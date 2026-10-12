@@ -1,0 +1,17 @@
+# Qwen3-32B GRPO on math, 4 nodes x 4 GH200.
+defaults: /opt/nemo-rl/examples/configs/grpo_math_8B.yaml
+policy:
+  model_name: Qwen/Qwen3-32B
+  tokenizer:
+    chat_template_kwargs:
+      enable_thinking: false
+  dtensor_cfg:
+    _v2: false
+    activation_checkpointing: true
+    tensor_parallel_size: 2
+  generation:
+    vllm_cfg:
+      tensor_parallel_size: 2
+cluster:
+  gpus_per_node: 4
+  num_nodes: 4

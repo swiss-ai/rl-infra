@@ -1,0 +1,15 @@
+# Qwen3.5-35B-A3B GRPO on Geometry3K, 4 nodes. BROKEN in v0.7.0 (Megatron->vLLM refit gives garbage weights).
+# Launch with SCRIPT=examples/run_vlm_grpo.py.
+defaults: /opt/nemo-rl/examples/configs/recipes/vlm/vlm_grpo-qwen3.5-35ba3b-geo3k-2n8g-megatron-ep16.yaml
+policy:
+  megatron_cfg:
+    distributed_data_parallel_config:
+      overlap_grad_reduce: false
+  generation:
+    vllm_cfg:
+      tensor_parallel_size: 4
+logger:
+  wandb_enabled: false
+cluster:
+  gpus_per_node: 4
+  num_nodes: 4

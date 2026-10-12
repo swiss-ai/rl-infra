@@ -1,0 +1,8 @@
+# NeMo-RL source the container image was built from. The image's prebuilt venvs only
+# match this commit (NeMo-RL checks a fingerprint of pyproject.toml, uv.lock and the
+# submodule SHAs at startup), so change it together with IMAGE_* in site.env.
+# 19244a094 = r0.7.0 = nvcr.io/nvidia/nemo-rl:v0.7.0.
+NEMO_RL_URL=https://github.com/swiss-ai/Nemo-RL.git
+NEMO_RL_COMMIT=19244a0949fb363326f71675223da75e09d14866
+# Local branch on top of the pin carrying patches/*.patch (setup.sh creates it).
+NEMO_RL_BRANCH=alps

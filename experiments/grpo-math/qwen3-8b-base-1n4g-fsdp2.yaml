@@ -1,0 +1,9 @@
+# Qwen3-8B-Base GRPO on math, 1 node x 4 GH200.
+defaults: /opt/nemo-rl/examples/configs/grpo_math_8B.yaml
+policy:
+  model_name: Qwen/Qwen3-8B-Base
+  dtensor_cfg:
+    activation_checkpointing: true
+cluster:
+  gpus_per_node: 4
+  num_nodes: 1
