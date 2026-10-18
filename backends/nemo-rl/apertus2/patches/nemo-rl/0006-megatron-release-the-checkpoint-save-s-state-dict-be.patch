@@ -1,0 +1,42 @@
+From bec1ef97c28a7e395f171db0959d332fbde6506e Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Sat, 17 Oct 2026 22:22:03 +0200
+Subject: [PATCH] megatron: release the checkpoint save's state dict before the
+ next step
+
+Bridge's load path deletes its state dicts and runs gc.collect() and
+torch.cuda.empty_cache(); its save path leaves them to the cyclic
+collector. With md_decoupling's optimizer state on the GPU, 6-12 GiB
+per GPU stayed allocated after the step-20 save and the next training
+step ran out of memory (both 20-node runs of 2026-10-17). Do the same
+cleanup after saving, with [gpumem] lines before and after it.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ .../models/policy/workers/megatron_policy_worker.py    | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/nemo_rl/models/policy/workers/megatron_policy_worker.py b/nemo_rl/models/policy/workers/megatron_policy_worker.py
+index bd1fb2077..a2c2212dd 100644
+--- a/nemo_rl/models/policy/workers/megatron_policy_worker.py
++++ b/nemo_rl/models/policy/workers/megatron_policy_worker.py
+@@ -4661,6 +4661,16 @@ class MegatronPolicyWorkerImpl(
+             if not is_training:
+                 self.model.train()
+ 
++            # Release what the save built, as Bridge's load path does after loading:
++            # the sharded state dict can own tensors distinct from the parameters and
++            # optimizer state, and it is left to the cyclic garbage collector. With the
++            # optimizer state on the GPU (md_decoupling) 6-12 GiB per GPU stayed
++            # allocated into the next training step and ran it out of memory.
++            self._log_gpu_mem("ckpt_save_exit")
++            gc.collect()
++            torch.cuda.empty_cache()
++            self._log_gpu_mem("ckpt_save_exit_after_gc")
++
+         except Exception as e:
+             print(f"Failed to save checkpoint to {weights_path}: {e}")
+             raise
+-- 
+2.43.0
+

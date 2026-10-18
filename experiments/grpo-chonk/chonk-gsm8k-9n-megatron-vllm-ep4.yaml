@@ -1,0 +1,66 @@
+defaults: chonk-gsm8k-9n-dtensor-vllm-ep4.yaml
+
+policy:
+  optimizer: null
+  scheduler: null
+  make_sequence_length_divisible_by: 2
+  dtensor_cfg:
+    enabled: false
+  megatron_cfg:
+    enabled: true
+    tensor_model_parallel_size: 1
+    pipeline_model_parallel_size: 1
+    expert_model_parallel_size: 32
+    expert_tensor_parallel_size: 1
+    context_parallel_size: 1
+    sequence_parallel: true
+    gradient_accumulation_fusion: true
+    apply_rope_fusion: false
+    moe_router_load_balancing_type: quantile_balancing
+    moe_router_dtype: fp32
+    moe_router_bias_update_rate: 0.0
+    moe_token_dispatcher_type: flex
+    moe_flex_dispatcher_backend: deepep
+    moe_enable_deepep: true
+    moe_permute_fusion: true
+    env_vars:
+      CUDA_DEVICE_MAX_CONNECTIONS: "1"
+      UCCL_EP_TRANSPORT: cxi
+      UCCL_EP_DISPATCH_CONFIG: "24,40,512,32,512"
+      UCCL_EP_COMBINE_CONFIG: "24,7,512,32,512"
+      UCCL_EP_CPU_TIMEOUT_SECS: "1200"
+      NRL_REFIT_BUFFER_MEMORY_RATIO: "0.005"
+      NRL_REFIT_NUM_BUFFERS: "1"
+      CUDA_ENABLE_COREDUMP_ON_EXCEPTION: "1"
+      CUDA_COREDUMP_GENERATION_FLAGS: skip_nonrelocated_elf_images,skip_global_memory,skip_shared_memory,skip_local_memory,skip_abort
+      CUDA_COREDUMP_FILE: ${logger.log_dir}/core_%h_%p
+      NCCL_DEBUG: WARN
+      TORCH_SHOW_CPP_STACKTRACES: "1"
+      TORCH_NCCL_TRACE_BUFFER_SIZE: "2000"
+      TORCH_NCCL_DUMP_ON_TIMEOUT: "1"
+      TORCH_FR_DUMP_TEMP_FILE: ${logger.log_dir}/fr-rank
+      TORCH_NCCL_DEBUG_INFO_TEMP_FILE: ${logger.log_dir}/fr-rank
+      NRL_LOG_LEVEL: DEBUG
+    model_overrides:
+      moe_router_quantile_balancing_freeze: true
+    checkpoint:
+      async_save: false
+    optimizer:
+      optimizer_cpu_offload: true
+      optimizer_offload_fraction: 1.0
+    scheduler:
+      lr_warmup_iters: 50
+      lr_warmup_init: 5.0e-7
+    distributed_data_parallel_config:
+      grad_reduce_in_fp32: true
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+  generation:
+    vllm_cfg:
+      env_vars:
+        NRL_REFIT_BUFFER_MEMORY_RATIO: "0.005"
+        NRL_REFIT_NUM_BUFFERS: "1"
+        NCCL_DEBUG: WARN
+        CUDA_ENABLE_COREDUMP_ON_EXCEPTION: "1"
+        CUDA_COREDUMP_GENERATION_FLAGS: skip_nonrelocated_elf_images,skip_global_memory,skip_shared_memory,skip_local_memory,skip_abort
+        CUDA_COREDUMP_FILE: ${logger.log_dir}/core_vllm_%h_%p

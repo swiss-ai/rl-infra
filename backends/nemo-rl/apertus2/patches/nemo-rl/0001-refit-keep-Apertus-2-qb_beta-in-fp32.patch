@@ -1,0 +1,34 @@
+From 99f4eed8ee2186ab234733d3449f2f351b6864e4 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Tue, 13 Oct 2026 16:55:39 +0200
+Subject: [PATCH] refit: keep Apertus 2 qb_beta in fp32
+
+The quantile-balancing selection offsets are an fp32 buffer that FSDP2 does
+not cast, so the trainer routes with fp32 values; sending them in the refit
+dtype (bf16) rounded vLLM's copy and could flip top-k expert choices.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ nemo_rl/models/policy/workers/dtensor_policy_worker_v2.py | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/nemo_rl/models/policy/workers/dtensor_policy_worker_v2.py b/nemo_rl/models/policy/workers/dtensor_policy_worker_v2.py
+index 54a743c66..219d7f161 100644
+--- a/nemo_rl/models/policy/workers/dtensor_policy_worker_v2.py
++++ b/nemo_rl/models/policy/workers/dtensor_policy_worker_v2.py
+@@ -89,8 +89,10 @@ def _refit_tensor_dtype(
+     fqn: str, tensor: torch.Tensor, default_dtype: torch.dtype
+ ) -> torch.dtype:
+     """Preserve the FP32 dtype used by inference-critical MoE router state."""
+-    is_router_correction_bias = fqn.rsplit(".", maxsplit=1)[-1] == (
+-        "e_score_correction_bias"
++    # qb_beta: Apertus 2 quantile-balancing selection offsets (fp32 buffer, like the bias).
++    is_router_correction_bias = fqn.rsplit(".", maxsplit=1)[-1] in (
++        "e_score_correction_bias",
++        "qb_beta",
+     )
+     if is_router_correction_bias and tensor.dtype == torch.float32:
+         return tensor.dtype
+-- 
+2.43.0
+

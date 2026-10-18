@@ -1,0 +1,13 @@
+defaults: ../experiments/grpo-chonk/chonk-gsm8k-20n-megatron-128x16-2k-async-mcoregen-md.yaml
+
+cluster:
+  num_nodes: 20
+
+policy:
+  sequence_packing:
+    train_mb_tokens: 2048
+
+checkpointing:
+  checkpoint_must_save_by: "00:04:40:00"
+  save_period: 1000
+  save_optimizer: false

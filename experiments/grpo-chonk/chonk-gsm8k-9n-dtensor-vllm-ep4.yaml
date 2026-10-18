@@ -1,0 +1,59 @@
+defaults: /opt/nemo-rl/examples/configs/grpo_math_1B.yaml
+
+grpo:
+  num_prompts_per_step: 16
+  num_generations_per_prompt: 8
+  max_num_steps: 5
+  val_period: 0
+  val_at_start: false
+  val_at_end: false
+
+loss_fn:
+  reference_policy_kl_penalty: 0
+
+checkpointing:
+  enabled: false
+
+policy:
+  model_name: ${oc.env:SCRATCH}/models/apertus2-chonk-lc-iter3576
+  tokenizer:
+    chat_template: "{{ bos_token }}{% for message in messages %}{{ message['content'] }}{% endfor %}"
+  train_global_batch_size: 128
+  train_micro_batch_size: 1
+  logprob_batch_size: 1
+  max_total_sequence_length: 1280
+  dtensor_cfg:
+    activation_checkpointing: true
+    automodel_kwargs:
+      force_hf: true
+      attn_implementation: sdpa
+    env_vars:
+      FLA_FLASH_KDA: "0"
+      NRL_OFFLOAD_OPTIMIZER_OUTSIDE_STEP: "1"
+  sequence_packing:
+    enabled: false
+  generation:
+    max_new_tokens: 256
+    stop_strings: ["Question:"]
+    colocated:
+      enabled: false
+      resources:
+        num_nodes: 1
+        gpus_per_node: 4
+    vllm_cfg:
+      tensor_parallel_size: 1
+      expert_parallel_size: 4
+      gpu_memory_utilization: 0.8
+      enforce_eager: true
+      load_format: dummy
+      async_engine: true
+    vllm_kwargs:
+      all2all_backend: allgather_reducescatter
+
+data:
+  max_input_seq_length: 1024
+  train:
+    dataset_name: gsm8k
+    split_validation_size: 0.0
+  default:
+    prompt_file: ${oc.env:RL_INFRA_DIR}/envs/gsm8k-five-shot.txt

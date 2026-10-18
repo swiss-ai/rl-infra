@@ -1,0 +1,75 @@
+From cb7cb208c9937826ac539be887f39214151d3c44 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Wed, 14 Oct 2026 13:21:51 +0200
+Subject: [PATCH] dtensor v2: optionally keep optimizer state on CPU outside
+ optimizer.step()
+
+NRL_OFFLOAD_OPTIMIZER_OUTSIDE_STEP=1 moves the optimizer state to the GPU only
+around optimizer.step() and back afterwards, so it is not resident during
+forward/backward. Apertus 2 (Chonk, 108B) on 32 GPUs OOMed in the step-2
+backward once AdamW's 25 GiB per GPU stayed resident (job 3657902).
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ .../workers/dtensor_policy_worker_v2.py       | 22 ++++++++++++++++++-
+ 1 file changed, 21 insertions(+), 1 deletion(-)
+
+diff --git a/nemo_rl/models/policy/workers/dtensor_policy_worker_v2.py b/nemo_rl/models/policy/workers/dtensor_policy_worker_v2.py
+index 219d7f161..70e3ad1e1 100644
+--- a/nemo_rl/models/policy/workers/dtensor_policy_worker_v2.py
++++ b/nemo_rl/models/policy/workers/dtensor_policy_worker_v2.py
+@@ -13,6 +13,7 @@
+ # limitations under the License.
+ 
+ import gc
++import os
+ import warnings
+ from contextlib import AbstractContextManager, contextmanager, nullcontext
+ from typing import Any, Generator, Iterable, Optional
+@@ -551,8 +552,12 @@ class DTensorPolicyWorkerV2Impl(
+                     warn_if_inf_grad_norm(grad_norm)
+ 
+                     # Update parameters and the non-gradient MoE routing bias.
++                    if self._optimizer_state_on_cpu_outside_step:
++                        self.move_optimizer_to_device("cuda")
+                     self.optimizer.step()
+                     self._update_moe_gate_bias_if_supported()
++                    if self._optimizer_state_on_cpu_outside_step:
++                        self.move_optimizer_to_device("cpu")
+ 
+                 losses.append(torch.tensor(mb_losses).sum().item())
+ 
+@@ -1284,7 +1289,9 @@ class DTensorPolicyWorkerV2Impl(
+         # than tracking which path offloaded it; move_optimizer_to_device is a no-op
+         # when the state is already resident.
+         if self.optimizer is not None and not self.cpu_offload:
+-            self.move_optimizer_to_device("cuda")
++            self.move_optimizer_to_device(
++                "cpu" if self._optimizer_state_on_cpu_outside_step else "cuda"
++            )
+ 
+         torch.cuda.empty_cache()
+ 
+@@ -1323,6 +1330,19 @@ class DTensorPolicyWorkerV2Impl(
+             f"GPU Memory after optimizer offload: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved"
+         )
+ 
++    @property
++    def _optimizer_state_on_cpu_outside_step(self) -> bool:
++        """Keep optimizer state in host memory except around optimizer.step().
++
++        Set NRL_OFFLOAD_OPTIMIZER_OUTSIDE_STEP=1 (e.g. via dtensor_cfg.env_vars): the state is
++        then not resident on the GPU during forward/backward, at the cost of one host<->device
++        copy of it per optimizer step. Values are moved, never converted.
++        """
++        return (
++            os.environ.get("NRL_OFFLOAD_OPTIMIZER_OUTSIDE_STEP") == "1"
++            and not self.cpu_offload
++        )
++
+     def move_optimizer_to_device(self, device: str | torch.device) -> None:
+         for state in self.optimizer.state.values():
+             for k, v in state.items():
+-- 
+2.43.0
+

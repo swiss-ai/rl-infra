@@ -6,6 +6,22 @@ each backend is an untouched local clone that this repo pins, mounts into a cont
 and launches, the same way a verl checkout sits next to the code that drives it. The
 only backend so far is [NeMo-RL](https://github.com/NVIDIA-NeMo/RL).
 
+## Quick start: GRPO on Apertus 2
+
+```bash
+git clone https://github.com/swiss-ai/rl-infra.git && cd rl-infra
+bash run.sh envs/gsm8k.yaml
+```
+
+This trains Apertus 2 Chonk on GSM8K with GRPO, on 12 nodes of the `infra01` account, in
+about an hour and a half, and saves the final weights. A new RL environment needs only a
+task file like `envs/gsm8k.yaml`, with its dataset, prompt and reward; the training recipe
+stays as it is. The first run also sets everything up, cloning the pinned sources and
+copying the 200 GB model to your scratch, so it takes a while to start; later runs start
+right away. `run.sh` prints where the training log, the metrics and the weights go, and
+`RECIPE=recipes/<name>.yaml` selects one of the other setups in `recipes/`. The sections
+below describe the general launcher underneath.
+
 ## How a NeMo-RL run is put together
 
 NeMo-RL ships as an NGC container image (`nvcr.io/nvidia/nemo-rl`) that already contains

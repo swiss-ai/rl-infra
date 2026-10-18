@@ -1,0 +1,20 @@
+data:
+  train:
+    dataset_name: gsm8k
+    split_validation_size: 0.0
+  validation:
+    dataset_name: gsm8k
+    split: test
+  default:
+    prompt_file: ${oc.env:RL_INFRA_DIR}/envs/gsm8k-five-shot.txt
+    processor: math_hf_data_processor
+    env_name: math
+
+env:
+  math:
+    num_workers: 8
+    math_verify_impl: hf_math_verify
+
+policy:
+  generation:
+    stop_strings: ["Question:"]

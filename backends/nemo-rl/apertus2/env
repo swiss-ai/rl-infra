@@ -1,0 +1,30 @@
+# Apertus 2 stack: overrides of site.env for backends/nemo-rl. Sourced BEFORE site.env by
+# setup.sh and launch.sh in this directory; same rule as site.env, a variable already set in
+# the environment wins. Requires APERTUS2_DIR (this directory).
+: "${SCRATCH:=/iopsstor/scratch/cscs/${USER}}"
+
+: "${NEMO_RL_DIR:=/users/${USER}/projects/nemo-rl-apertus2}"
+: "${MEGATRON_DIR:=/users/${USER}/projects/megatron-lm-moe-apertus2}"
+: "${BRIDGE_DIR:=/users/${USER}/projects/megatron-bridge-apertus2}"
+: "${PIN_FILE:=${APERTUS2_DIR}/pin}"
+: "${EDF_NAME:=nemo-rl-apertus2}"
+# The image has no /opt/nemo_rl_venv; driver.sh runs the image's system Python.
+: "${DRIVER_PYTHON:=bash ${APERTUS2_DIR}/driver.sh}"
+# Runtime overlay on PYTHONPATH (driver.sh installs it when missing).
+: "${PYDEPS:=${SCRATCH}/nemo-rl-apertus2/pydeps}"
+
+# NeMo-RL image of alps-extended-images#64 at the digest its Chonk example uses (built
+# 2026-10-07, tag alps7-dev-cfcfede4...); Megatron, Apertus2 kernels and the vLLM 0.28 fork.
+# Jobs do not run it directly: uccl-fix/build_image.sh builds the image below from it.
+: "${IMAGE_REF:=jfrog.svc.cscs.ch#docker-group-csstaff/alps-images/nemo-rl-cuda@sha256:6dc3748ee1e86d4eefe2265083a4a69d33b0e6da6a2f776743962c94421ab386}"
+: "${BASE_IMAGE_MASTER:=/capstor/store/cscs/swissai/infra01/MLLM/containers/jfrog.svc.cscs.ch#alps-images+nemo-rl-cuda+alps7-dev-cfcfede4.aarch64.sqsh}"
+: "${BASE_IMAGE_WORK:=${SCRATCH}/container-images/nemo-rl-apertus2-cfcfede4.sqsh}"
+# The image jobs run: the one above with UCCL rebuilt with patches/uccl (uccl-project/uccl#1085,
+# illegal memory accesses in EP combine). It is not in JFrog; the capstor master is its backup.
+: "${IMAGE_MASTER:=/capstor/store/cscs/swissai/infra01/MLLM/containers/nemo-rl-apertus2-cfcfede4-ucclfix.aarch64.sqsh}"
+: "${IMAGE_WORK:=${SCRATCH}/container-images/nemo-rl-apertus2-cfcfede4-ucclfix.sqsh}"
+
+# Standalone Apertus2 vLLM image (alps-extended-images#67) for serving tests outside NeMo-RL.
+: "${VLLM_IMAGE_REF:=jfrog.svc.cscs.ch#docker-group-csstaff/alps-images/vllm-apertus2-cuda@sha256:2daf3b1906ab62291c00b6a78d9eaa8aa85aad792abffb6695dc89ce9dcc9e05}"
+: "${VLLM_IMAGE_MASTER:=/capstor/store/cscs/swissai/infra01/MLLM/containers/jfrog.svc.cscs.ch#alps-images+vllm-apertus2-cuda+2daf3b19.aarch64.sqsh}"
+: "${VLLM_IMAGE_WORK:=${SCRATCH}/container-images/vllm-apertus2-2daf3b19.sqsh}"

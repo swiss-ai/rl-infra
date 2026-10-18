@@ -1,0 +1,37 @@
+diff --git a/nemo_automodel/_transformers/auto_model.py b/nemo_automodel/_transformers/auto_model.py
+index b0f0ec237..e317fe55c 100644
+--- a/nemo_automodel/_transformers/auto_model.py
++++ b/nemo_automodel/_transformers/auto_model.py
+@@ -534,6 +534,9 @@ class _BaseNeMoAutoModelClass(_BaseAutoModelClass):
+                     force_hf,
+                     *model_args,
+                     _process_group=process_group,
++                    # Meta init: the checkpoint is loaded after sharding, so a pretrained
++                    # force_hf model is built from its config instead of read and discarded.
++                    _skip_weight_load=is_meta_device and load_base_model,
+                     **kwargs,
+                 )
+         except (NotImplementedError, RuntimeError) as e:
+diff --git a/nemo_automodel/_transformers/model_init.py b/nemo_automodel/_transformers/model_init.py
+index 506c7c826..131b1fbe2 100644
+--- a/nemo_automodel/_transformers/model_init.py
++++ b/nemo_automodel/_transformers/model_init.py
+@@ -834,6 +834,9 @@ def __init_model(
+     # it. Pop here so the flag never reaches HF's ``from_pretrained``.
+     restore_loaded_dtype = kwargs.pop("_restore_loaded_dtype", True)
+     process_group = kwargs.pop("_process_group", None)
++    # Under meta-device init HF's from_pretrained would read every tensor of the checkpoint and
++    # the empty-weights context would drop each one again (the real load follows sharding).
++    skip_weight_load = kwargs.pop("_skip_weight_load", False)
+     torch_dtype = dtype_from_str(torch_dtype) if torch_dtype != "auto" else torch_dtype
+     is_pretrained_init = isinstance(pretrained_model_name_or_path_or_config, str)  # The caller is .from_pretrained
+     hf_config = (
+@@ -895,7 +898,7 @@ def __init_model(
+         if quantization_config is not None:
+             kwargs["quantization_config"] = quantization_config
+             _setup_bnb_loading_kwargs(kwargs)
+-        if is_pretrained_init:
++        if is_pretrained_init and not skip_weight_load:
+             with skip_random_init():
+                 model = cls._from_pretrained_parent_class(
+                     pretrained_model_name_or_path,

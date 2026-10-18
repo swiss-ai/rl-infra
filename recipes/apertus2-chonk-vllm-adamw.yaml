@@ -1,0 +1,9 @@
+defaults: ../experiments/grpo-chonk/chonk-gsm8k-12n-megatron-128x16-2k-async.yaml
+
+cluster:
+  num_nodes: 12
+
+checkpointing:
+  checkpoint_must_save_by: "00:04:40:00"
+  save_period: 1000
+  save_optimizer: false

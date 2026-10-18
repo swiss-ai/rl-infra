@@ -1,0 +1,3 @@
+defaults:
+  - chonk-gsm8k-12n-megatron-128x16-2k-async-mcoregen.yaml
+  - trainer-16n-ep64-md-decoupling.yaml

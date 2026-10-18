@@ -1,0 +1,28 @@
+# NeMo-RL source for the Apertus 2 stack. Same recipe as the Chonk example in
+# eth-cscs/alps-extended-images#64 (Andres Nowak): the swiss-ai fork at a fixed commit with
+# three PRs merged on top, which is the combination that runs with that image's vLLM 0.28
+# Apertus2 fork. Our Alps ray.sub patch (../patches/) goes on top of that.
+NEMO_RL_URL=https://github.com/swiss-ai/Nemo-RL.git
+NEMO_RL_COMMIT=f196ef0a1ccb54d6ce71cd63277fb6a0e01168db
+NEMO_RL_BRANCH=apertus2
+# "<repo> <pr> [<commit>]" lines, merged in this order. #2517 (vLLM DP path for EP) is merged with
+# -Xtheirs and the fork's tests/unit/test_recipes_and_test_suites.py kept, as in the example.
+# A line with a commit merges that commit instead of the PR head, and setup.sh also merges it
+# into an existing clone that lacks it. #8 is the Megatron trainer's FP8 expert-cache fix.
+NEMO_RL_PRS="swiss-ai/Nemo-RL 5
+swiss-ai/Nemo-RL 1
+NVIDIA-NeMo/RL 2517
+swiss-ai/Nemo-RL 8 19843e5a523254ebf3bed49a47a1e852dca29a70"
+# The DTensor (HF) trainer imports nemo_automodel; the image does not ship it, so the clone's
+# submodule (this commit, the fork's pin) goes on PYTHONPATH instead.
+AUTOMODEL_COMMIT=72daceffa54d77783e1f73a5ac165eb39b6b5ea1
+# The Megatron trainer imports Megatron-Core and Megatron-Bridge, which the image does not ship
+# either; same sources as the Megatron examples of alps-extended-images#64. Megatron-LM-MoE at
+# the head of PR #88 (port of the fork to current NeMo-RL/Bridge), Bridge at the head of PR #5
+# (Apertus2 provider and checkpoint conversion).
+MEGATRON_URL=https://github.com/swiss-ai/Megatron-LM-MoE.git
+MEGATRON_COMMIT=0536034901962160aac9742d134a84c55e28d224
+MEGATRON_REF=pull/88/head
+BRIDGE_URL=https://github.com/swiss-ai/Megatron-Bridge.git
+BRIDGE_COMMIT=6ccdb3c369491374f1fef4320886e8bb1394bb3e
+BRIDGE_REF=pull/5/head

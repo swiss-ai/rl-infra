@@ -1,0 +1,169 @@
+diff --git a/nemo_automodel/components/checkpoint/checkpointing.py b/nemo_automodel/components/checkpoint/checkpointing.py
+index 7912cfaaa..48b356645 100644
+--- a/nemo_automodel/components/checkpoint/checkpointing.py
++++ b/nemo_automodel/components/checkpoint/checkpointing.py
+@@ -867,6 +867,13 @@ class Checkpointer:
+                 or single_device_custom_safetensors
+             )
+         ):
++            # Safetensors into an HF model without a state-dict adapter: every rank reads only its
++            # own shard of each tensor straight into its parameter (no full CPU state dict, no
++            # collectives) and per-expert keys are stacked into grouped expert parameters.
++            if is_safetensors and not has_state_dict_adapter and not _is_custom_model(model_state.model[0]):
++                _load_hf_safetensors_sharded(model_state.model[0], model_path, key_mapping)
++                return
++
+             t0 = time.monotonic()
+             state_dict_from_disk = _load_hf_checkpoint_preserving_dtype(model_path)
+             t_disk = time.monotonic()
+@@ -2649,6 +2656,150 @@ def _load_hf_safetensors_checkpoint(model_path: str) -> Optional[dict[str, torch
+ load_hf_safetensors_state_dict = _load_hf_safetensors_checkpoint
+ 
+ 
++def _safetensors_weight_map(model_path: str) -> dict[str, str]:
++    """Checkpoint key -> safetensors file path, from the index or by scanning the files."""
++    from safetensors import safe_open
++
++    if os.path.isfile(model_path):
++        files = [model_path]
++    else:
++        index_file = os.path.join(model_path, "model.safetensors.index.json")
++        if os.path.isfile(index_file):
++            with open(index_file) as f:
++                return {k: os.path.join(model_path, v) for k, v in json.load(f)["weight_map"].items()}
++        files = sorted(glob.glob(os.path.join(model_path, "*.safetensors")))
++    weight_map = {}
++    for path in files:
++        with safe_open(path, framework="pt", device="cpu") as f:
++            weight_map.update({k: path for k in f.keys()})
++    return weight_map
++
++
++def plan_hf_safetensors_load(
++    target_shapes: dict[str, tuple[int, ...]], checkpoint_keys
++) -> tuple[dict[str, tuple], list[str], list[str]]:
++    """
++    Map every model tensor to its checkpoint source.
++
++    ``plan[name]`` is ``("tensor", key)`` for a 1:1 match, or ``("experts", prefix, proj)`` for a grouped
++    expert parameter (``<prefix>.gate_up_proj [E, 2I, D]`` / ``<prefix>.down_proj [E, D, I]``) whose
++    checkpoint stores one key per expert (``<prefix>.<e>.{gate,up,down}_proj.weight``).
++
++    Returns ``(plan, missing, unexpected)``: model tensors without a source (they keep their init),
++    and checkpoint keys that nothing reads (they would be dropped).
++    """
++    keys = set(checkpoint_keys)
++    plan: dict[str, tuple] = {}
++    missing: list[str] = []
++    used: set[str] = set()
++    for name, shape in target_shapes.items():
++        if name in keys:
++            plan[name] = ("tensor", name)
++            used.add(name)
++            continue
++        prefix, _, proj = name.rpartition(".")
++        projs = {"gate_up_proj": ("gate_proj", "up_proj"), "down_proj": ("down_proj",)}.get(proj)
++        expert_keys = [f"{prefix}.{e}.{p}.weight" for e in range(shape[0]) for p in projs] if projs and len(shape) == 3 else []
++        if expert_keys and all(k in keys for k in expert_keys):
++            plan[name] = ("experts", prefix, proj)
++            used.update(expert_keys)
++        else:
++            missing.append(name)
++    return plan, missing, sorted(keys - used)
++
++
++@torch.no_grad()
++def _load_hf_safetensors_sharded(model: nn.Module, model_path: str, key_mapping: Optional[dict] = None) -> None:
++    """
++    Load an HF safetensors checkpoint into a (possibly FSDP/TP-sharded) model, rank-locally.
++
++    Each rank reads only the slice of every tensor that its local shard holds (a safetensors slice
++    reads just those bytes) and copies it into the parameter in place, casting to the parameter's
++    dtype. Per-expert checkpoint keys are stacked into grouped expert parameters (see
++    plan_hf_safetensors_load), which the full-state-dict path would drop under strict=False.
++    """
++    from safetensors import safe_open
++    from torch.distributed.tensor import DTensor
++    from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
++
++    t0 = time.monotonic()
++    rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
++    weight_map = _safetensors_weight_map(model_path)
++    if key_mapping:
++        from nemo_automodel.components.checkpoint._backports.hf_storage import _get_key_renaming_mapping
++
++        source_key = {_get_key_renaming_mapping(k, key_mapping): k for k in weight_map}
++    else:
++        source_key = {k: k for k in weight_map}
++    targets = {canonical_parameter_fqn(k): v for k, v in model.state_dict(keep_vars=True).items()}
++    plan, missing, unexpected = plan_hf_safetensors_load({k: tuple(v.shape) for k, v in targets.items()}, source_key)
++
++    handles = {}
++
++    def tensor_slice(key):
++        path = weight_map[source_key[key]]
++        if path not in handles:
++            handles[path] = safe_open(path, framework="pt", device="cpu")
++        return handles[path].get_slice(source_key[key])
++
++    def read(key, shape, index=None):
++        sl = tensor_slice(key)
++        if tuple(sl.get_shape()) != tuple(shape):
++            raise ValueError(f"checkpoint {key} has shape {tuple(sl.get_shape())}, model expects {tuple(shape)}")
++        return sl[index] if index else sl[...]
++
++    nbytes, total = 0, len(plan)
++    for i, (name, source) in enumerate(plan.items(), 1):
++        tensor = targets[name]
++        if isinstance(tensor, DTensor):
++            local = tensor.to_local()
++            local_shape, offset = compute_local_shape_and_global_offset(
++                tensor.shape, tensor.device_mesh, tensor.placements
++            )
++        else:
++            local, local_shape, offset = tensor, tuple(tensor.shape), (0,) * tensor.dim()
++        if tuple(local.shape) != tuple(local_shape):
++            raise RuntimeError(f"{name}: local shard {tuple(local.shape)} != computed {tuple(local_shape)}")
++        if local.numel() > 0 and source[0] == "tensor":
++            index = tuple(slice(o, o + s) for o, s in zip(offset, local_shape))
++            data = read(source[1], tensor.shape, index)
++            local.copy_(data)
++            nbytes += data.numel() * data.element_size()
++        elif local.numel() > 0:
++            _, prefix, proj = source
++            if any(offset[1:]) or tuple(local_shape[1:]) != tuple(tensor.shape[1:]):
++                raise NotImplementedError(f"{name}: grouped experts must be sharded on the expert dim only")
++            inter = tensor.shape[1] // 2
++            for j, e in enumerate(range(offset[0], offset[0] + local_shape[0])):
++                if proj == "gate_up_proj":
++                    gate = read(f"{prefix}.{e}.gate_proj.weight", (inter, tensor.shape[2]))
++                    up = read(f"{prefix}.{e}.up_proj.weight", (inter, tensor.shape[2]))
++                    local[j, :inter].copy_(gate)
++                    local[j, inter:].copy_(up)
++                    nbytes += 2 * gate.numel() * gate.element_size()
++                else:
++                    down = read(f"{prefix}.{e}.down_proj.weight", tuple(tensor.shape[1:]))
++                    local[j].copy_(down)
++                    nbytes += down.numel() * down.element_size()
++        if rank == 0 and (i % max(1, total // 10) == 0 or i == total):
++            print(
++                f"[hf-sharded-load] rank 0: {i}/{total} tensors, {nbytes / 2**30:.1f} GiB read, "
++                f"{time.monotonic() - t0:.0f}s",
++                flush=True,
++            )
++    handles.clear()
++
++    if rank == 0:
++        n_experts = sum(1 for s in plan.values() if s[0] == "experts")
++        print(
++            f"[hf-sharded-load] done in {time.monotonic() - t0:.0f}s: {total} tensors "
++            f"({n_experts} grouped-expert params stacked from per-expert keys), "
++            f"missing {len(missing)} (keep init): {sorted({m.rsplit('.', 1)[-1] for m in missing})}, "
++            f"unexpected {len(unexpected)} (dropped): {unexpected[:5]}",
++            flush=True,
++        )
++
++
+ def _load_hf_bin_checkpoint(model_path: str) -> Optional[dict[str, torch.Tensor]]:
+     """
+     Load a HuggingFace .bin checkpoint into a state dict.

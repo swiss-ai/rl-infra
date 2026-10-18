@@ -1,0 +1,39 @@
+policy:
+  offload_optimizer_for_logprob: true
+  megatron_cfg:
+    expert_model_parallel_size: 64
+    env_vars:
+      UCCL_EP_COMBINE_CONFIG: "24,7,1024,32,512"
+    optimizer:
+      optimizer: md_decoupling
+      lr: 2.0e-7
+      matrix_lr: 5.0e-6
+      gains_lr: 2.0e-7
+      min_lr: 0.0
+      min_lr_mode: absolute
+      weight_decay: 0.0
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      adam_eps: 1.0e-8
+      use_distributed_optimizer: false
+      use_layer_wise_distributed_optimizer: true
+      use_precision_aware_optimizer: false
+      optimizer_cpu_offload: false
+      optimizer_offload_fraction: 0.0
+      hypersphere_preserve_init: true
+      hypersphere_mode: row
+      hypersphere_embedding_mode: row
+      hypersphere_router_mode: row
+      hypersphere_radius_mode: fan_in
+      hypersphere_gains_mode: rowcol
+      hypersphere_gains_mode_router: rowcol
+      hypersphere_gains_mode_embedding: none
+      gain_parametrization: softplus
+      use_orthogonal_updates: true
+      muon_coefficient_type: polar_express
+      muon_scale_mode: shape_up
+      muon_router_scale_mode: none
+      muon_momentum: 0.95
+      muon_use_nesterov: true
+    scheduler:
+      lr_warmup_init: 0.0

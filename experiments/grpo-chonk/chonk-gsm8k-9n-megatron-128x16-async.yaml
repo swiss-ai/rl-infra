@@ -1,0 +1,11 @@
+defaults: chonk-gsm8k-9n-megatron-128x16.yaml
+
+grpo:
+  async_grpo:
+    enabled: true
+    max_trajectory_age_steps: 1
+
+loss_fn:
+  use_importance_sampling_correction: true
+  truncated_importance_sampling_type: tis
+  truncated_importance_sampling_ratio: 2.0

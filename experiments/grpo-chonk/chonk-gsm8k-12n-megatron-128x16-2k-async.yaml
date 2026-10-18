@@ -1,0 +1,19 @@
+defaults: chonk-gsm8k-9n-megatron-128x16-async.yaml
+
+grpo:
+  val_period: 20
+  async_grpo:
+    in_flight_weight_updates: true
+
+checkpointing:
+  save_period: 20
+
+policy:
+  generation:
+    colocated:
+      resources:
+        num_nodes: 4
+    vllm_cfg:
+      enforce_eager: false
+    vllm_kwargs:
+      max_num_batched_tokens: 16384

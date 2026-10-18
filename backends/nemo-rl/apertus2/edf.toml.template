@@ -1,0 +1,52 @@
+# CSCS Container Engine environment (EDF) for the Apertus 2 NeMo-RL stack; setup.sh renders it
+# into ~/.edf/. Network settings follow the image's own example EDF (alps-extended-images#64):
+# the image carries its libfabric/NCCL plugin, so no aws_ofi_nccl/cxi hooks.
+image = "@@IMAGE_WORK@@"
+
+mounts = [
+  "/iopsstor",
+  "/users",
+  "/capstor",
+  "@@NEMO_RL_DIR@@:/opt/nemo-rl",
+]
+
+writable = true
+
+workdir = "/opt/nemo-rl"
+
+[annotations]
+com.hooks.cxi.enabled = "false"
+com.hooks.netstack.source = "host"
+
+[env]
+PATH = "/usr/local/lib/python3.12/dist-packages/torch_tensorrt/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/mpi/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/ucx/bin:/opt/amazon/efa/bin:/opt/tensorrt/bin"
+PMIX_MCA_psec = "native"
+NCCL_PXN_DISABLE = "1"
+NCCL_CROSS_NIC = "0"
+UCCL_EP_TRANSPORT = "cxi"
+
+# NeMo-RL, Automodel, Megatron-LM and Megatron-Bridge are not installed in the image: the clone,
+# its Automodel checkout and the Megatron checkouts are imported from the mounts. PYDEPS = runtime
+# overlay (driver.sh).
+PYTHONPATH = "/opt/nemo-rl:/opt/nemo-rl/3rdparty/Automodel-workspace/Automodel:@@BRIDGE_DIR@@/src:@@MEGATRON_DIR@@:@@PYDEPS@@"
+PYDEPS = "@@PYDEPS@@"
+PYTHONNOUSERSITE = "1"
+PYTHONDONTWRITEBYTECODE = "1"
+TOKENIZERS_PARALLELISM = "false"
+RAY_USAGE_STATS_ENABLED = "0"
+RAY_ENABLE_UV_RUN_RUNTIME_ENV = "0"
+VLLM_WORKER_MULTIPROC_METHOD = "spawn"
+HF_DEACTIVATE_ASYNC_LOAD = "1"
+
+NRL_DISABLE_NUMA_BINDING = "1"
+
+SCRATCH = "@@SCRATCH@@"
+HF_HOME = "@@SCRATCH@@/huggingface/"
+VLLM_CACHE_ROOT = "@@SCRATCH@@/vllm_cache"
+FLASHINFER_WORKSPACE_BASE = "@@SCRATCH@@/.cache/flashinfer"
+XDG_CACHE_HOME = "@@SCRATCH@@/.cache"
+UV_CACHE_DIR = "@@SCRATCH@@/.cache/uv"
+TORCH_EXTENSIONS_DIR = "@@SCRATCH@@/.cache/torch_extensions"
+TRITON_CACHE_DIR = "/tmp/triton-nemo-rl-apertus2"
+TORCHINDUCTOR_CACHE_DIR = "/tmp/nemo_rl_jit/torchinductor"
+MEGATRON_CONFIG_LOCK_DIR = "/tmp/megatron-config-locks"

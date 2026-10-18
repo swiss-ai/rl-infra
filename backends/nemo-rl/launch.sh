@@ -8,6 +8,9 @@
 #   overrides    passed to the training script, e.g. grpo.max_num_steps=50
 #   SCRIPT=examples/run_vlm_grpo.py for vision-language models (default: examples/run_grpo.py)
 #   PARTITION, JOB_TIME, ACCOUNT, USE_RESERVATION, EXCLUDE_NODES override site.env.
+#   DEPENDENCY=afterok:<jobid> starts the job only after another one succeeded.
+#   PREFLIGHT=0 skips the config check (preflight.sh) done before submission.
+#   PIN_FILE, DRIVER_PYTHON select another NeMo-RL source/image stack (see apertus2/launch.sh).
 #
 # Everything a job writes (Slurm/Ray logs, checkpoints, metrics) goes under $OUT on
 # scratch; this repo and the NeMo-RL clone are only read.
@@ -17,7 +20,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "${HERE}/../.." && pwd)"
 [[ -f "${ROOT}/site.env" ]] || { echo "ERROR: ${ROOT}/site.env missing (copy site.env.example)" >&2; exit 1; }
 source "${ROOT}/site.env"
-source "${HERE}/pin"
+source "${PIN_FILE:-${HERE}/pin}"
 
 CONFIG=$1; NODES=$2; RUN=$3; shift 3
 SCRIPT="${SCRIPT:-examples/run_grpo.py}"
@@ -37,6 +40,23 @@ elif [[ -f "${NEMO_RL_DIR}/${CONFIG}" ]]; then
     CONFIG="/opt/nemo-rl/${CONFIG}"
 else
     echo "ERROR: config ${CONFIG} not found (cwd, ${ROOT} or ${NEMO_RL_DIR})" >&2; exit 1
+fi
+
+# Check the config here, before it waits in the queue (PREFLIGHT=0 skips it). Its report
+# goes to slurm/<jobid>-<run>.preflight.txt; only errors and warnings are printed.
+PREFLIGHT_OUT=""
+if [[ "${PREFLIGHT:-1}" == 1 ]]; then
+    if command -v yq >/dev/null; then
+        PREFLIGHT_OUT="$(mktemp)"
+        trap 'rm -f "${PREFLIGHT_OUT}"' EXIT
+        if ! NEMO_RL_DIR="${NEMO_RL_DIR}" JOB_TIME="${JOB_TIME}" bash "${HERE}/preflight.sh" "${CONFIG}" "${NODES}" "$@" > "${PREFLIGHT_OUT}" 2>&1; then
+            cat "${PREFLIGHT_OUT}" >&2
+            echo "ERROR: preflight failed, not submitting (PREFLIGHT=0 to override)" >&2; exit 1
+        fi
+        grep "WARNING" "${PREFLIGHT_OUT}" >&2 || true
+    else
+        echo "WARNING: yq not found, config not checked" >&2
+    fi
 fi
 
 # Re-stage the image if the scratch purge removed it. Copy to a per-process temp name,
@@ -69,10 +89,17 @@ SBATCH_FLAGS=(--nodes="${NODES}" --account="${ACCOUNT}" --partition="${PARTITION
               --time="${JOB_TIME}" --job-name="nrl-${RUN}" --output="${OUT}/slurm/%j-${RUN}.out")
 [[ -n "${RESERVATION}" ]] && SBATCH_FLAGS+=(--reservation="${RESERVATION}")
 [[ -n "${EXCLUDE_NODES}" ]] && SBATCH_FLAGS+=(--exclude="${EXCLUDE_NODES}")
+[[ -n "${DEPENDENCY:-}" ]] && SBATCH_FLAGS+=(--dependency="${DEPENDENCY}")
+[[ "${PARTITION}" == preemptable ]] && SBATCH_FLAGS+=(--requeue --open-mode=append)
 
 # Runs on the Ray head inside the container, cwd = /opt/nemo-rl (the clone mount).
 # The image driver venv directly, not `uv run`: the venvs are complete and read-only for us.
-COMMAND="/opt/nemo_rl_venv/bin/python ${SCRIPT} --config ${CONFIG} \
+# driver_retry.sh restarts a driver that fails mid-run (DRIVER_RETRIES, default 2; 0 disables).
+# RAY_DEDUP_LOGS=0: Ray otherwise folds similar lines from different workers into one
+# "[repeated Nx]" line, which drops per-rank errors (NCCL's failing CUDA call) and the
+# per-rank [gpumem] lines.
+COMMAND="RAY_DEDUP_LOGS=${RAY_DEDUP_LOGS:-0} DRIVER_RETRIES=${DRIVER_RETRIES:-2} bash ${HERE}/driver_retry.sh \
+${DRIVER_PYTHON:-/opt/nemo_rl_venv/bin/python} ${SCRIPT} --config ${CONFIG} \
 cluster.num_nodes=${NODES} cluster.gpus_per_node=4 \
 checkpointing.checkpoint_dir=${OUT}/results/${RUN} \
 logger.log_dir=${OUT}/logs/${RUN} $*"
@@ -81,6 +108,8 @@ logger.log_dir=${OUT}/logs/${RUN} $*"
 cd "${OUT}/slurm"
 # RAY_SINGLE_SRUN=1: head + workers in one srun step (Slingshot network is per step).
 # SRUN_MEM_BIND: keep host memory on the CPU NUMA nodes 0-3, off the GPUs' HBM.
-EDF="${EDF_NAME}" GPUS_PER_NODE=4 RAY_SINGLE_SRUN="${RAY_SINGLE_SRUN:-1}" BASE_LOG_DIR="${OUT}/slurm" COMMAND="${COMMAND}" \
+submitted="$(EDF="${EDF_NAME}" GPUS_PER_NODE=4 RAY_SINGLE_SRUN="${RAY_SINGLE_SRUN:-1}" BASE_LOG_DIR="${OUT}/slurm" COMMAND="${COMMAND}" \
 SRUN_MEM_BIND="${SRUN_MEM_BIND-verbose,mask_mem:0xf}" NUMA_WATCH="${NUMA_WATCH-${HERE}/numa_watch.sh}" \
-    sbatch "${SBATCH_FLAGS[@]}" "${NEMO_RL_DIR}/ray.sub"
+    sbatch "${SBATCH_FLAGS[@]}" "${NEMO_RL_DIR}/ray.sub")"
+echo "${submitted}"
+if [[ -n "${PREFLIGHT_OUT}" ]]; then mv "${PREFLIGHT_OUT}" "${OUT}/slurm/${submitted##* }-${RUN}.preflight.txt"; fi
