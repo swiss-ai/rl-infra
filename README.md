@@ -19,8 +19,10 @@ task file like `envs/gsm8k.yaml`, with its dataset, prompt and reward; the train
 stays as it is. The first run also sets everything up, cloning the pinned sources and
 copying the 200 GB model to your scratch, so it takes a while to start; later runs start
 right away. `run.sh` prints where the training log, the metrics and the weights go, and
-`RECIPE=recipes/<name>.yaml` selects one of the other setups in `recipes/`. The sections
-below describe the general launcher underneath.
+`RECIPE=recipes/<name>.yaml` selects one of the other setups in `recipes/`;
+[experiments/grpo-chonk/README.md](experiments/grpo-chonk/README.md) shows how to
+reproduce the comparison of vLLM against Megatron inference and of AdamW against Muon.
+The sections below describe the general launcher underneath.
 
 ## How a NeMo-RL run is put together
 
