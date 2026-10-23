@@ -37,9 +37,16 @@ resolve() {
 }
 merged="${TMP}/merged.yaml"
 resolve "$(host_path "${CONFIG}")" "${merged}"
+new_keys=()
 for o in "$@"; do
   [[ "$o" == *=* ]] || continue
-  yq w -i "${merged}" "${o%%=*}" "${o#*=}"
+  key="${o%%=*}"
+  if [[ "${key}" == +* ]]; then
+    key="${key#+}"
+  elif [[ -z "$(yq r "${merged}" "${key}")" ]]; then
+    new_keys+=("${key}")
+  fi
+  yq w -i "${merged}" "${key}" "${o#*=}"
 done
 r() { yq r "${merged}" "$1"; }
 
@@ -177,5 +184,8 @@ if [[ -n "${must}" && "${must}" != null && -n "${JOB_TIME:-}" ]]; then
   must_s=$(( 10#$md*86400 + 10#$mh*3600 + 10#$mm*60 + 10#$ms ))
   (( must_s < $(secs "${JOB_TIME}") )) || warn "checkpoint_must_save_by ${must} is not before the job time ${JOB_TIME}: the job is killed before it saves"
 fi
+for k in "${new_keys[@]}"; do
+  err "override ${k} sets a key the config does not have; NeMo-RL rejects that, add it as +${k}=..."
+done
 echo "== preflight: ${errors} error(s), ${warnings} warning(s)"
 (( errors == 0 ))
