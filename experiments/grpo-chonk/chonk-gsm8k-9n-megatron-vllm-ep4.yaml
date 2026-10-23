@@ -28,13 +28,18 @@ policy:
       UCCL_EP_TRANSPORT: cxi
       UCCL_EP_DISPATCH_CONFIG: "24,40,512,32,512"
       UCCL_EP_COMBINE_CONFIG: "24,7,512,32,512"
-      UCCL_EP_CPU_TIMEOUT_SECS: "1200"
+      UCCL_EP_CPU_TIMEOUT_SECS: "480"
       NRL_REFIT_BUFFER_MEMORY_RATIO: "0.005"
       NRL_REFIT_NUM_BUFFERS: "1"
       CUDA_ENABLE_COREDUMP_ON_EXCEPTION: "1"
       CUDA_COREDUMP_GENERATION_FLAGS: skip_nonrelocated_elf_images,skip_global_memory,skip_shared_memory,skip_local_memory,skip_abort
       CUDA_COREDUMP_FILE: ${logger.log_dir}/core_%h_%p
-      NCCL_DEBUG: WARN
+      NCCL_DEBUG: INFO
+      NCCL_DEBUG_SUBSYS: INIT,ALLOC
+      NCCL_DEBUG_FILE: ${logger.log_dir}/forensics/nccl-%h-%p.log
+      NRL_FORENSICS_DIR: ${logger.log_dir}/forensics
+      NRL_MEM_HISTORY: "1"
+      NRL_NCCL_WARMUP: "1"
       TORCH_SHOW_CPP_STACKTRACES: "1"
       TORCH_NCCL_TRACE_BUFFER_SIZE: "2000"
       TORCH_NCCL_DUMP_ON_TIMEOUT: "1"
