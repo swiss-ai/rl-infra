@@ -11,8 +11,8 @@ NEMO_RL_BRANCH=apertus2
 # into an existing clone that lacks it. #8 is the Megatron trainer's FP8 expert-cache fix.
 # #2517 is pinned at 05db6ab36 (2026-05-29): its later head (1c42be6aa, 2026-10-23) makes #8
 # conflict in nemo_rl/models/policy/workers/megatron_policy_worker.py.
-NEMO_RL_PRS="swiss-ai/Nemo-RL 5
-swiss-ai/Nemo-RL 1
+NEMO_RL_PRS="swiss-ai/Nemo-RL 5 fe7e3fe71c80c1630487c09a7d49a27e27a3b71e
+swiss-ai/Nemo-RL 1 40a766b21dcfc65c9548fd0cc1ff02869c585869
 NVIDIA-NeMo/RL 2517 05db6ab36b7a0c528c178cbeb44903dbe82fda5d
 swiss-ai/Nemo-RL 8 19843e5a523254ebf3bed49a47a1e852dca29a70"
 # The DTensor (HF) trainer imports nemo_automodel; the image does not ship it, so the clone's
