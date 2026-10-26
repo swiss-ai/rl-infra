@@ -25,7 +25,7 @@ if [[ ! -d "${NEMO_RL_DIR}/.git" ]]; then
     while read -r repo pr sha; do
         git -C "${NEMO_RL_DIR}" fetch "https://github.com/${repo}.git" "pull/${pr}/head"
         if [[ "${repo}" == NVIDIA-NeMo/RL && "${pr}" == 2517 ]]; then
-            "${GIT[@]}" -C "${NEMO_RL_DIR}" merge --no-commit --no-ff -Xtheirs FETCH_HEAD || true
+            "${GIT[@]}" -C "${NEMO_RL_DIR}" merge --no-commit --no-ff -Xtheirs "${sha:-FETCH_HEAD}" || true
             git -C "${NEMO_RL_DIR}" restore --source=HEAD -- tests/unit/test_recipes_and_test_suites.py
             git -C "${NEMO_RL_DIR}" add tests/unit/test_recipes_and_test_suites.py
             "${GIT[@]}" -C "${NEMO_RL_DIR}" commit -m "Merge ${repo} PR #${pr}"

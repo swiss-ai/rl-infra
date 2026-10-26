@@ -9,9 +9,11 @@ NEMO_RL_BRANCH=apertus2
 # -Xtheirs and the fork's tests/unit/test_recipes_and_test_suites.py kept, as in the example.
 # A line with a commit merges that commit instead of the PR head, and setup.sh also merges it
 # into an existing clone that lacks it. #8 is the Megatron trainer's FP8 expert-cache fix.
+# #2517 is pinned at 05db6ab36 (2026-05-29): its later head (1c42be6aa, 2026-10-23) makes #8
+# conflict in nemo_rl/models/policy/workers/megatron_policy_worker.py.
 NEMO_RL_PRS="swiss-ai/Nemo-RL 5
 swiss-ai/Nemo-RL 1
-NVIDIA-NeMo/RL 2517
+NVIDIA-NeMo/RL 2517 05db6ab36b7a0c528c178cbeb44903dbe82fda5d
 swiss-ai/Nemo-RL 8 19843e5a523254ebf3bed49a47a1e852dca29a70"
 # The DTensor (HF) trainer imports nemo_automodel; the image does not ship it, so the clone's
 # submodule (this commit, the fork's pin) goes on PYTHONPATH instead.
