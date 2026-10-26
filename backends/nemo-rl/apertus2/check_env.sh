@@ -24,6 +24,15 @@ import nemo_rl.models.generation.vllm.vllm_worker
 from nemo_automodel.components.checkpoint.checkpointing import _load_hf_safetensors_sharded, plan_hf_safetensors_load
 print('trainer + vLLM worker modules OK, Automodel loader patch present')
 "
+echo "== Gym (Harbor + OpenSandbox)"; "${PY}" -c "
+import nemo_gym, nemo_rl.environments.nemo_gym as ng
+print('nemo_gym', nemo_gym.__file__)
+import nemo_gym.sandbox.providers.opensandbox.provider as p
+print('opensandbox provider OK')
+print('mask_degenerate_rollouts in nemo_rl:', 'mask_degenerate_rollouts' in open(ng.__file__).read())
+import importlib.util as u
+print('harbor_agent app importable spec:', u.find_spec('responses_api_agents.harbor_agent.app') is not None)
+"
 echo "== overlay imports"; "${PY}" -c "import soundfile, nemo.lens; print('soundfile', soundfile.__version__, '| nemo.lens', nemo.lens.__file__)"
 echo "== Megatron trainer"; "${PY}" -c "
 import megatron.core, megatron.bridge, deep_ep

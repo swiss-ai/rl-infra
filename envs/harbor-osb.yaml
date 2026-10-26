@@ -1,0 +1,137 @@
+# Task file: Harbor agent tasks (micro-tasks, or SWE-Lego) in NeMo Gym, every task container a pod on the
+# OpenSandbox cluster (Breithorn). Merged over a recipe by run-harbor-osb.sh, like envs/gsm8k.yaml.
+#
+# Combines two stacks:
+#   - the Apertus 2 Chonk recipe of this repository (Megatron trainer + vLLM generation, async)
+#   - Kostas's / Ambroise's Harbor + OpenSandbox setup (swiss-ai/nemo-rl-development
+#     swissai/harbor_agent_osb_v0.8.0, swiss-ai/nemo-gym swissai/harbor_agent_osb_v0.7.0)
+#
+# Terminus-2 runs in the Gym process on the training nodes, calls the policy through the vLLM
+# HTTP server, and drives tmux in the remote sandbox over the OpenSandbox API. Only
+# Clariden -> OpenSandbox traffic is needed. The reward is read once, at the end of a trial,
+# from /logs/verifier/reward.txt.
+#
+# FIRST RUN = plumbing, not learning: Chonk is a pretraining checkpoint, so the reward is ~0.
+# Sizes are the smallest that exercise every part (64 concurrent sandboxes, a few steps).
+
+grpo:
+  num_prompts_per_step: 8
+  num_generations_per_prompt: 8        # 64 trajectories = 64 sandboxes in flight
+  max_num_steps: 5                     # enough to time a step; raise for a real run
+  max_num_epochs: 100
+  use_leave_one_out_baseline: true
+  normalize_rewards: true
+  overlong_filtering: true
+  # the Gym entrypoint refuses a non-null value (it inherits 256 from the NeMo-RL defaults)
+  max_val_samples: null
+  val_batch_size: null
+  val_num_generations_per_prompt: 1
+  val_period: 0
+  val_at_start: false
+  val_at_end: false
+
+checkpointing:
+  enabled: false                       # plumbing run: skip the 200 GB checkpoint write
+
+policy:
+  # one optimizer step per rollout batch
+  train_global_batch_size: 64
+  # Chonk trains at 2k for GSM8K. Harbor trajectories are multi-turn, so this is the real limit:
+  # raise it (and the micro-batch token budgets) only after a run fits in memory at this size.
+  max_total_sequence_length: 4096
+  sequence_packing:
+    enabled: true
+    train_mb_tokens: 4096
+    logprob_mb_tokens: 4096
+  generation:
+    # per agent turn, not per trajectory
+    max_new_tokens: 1024
+    # the GSM8K recipe stops generation at 'Question:', which would cut agent turns short
+    stop_strings: null
+    temperature: 1.0
+    top_p: 1.0
+    top_k: null
+    vllm_cfg:
+      max_model_len: ${policy.max_total_sequence_length}
+      async_engine: true
+      # NeMo Gym's model server talks to the policy over an OpenAI-compatible HTTP endpoint.
+      expose_http_server: true
+    vllm_kwargs:
+      # Agent turns arrive as many concurrent, very long prompts (Harbor README).
+      enable_chunked_prefill: false
+
+data:
+  max_input_seq_length: null
+  shuffle: true
+  num_workers: 0
+  # the data block below replaces the whole recipe block, and grpo.setup() indexes this key
+  use_multiple_dataloader: false
+  train:
+    dataset_name: NemoGymDataset
+    data_path: ${oc.env:HARBOR_ROOT}/train.jsonl
+  validation:
+    dataset_name: NemoGymDataset
+    data_path: ${oc.env:HARBOR_ROOT}/validation.jsonl
+  default:
+    dataset_name: NemoGymDataset
+    env_name: nemo_gym
+    prompt_file: null
+    system_prompt_file: null
+    processor: nemo_gym_data_processor
+  _override_: true
+
+env:
+  should_use_nemo_gym: true
+  should_log_nemo_gym_responses: true
+  should_mask_flagged_samples: true
+  nemo_gym:
+    port_range_low: 5000
+    port_range_high: 5999
+    is_trajectory_collection: false
+    # Gym's servers live on several Ray nodes and must advertise the node IP.
+    use_absolute_ip: true
+    # A rollout whose sandbox never came up returns an empty output list, which would abort the
+    # step; this turns it into a zero-weight sample (needs should_mask_flagged_samples).
+    mask_degenerate_rollouts: true
+    config_paths:
+    - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+    # defines `sandbox`, which the harbor config references as ${sandbox}
+    - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+    - responses_api_agents/harbor_agent/configs/harbor_agent_opensandbox_training.yaml
+    sandbox:
+      opensandbox:
+        connection:
+          transport_backend: httpx
+    harbor_agent:
+      responses_api_agents:
+        harbor_agent:
+          # one Harbor trial (and one sandbox) per in-flight rollout
+          concurrency: ${mul:${grpo.num_prompts_per_step}, ${grpo.num_generations_per_prompt}}
+          harbor_datasets:
+            # the alias is the left half of every row's instance_id
+            swe_lego:
+              local_dataset_path: ${oc.env:HARBOR_TASKS_DIR}
+          harbor_agent_kwargs:
+            max_turns: 20
+            model_info:
+              max_input_tokens: ${policy.max_total_sequence_length}
+              max_output_tokens: ${policy.max_total_sequence_length}
+          harbor_environment_kwargs:
+            sandbox_metadata:
+              harbor-dataset: swe-lego
+            sandbox_provider_options:
+              # the cluster rejects every create without it (ValidatingAdmissionPolicy)
+              secure_access: true
+              # swe_lego_v05_1 is a public project; the placeholder is accepted and ignored
+              image_auth:
+                username: ${oc.env:RL_REGISTRY_USERNAME}
+                password: ${oc.env:RL_REGISTRY_PASSWORD}
+          # caps, not overrides: SWE-Lego tasks declare 3000 s
+          harbor_agent_max_timeout: 1800
+          harbor_verifier_max_timeout: 1200
+          harbor_jobs_dir: ${oc.env:HARBOR_ROOT}/jobs
+  _override_: true
+
+logger:
+  tensorboard_enabled: true
+  wandb_enabled: false

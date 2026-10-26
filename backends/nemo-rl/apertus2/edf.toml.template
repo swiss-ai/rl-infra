@@ -28,7 +28,7 @@ UCCL_EP_TRANSPORT = "cxi"
 # NeMo-RL, Automodel, Megatron-LM and Megatron-Bridge are not installed in the image: the clone,
 # its Automodel checkout and the Megatron checkouts are imported from the mounts. PYDEPS = runtime
 # overlay (driver.sh).
-PYTHONPATH = "/opt/nemo-rl:/opt/nemo-rl/3rdparty/Automodel-workspace/Automodel:@@BRIDGE_DIR@@/src:@@MEGATRON_DIR@@:@@PYDEPS@@"
+PYTHONPATH = "/opt/nemo-rl:/opt/nemo-rl/3rdparty/Automodel-workspace/Automodel:/opt/nemo-rl/3rdparty/Gym-workspace/Gym:@@BRIDGE_DIR@@/src:@@MEGATRON_DIR@@:@@PYDEPS@@"
 PYDEPS = "@@PYDEPS@@"
 PYTHONNOUSERSITE = "1"
 PYTHONDONTWRITEBYTECODE = "1"

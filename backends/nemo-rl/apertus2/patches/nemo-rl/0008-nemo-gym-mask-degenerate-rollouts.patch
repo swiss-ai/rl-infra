@@ -1,0 +1,295 @@
+From cfc47ae3adcd8d79d99f75b91e1049acb402eb26 Mon Sep 17 00:00:00 2001
+From: rob <rob@local>
+Date: Wed, 21 Oct 2026 11:38:04 +0200
+Subject: [PATCH] nemo_gym: mask_degenerate_rollouts (port of
+ swiss-ai/nemo-rl-development 64327d7c, without the Hermes hunk)
+
+---
+ nemo_rl/environments/nemo_gym.py              | 110 ++++++++++++++++
+ .../test_nemo_gym_degenerate_rollouts.py      | 118 ++++++++++++++++++
+ 2 files changed, 228 insertions(+)
+ create mode 100644 tests/unit/environments/test_nemo_gym_degenerate_rollouts.py
+
+diff --git a/nemo_rl/environments/nemo_gym.py b/nemo_rl/environments/nemo_gym.py
+index 0bcef5b8a..7843d4520 100644
+--- a/nemo_rl/environments/nemo_gym.py
++++ b/nemo_rl/environments/nemo_gym.py
+@@ -330,6 +330,17 @@ class NemoGymConfig(TypedDict):
+     # server, switches run_rollouts to receipt mode, and assembles receipts
+     # from the manifest control route. None/absent = legacy token-echo path.
+     token_capture: NotRequired[Dict[str, Any] | None]
++    # Turn a rollout that produced no trainable token into a zero-loss sample
++    # instead of aborting the step. Only applies to rollouts the environment has
++    # already flagged with instance_config.mask_sample, and requires
++    # env.should_mask_flagged_samples, which is what actually zeroes the loss.
++    # Agentic environments that run a whole container per rollout (harbor_agent,
++    # anyswe_agent) fail this way for reasons unrelated to the policy -- a
++    # container that never came up, a first-turn prompt over max_model_len -- and
++    # one such rollout otherwise takes the entire training step with it. Leave it
++    # absent (the default) for environments where an empty rollout is a genuine
++    # bug worth surfacing loudly.
++    mask_degenerate_rollouts: NotRequired[bool]
+ 
+ 
+ # Gym control-plane server name (the model server hosting the ledger) and the
+@@ -425,6 +436,80 @@ def get_pad_dynamic_image_shapes(env_config: Mapping[str, Any]) -> bool:
+     return bool(nemo_gym_config.get("pad_dynamic_image_shapes"))
+ 
+ 
++def _degenerate_message_log(
++    cfg: NemoGymConfig,
++    nemo_gym_result: dict,
++    *,
++    tokenizer: PreTrainedTokenizerBase,
++) -> list[dict] | None:
++    """Build a zero-weight stand-in for a rollout that produced no tokens.
++
++    Agentic environments run a container per rollout and fail for reasons that
++    have nothing to do with the policy: the sandbox never came up, the
++    first-turn prompt exceeded max_model_len, the agent bridge raised. The
++    environment reports those as ``instance_config.mask_sample``, but the
++    conversion in _postprocess_nemo_gym_to_nemo_rl_result still needs *some*
++    message log, and one such rollout would otherwise abort the whole step.
++
++    The stand-in is deliberately one token per side rather than the real prompt:
++    it is excluded from the gradient by GRPO's mask_sample filter, so its
++    content is irrelevant, and staying tiny means it cannot itself overflow
++    ``max_total_sequence_length`` -- which is one of the very failures it exists
++    to absorb.
++
++    This is a module-level function rather than a NemoGym method because the
++    postprocess is called unbound against lightweight stand-ins that define only
++    ``cfg``; a ``self.`` call here would turn unrelated tests into AttributeError.
++
++    Args:
++        cfg: The environment config, for the masking flags.
++        nemo_gym_result: The Gym /run response for this rollout.
++        tokenizer: Tokenizer used for the run, for its EOS id.
++
++    Returns:
++        A two-message log, or None when the caller should raise instead: masking
++        is off, the environment did not flag this rollout, router replay needs
++        per-token routes that a stand-in cannot supply, or the tokenizer has no
++        EOS token to pad with.
++    """
++    if not cfg.get("mask_degenerate_rollouts"):
++        return None
++    if not (nemo_gym_result.get("instance_config") or {}).get("mask_sample"):
++        return None
++    if cfg.get("require_routed_experts"):
++        # A stand-in has no routed_experts, and R3 asserts on their presence for
++        # every trainable item, so masking here would only move the failure
++        # downstream.
++        return None
++
++    eos_token_id = tokenizer.eos_token_id
++    if eos_token_id is None:
++        return None
++
++    print(
++        "Masking a degenerate NeMo Gym rollout (no generation data, flagged "
++        f"mask_sample) for instance {nemo_gym_result.get('instance_id')!r}. "
++        "It is replaced by a zero-weight sample and excluded from the "
++        "gradient; watch the num_mask_sample_filtered metric for the rate.",
++        file=sys.stderr,
++    )
++    return [
++        {
++            "role": "user",
++            "content": "",
++            "token_ids": torch.tensor([eos_token_id]),
++        },
++        {
++            "role": "assistant",
++            "content": "",
++            "token_ids": torch.tensor([eos_token_id]),
++            "generation_logprobs": torch.tensor([0.0]),
++            "is_invalid_tool_call": False,
++            "has_malformed_thinking": False,
++        },
++    ]
++
++
+ # Fail fast rather than restart. The servers this actor owns are started in
+ # _spinup, which Ray does not re-run after a restart, so a restarted actor is
+ # permanently broken: _require_spinup() rejects every later rollout call, and
+@@ -1236,6 +1321,13 @@ output prompt token ids till seen: {output_item_dict["prompt_token_ids"][: len(s
+             batch_decode_items.append(
+                 (output_item_dict, prompt_token_ids, generation_token_ids)
+             )
++
++        if not nemo_rl_message_log:
++            degenerate_log = _degenerate_message_log(
++                self.cfg, nemo_gym_result, tokenizer=tokenizer
++            )
++            if degenerate_log is not None:
++                nemo_rl_message_log = degenerate_log
+             turn_idx += 1
+ 
+         if batch_decode_items:
+@@ -1515,6 +1607,11 @@ def _build_gym_actor_config(
+         _value = nemo_gym_dict.pop(_flag, None)
+         if _value is not None:
+             multimodal_flags[_flag] = bool(_value)
++    # Same again: a NeMo-RL-side knob, not part of Gym's global config.
++    masking_flags: dict[str, bool] = {}
++    mask_degenerate_rollouts = nemo_gym_dict.pop("mask_degenerate_rollouts", None)
++    if mask_degenerate_rollouts is not None:
++        masking_flags["mask_degenerate_rollouts"] = bool(mask_degenerate_rollouts)
+ 
+     # Pass prebuilt cache + venv dirs through the global config so the gym reuses
+     # image-baked venvs instead of rebuilding them.
+@@ -1544,6 +1641,7 @@ def _build_gym_actor_config(
+         token_capture=token_capture,
+         **port_range,
+         **multimodal_flags,
++        **masking_flags,
+     )
+ 
+ 
+@@ -1767,6 +1865,18 @@ def build_nemo_gym_actors(
+             actors already created are torn down first.
+     """
+     nemo_gym_dict = dict(env_configs["nemo_gym"])
++    if nemo_gym_dict.get("mask_degenerate_rollouts"):
++        # Deferred to break the import cycle: nemo_rl.experience.rollouts
++        # imports this module at its top level.
++        from nemo_rl.experience.rollouts import should_mask_flagged_samples
++
++        if not should_mask_flagged_samples(env_configs):
++            raise ValueError(
++                "env.nemo_gym.mask_degenerate_rollouts=true requires "
++                "env.should_mask_flagged_samples, which is what actually zeroes "
++                "the loss for a flagged sample. With masking off, a degenerate "
++                "rollout would be trained on as if it were a real trajectory."
++            )
+     plan = parse_shard_plan(nemo_gym_dict)
+ 
+     if plan is None:
+diff --git a/tests/unit/environments/test_nemo_gym_degenerate_rollouts.py b/tests/unit/environments/test_nemo_gym_degenerate_rollouts.py
+new file mode 100644
+index 000000000..1c16991b2
+--- /dev/null
++++ b/tests/unit/environments/test_nemo_gym_degenerate_rollouts.py
+@@ -0,0 +1,118 @@
++# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++import pytest
++
++from nemo_rl.environments import nemo_gym as nemo_gym_mod
++from nemo_rl.environments.nemo_gym import (
++    NemoGym,
++    build_nemo_gym_actors,
++    build_nemo_gym_config,
++)
++
++_EOS = 7
++
++
++class _Tokenizer:
++    eos_token_id = _EOS
++
++    def apply_chat_template(self, messages, tokenize=True):
++        return [1, 2, 3]
++
++    def batch_decode(self, batch):
++        return [" ".join(map(str, token_ids)) for token_ids in batch]
++
++
++def _empty_result(*, mask_sample: bool) -> dict:
++    """A Gym /run result whose trial died before the first completed turn."""
++    return {
++        "instance_id": "swe_lego::some_task",
++        "response": {"output": []},
++        "responses_create_params": {"input": []},
++        "instance_config": {"mask_sample": mask_sample},
++    }
++
++
++def _postprocess(cfg: dict, nemo_gym_result: dict) -> dict:
++    class _MockSelf:
++        pass
++
++    mock_self = _MockSelf()
++    mock_self.cfg = cfg
++    return NemoGym.__ray_metadata__.modified_class._postprocess_nemo_gym_to_nemo_rl_result(
++        mock_self, {}, nemo_gym_result, _Tokenizer()
++    )
++
++
++def test_flagged_empty_rollout_becomes_zero_weight_stand_in():
++    result = _postprocess(
++        {"mask_degenerate_rollouts": True}, _empty_result(mask_sample=True)
++    )
++
++    user_message, assistant_message = result["message_log"]
++    assert user_message["role"] == "user"
++    assert user_message["token_ids"].tolist() == [_EOS]
++    assert assistant_message["role"] == "assistant"
++    assert assistant_message["token_ids"].tolist() == [_EOS]
++    assert assistant_message["generation_logprobs"].tolist() == [0.0]
++    assert result["input_message_log"] == [user_message]
++
++
++@pytest.mark.parametrize(
++    ("cfg", "mask_sample"),
++    [
++        ({}, True),
++        ({"mask_degenerate_rollouts": True}, False),
++        ({"mask_degenerate_rollouts": True, "require_routed_experts": True}, True),
++    ],
++    ids=["knob-off", "not-flagged", "router-replay"],
++)
++def test_empty_rollout_still_raises_when_masking_does_not_apply(cfg, mask_sample):
++    with pytest.raises(ValueError, match="no generation data"):
++        _postprocess(cfg, _empty_result(mask_sample=mask_sample))
++
++
++def test_build_nemo_gym_config_moves_mask_degenerate_rollouts_out_of_gym_config(
++    monkeypatch,
++):
++    monkeypatch.setattr(nemo_gym_mod, "get_nemo_gym_uv_cache_dir", lambda: None)
++    monkeypatch.setattr(nemo_gym_mod, "get_nemo_gym_venv_dir", lambda: None)
++
++    cfg = build_nemo_gym_config(
++        {"nemo_gym": {"config_paths": ["gym.yaml"], "mask_degenerate_rollouts": True}},
++        base_urls=[],
++        model_name="test-model",
++        enable_router_replay=False,
++        use_fastokens=False,
++    )
++
++    assert cfg["mask_degenerate_rollouts"] is True
++    assert "mask_degenerate_rollouts" not in cfg["initial_global_config_dict"]
++
++
++def test_mask_degenerate_rollouts_requires_should_mask_flagged_samples():
++    env_configs = {
++        "should_mask_flagged_samples": False,
++        "nemo_gym": {"config_paths": ["gym.yaml"], "mask_degenerate_rollouts": True},
++    }
++
++    with pytest.raises(ValueError, match="should_mask_flagged_samples"):
++        build_nemo_gym_actors(
++            env_configs,
++            base_urls=[],
++            model_name="test-model",
++            tokenizer=_Tokenizer(),
++            enable_router_replay=False,
++            use_fastokens=False,
++        )
+-- 
+2.54.0 (Apple Git-157)
+
