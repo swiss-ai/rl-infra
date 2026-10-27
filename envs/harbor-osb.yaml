@@ -57,8 +57,8 @@ policy:
       # NeMo Gym's model server talks to the policy over an OpenAI-compatible HTTP endpoint.
       expose_http_server: true
     vllm_kwargs:
-      # Agent turns arrive as many concurrent, very long prompts (Harbor README).
-      enable_chunked_prefill: false
+      # Chonk's hybrid Mamba layers need it (vLLM: "Chunked prefill is required for mamba cache mode 'align'").
+      enable_chunked_prefill: true
 
 data:
   max_input_seq_length: null
