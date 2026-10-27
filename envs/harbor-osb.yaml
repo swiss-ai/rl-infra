@@ -56,6 +56,11 @@ policy:
       async_engine: true
       # NeMo Gym's model server talks to the policy over an OpenAI-compatible HTTP endpoint.
       expose_http_server: true
+      # The Chonk checkpoint's tokenizer has no chat template, and the HTTP server does not use
+      # policy.tokenizer.chat_template on its own: every /v1/chat/completions call failed with HTTP 500
+      # ("default chat template is no longer allowed"), so every rollout came back empty (KISTI job 1153276).
+      http_server_serving_chat_kwargs:
+        chat_template: ${policy.tokenizer.chat_template}
     vllm_kwargs:
       # Chonk's hybrid Mamba layers need it (vLLM: "Chunked prefill is required for mamba cache mode 'align'").
       enable_chunked_prefill: true
