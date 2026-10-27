@@ -41,6 +41,12 @@ else
 fi
 git -C "${GYM_DIR}" switch -q apertus2-osb
 git -C "${GYM_DIR}" remote set-url --push origin no_push
+# Gym needs Python 3.13 since 2026-08-04 (#2194), but David's image is Python 3.12, and Gym builds every
+# server venv with the driver's Python (Ray needs the same version on both sides). The code runs on 3.12
+# (the driver imports it), so relax the declared minimum in the working tree; without this the servers'
+# `uv pip install` fails with "the current Python version (3.12.3) does not satisfy Python>=3.13.14".
+grep -rl --include=pyproject.toml 'requires-python = ">=3.13.14"' "${GYM_DIR}" \
+    | xargs -r sed -i 's/requires-python = ">=3.13.14"/requires-python = ">=3.12"/'
 echo "== Gym ready: $(git -C "${GYM_DIR}" log --oneline -1)"
 for f in nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
          responses_api_agents/harbor_agent/configs/harbor_agent_opensandbox_training.yaml; do
