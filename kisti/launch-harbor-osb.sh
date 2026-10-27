@@ -86,9 +86,11 @@ bash ${RL_INFRA}/backends/nemo-rl/apertus2/driver.sh examples/nemo_gym/run_grpo_
 cluster.num_nodes=${NODES} cluster.gpus_per_node=4 \
 checkpointing.checkpoint_dir=${OUT}/results/${RUN} logger.log_dir=${OUT}/logs/${RUN} $*"
 
-# ray.sub's pyxis path, plus a writable container (vLLM and FlashInfer write caches under the image's paths).
+# ray.sub's pyxis path, plus a writable container (vLLM and FlashInfer write caches under the image's paths)
+# and --container-env: for variables the image itself sets (UV_DEFAULT_INDEX is one), the image's value wins
+# over the job's unless pyxis is told to take the job's.
 RAY_SUB="${OUT}/slurm/ray-kisti.sub"
-sed 's|COMMON_SRUN_ARGS+=" --container-image=$CONTAINER"|COMMON_SRUN_ARGS+=" --container-image=$CONTAINER --container-writable"|' \
+sed 's|COMMON_SRUN_ARGS+=" --container-image=$CONTAINER"|COMMON_SRUN_ARGS+=" --container-image=$CONTAINER --container-writable --container-env=UV_DEFAULT_INDEX"|' \
     "${NEMO_RL_DIR}/ray.sub" > "${RAY_SUB}"
 grep -q -- '--container-writable' "${RAY_SUB}" || { echo "ERROR: could not patch ray.sub for a writable container" >&2; exit 1; }
 
