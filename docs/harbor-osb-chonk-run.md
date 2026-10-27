@@ -25,14 +25,14 @@ Newest first. If you followed an earlier version, the entries marked **action** 
     (`devtools`, `yappi`, `pydot`, a current `openai`), and `setup-gym.sh` relaxes Gym's `requires-python` from 3.13
     to 3.12 (the image's Python). Re-run `setup-gym.sh` on an existing clone; `pydeps.sh` re-installs by itself.
   - New `kisti/launch-harbor-osb.sh`: the GRPO job on KISTI. First complete Chonk run (KISTI job 1153929).
-    [KISTI HANGANG](#kisti-hangang) now has the full procedure, including how to reuse the copies in `/scratch/hanint02`.
+    The KISTI procedure moved to the private `swiss-ai/kisti-docs` (folder `rl/`); [KISTI HANGANG](#kisti-hangang) links to it.
 - **2026-10-27**
   - **Action:** `envs/harbor-osb.yaml` now sets `enable_chunked_prefill: true`. With `false`, every vLLM worker
     fails at start-up on Chonk ("Chunked prefill is required for mamba cache mode 'align'", job 3753228). Pull the
     branch before submitting.
   - **Action:** the `harbor-osb` branch is on GitHub (`swiss-ai/rl-infra`), rebased on main. Earlier versions of
     this page referred to a bundle; use the branch instead.
-  - New section [KISTI HANGANG](#kisti-hangang): Chonk loads and generates on KISTI's `intTest` partition, 2-node
+  - New section [KISTI HANGANG](#kisti-hangang): Chonk loads and generates on KISTI, 2-node
     NCCL works, and the OpenSandbox API is reachable from KISTI. New scripts in `kisti/`.
   - GPU memory: GH200 "120GB" nodes report about **96 GB per GPU** (`nvidia-smi`: 97,871 MiB). Size memory with 96.
   - Attempt log and Errors table updated (job 3753228 result, queued jobs).
@@ -313,90 +313,10 @@ run label matched). `https://osb-ui.swissai.svc.cscs.ch` also lists and deletes 
 
 ## KISTI HANGANG
 
-KISTI (Korea) lent us GH200 nodes for a month. Same node type as Clariden (4 GH200, 288 cores, 870 GB RAM per node,
-Slingshot/CXI), but a different site: pyxis/enroot instead of the CSCS Container Engine, no EDF, a 260 to 280 ms
-round trip to Switzerland. The site guide is `swiss-ai/kisti-docs`; read it first (login with OTP, mandatory Slurm
-options, `NCCL_PROTO=^LL128`). What we found, in the order you will need it:
-
-**Partition.** Use `-p intTest` (209 nodes, no time limit, no per-user job limits; KISTI dedicated it to us on
-2026-10-27). `normal` now rejects our group ("your group is not authorized to access this partition"). Every job
-also needs `--comment="field=nlp;appl=..."`, `--gres=gpu:4`, `--exclusive --mem=0` (a single-node job without
-`--exclusive` gets only part of the node's memory), and must be submitted from under `/scratch/$USER`.
-`kisti/env.sh` sets all of this as `KISTI_SLURM`.
-
-**Image.** Use David's image (`nemo-rl-apertus2-cfcfede4-ucclfix.sqsh`, 28 GB, 446k files). pyxis *unpacks* every
-image into the node's `/tmp`, a 239 GB RAM disk: David's takes 26 s and 50 GB. Kostas's `nemo-rl_osb_v0_8_0.sqsh`
-does **not** work there: it unpacks to more than 239 GB and 2.5M files, which fills `/tmp`, and unpacking it to
-`/scratch` instead hits the group's 5M-file quota. Apptainer cannot mount these images either (KISTI's squashfuse
-lacks zstd).
-
-**Getting files there.** `hangang-dm.ksc.re.kr` is the data mover (scp/sftp/rsync, OTP login). Copy the image and the
-checkpoint (`$SCRATCH/models/apertus2-chonk-lc-iter3576`, 54 files, 202 GB) to `/scratch/$USER/images` and
-`/scratch/$USER/models`. From a laptop, a single ssh connection to KISTI reaches about 5 MB/s (11 h for the
-checkpoint); several connections in parallel help, but KISTI refuses more than about 10 sessions per connection.
-**Verify checksums, not just sizes**: a size check passed on copies with zero-filled blocks. For example, compare
-`md5sum` of every file under 20 MB and of the first and last 4 MB of larger files on both sides. Copies already on
-KISTI, readable by everyone in group `in0138`, are in `/scratch/hanint02` (the account used before ours existed): see
-[Run it on KISTI](#run-it-on-kisti). `/scratch` files unused for 15 days are deleted.
-
-**Inside the image.** It has torch 2.13, vLLM 0.28 (Apertus 2 build), UCCL, DeepEP and Transformer Engine, and the
-CXI libfabric provider. NeMo-RL, Gym and Megatron are not in it (on Alps they are mounted checkouts; the same applies
-here). Three settings differ from Alps:
-
-| Setting | Why |
-|---|---|
-| `UV_DEFAULT_INDEX=https://pypi.org/simple` | The image's `uv` points at CSCS's JFrog mirror, which KISTI cannot reach. Compute nodes do reach PyPI and GitHub |
-| a current `openai` package beside the image | The image's `openai` 2.7.2 is too old for its own vLLM (`ImportError: cannot import name 'NamespaceTool'`) when vLLM's server code is imported |
-| single node: `NCCL_NET=Socket` | KISTI assigns no Slingshot VNI to single-node jobs, so NCCL's OFI plugin fails ("NCCL error: invalid usage"; `NCCL_NET_PLUGIN=none` fails the same way). Multi-node jobs use the image's OFI plugin as is |
-
-Chonk has 7 KV heads, so vLLM tensor parallelism must be 1: serve it as 4 data-parallel replicas with expert
-parallelism per node (the blueprint's layout).
-
-**OpenSandbox from KISTI** works without an allowlist change: from a compute node, create took 5.6 s and an exec 1.0 s on
-a new connection, 0.5 s on a reused one (Clariden: 4.1 s and 0.26 s). The registry returns 403 from KISTI, which does not
-matter: the sandbox nodes pull the task images.
-
-**Tests** (scripts in `kisti/`; each header has the submit command):
-
-| Script | Nodes | Result on 2026-10-27 |
-|---|---|---|
-| `inspect_image.sh` | 1 | Image runs; versions as above |
-| `nccl_2node.sh` | 2 | `correct=True`, about 30 to 33 GB/s bus bandwidth for 256 MB |
-| `chonk_serve.sh` | 1 | Server ready after 484 s, completion " Bern.\nThe official language of Switzerland is German..." (first request about 4 min: Triton compilation) |
-
-| `launch-harbor-osb.sh` | 12 | The GRPO job: passed end to end (job 1153929, see [Status](#status)) |
-
-### Run it on KISTI
-
-`kisti/launch-harbor-osb.sh` is the pyxis counterpart of `run-harbor-osb.sh` + `launch.sh`: same recipe, task file,
-image and driver; the EDF's `[env]` becomes exports, the checkouts are mounted, and `ray.sub` gets
-`--container-writable --container-env=UV_DEFAULT_INDEX` (for variables the image itself sets, the image's value wins
-unless pyxis is told to take the job's). Everything below goes under `/scratch/$USER` (jobs must be submitted from there).
-
-```bash
-# 1. this branch, and the OpenSandbox key (one line, chmod 600)
-git clone -b harbor-osb https://github.com/swiss-ai/rl-infra.git ~/rl-infra
-vi ~/.opensandbox_token && chmod 600 ~/.opensandbox_token
-
-# 2. image and checkpoint: link the copies in /scratch/hanint02 (untested with links; copy them, about 265 GB, if a job cannot read them)
-S=/scratch/hanint02; mkdir -p /scratch/$USER/{images,models,projects,osb/harbor_micro}
-ln -s $S/images/nemo-rl-apertus2-cfcfede4-ucclfix.sqsh /scratch/$USER/images/
-ln -s $S/models/apertus2-chonk-lc-iter3576 /scratch/$USER/models/
-
-# 3. the checkouts (setup.sh + setup-gym.sh output from Alps, 0.9 GB) and the micro-tasks: copy, they are written to
-cp -a $S/projects/{nemo-rl-apertus2,megatron-lm-moe-apertus2,megatron-bridge-apertus2} /scratch/$USER/projects/
-cp -a $S/osb/harbor_micro/{tasks,train.jsonl,validation.jsonl} /scratch/$USER/osb/harbor_micro/
-
-# 4. submit (12 nodes, the blueprint layout; about 20 min for 5 steps)
-cd /scratch/$USER && RUN=kisti-chonk-12n-$(date +%m%d-%H%M) bash ~/rl-infra/kisti/launch-harbor-osb.sh
-tail -f /scratch/$USER/nemo-rl/slurm/<id>-logs/ray-driver.log
-```
-
-The checkouts in `/scratch/hanint02/projects` already carry the Gym `requires-python` change. If you build your own on
-Alps (steps 2 and 3), copy them over the data mover the same way. The first job builds the Gym server venvs under
-`$HARBOR_ROOT/venvs`, which takes a few minutes; later jobs reuse them. Healthy run, in `ray-driver.log`: steps of 1 to 4
-minutes, `Masking a degenerate` a small fraction of 64 per step, and `harbor_micro/jobs/<date>/.../result.json` files
-without `exception_info`.
+The same job runs on KISTI's HANGANG system (Korea, GH200 nodes like Clariden, pyxis/enroot instead of the CSCS
+Container Engine). The procedure, the shared copies of the image and checkpoint, the site settings and the attempt log
+are in the private repository [`swiss-ai/kisti-docs`](https://github.com/swiss-ai/kisti-docs), folder `rl/`. The scripts
+it uses are in `kisti/` of this branch.
 
 ## Open questions
 
@@ -409,8 +329,7 @@ without `exception_info`.
   with 1k+ sandboxes?
 - For datasets of 100k images: sandbox creation waits on image pulls (about 26 s cold, about 4 s warm). Async age 1 hides one step. Options:
   prefetch by dataloader order, a pull-through cache, a curriculum slice, or pools.
-- KISTI: does UCCL EP over CXI work across nodes there (the 2-node NCCL test passes; UCCL is untested)? See
-  [KISTI HANGANG](#kisti-hangang) for the rest.
+- KISTI: see `swiss-ai/kisti-docs`, folder `rl/`.
 
 ## Attempt log
 
@@ -424,14 +343,7 @@ without `exception_info`.
 | 3753228 | `normal`, 6 nodes, 4096 tokens, `stop_strings: null` | Submitted 2026-10-26 11:01, started 2026-10-27 06:17 (19 h wait), failed after 5m19s: `enable_chunked_prefill` |
 | 3762540 | `normal`, 6 nodes, all the fixes above | Queued |
 | 3762800 | `preemptable`, same | Queued |
-| 1152908 | KISTI `intTest`, 1 node, `kisti/chonk_serve.sh` | Passed: Chonk loads and generates |
-| 1152981 | KISTI, 12 nodes, `launch-harbor-osb.sh` | Failed: `uv` inside the container still used JFrog (image env wins) -> `--container-env` |
-| 1153002 | KISTI, 12 nodes | Failed: `No module named 'devtools'` -> Gym dependencies in pydeps |
-| 1153070 | KISTI, 12 nodes | Failed: `environment_servers/legacy_agent` -> `harbor_agent_environment_server: null` |
-| 1153234 | KISTI, 12 nodes | Failed: Gym venvs need Python 3.13 -> relaxed to 3.12 |
-| 1153276 | KISTI, 12 nodes | 5 steps, 320 sandboxes created and verified, but every rollout masked: no chat template on the HTTP server |
-| 1153539 | KISTI, 12 nodes | 5 steps; first agent turns generated, every second turn HTTP 500 (no EOS in the template) |
-| 1153929 | KISTI, 12 nodes | **Passed end to end**: 5 steps, 302 of 320 rollouts real, mean 4.2 turns, reward 0 |
+| KISTI jobs | 1 to 12 nodes | See `swiss-ai/kisti-docs`, folder `rl/` |
 
 ## Credits and sources
 
