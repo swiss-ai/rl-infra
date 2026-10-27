@@ -34,6 +34,12 @@ checkpointing:
   enabled: false                       # plumbing run: skip the 200 GB checkpoint write
 
 policy:
+  tokenizer:
+    # The recipe's pass-through template, plus EOS after every assistant message. On each agent turn
+    # NeMo-RL's HTTP server splices the previous turn's generated tokens back in at the EOS that closes
+    # them (openai_server_utils.replace_prefix_tokens); with no EOS every second turn failed with HTTP 500,
+    # "EOS token #0 not found in template_token_ids" (KISTI job 1153539).
+    chat_template: "{{ bos_token }}{% for message in messages %}{{ message['content'] }}{% if message['role'] == 'assistant' %}{{ eos_token }}{% endif %}{% endfor %}"
   # one optimizer step per rollout batch
   train_global_batch_size: 64
   # Chonk trains at 2k for GSM8K. Harbor trajectories are multi-turn, so this is the real limit:
