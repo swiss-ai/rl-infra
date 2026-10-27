@@ -93,6 +93,11 @@ env:
     # A rollout whose sandbox never came up returns an empty output list, which would abort the
     # step; this turns it into a zero-weight sample (needs should_mask_flagged_samples).
     mask_degenerate_rollouts: true
+    # Kostas's harbor_agent_opensandbox_training.yaml also starts an `environment_servers/legacy_agent`
+    # wrapper. That server type exists on his Gym branch but not at the blueprint's Gym pin, so Gym fails
+    # with "Missing pyproject.toml or requirements.txt ... environment_servers/legacy_agent". Nothing
+    # references it here (the data rows name harbor_agent directly), so it is switched off.
+    harbor_agent_environment_server: null
     config_paths:
     - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
     # defines `sandbox`, which the harbor config references as ${sandbox}

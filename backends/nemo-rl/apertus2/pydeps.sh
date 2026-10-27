@@ -11,6 +11,15 @@ PKGS=(
     "nemo-lens[sdk] @ git+https://github.com/NVIDIA-NeMo/Lens.git@b85578fc2b736a1804705e537001b5f45e9c715d"
     # NeMo-RL's dataset registry imports the audio datasets at module level
     soundfile==0.13.1
+    # NeMo Gym (Harbor runs): dependencies the image lacks ("No module named 'devtools'" at Gym
+    # start-up, KISTI job 1153002), devtools' own two, and the openai Gym pins (the image's 2.7.2 also
+    # lacks NamespaceTool, which vLLM's server code imports). Same list as kisti/pydeps-kisti.sh.
+    openai==2.44.0
+    devtools==0.13.0
+    yappi==1.7.6
+    pydot==4.0.1
+    asttokens==3.0.2
+    executing==2.3.0
 )
 
 if [[ "$(cat "${PYDEPS}/.complete" 2>/dev/null)" != "${PKGS[*]}" ]]; then
