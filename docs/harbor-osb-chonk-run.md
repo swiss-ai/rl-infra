@@ -4,8 +4,9 @@ How to run the Apertus 2 Chonk blueprint (async GRPO, Megatron trainer + vLLM) w
 whose sandboxes are pods on the OpenSandbox cluster (Breithorn). Written so that anyone in the
 swiss-ai organisation with Clariden access can reproduce it from a clean account.
 
-**Status (2026-10-27): the full Chonk job has not completed a training step yet.** What is proven
-and what is not is listed in [Status](#status) below. Please read that before spending queue time.
+**Status (2026-10-28): the full Chonk job runs end to end on KISTI** (job 1153929, 12 nodes: 5 GRPO steps,
+302 of 320 rollouts real, multi-turn agent trials on OpenSandbox sandboxes, reward 0 as expected). It has not run on
+Clariden yet (queued). What is proven and what is not is listed in [Status](#status) below.
 
 Contents: [Changelog](#changelog) · [What it is](#what-it-is) · [Status](#status) · [Access](#access-you-need) ·
 [Steps](#steps) · [Config reference](#config-reference) · [Errors we hit](#errors-we-hit) ·
@@ -16,6 +17,15 @@ Contents: [Changelog](#changelog) · [What it is](#what-it-is) · [Status](#stat
 
 Newest first. If you followed an earlier version, the entries marked **action** need you to change something.
 
+- **2026-10-28**
+  - **Action:** pull the branch. `envs/harbor-osb.yaml` gained three settings without which every rollout is empty:
+    `harbor_agent_environment_server: null`, `vllm_cfg.http_server_serving_chat_kwargs.chat_template`, and a
+    `policy.tokenizer.chat_template` that ends assistant turns with EOS. See [Errors we hit](#errors-we-hit).
+  - **Action:** `backends/nemo-rl/apertus2/pydeps.sh` installs Gym's dependencies that David's image lacks
+    (`devtools`, `yappi`, `pydot`, a current `openai`), and `setup-gym.sh` relaxes Gym's `requires-python` from 3.13
+    to 3.12 (the image's Python). Re-run `setup-gym.sh` on an existing clone; `pydeps.sh` re-installs by itself.
+  - New `kisti/launch-harbor-osb.sh`: the GRPO job on KISTI. First complete Chonk run (KISTI job 1153929).
+    [KISTI HANGANG](#kisti-hangang) now has the full procedure, including how to reuse the copies in `/scratch/hanint02`.
 - **2026-10-27**
   - **Action:** `envs/harbor-osb.yaml` now sets `enable_chunked_prefill: true`. With `false`, every vLLM worker
     fails at start-up on Chonk ("Chunked prefill is required for mamba cache mode 'align'", job 3753228). Pull the
@@ -60,15 +70,16 @@ Proven:
 | The micro-tasks are valid | `envs/validate_micro_tasks.py`: reward 0 on the untouched pod, 1 after the reference solution, all 8 families |
 | Chonk builds in David's image with Gym and the OpenSandbox provider importable | `check_env.sh`: 108.3B parameters, no shape mismatches, 39 `e_score_correction_bias` tensors absent from the checkpoint and left at their init values, "Gym (Harbor + OpenSandbox)" section passes |
 | The config gets through Ray start-up, data loading and config validation | 12-node attempts reached the entrypoint's config check and `grpo.setup()`; the 6-node job 3753228 reached vLLM worker start-up (Ray cluster ready 72 s after the job started) before the errors below ([attempt log](#attempt-log)) |
+| **Chonk GRPO with Harbor + OpenSandbox runs end to end** (12 nodes, blueprint layout, async GRPO) | KISTI job 1153929: 5 steps in 20.5 min; 302 of 320 rollouts real (18 masked); 200 trials checked had no exception, mean 4.2 Terminus-2 turns (max 20); a sandbox per trial on Breithorn, verifier reward read for all 320; weight sync about 4.6 s; generation KL error 0.0006; step times 16 to 235 s. Reward 0.0 everywhere, so the loss is 0 and nothing is learned yet |
 | Chonk serves from David's image with the blueprint's vLLM layout (TP1, DP4, expert parallel per node) | KISTI job 1152908: weights load in 113 s (58 GiB per GPU, 16.9 GiB left for KV cache at 0.85 utilisation), and a completion returns "Bern." for "The capital of Switzerland is". See [KISTI HANGANG](#kisti-hangang) |
 
 **Not proven** (nobody has run these):
 
-- Chonk training with these settings past vLLM start-up: the Megatron model load, memory at 4096-token sequences,
-  the first rollout, and the first optimizer step. David validated 2048 tokens only.
-- Async GRPO (`max_trajectory_age_steps: 1`) together with Gym. Kostas's run is synchronous.
-- The 6-node layout (4 trainer EP16 + 2 vLLM): the blueprint only ran 12 nodes. The UCCL dispatch settings are tuned for EP32.
-- Any sandbox actually being created by a Chonk job. The jobs so far died before the first rollout.
+- A non-zero reward, and therefore a gradient step that changes the model. Chonk is a pretraining checkpoint and
+  produced no correct Terminus-2 answer in 320 trials. Next: a chat/SFT checkpoint, or easier tasks.
+- Contexts longer than 4096 tokens: 661 agent calls were refused with HTTP 400 because the conversation outgrew
+  `max_model_len` (the trial then ends). Raise `max_total_sequence_length` once memory is checked.
+- The same run on Clariden (jobs queued), and the 6-node layout (4 trainer EP16 + 2 vLLM; UCCL dispatch is tuned for EP32).
 
 ## Access you need
 
@@ -235,6 +246,9 @@ All attempts so far died in the first two minutes of `ray-driver.log`, so read i
 | `policy.generation.stop_strings` | `null` | **Required.** The GSM8K recipe stops generation at `Question:`, which would cut agent turns short |
 | `policy.generation.vllm_kwargs.enable_chunked_prefill` | true | **Required for Chonk.** Its Mamba layers need it; with `false` vLLM refuses to start. (The Harbor README disables it for non-Mamba models) |
 | `policy.generation.vllm_cfg.async_engine` / `expose_http_server` | true / true | NeMo Gym calls the policy over an OpenAI-compatible HTTP endpoint |
+| `policy.generation.vllm_cfg.http_server_serving_chat_kwargs.chat_template` | `${policy.tokenizer.chat_template}` | **Required for Chonk.** Its tokenizer has no chat template and the HTTP server does not use the recipe's on its own |
+| `policy.tokenizer.chat_template` | pass-through + EOS after assistant turns | **Required for multi-turn.** NeMo-RL's HTTP server splices each turn's generated tokens back in at the EOS that closes them |
+| `env.nemo_gym.harbor_agent_environment_server` | `null` | Kostas's Harbor config also starts `environment_servers/legacy_agent`, which only exists on his Gym branch |
 | `data` block with `_override_: true` | see file | Replaces the whole recipe `data` block, so it must carry **`use_multiple_dataloader: false`**: `grpo.setup()` indexes that key |
 | `env.nemo_gym.mask_degenerate_rollouts` | true | A rollout whose sandbox never came up returns no output items; this turns it into a zero-weight sample instead of aborting the step (patch 0008; needs `should_mask_flagged_samples`) |
 | `...harbor_agent.concurrency` | `num_prompts * num_generations` | One trial and one sandbox per in-flight rollout |
@@ -259,6 +273,12 @@ pods per node and about 40 creates per second cluster-wide. Full API guide: the 
 | `ValueError: A non-null grpo.max_val_samples parameter is not supported.` (driver log, 40 s after start) | The recipe inherits `max_val_samples: 256`; the Gym entrypoint rejects any non-null value | `grpo.max_val_samples: null` |
 | `KeyError: 'use_multiple_dataloader'` in `grpo.py setup()` | The `data:` block with `_override_: true` replaced the recipe's block and dropped this key | `data.use_multiple_dataloader: false` |
 | `ValidationError ... Chunked prefill is required for mamba cache mode 'align'` in every `VllmAsyncGenerationWorker` (driver log, about 3 min after start) | `enable_chunked_prefill: false` | `enable_chunked_prefill: true` (now set) |
+| `No module named 'devtools'` at Gym start-up (then `yappi`, `pydot`) | David's image lacks Gym's dependencies | `pydeps.sh` installs them (KISTI: `kisti/pydeps-kisti.sh`) |
+| `Missing pyproject.toml or requirements.txt ... environment_servers/legacy_agent` | Kostas's Harbor config references a server that is only on his Gym branch | `harbor_agent_environment_server: null` |
+| Gym server venvs: `the current Python version (3.12.3) does not satisfy Python>=3.13.14` | Gym declares 3.13 since 2026-08-04; the image has 3.12 | `setup-gym.sh` relaxes `requires-python` |
+| Every rollout masked, `ChatTemplateResolutionError ... default chat template is no longer allowed` behind HTTP 500 from `/v1/chat/completions` | Chonk's tokenizer has no chat template; the HTTP server ignores the recipe's | `http_server_serving_chat_kwargs.chat_template` |
+| HTTP 500 on every second agent turn, `AssertionError: EOS token #0 not found in template_token_ids` | The pass-through template has no EOS, which NeMo-RL needs to find the end of the previous turn | Template with EOS after assistant messages |
+| HTTP 400 `Prompt exceeds max_model_len` (not an error) | The conversation outgrew 4096 tokens; the trial ends | Raise `max_total_sequence_length` when memory allows |
 | Agent turns truncated at "Question:" (not an error) | `stop_strings: ['Question:']` inherited from the GSM8K recipe | `policy.generation.stop_strings: null` |
 | HTTP 401 `INVALID_API_KEY` from every create while `/health` is 200 | Key expired or rotated | New key; the wrapper now fails at submit time |
 | HTTP 422 `ValidatingAdmissionPolicy ... denied request` | `secureAccess` missing | `secure_access: true` (already set) |
@@ -315,8 +335,9 @@ checkpoint (`$SCRATCH/models/apertus2-chonk-lc-iter3576`, 54 files, 202 GB) to `
 `/scratch/$USER/models`. From a laptop, a single ssh connection to KISTI reaches about 5 MB/s (11 h for the
 checkpoint); several connections in parallel help, but KISTI refuses more than about 10 sessions per connection.
 **Verify checksums, not just sizes**: a size check passed on copies with zero-filled blocks. For example, compare
-`md5sum` of every file under 20 MB and of the first and last 4 MB of larger files on both sides. Copies exist in
-`/scratch/hanint02` (Rob's account); ask Rob if you want to copy from there. `/scratch` files unused for 15 days are deleted.
+`md5sum` of every file under 20 MB and of the first and last 4 MB of larger files on both sides. Copies already on
+KISTI, readable by everyone in group `in0138`, are in `/scratch/hanint02` (the account used before ours existed): see
+[Run it on KISTI](#run-it-on-kisti). `/scratch` files unused for 15 days are deleted.
 
 **Inside the image.** It has torch 2.13, vLLM 0.28 (Apertus 2 build), UCCL, DeepEP and Transformer Engine, and the
 CXI libfabric provider. NeMo-RL, Gym and Megatron are not in it (on Alps they are mounted checkouts; the same applies
@@ -335,7 +356,7 @@ parallelism per node (the blueprint's layout).
 a new connection, 0.5 s on a reused one (Clariden: 4.1 s and 0.26 s). The registry returns 403 from KISTI, which does not
 matter: the sandbox nodes pull the task images.
 
-**Tests** (scripts in `kisti/`; each header has the submit command; clone this branch to `~/rl-infra` on KISTI):
+**Tests** (scripts in `kisti/`; each header has the submit command):
 
 | Script | Nodes | Result on 2026-10-27 |
 |---|---|---|
@@ -343,8 +364,39 @@ matter: the sandbox nodes pull the task images.
 | `nccl_2node.sh` | 2 | `correct=True`, about 30 to 33 GB/s bus bandwidth for 256 MB |
 | `chonk_serve.sh` | 1 | Server ready after 484 s, completion " Bern.\nThe official language of Switzerland is German..." (first request about 4 min: Triton compilation) |
 
-**Not done on KISTI yet:** the GRPO job itself. It needs the Alps launcher ported to pyxis (EDF environment as exports,
-the checkouts mounted, the settings above).
+| `launch-harbor-osb.sh` | 12 | The GRPO job: passed end to end (job 1153929, see [Status](#status)) |
+
+### Run it on KISTI
+
+`kisti/launch-harbor-osb.sh` is the pyxis counterpart of `run-harbor-osb.sh` + `launch.sh`: same recipe, task file,
+image and driver; the EDF's `[env]` becomes exports, the checkouts are mounted, and `ray.sub` gets
+`--container-writable --container-env=UV_DEFAULT_INDEX` (for variables the image itself sets, the image's value wins
+unless pyxis is told to take the job's). Everything below goes under `/scratch/$USER` (jobs must be submitted from there).
+
+```bash
+# 1. this branch, and the OpenSandbox key (one line, chmod 600)
+git clone -b harbor-osb https://github.com/swiss-ai/rl-infra.git ~/rl-infra
+vi ~/.opensandbox_token && chmod 600 ~/.opensandbox_token
+
+# 2. image and checkpoint: link the copies in /scratch/hanint02 (untested with links; copy them, about 265 GB, if a job cannot read them)
+S=/scratch/hanint02; mkdir -p /scratch/$USER/{images,models,projects,osb/harbor_micro}
+ln -s $S/images/nemo-rl-apertus2-cfcfede4-ucclfix.sqsh /scratch/$USER/images/
+ln -s $S/models/apertus2-chonk-lc-iter3576 /scratch/$USER/models/
+
+# 3. the checkouts (setup.sh + setup-gym.sh output from Alps, 0.9 GB) and the micro-tasks: copy, they are written to
+cp -a $S/projects/{nemo-rl-apertus2,megatron-lm-moe-apertus2,megatron-bridge-apertus2} /scratch/$USER/projects/
+cp -a $S/osb/harbor_micro/{tasks,train.jsonl,validation.jsonl} /scratch/$USER/osb/harbor_micro/
+
+# 4. submit (12 nodes, the blueprint layout; about 20 min for 5 steps)
+cd /scratch/$USER && RUN=kisti-chonk-12n-$(date +%m%d-%H%M) bash ~/rl-infra/kisti/launch-harbor-osb.sh
+tail -f /scratch/$USER/nemo-rl/slurm/<id>-logs/ray-driver.log
+```
+
+The checkouts in `/scratch/hanint02/projects` already carry the Gym `requires-python` change. If you build your own on
+Alps (steps 2 and 3), copy them over the data mover the same way. The first job builds the Gym server venvs under
+`$HARBOR_ROOT/venvs`, which takes a few minutes; later jobs reuse them. Healthy run, in `ray-driver.log`: steps of 1 to 4
+minutes, `Masking a degenerate` a small fraction of 64 per step, and `harbor_micro/jobs/<date>/.../result.json` files
+without `exception_info`.
 
 ## Open questions
 
@@ -370,9 +422,16 @@ the checkouts mounted, the settings above).
 | 3752878 | `highprio`, 12 nodes | Started after 25 min, failed after 2m22s: `use_multiple_dataloader` |
 | 3753104 | `highprio`, 12 nodes | Cancelled by us after 2m26s, during startup |
 | 3753228 | `normal`, 6 nodes, 4096 tokens, `stop_strings: null` | Submitted 2026-10-26 11:01, started 2026-10-27 06:17 (19 h wait), failed after 5m19s: `enable_chunked_prefill` |
-| 3762540 | `normal`, 6 nodes, chunked prefill on | Queued |
+| 3762540 | `normal`, 6 nodes, all the fixes above | Queued |
 | 3762800 | `preemptable`, same | Queued |
 | 1152908 | KISTI `intTest`, 1 node, `kisti/chonk_serve.sh` | Passed: Chonk loads and generates |
+| 1152981 | KISTI, 12 nodes, `launch-harbor-osb.sh` | Failed: `uv` inside the container still used JFrog (image env wins) -> `--container-env` |
+| 1153002 | KISTI, 12 nodes | Failed: `No module named 'devtools'` -> Gym dependencies in pydeps |
+| 1153070 | KISTI, 12 nodes | Failed: `environment_servers/legacy_agent` -> `harbor_agent_environment_server: null` |
+| 1153234 | KISTI, 12 nodes | Failed: Gym venvs need Python 3.13 -> relaxed to 3.12 |
+| 1153276 | KISTI, 12 nodes | 5 steps, 320 sandboxes created and verified, but every rollout masked: no chat template on the HTTP server |
+| 1153539 | KISTI, 12 nodes | 5 steps; first agent turns generated, every second turn HTTP 500 (no EOS in the template) |
+| 1153929 | KISTI, 12 nodes | **Passed end to end**: 5 steps, 302 of 320 rollouts real, mean 4.2 turns, reward 0 |
 
 ## Credits and sources
 
