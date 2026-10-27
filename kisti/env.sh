@@ -11,7 +11,9 @@
 # David's Apertus 2 NeMo-RL image (same file as IMAGE_WORK in backends/nemo-rl/apertus2/env).
 : "${KISTI_IMAGE:=${KISTI_SCRATCH}/images/nemo-rl-apertus2-cfcfede4-ucclfix.sqsh}"
 : "${KISTI_MODEL:=${KISTI_SCRATCH}/models/apertus2-chonk-lc-iter3576}"
-export KISTI_ACCOUNT KISTI_PARTITION KISTI_COMMENT KISTI_SCRATCH KISTI_IMAGE KISTI_MODEL
+# Packages the image lacks (kisti/pydeps-kisti.sh installs them; on PYTHONPATH in every job).
+: "${PYDEPS_KISTI:=${KISTI_SCRATCH}/pydeps-kisti}"
+export KISTI_ACCOUNT KISTI_PARTITION KISTI_COMMENT KISTI_SCRATCH KISTI_IMAGE KISTI_MODEL PYDEPS_KISTI
 
 # sbatch/srun flags every job needs: whole nodes (single-node jobs need --exclusive for the memory) and all 4 GPUs.
 KISTI_SLURM=(-A "${KISTI_ACCOUNT}" -p "${KISTI_PARTITION}" --comment="${KISTI_COMMENT}" --exclusive --gres=gpu:4 --mem=0)

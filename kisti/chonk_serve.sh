@@ -11,10 +11,9 @@ source "${RL_INFRA:-${HOME}/rl-infra}/kisti/env.sh"
 
 # The image's uv points at CSCS's JFrog mirror, which KISTI cannot reach.
 export UV_DEFAULT_INDEX=https://pypi.org/simple
-# The image's openai (2.7.2) is too old for its vLLM (ImportError: NamespaceTool); install a current one beside it.
-PYDEPS="${KISTI_SCRATCH}/pydeps-kisti"
-[[ -d "${PYDEPS}/openai" ]] || uv pip install --python /usr/bin/python3.12 --no-deps --target "${PYDEPS}" openai
-export PYTHONPATH="${PYDEPS}:${PYTHONPATH:-}"
+# The image's openai (2.7.2) is too old for its vLLM (ImportError: NamespaceTool).
+bash "${RL_INFRA:-${HOME}/rl-infra}/kisti/pydeps-kisti.sh"
+export PYTHONPATH="${PYDEPS_KISTI}:${PYTHONPATH:-}"
 
 # Single node: KISTI assigns no Slingshot VNI, so the OFI plugin cannot open a domain ("NCCL error: invalid usage").
 # Sockets are only the fallback transport; GPUs in one node talk over NVLink.

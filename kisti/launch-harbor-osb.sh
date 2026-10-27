@@ -57,8 +57,6 @@ mkdir -p "${HARBOR_ROOT}/jobs" "${NEMO_GYM_VENV_DIR}" "${OUT}/slurm" "${OUT}/res
 # --- The EDF's [env], as exports (pyxis passes the job environment into the container) -------------
 export SCRATCH="${KISTI_SCRATCH}"   # the recipes read ${oc.env:SCRATCH}/models/apertus2-chonk-lc-iter3576
 PYDEPS="${KISTI_SCRATCH}/nemo-rl-apertus2/pydeps"
-# The image's openai is too old for its own vLLM; kisti/chonk_serve.sh documents it. Installed below on first use.
-PYDEPS_KISTI="${KISTI_SCRATCH}/pydeps-kisti"
 export PYDEPS PATH="/usr/local/lib/python3.12/dist-packages/torch_tensorrt/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/mpi/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export PYTHONPATH="/opt/nemo-rl:/opt/nemo-rl/3rdparty/Automodel-workspace/Automodel:/opt/nemo-rl/3rdparty/Gym-workspace/Gym:${BRIDGE_DIR}/src:${MEGATRON_DIR}:${PYDEPS}:${PYDEPS_KISTI}"
 export PMIX_MCA_psec=native NCCL_PXN_DISABLE=1 NCCL_CROSS_NIC=0 UCCL_EP_TRANSPORT=cxi
@@ -80,7 +78,7 @@ export SLURM_NETWORK=disable_rdzv_get
 CFG="${OUT}/configs/${RUN}.yaml"
 printf 'defaults:\n  - %s\n  - %s\n' "${RECIPE}" "${TASK}" > "${CFG}"
 COMMAND="cd /opt/nemo-rl && \
-{ [[ -d ${PYDEPS_KISTI}/openai ]] || uv pip install --python /usr/bin/python3.12 --no-deps --target ${PYDEPS_KISTI} openai; } && \
+bash ${RL_INFRA}/kisti/pydeps-kisti.sh && \
 RAY_DEDUP_LOGS=0 DRIVER_RETRIES=0 bash ${RL_INFRA}/backends/nemo-rl/driver_retry.sh \
 bash ${RL_INFRA}/backends/nemo-rl/apertus2/driver.sh examples/nemo_gym/run_grpo_nemo_gym.py --config ${CFG} \
 cluster.num_nodes=${NODES} cluster.gpus_per_node=4 \
