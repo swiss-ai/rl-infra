@@ -82,7 +82,7 @@ All commands run on the Clariden login node unless stated. `$SCRATCH` is `/iopss
 
 ```bash
 git clone https://github.com/swiss-ai/rl-infra.git ~/rl-infra && cd ~/rl-infra
-git checkout harbor-osb            # branch with the files below; until it is pushed, apply the bundle (see the end)
+git checkout harbor-osb            # branch with the files below (rebased on main)
 cp site.env.example site.env       # then set ACCOUNT=infra01 in site.env
 ```
 
