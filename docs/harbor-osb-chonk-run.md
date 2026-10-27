@@ -4,13 +4,31 @@ How to run the Apertus 2 Chonk blueprint (async GRPO, Megatron trainer + vLLM) w
 whose sandboxes are pods on the OpenSandbox cluster (Breithorn). Written so that anyone in the
 swiss-ai organisation with Clariden access can reproduce it from a clean account.
 
-**Status (2026-10-26): the full Chonk job has not completed a training step yet.** What is proven
+**Status (2026-10-27): the full Chonk job has not completed a training step yet.** What is proven
 and what is not is listed in [Status](#status) below. Please read that before spending queue time.
 
-Contents: [What it is](#what-it-is) · [Status](#status) · [Access](#access-you-need) ·
+Contents: [Changelog](#changelog) · [What it is](#what-it-is) · [Status](#status) · [Access](#access-you-need) ·
 [Steps](#steps) · [Config reference](#config-reference) · [Errors we hit](#errors-we-hit) ·
-[Queue etiquette](#queue-etiquette) · [Cleanup](#cleanup) · [Open questions](#open-questions) ·
-[Attempt log](#attempt-log)
+[Queue etiquette](#queue-etiquette) · [Cleanup](#cleanup) · [KISTI HANGANG](#kisti-hangang) ·
+[Open questions](#open-questions) · [Attempt log](#attempt-log)
+
+## Changelog
+
+Newest first. If you followed an earlier version, the entries marked **action** need you to change something.
+
+- **2026-10-27**
+  - **Action:** `envs/harbor-osb.yaml` now sets `enable_chunked_prefill: true`. With `false`, every vLLM worker
+    fails at start-up on Chonk ("Chunked prefill is required for mamba cache mode 'align'", job 3753228). Pull the
+    branch before submitting.
+  - **Action:** the `harbor-osb` branch is on GitHub (`swiss-ai/rl-infra`), rebased on main. Earlier versions of
+    this page referred to a bundle; use the branch instead.
+  - New section [KISTI HANGANG](#kisti-hangang): Chonk loads and generates on KISTI's `intTest` partition, 2-node
+    NCCL works, and the OpenSandbox API is reachable from KISTI. New scripts in `kisti/`.
+  - GPU memory: GH200 "120GB" nodes report about **96 GB per GPU** (`nvidia-smi`: 97,871 MiB). Size memory with 96.
+  - Attempt log and Errors table updated (job 3753228 result, queued jobs).
+  - Removed references to `sandbox-instructions.md`, which is not in this repository; use the handbook page
+    `engineering/post-training/opensandbox` instead.
+- **2026-10-26:** first complete version (steps, config reference, errors, queue etiquette, attempt log).
 
 ## What it is
 
@@ -41,12 +59,13 @@ Proven:
 | The same path trains a 30B model with non-zero rewards | Kostas's Qwen3-30B-A3B run (9 nodes), see the handbook page `engineering/post-training/rl-nemorl` in `swiss-ai/apertus-program` |
 | The micro-tasks are valid | `envs/validate_micro_tasks.py`: reward 0 on the untouched pod, 1 after the reference solution, all 8 families |
 | Chonk builds in David's image with Gym and the OpenSandbox provider importable | `check_env.sh`: 108.3B parameters, no shape mismatches, 39 `e_score_correction_bias` tensors absent from the checkpoint and left at their init values, "Gym (Harbor + OpenSandbox)" section passes |
-| The config gets through Ray start-up, data loading and config validation on 12 nodes | The first attempt reached the entrypoint's config check and the second reached `grpo.setup()` before the errors below ([attempt log](#attempt-log)) |
+| The config gets through Ray start-up, data loading and config validation | 12-node attempts reached the entrypoint's config check and `grpo.setup()`; the 6-node job 3753228 reached vLLM worker start-up (Ray cluster ready 72 s after the job started) before the errors below ([attempt log](#attempt-log)) |
+| Chonk serves from David's image with the blueprint's vLLM layout (TP1, DP4, expert parallel per node) | KISTI job 1152908: weights load in 113 s (58 GiB per GPU, 16.9 GiB left for KV cache at 0.85 utilisation), and a completion returns "Bern." for "The capital of Switzerland is". See [KISTI HANGANG](#kisti-hangang) |
 
 **Not proven** (nobody has run these):
 
-- Chonk training with these settings past `grpo.setup()`: model load, memory at 4096-token sequences, the
-  first rollout, and the first optimizer step. David validated 2048 tokens only.
+- Chonk training with these settings past vLLM start-up: the Megatron model load, memory at 4096-token sequences,
+  the first rollout, and the first optimizer step. David validated 2048 tokens only.
 - Async GRPO (`max_trajectory_age_steps: 1`) together with Gym. Kostas's run is synchronous.
 - The 6-node layout (4 trainer EP16 + 2 vLLM): the blueprint only ran 12 nodes. The UCCL dispatch settings are tuned for EP32.
 - Any sandbox actually being created by a Chonk job. The jobs so far died before the first rollout.
@@ -194,7 +213,7 @@ All attempts so far died in the first two minutes of `ray-driver.log`, so read i
 
 - `Loaded training dataset ... with 88 samples` then `Setting grpo.max_val_samples and grpo.val_batch_size to the length of the validation dataset`: config and data are fine.
 - Model load, then vLLM start, then the first rollouts. `kubectl` is not needed: list sandboxes with
-  `GET /v1/sandboxes` (see `sandbox-instructions.md`) and filter on your run id.
+  `GET /v1/sandboxes` (handbook page `engineering/post-training/opensandbox`) and filter on your run id.
 - A healthy Gym run of a 30B model takes about 1340 s per step and about 25 min of startup (Kostas, handbook). If steps take seconds and
   `Masking a degenerate` keeps climbing, every rollout is failing: stop and look at the first trial's logs under `$HARBOR_ROOT/jobs`.
 - Per-trial rewards: `cat $HARBOR_ROOT/jobs/*/*/*/verifier/reward.txt | sort | uniq -c`.
@@ -214,7 +233,7 @@ All attempts so far died in the first two minutes of `ray-driver.log`, so read i
 | `policy.max_total_sequence_length` and both `sequence_packing.*_mb_tokens` | 4096 | Memory headroom on the trainer. David validated 2048. A multi-turn trajectory is cut at this length |
 | `policy.generation.max_new_tokens` | 1024 | Per agent turn, not per trajectory |
 | `policy.generation.stop_strings` | `null` | **Required.** The GSM8K recipe stops generation at `Question:`, which would cut agent turns short |
-| `policy.generation.vllm_kwargs.enable_chunked_prefill` | false | Agent turns arrive as many concurrent, very long prompts; chunked prefill is the documented instability on the Harbor path |
+| `policy.generation.vllm_kwargs.enable_chunked_prefill` | true | **Required for Chonk.** Its Mamba layers need it; with `false` vLLM refuses to start. (The Harbor README disables it for non-Mamba models) |
 | `policy.generation.vllm_cfg.async_engine` / `expose_http_server` | true / true | NeMo Gym calls the policy over an OpenAI-compatible HTTP endpoint |
 | `data` block with `_override_: true` | see file | Replaces the whole recipe `data` block, so it must carry **`use_multiple_dataloader: false`**: `grpo.setup()` indexes that key |
 | `env.nemo_gym.mask_degenerate_rollouts` | true | A rollout whose sandbox never came up returns no output items; this turns it into a zero-weight sample instead of aborting the step (patch 0008; needs `should_mask_flagged_samples`) |
@@ -230,8 +249,8 @@ All attempts so far died in the first two minutes of `ray-driver.log`, so read i
 
 OpenSandbox facts that matter: gVisor is the default isolation (since 2026-10-21), so a per-sandbox `networkPolicy` is
 rejected; sandboxes have open internet but cannot reach CSCS-internal hosts (including the registry); about 110
-pods per node and about 40 creates per second cluster-wide. Full API guide: `sandbox-instructions.md` and the handbook
-page `engineering/post-training/opensandbox`.
+pods per node and about 40 creates per second cluster-wide. Full API guide: the handbook page
+`engineering/post-training/opensandbox` (repository `swiss-ai/apertus-program`).
 
 ## Errors we hit
 
@@ -239,6 +258,7 @@ page `engineering/post-training/opensandbox`.
 |---|---|---|
 | `ValueError: A non-null grpo.max_val_samples parameter is not supported.` (driver log, 40 s after start) | The recipe inherits `max_val_samples: 256`; the Gym entrypoint rejects any non-null value | `grpo.max_val_samples: null` |
 | `KeyError: 'use_multiple_dataloader'` in `grpo.py setup()` | The `data:` block with `_override_: true` replaced the recipe's block and dropped this key | `data.use_multiple_dataloader: false` |
+| `ValidationError ... Chunked prefill is required for mamba cache mode 'align'` in every `VllmAsyncGenerationWorker` (driver log, about 3 min after start) | `enable_chunked_prefill: false` | `enable_chunked_prefill: true` (now set) |
 | Agent turns truncated at "Question:" (not an error) | `stop_strings: ['Question:']` inherited from the GSM8K recipe | `policy.generation.stop_strings: null` |
 | HTTP 401 `INVALID_API_KEY` from every create while `/health` is 200 | Key expired or rotated | New key; the wrapper now fails at submit time |
 | HTTP 422 `ValidatingAdmissionPolicy ... denied request` | `secureAccess` missing | `secure_access: true` (already set) |
@@ -271,6 +291,61 @@ uv run --extra nemo_gym python -m nemo_gym.sandbox.providers.opensandbox.cleanup
 (the command mirrors Kostas's handbook; we reaped our smoke run by listing `GET /v1/sandboxes` and deleting those whose
 run label matched). `https://osb-ui.swissai.svc.cscs.ch` also lists and deletes sandboxes.
 
+## KISTI HANGANG
+
+KISTI (Korea) lent us GH200 nodes for a month. Same node type as Clariden (4 GH200, 288 cores, 870 GB RAM per node,
+Slingshot/CXI), but a different site: pyxis/enroot instead of the CSCS Container Engine, no EDF, a 260 to 280 ms
+round trip to Switzerland. The site guide is `swiss-ai/kisti-docs`; read it first (login with OTP, mandatory Slurm
+options, `NCCL_PROTO=^LL128`). What we found, in the order you will need it:
+
+**Partition.** Use `-p intTest` (209 nodes, no time limit, no per-user job limits; KISTI dedicated it to us on
+2026-10-27). `normal` now rejects our group ("your group is not authorized to access this partition"). Every job
+also needs `--comment="field=nlp;appl=..."`, `--gres=gpu:4`, `--exclusive --mem=0` (a single-node job without
+`--exclusive` gets only part of the node's memory), and must be submitted from under `/scratch/$USER`.
+`kisti/env.sh` sets all of this as `KISTI_SLURM`.
+
+**Image.** Use David's image (`nemo-rl-apertus2-cfcfede4-ucclfix.sqsh`, 28 GB, 446k files). pyxis *unpacks* every
+image into the node's `/tmp`, a 239 GB RAM disk: David's takes 26 s and 50 GB. Kostas's `nemo-rl_osb_v0_8_0.sqsh`
+does **not** work there: it unpacks to more than 239 GB and 2.5M files, which fills `/tmp`, and unpacking it to
+`/scratch` instead hits the group's 5M-file quota. Apptainer cannot mount these images either (KISTI's squashfuse
+lacks zstd).
+
+**Getting files there.** `hangang-dm.ksc.re.kr` is the data mover (scp/sftp/rsync, OTP login). Copy the image and the
+checkpoint (`$SCRATCH/models/apertus2-chonk-lc-iter3576`, 54 files, 202 GB) to `/scratch/$USER/images` and
+`/scratch/$USER/models`. From a laptop, a single ssh connection to KISTI reaches about 5 MB/s (11 h for the
+checkpoint); several connections in parallel help, but KISTI refuses more than about 10 sessions per connection.
+**Verify checksums, not just sizes**: a size check passed on copies with zero-filled blocks. For example, compare
+`md5sum` of every file under 20 MB and of the first and last 4 MB of larger files on both sides. Copies exist in
+`/scratch/hanint02` (Rob's account); ask Rob if you want to copy from there. `/scratch` files unused for 15 days are deleted.
+
+**Inside the image.** It has torch 2.13, vLLM 0.28 (Apertus 2 build), UCCL, DeepEP and Transformer Engine, and the
+CXI libfabric provider. NeMo-RL, Gym and Megatron are not in it (on Alps they are mounted checkouts; the same applies
+here). Three settings differ from Alps:
+
+| Setting | Why |
+|---|---|
+| `UV_DEFAULT_INDEX=https://pypi.org/simple` | The image's `uv` points at CSCS's JFrog mirror, which KISTI cannot reach. Compute nodes do reach PyPI and GitHub |
+| a current `openai` package beside the image | The image's `openai` 2.7.2 is too old for its own vLLM (`ImportError: cannot import name 'NamespaceTool'`) when vLLM's server code is imported |
+| single node: `NCCL_NET=Socket` | KISTI assigns no Slingshot VNI to single-node jobs, so NCCL's OFI plugin fails ("NCCL error: invalid usage"; `NCCL_NET_PLUGIN=none` fails the same way). Multi-node jobs use the image's OFI plugin as is |
+
+Chonk has 7 KV heads, so vLLM tensor parallelism must be 1: serve it as 4 data-parallel replicas with expert
+parallelism per node (the blueprint's layout).
+
+**OpenSandbox from KISTI** works without an allowlist change: from a compute node, create took 5.6 s and an exec 1.0 s on
+a new connection, 0.5 s on a reused one (Clariden: 4.1 s and 0.26 s). The registry returns 403 from KISTI, which does not
+matter: the sandbox nodes pull the task images.
+
+**Tests** (scripts in `kisti/`; each header has the submit command; clone this branch to `~/rl-infra` on KISTI):
+
+| Script | Nodes | Result on 2026-10-27 |
+|---|---|---|
+| `inspect_image.sh` | 1 | Image runs; versions as above |
+| `nccl_2node.sh` | 2 | `correct=True`, about 30 to 33 GB/s bus bandwidth for 256 MB |
+| `chonk_serve.sh` | 1 | Server ready after 484 s, completion " Bern.\nThe official language of Switzerland is German..." (first request about 4 min: Triton compilation) |
+
+**Not done on KISTI yet:** the GRPO job itself. It needs the Alps launcher ported to pyxis (EDF environment as exports,
+the checkouts mounted, the settings above).
+
 ## Open questions
 
 - Does Chonk fit 4096-token multi-turn sequences, and does it follow the Terminus-2 JSON format? A reward of 0 would be expected
@@ -282,8 +357,8 @@ run label matched). `https://osb-ui.swissai.svc.cscs.ch` also lists and deletes 
   with 1k+ sandboxes?
 - For datasets of 100k images: sandbox creation waits on image pulls (about 26 s cold, about 4 s warm). Async age 1 hides one step. Options:
   prefetch by dataloader order, a pull-through cache, a curriculum slice, or pools.
-- Korea compute (200 GH200 nodes, one month): a Switzerland-to-Korea round trip is about 265 to 280 ms (measured to a public host, not to the cluster), which
-  adds about 1 s per Terminus-2 turn, but the interconnect (the recipe uses `UCCL_EP_TRANSPORT=cxi`) and the OpenSandbox allowlist are the bigger risks.
+- KISTI: does UCCL EP over CXI work across nodes there (the 2-node NCCL test passes; UCCL is untested)? See
+  [KISTI HANGANG](#kisti-hangang) for the rest.
 
 ## Attempt log
 
@@ -294,7 +369,10 @@ run label matched). `https://osb-ui.swissai.svc.cscs.ch` also lists and deletes 
 | 3712461 | `normal`, 12 nodes, micro-tasks | Waited about 69 h, started 2026-10-24 09:43, failed after 2m20s: `max_val_samples` |
 | 3752878 | `highprio`, 12 nodes | Started after 25 min, failed after 2m22s: `use_multiple_dataloader` |
 | 3753104 | `highprio`, 12 nodes | Cancelled by us after 2m26s, during startup |
-| 3753228 | `normal`, 6 nodes, 4096 tokens, `stop_strings: null` | Queued (this config; no result yet) |
+| 3753228 | `normal`, 6 nodes, 4096 tokens, `stop_strings: null` | Submitted 2026-10-26 11:01, started 2026-10-27 06:17 (19 h wait), failed after 5m19s: `enable_chunked_prefill` |
+| 3762540 | `normal`, 6 nodes, chunked prefill on | Queued |
+| 3762800 | `preemptable`, same | Queued |
+| 1152908 | KISTI `intTest`, 1 node, `kisti/chonk_serve.sh` | Passed: Chonk loads and generates |
 
 ## Credits and sources
 
