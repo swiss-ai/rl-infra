@@ -28,3 +28,8 @@ MEGATRON_REF=pull/88/head
 BRIDGE_URL=https://github.com/swiss-ai/Megatron-Bridge.git
 BRIDGE_COMMIT=6ccdb3c369491374f1fef4320886e8bb1394bb3e
 BRIDGE_REF=pull/5/head
+# The image's vLLM (swiss-ai/vllm d4d41485) predates swiss-ai/vllm#24: DP dummy steps during an
+# in-flight weight update wrote KDA state into live requests' KV blocks, which gave NaN logprobs.
+# The runner at the merge commit is the image's one plus that fix; the EDF mounts it over it.
+VLLM_RUNNER_URL=https://raw.githubusercontent.com/swiss-ai/vllm/b5161a48e6946d96f499c8b019d0d8020223a02b/vllm/v1/worker/gpu_model_runner.py
+VLLM_RUNNER_BLOB=4ec55eef55352090b50a255ee021cbe41daae06f

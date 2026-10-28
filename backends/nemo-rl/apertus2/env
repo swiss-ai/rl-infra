@@ -6,6 +6,7 @@
 : "${NEMO_RL_DIR:=/users/${USER}/projects/nemo-rl-apertus2}"
 : "${MEGATRON_DIR:=/users/${USER}/projects/megatron-lm-moe-apertus2}"
 : "${BRIDGE_DIR:=/users/${USER}/projects/megatron-bridge-apertus2}"
+: "${VLLM_RUNNER:=${NEMO_RL_DIR}-vllm/gpu_model_runner.py}"
 : "${PIN_FILE:=${APERTUS2_DIR}/pin}"
 : "${EDF_NAME:=nemo-rl-apertus2}"
 # The image has no /opt/nemo_rl_venv; driver.sh runs the image's system Python.

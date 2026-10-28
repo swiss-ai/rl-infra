@@ -2,7 +2,8 @@
 # One-time setup of the Apertus 2 NeMo-RL stack on the login node (safe to re-run):
 #   1. clone the NeMo-RL fork at the pin, merge the pinned PRs, apply our patches (Alps ray.sub,
 #      refit fixes) and check out the Automodel submodule the DTensor (HF) trainer imports (+ our loader patch)
-#      and the Megatron-LM-MoE / Megatron-Bridge sources the Megatron trainer imports
+#      and the Megatron-LM-MoE / Megatron-Bridge sources the Megatron trainer imports, and
+#      fetch the vLLM runner with the NaN fix the image predates (see the pin)
 #   2. render the EDF into ~/.edf/<EDF_NAME>.toml (the old one is backed up if it differs)
 #   3. images: stage the scratch working copy jobs read from its capstor master; when that master
 #      is missing, import the base image from JFrog (enroot, needs your JFrog login) for
@@ -76,6 +77,18 @@ for p in "${APERTUS2_DIR}"/patches/megatron/*.patch; do
     git -C "${MEGATRON_DIR}" apply "${p}"
     echo "== Megatron-LM: applied $(basename "${p}")"
 done
+# vLLM runner with swiss-ai/vllm#24, mounted over the image's copy (see the pin).
+if [[ "$(git hash-object "${VLLM_RUNNER}" 2>/dev/null)" != "${VLLM_RUNNER_BLOB}" ]]; then
+    echo "== vLLM runner with swiss-ai/vllm#24: ${VLLM_RUNNER}"
+    mkdir -p "$(dirname "${VLLM_RUNNER}")"
+    curl -fsSL -o "${VLLM_RUNNER}.tmp.$$" "${VLLM_RUNNER_URL}"
+    if [[ "$(git hash-object "${VLLM_RUNNER}.tmp.$$")" != "${VLLM_RUNNER_BLOB}" ]]; then
+        rm -f "${VLLM_RUNNER}.tmp.$$"
+        echo "ERROR: ${VLLM_RUNNER_URL} is not blob ${VLLM_RUNNER_BLOB}" >&2
+        exit 1
+    fi
+    mv "${VLLM_RUNNER}.tmp.$$" "${VLLM_RUNNER}"
+fi
 
 # 2. EDF
 EDF_FILE="${HOME}/.edf/${EDF_NAME}.toml"
@@ -87,6 +100,7 @@ sed -e "s|@@IMAGE_WORK@@|${IMAGE_WORK}|g" \
     -e "s|@@PYDEPS@@|${PYDEPS}|g" \
     -e "s|@@MEGATRON_DIR@@|${MEGATRON_DIR}|g" \
     -e "s|@@BRIDGE_DIR@@|${BRIDGE_DIR}|g" \
+    -e "s|@@VLLM_RUNNER@@|${VLLM_RUNNER}|g" \
     "${APERTUS2_DIR}/edf.toml.template" > "${rendered}"
 if [[ -f "${EDF_FILE}" ]] && cmp -s "${rendered}" "${EDF_FILE}"; then
     echo "== EDF up to date: ${EDF_FILE}"
