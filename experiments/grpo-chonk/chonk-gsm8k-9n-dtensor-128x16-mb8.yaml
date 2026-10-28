@@ -1,0 +1,5 @@
+defaults: chonk-gsm8k-9n-dtensor-128x16.yaml
+
+policy:
+  train_micro_batch_size: 8
+  logprob_batch_size: 16

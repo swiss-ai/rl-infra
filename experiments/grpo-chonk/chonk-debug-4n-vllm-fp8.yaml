@@ -1,0 +1,22 @@
+defaults: chonk-gsm8k-debug-4n-megatron.yaml
+
+grpo:
+  async_grpo:
+    enabled: true
+    max_trajectory_age_steps: 1
+    in_flight_weight_updates: true
+
+loss_fn:
+  use_importance_sampling_correction: true
+  truncated_importance_sampling_type: tis
+  truncated_importance_sampling_ratio: 2.0
+
+policy:
+  generation:
+    vllm_cfg:
+      precision: fp8
+      kv_cache_dtype: fp8
+      fp8_kv_unit_scales: true
+      enforce_eager: false
+    vllm_kwargs:
+      max_num_batched_tokens: 16384

@@ -1,0 +1,25 @@
+defaults: chonk-gsm8k-debug-4n-megatron.yaml
+
+grpo:
+  val_at_start: false
+  skip_zero_advantage_groups: true
+  async_grpo:
+    enabled: true
+    max_trajectory_age_steps: 1
+    in_flight_weight_updates: true
+  reward_shaping:
+    enabled: true
+    stop_properly_penalty_coef: 0.0
+    overlong_buffer_length: null
+    overlong_buffer_penalty: null
+    max_response_length: null
+
+loss_fn:
+  use_importance_sampling_correction: true
+  truncated_importance_sampling_type: tis
+  truncated_importance_sampling_ratio: 2.0
+
+policy:
+  generation:
+    vllm_cfg:
+      gpu_memory_utilization: 0.88

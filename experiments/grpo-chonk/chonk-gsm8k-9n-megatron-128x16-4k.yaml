@@ -1,0 +1,6 @@
+defaults: chonk-gsm8k-9n-megatron-128x16.yaml
+
+policy:
+  max_total_sequence_length: 4096
+  generation:
+    max_new_tokens: 4096

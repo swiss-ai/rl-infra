@@ -1,0 +1,11 @@
+defaults: chonk-debug-4n-nan-refit.yaml
+
+grpo:
+  num_prompts_per_step: 8
+
+policy:
+  train_global_batch_size: 128
+  generation:
+    ignore_eos: true
+    stop_token_ids: [0]
+    stop_strings: null

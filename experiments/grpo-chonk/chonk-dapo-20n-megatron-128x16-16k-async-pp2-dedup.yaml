@@ -1,0 +1,8 @@
+defaults: chonk-dapo-20n-megatron-128x16-16k-async-pp2.yaml
+
+grpo:
+  max_num_steps: 1000000
+
+data:
+  train:
+    deduplicate: true

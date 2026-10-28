@@ -1,0 +1,26 @@
+defaults: chonk-gsm8k-9n-megatron-128x16-4k.yaml
+
+grpo:
+  val_period: 20
+  async_grpo:
+    enabled: true
+    max_trajectory_age_steps: 1
+    in_flight_weight_updates: true
+
+checkpointing:
+  save_period: 20
+
+loss_fn:
+  use_importance_sampling_correction: true
+  truncated_importance_sampling_type: tis
+  truncated_importance_sampling_ratio: 2.0
+
+policy:
+  megatron_cfg:
+    env_vars:
+      CUDA_COREDUMP_GENERATION_FLAGS: skip_nonrelocated_elf_images,skip_abort
+      CUDA_COREDUMP_SHOW_PROGRESS: "1"
+  generation:
+    colocated:
+      resources:
+        num_nodes: 4

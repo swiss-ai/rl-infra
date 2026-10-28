@@ -1,0 +1,7 @@
+defaults: chonk-debug-4n-nan-refit-long-probe.yaml
+
+policy:
+  generation:
+    vllm_kwargs:
+      compilation_config:
+        cudagraph_mode: PIECEWISE

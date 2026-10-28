@@ -1,0 +1,9 @@
+defaults: chonk-gsm8k-9n-megatron-128x16.yaml
+
+policy:
+  sequence_packing:
+    enabled: true
+    train_mb_tokens: 5120
+    logprob_mb_tokens: 5120
+  megatron_cfg:
+    activation_checkpointing: true

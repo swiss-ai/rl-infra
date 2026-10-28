@@ -1,0 +1,26 @@
+defaults: chonk-gsm8k-9n-megatron-vllm-ep4.yaml
+
+grpo:
+  max_num_steps: 1
+  num_prompts_per_step: 6
+  val_at_start: true
+  max_val_samples: 32
+  val_batch_size: 32
+
+policy:
+  train_global_batch_size: 48
+  megatron_cfg:
+    pipeline_model_parallel_size: 3
+    num_layers_in_first_pipeline_stage: null
+    num_layers_in_last_pipeline_stage: null
+    expert_model_parallel_size: 4
+    env_vars:
+      TORCH_NCCL_TRACE_BUFFER_SIZE: "2000"
+      TORCH_NCCL_DUMP_ON_TIMEOUT: "1"
+      TORCH_FR_DUMP_TEMP_FILE: /iopsstor/scratch/cscs/dmelikidze/nemo-rl/slurm/fr-chonk-mcore-debug-rank
+      TORCH_NCCL_DEBUG_INFO_TEMP_FILE: /iopsstor/scratch/cscs/dmelikidze/nemo-rl/slurm/fr-chonk-mcore-debug-rank
+
+data:
+  validation:
+    dataset_name: gsm8k
+    split: test

@@ -1,0 +1,7 @@
+defaults: chonk-debug-4n-nan-refit-long.yaml
+
+policy:
+  generation:
+    vllm_cfg:
+      env_vars:
+        NRL_DEBUG_NAN_PROBE: "1"

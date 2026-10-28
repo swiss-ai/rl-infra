@@ -1,0 +1,4 @@
+defaults: chonk-gsm8k-9n-megatron-128x32-async.yaml
+
+policy:
+  train_global_batch_size: 1024

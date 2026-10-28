@@ -1,0 +1,7 @@
+defaults: chonk-gsm8k-12n-megatron-128x16-2k-async-mcoregen.yaml
+
+policy:
+  generation:
+    mcore_generation_config:
+      expert_model_parallel_size: 4
+      buffer_size_gb: 16

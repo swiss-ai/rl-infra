@@ -1,0 +1,7 @@
+defaults: chonk-dapo-12n-megatron-128x16-16k-async-pp2.yaml
+
+policy:
+  megatron_cfg:
+    env_vars:
+      NRL_HBM_SPILL_CHECK: "4"
+      NRL_HBM_BIND_CPU: "1"

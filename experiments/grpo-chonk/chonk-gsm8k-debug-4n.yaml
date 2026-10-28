@@ -1,0 +1,16 @@
+defaults: chonk-gsm8k-9n-dtensor-vllm-ep4.yaml
+
+grpo:
+  max_num_steps: 1
+  num_prompts_per_step: 6
+  val_at_start: true
+  max_val_samples: 32
+  val_batch_size: 32
+
+policy:
+  train_global_batch_size: 48
+
+data:
+  validation:
+    dataset_name: gsm8k
+    split: test

@@ -1,0 +1,4 @@
+defaults: chonk-gsm8k-9n-megatron-128x16-async.yaml
+
+grpo:
+  num_generations_per_prompt: 32

@@ -1,0 +1,6 @@
+defaults: chonk-gsm8k-9n-megatron-128x16-async.yaml
+
+policy:
+  megatron_cfg:
+    moe_token_dispatcher_type: alltoall
+    moe_enable_deepep: false

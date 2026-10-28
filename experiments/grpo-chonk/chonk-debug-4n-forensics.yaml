@@ -1,0 +1,10 @@
+defaults: chonk-gsm8k-debug-4n-megatron.yaml
+
+grpo:
+  val_at_start: false
+
+policy:
+  megatron_cfg:
+    env_vars:
+      NRL_NCCL_WARMUP: "1"
+      NRL_FORENSICS_TEST_OOM: "1"

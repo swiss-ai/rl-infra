@@ -1,0 +1,5 @@
+defaults: chonk-dapo-12n-megatron-128x16-16k-async-pp2.yaml
+
+policy:
+  megatron_cfg:
+    expert_model_parallel_size: 32

@@ -1,0 +1,10 @@
+defaults: chonk-gsm8k-9n-megatron-vllm-ep4.yaml
+
+grpo:
+  max_num_steps: 2
+
+checkpointing:
+  enabled: true
+  save_period: 2
+  keep_top_k: 1
+  metric_name: null
