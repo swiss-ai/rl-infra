@@ -126,7 +126,18 @@ stage_image() {   # <ref> <master> <work>
         echo "== image present: ${work}"
     fi
 }
-lfs setstripe -c 16 -S 4M "$(dirname "${IMAGE_WORK}")" 2>/dev/null || true
+IMAGE_WORK_DIR="$(dirname "${IMAGE_WORK}")"
+if [ -d "${IMAGE_WORK_DIR}" ]
+then
+	:
+elif [ ! -e "${IMAGE_WORK_DIR}" ]
+then
+	mkdir -p "${IMAGE_WORK_DIR}"
+else
+	echo "== Image work path '${IMAGE_WORK_DIR}' already exists and is not a folder." >&2
+	exit 1
+fi
+lfs setstripe -c 16 -S 4M "${IMAGE_WORK_DIR}" 2>/dev/null || true
 if [[ -s "${IMAGE_MASTER}" ]]; then
     stage_image "" "${IMAGE_MASTER}" "${IMAGE_WORK}"
 else
