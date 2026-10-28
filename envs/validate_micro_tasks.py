@@ -19,7 +19,7 @@ import sys
 import urllib.request
 from pathlib import Path
 
-API = os.environ.get("OPENSANDBOX_DOMAIN", "https://opensandbox.breithorn.svc.cscs.ch").rstrip("/") + "/v1"
+API = os.environ.get("OPENSANDBOX_DOMAIN", "https://opensandbox-gvisor.breithorn.svc.cscs.ch").rstrip("/") + "/v1"
 KEY = os.environ["OPENSANDBOX_API_KEY"]
 
 

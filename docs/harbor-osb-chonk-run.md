@@ -18,6 +18,12 @@ Contents: [Changelog](#changelog) · [What it is](#what-it-is) · [Status](#stat
 
 Newest first. If you followed an earlier version, the entries marked **action** need you to change something.
 
+- **2026-10-28 (evening)**
+  - **Action:** OpenSandbox moved to **`https://opensandbox-gvisor.breithorn.svc.cscs.ch`**, with new API keys. The old
+    `opensandbox.breithorn.svc.cscs.ch` has served Traefik's default self-signed certificate and 404 since 11:32 today.
+    The launchers and `validate_micro_tasks.py` now default to the new endpoint; put the new key in `~/.opensandbox_token`.
+  - Real SWE tasks: new `envs/prepare_swe_lego_tasks.py` builds a `HARBOR_ROOT` from Ambroise's 1,830 validated SWE-Lego
+    tasks, see [Using real SWE tasks](#using-real-swe-tasks).
 - **2026-10-28**
   - **Action:** pull the branch. `envs/harbor-osb.yaml` gained three settings without which every rollout is empty:
     `harbor_agent_environment_server: null`, `vllm_cfg.http_server_serving_chat_kwargs.chat_template`, and a
@@ -107,7 +113,7 @@ Proven:
 
    ```bash
    curl -s -o /dev/null -w "%{http_code}\n" -H "OPEN-SANDBOX-API-KEY: $(tr -d '\n' < ~/.opensandbox_token)" \
-     "https://opensandbox.breithorn.svc.cscs.ch/v1/sandboxes?pageSize=1"      # expect 200
+     "https://opensandbox-gvisor.breithorn.svc.cscs.ch/v1/sandboxes?pageSize=1"      # expect 200
    ```
 4. **No registry credential** is needed for the micro-tasks or for the public Harbor project `swe_lego_v05_1`.
    The wrapper sends the placeholder `anonymous` / `unused`, which the public project accepts.
@@ -206,7 +212,19 @@ maps it to `$HARBOR_ROOT/tasks`.
 
 #### Using real SWE tasks
 
-Use `examples/nemo_gym/fetch_harbor_osb_tasks.py` and `prepare_harbor_osb_dataset.py` from `swiss-ai/nemo-rl-development`
+Ambroise's SWE-Lego set (public rl-registry project `swe_lego_v05_1`, 1,830 tasks whose reference solution scores 1
+and whose empty run scores 0) is on Alps:
+
+```bash
+python3.11 envs/prepare_swe_lego_tasks.py /capstor/store/cscs/swissai/infra01/users/aborbely/swe_lego_v05/tasks \
+  $SCRATCH/osb/swe_lego_v05 [--limit N]
+export HARBOR_ROOT=$SCRATCH/osb/swe_lego_v05
+```
+
+It flattens the layout and adds `environment/Dockerfile` (`FROM <docker_image>`): the Harbor version Gym installs ignores
+task directories without `environment/`, and every trial then fails with "Either datasets or tasks must be provided".
+
+Alternatively, use `examples/nemo_gym/fetch_harbor_osb_tasks.py` and `prepare_harbor_osb_dataset.py` from `swiss-ai/nemo-rl-development`
 (branch `swissai/harbor_agent_osb_v0.8.0`; see their `--help`. We used `--project swe_lego_v05_1 --limit N`
 for the public project), then point `HARBOR_ROOT` at the output. These images are about 1.0 to 1.4 GB each and create
 in about 26 s the first time, against about 4 s for the public micro-task image. Kostas's 10-task set uses the
@@ -330,7 +348,7 @@ Sandboxes have a TTL (6 h in this setup), and a hard-killed job leaves them behi
 ```bash
 cd ~/projects/nemo-rl-apertus2/3rdparty/Gym-workspace/Gym
 uv run --extra nemo_gym python -m nemo_gym.sandbox.providers.opensandbox.cleanup_sandboxes \
-  --domain https://opensandbox.breithorn.svc.cscs.ch --api-key "$(tr -d '\n' < ~/.opensandbox_token)" \
+  --domain https://opensandbox-gvisor.breithorn.svc.cscs.ch --api-key "$(tr -d '\n' < ~/.opensandbox_token)" \
   --run-id <RUN> --user "$USER" --reap
 ```
 

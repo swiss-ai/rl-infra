@@ -33,7 +33,7 @@ if [[ -z "${OPENSANDBOX_API_KEY:-}" ]]; then
     OPENSANDBOX_API_KEY="$(tr -d '\n' < "${HOME}/.opensandbox_token")"
 fi
 export OPENSANDBOX_API_KEY
-export OPENSANDBOX_DOMAIN="${OPENSANDBOX_DOMAIN:-https://opensandbox.breithorn.svc.cscs.ch}"
+export OPENSANDBOX_DOMAIN="${OPENSANDBOX_DOMAIN:-https://opensandbox-gvisor.breithorn.svc.cscs.ch}"
 # /health needs no key, so it says nothing about the key. List sandboxes instead: a rejected key
 # (HTTP 401) would otherwise only show up as masked rollouts, after the job waited in the queue.
 code="$(curl -s -m 15 -o /dev/null -w '%{http_code}' -H "OPEN-SANDBOX-API-KEY: ${OPENSANDBOX_API_KEY}" \
