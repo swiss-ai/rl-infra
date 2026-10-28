@@ -5,8 +5,9 @@ whose sandboxes are pods on the OpenSandbox cluster (Breithorn). Written so that
 swiss-ai organisation with Clariden access can reproduce it from a clean account.
 
 **Status (2026-10-28): the full Chonk job runs end to end on KISTI** (job 1153929, 12 nodes: 5 GRPO steps,
-302 of 320 rollouts real, multi-turn agent trials on OpenSandbox sandboxes, reward 0 as expected). It has not run on
-Clariden yet (queued). What is proven and what is not is listed in [Status](#status) below.
+302 of 320 rollouts real, multi-turn agent trials on OpenSandbox sandboxes, reward 0 as expected). **It also runs end to end on CSCS Alps (Daint)**
+(job 5184052, 12 nodes: 5 GRPO steps, 411 trials, one trial with reward 1). It has not run on Clariden yet (queued).
+What is proven and what is not is listed in [Status](#status) below.
 
 Contents: [Changelog](#changelog) · [What it is](#what-it-is) · [Status](#status) · [Access](#access-you-need) ·
 [Steps](#steps) · [Config reference](#config-reference) · [Errors we hit](#errors-we-hit) ·
@@ -26,6 +27,10 @@ Newest first. If you followed an earlier version, the entries marked **action** 
     to 3.12 (the image's Python). Re-run `setup-gym.sh` on an existing clone; `pydeps.sh` re-installs by itself.
   - New `kisti/launch-harbor-osb.sh`: the GRPO job on KISTI. First complete Chonk run (KISTI job 1153929).
     The KISTI procedure moved to the private `swiss-ai/kisti-docs` (folder `rl/`); [KISTI HANGANG](#kisti-hangang) links to it.
+  - First run on CSCS Alps (Daint, account `csstaff`, Philip Mueller): job 5184052 completed all 5 steps with one
+    reward of 1; the 6-node layout (job 5184751) runs out of GPU memory in its first training step. [Status](#status),
+    [Watch](#7-watch), [Errors we hit](#errors-we-hit), [Open questions](#open-questions) and [Attempt log](#attempt-log)
+    updated. The per-trial globs were one level too short: trials are five directories below `$HARBOR_ROOT/jobs`.
 - **2026-10-27**
   - **Action:** `envs/harbor-osb.yaml` now sets `enable_chunked_prefill: true`. With `false`, every vLLM worker
     fails at start-up on Chonk ("Chunked prefill is required for mamba cache mode 'align'", job 3753228). Pull the
@@ -72,14 +77,20 @@ Proven:
 | The config gets through Ray start-up, data loading and config validation | 12-node attempts reached the entrypoint's config check and `grpo.setup()`; the 6-node job 3753228 reached vLLM worker start-up (Ray cluster ready 72 s after the job started) before the errors below ([attempt log](#attempt-log)) |
 | **Chonk GRPO with Harbor + OpenSandbox runs end to end** (12 nodes, blueprint layout, async GRPO) | KISTI job 1153929: 5 steps in 20.5 min; 302 of 320 rollouts real (18 masked); 200 trials checked had no exception, mean 4.2 Terminus-2 turns (max 20); a sandbox per trial on Breithorn, verifier reward read for all 320; weight sync about 4.6 s; generation KL error 0.0006; step times 16 to 235 s. Reward 0.0 everywhere, so the loss is 0 and nothing is learned yet |
 | Chonk serves from David's image with the blueprint's vLLM layout (TP1, DP4, expert parallel per node) | KISTI job 1152908: weights load in 113 s (58 GiB per GPU, 16.9 GiB left for KV cache at 0.85 utilisation), and a completion returns "Bern." for "The capital of Switzerland is". See [KISTI HANGANG](#kisti-hangang) |
+| **The same on CSCS Alps (Daint)**, 12 nodes, branch as of 2026-10-28 | Daint job 5184052 (`csstaff`, `normal`): 5 steps, driver exit 0; start-up about 9.5 min (`ray.sub` start to step 1), step times 241 / 27 / 129 / 73 / 100 s; 411 trials over all 8 families, 16 masked; **one trial scored 1** in step 1 (mean 0.0156 over 64), 0 afterwards. Peak trainer memory per GPU 59.6 GB allocated, 68.2 GB reserved |
 
 **Not proven** (nobody has run these):
 
-- A non-zero reward, and therefore a gradient step that changes the model. Chonk is a pretraining checkpoint and
-  produced no correct Terminus-2 answer in 320 trials. Next: a chat/SFT checkpoint, or easier tasks.
+- A model that learns. Daint job 5184052 had one reward of 1 (step 1, so one step with a non-zero gradient); otherwise
+  Chonk, a pretraining checkpoint, produced no correct Terminus-2 answer in 320 KISTI trials and 410 of 411 Daint trials.
+  359 of the 411 Daint trials had at least one "No valid JSON object found" parser warning (5034 in total).
+  Next: a chat/SFT checkpoint, or easier tasks.
 - Contexts longer than 4096 tokens: 661 agent calls were refused with HTTP 400 because the conversation outgrew
-  `max_model_len` (the trial then ends). Raise `max_total_sequence_length` once memory is checked.
-- The same run on Clariden (jobs queued), and the 6-node layout (4 trainer EP16 + 2 vLLM; UCCL dispatch is tuned for EP32).
+  `max_model_len` (the trial then ends); on Daint 615 calls, and 125 trials ended with `ContextLengthExceededError`.
+  Memory allows more on 12 nodes (68.2 of 96 GB reserved at 4096). Raise `max_total_sequence_length`.
+- The same run on Clariden (jobs queued).
+- The 6-node layout (4 trainer EP16 + 2 vLLM) does not fit at 4096 tokens: out of GPU memory in the first training
+  step (Daint job 5184751, see [Errors we hit](#errors-we-hit)).
 
 ## Access you need
 
@@ -107,6 +118,8 @@ Proven:
 ## Steps
 
 All commands run on the Clariden login node unless stated. `$SCRATCH` is `/iopsstor/scratch/cscs/$USER`.
+On Daint `$SCRATCH` is `/ritom/...`, which the EDF does not mount (the job then exits with code 127);
+`export SCRATCH=/iopsstor/scratch/cscs/$USER` before setup and submit (`site.env` only sets it when unset).
 
 ### 1. Get the repository
 
@@ -176,6 +189,10 @@ Expect exit code 0, the "Gym (Harbor + OpenSandbox)" section passing, `Apertus2F
 dropped keys or shape mismatches, and the note that 39 `e_score_correction_bias` tensors stay at their init values.
 "Container fingerprint file not found, skipping version check" is normal here.
 
+The Gym section imports `nemo_gym` and the provider, but not `nemo_gym.cli`, which is what needs `devtools` and a
+current `openai`. Importing `from nemo_gym.cli import RunHelper, GlobalConfigDictParserConfig` (and
+`vllm.entrypoints.openai.api_server`) with the `pydeps.sh` packages installed would catch them on `debug`.
+
 ### 5. Data
 
 ```bash
@@ -227,7 +244,15 @@ All attempts so far died in the first two minutes of `ray-driver.log`, so read i
   `GET /v1/sandboxes` (handbook page `engineering/post-training/opensandbox`) and filter on your run id.
 - A healthy Gym run of a 30B model takes about 1340 s per step and about 25 min of startup (Kostas, handbook). If steps take seconds and
   `Masking a degenerate` keeps climbing, every rollout is failing: stop and look at the first trial's logs under `$HARBOR_ROOT/jobs`.
-- Per-trial rewards: `cat $HARBOR_ROOT/jobs/*/*/*/verifier/reward.txt | sort | uniq -c`.
+- Per-trial rewards: `cat $HARBOR_ROOT/jobs/*/*/*/*/*/verifier/reward.txt | sort | uniq -c`; the solved ones:
+  `grep -l 1 $HARBOR_ROOT/jobs/*/*/*/*/*/verifier/reward.txt`.
+- Conversations: each trial directory `$HARBOR_ROOT/jobs/<date>/swe_lego/<model>/<HHMMSS_hash>/<task>__<id>/` holds
+  `agent/trajectory.json` (every turn: model message, tool calls, observation) and `verifier/`; the task text is
+  `$HARBOR_ROOT/tasks/<task>/instruction.md`. With `should_log_nemo_gym_responses: true` NeMo-RL writes no
+  `train_data_step*.jsonl`.
+- "Async GRPO training complete!" is also printed on the error path; check the exit code and the step count.
+  The end of a successful log (`srun: error ... Terminated`, a graceful-shutdown timeout, the NemoGym actor killed
+  by `ray.kill`) is the normal teardown.
 
 ## Config reference
 
@@ -274,11 +299,14 @@ pods per node and about 40 creates per second cluster-wide. Full API guide: the 
 | `KeyError: 'use_multiple_dataloader'` in `grpo.py setup()` | The `data:` block with `_override_: true` replaced the recipe's block and dropped this key | `data.use_multiple_dataloader: false` |
 | `ValidationError ... Chunked prefill is required for mamba cache mode 'align'` in every `VllmAsyncGenerationWorker` (driver log, about 3 min after start) | `enable_chunked_prefill: false` | `enable_chunked_prefill: true` (now set) |
 | `No module named 'devtools'` at Gym start-up (then `yappi`, `pydot`) | David's image lacks Gym's dependencies | `pydeps.sh` installs them (KISTI: `kisti/pydeps-kisti.sh`) |
+| `ImportError: cannot import name 'Moderation'` from `openai` at Gym start-up | The image has `openai` 2.7.2 | `pydeps.sh` installs a current `openai` |
+| Exit code 127 right after the job starts, on Daint | `$SCRATCH` is `/ritom/...` there, which the EDF does not mount | `export SCRATCH=/iopsstor/scratch/cscs/$USER` |
 | `Missing pyproject.toml or requirements.txt ... environment_servers/legacy_agent` | Kostas's Harbor config references a server that is only on his Gym branch | `harbor_agent_environment_server: null` |
 | Gym server venvs: `the current Python version (3.12.3) does not satisfy Python>=3.13.14` | Gym declares 3.13 since 2026-08-04; the image has 3.12 | `setup-gym.sh` relaxes `requires-python` |
 | Every rollout masked, `ChatTemplateResolutionError ... default chat template is no longer allowed` behind HTTP 500 from `/v1/chat/completions` | Chonk's tokenizer has no chat template; the HTTP server ignores the recipe's | `http_server_serving_chat_kwargs.chat_template` |
 | HTTP 500 on every second agent turn, `AssertionError: EOS token #0 not found in template_token_ids` | The pass-through template has no EOS, which NeMo-RL needs to find the end of the previous turn | Template with EOS after assistant messages |
 | HTTP 400 `Prompt exceeds max_model_len` (not an error) | The conversation outgrew 4096 tokens; the trial ends | Raise `max_total_sequence_length` when memory allows |
+| 6 nodes: `ncclUnhandledCudaError ... Failed to CUDA calloc async 4 bytes` while creating an NCCL communicator in `_log_microbatch_router_metrics` (`finalize_model_grads`), first `policy.train()` | GPU out of memory: EP16 puts twice the experts on each GPU. Per GPU (96 GB): 65.4 GB allocated before the forward/backward, peaks 77.5 GB allocated and 88.8 GB reserved (12 nodes: 59.6 / 68.2 GB) | Use the 12-node layout. Untested: 2048 tokens, or `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (reserved minus allocated was 4 to 11 GB) |
 | Agent turns truncated at "Question:" (not an error) | `stop_strings: ['Question:']` inherited from the GSM8K recipe | `policy.generation.stop_strings: null` |
 | HTTP 401 `INVALID_API_KEY` from every create while `/health` is 200 | Key expired or rotated | New key; the wrapper now fails at submit time |
 | HTTP 422 `ValidatingAdmissionPolicy ... denied request` | `secureAccess` missing | `secure_access: true` (already set) |
@@ -322,9 +350,14 @@ it uses are in `kisti/` of this branch.
 
 - Does Chonk fit 4096-token multi-turn sequences, and does it follow the Terminus-2 JSON format? A reward of 0 would be expected
   and would prove the plumbing but not that the model can use the tools.
+  *Daint 5184052:* memory fits with headroom (68.2 of 96 GB reserved); the JSON format mostly not (359 of 411 trials
+  with parser warnings, one trial solved).
 - Does async GRPO work with Gym at this scale? If the first step fails in the async code, a synchronous run is the fallback
   (`grpo.async_grpo.enabled: false`; the 6-node recipe then needs a re-check of the trainer/inference split).
+  *Yes:* KISTI 1153929 and Daint 5184052 both ran 5 async steps (`max_trajectory_age_steps: 1`); on Daint, steps 3 to 5
+  waited on the trajectory buffer, as expected.
 - Is the 6-node layout stable (EP16, UCCL dispatch settings)? The 12-node layout is the one David validated.
+  *Daint 5184751:* not at 4096 tokens; out of GPU memory in the first training step (see [Errors we hit](#errors-we-hit)).
 - Can runc be requested per sandbox? Is a sandbox that lives for hours supported? Is the 110-pods-per-node cap compatible
   with 1k+ sandboxes?
 - For datasets of 100k images: sandbox creation waits on image pulls (about 26 s cold, about 4 s warm). Async age 1 hides one step. Options:
@@ -343,6 +376,12 @@ it uses are in `kisti/` of this branch.
 | 3753228 | `normal`, 6 nodes, 4096 tokens, `stop_strings: null` | Submitted 2026-10-26 11:01, started 2026-10-27 06:17 (19 h wait), failed after 5m19s: `enable_chunked_prefill` |
 | 3762540 | `normal`, 6 nodes, all the fixes above | Queued |
 | 3762800 | `preemptable`, same | Queued |
+| 3754080 | `normal`, 12 nodes, Philip's reconstruction of the branch | `enable_chunked_prefill`, as 3753228 |
+| 5162077, 5162114 | Daint `normal` (`csstaff`), 6 nodes, 2026-10-27 branch | Exit code 127: `$SCRATCH` (`/ritom`) not mounted |
+| 5162937 | Daint, 6 nodes | `No module named 'devtools'` |
+| 5167352 | Daint, 6 nodes, plus `devtools`, `yappi`, `pydot` | `ImportError: Moderation` (`openai` 2.7.2) |
+| 5184052 | Daint, 12 nodes, branch as of 2026-10-28 | **Passed:** 5 steps in 1198 s, one reward 1 |
+| 5184751 | Daint, 6 nodes, branch as of 2026-10-28 | GPU out of memory in the first training step after 788 s |
 | KISTI jobs | 1 to 12 nodes | See `swiss-ai/kisti-docs`, folder `rl/` |
 
 ## Credits and sources
