@@ -42,13 +42,14 @@ policy:
     chat_template: "{{ bos_token }}{% for message in messages %}{{ message['content'] }}{% if message['role'] == 'assistant' %}{{ eos_token }}{% endif %}{% endfor %}"
   # one optimizer step per rollout batch
   train_global_batch_size: 64
-  # Chonk trains at 2k for GSM8K. Harbor trajectories are multi-turn, so this is the real limit:
-  # raise it (and the micro-batch token budgets) only after a run fits in memory at this size.
-  max_total_sequence_length: 4096
+  # Chonk trains at 2k for GSM8K. Harbor trajectories are multi-turn, so this is the real limit.
+  # 4096 fit on 12 nodes with headroom (Daint job 5184052: peak 59.6 GB allocated, 68.2 GB reserved
+  # per GPU) but cut 125 of 411 trials short, so this is doubled. Keep the micro-batch budgets equal.
+  max_total_sequence_length: 8192
   sequence_packing:
     enabled: true
-    train_mb_tokens: 4096
-    logprob_mb_tokens: 4096
+    train_mb_tokens: 8192
+    logprob_mb_tokens: 8192
   generation:
     # per agent turn, not per trajectory
     max_new_tokens: 1024
