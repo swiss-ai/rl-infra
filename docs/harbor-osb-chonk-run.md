@@ -18,6 +18,13 @@ Contents: [Changelog](#changelog) · [What it is](#what-it-is) · [Status](#stat
 
 Newest first. If you followed an earlier version, the entries marked **action** need you to change something.
 
+- **2026-10-29**
+  - Larger layouts, both validated on KISTI (5/5 steps): `recipes/apertus2-chonk-vllm-adamw-20n.yaml` (16 trainer
+    nodes EP64 + 4 vLLM; runs 8192-token contexts) and `-24n.yaml` (8 trainer + 16 vLLM; 128 sandboxes per step).
+    See [Larger layouts](#larger-layouts).
+  - `OVERLAY=<file>` in both launchers merges a task overlay last; `envs/harbor-osb-proxy-sft.yaml` is an experiment
+    (role-marked chat template, 8192 tokens) that did not improve the base model's JSON validity.
+  - Sandboxes also outlive **successful** runs (the batch in flight at the end): reap them after every run, see [Cleanup](#cleanup).
 - **2026-10-28 (evening)**
   - **Action:** OpenSandbox moved to **`https://opensandbox-gvisor.breithorn.svc.cscs.ch`**, with new API keys. The old
     `opensandbox.breithorn.svc.cscs.ch` has served Traefik's default self-signed certificate and 404 since 11:32 today.
@@ -246,6 +253,29 @@ as `defaults: [recipe, envs/harbor-osb.yaml]` with absolute paths, so **edits to
 still queued take effect when it starts**.
 The warning "checkpoint_must_save_by ... is not before the job time" is harmless: checkpointing is off.
 
+#### Larger layouts
+
+| Recipe | Nodes | Trainer / vLLM | Use | Validated (KISTI) |
+|---|---|---|---|---|
+| `apertus2-chonk-vllm-adamw.yaml` | 12 | 8 (EP32) / 4 | the blueprint; up to 6144 tokens | 1153929, 1172833 |
+| `apertus2-chonk-vllm-adamw-20n.yaml` | 20 | 16 (EP64) / 4 | 8192 tokens | 1172834 (4096), 1172935 (8192) |
+| `apertus2-chonk-vllm-adamw-24n.yaml` | 24 | 8 (EP32) / 16 | more sandboxes per step | 1172832 (128 per step) |
+
+```bash
+# 8192 tokens, 2048 per agent turn
+RECIPE=recipes/apertus2-chonk-vllm-adamw-20n.yaml bash run-harbor-osb.sh \
+  policy.max_total_sequence_length=8192 policy.sequence_packing.train_mb_tokens=8192 \
+  policy.sequence_packing.logprob_mb_tokens=8192 policy.generation.max_new_tokens=2048
+# 128 sandboxes per step
+RECIPE=recipes/apertus2-chonk-vllm-adamw-24n.yaml bash run-harbor-osb.sh \
+  grpo.num_prompts_per_step=16 policy.train_global_batch_size=128
+```
+
+Not working yet: 32 nodes (16 EP64 + 16 vLLM) at 8192 with 128 per step died in the first log-probability pass
+(job 1172936). With more sandboxes per step, the sandboxes, not the GPUs, set the step time: each SWE-Lego task has
+its own 1 to 1.4 GB image, pulled cold on each sandbox node (median 38 s from create to running, p90 8.5 min, max
+23 min), and the 24-node run masked 128 of its 640 rollouts.
+
 ### 7. Watch
 
 ```bash
@@ -260,6 +290,9 @@ All attempts so far died in the first two minutes of `ray-driver.log`, so read i
   `GET /v1/sandboxes` (handbook page `engineering/post-training/opensandbox`) and filter on your run id.
 - A healthy Gym run of a 30B model takes about 1340 s per step and about 25 min of startup (Kostas, handbook). If steps take seconds and
   `Masking a degenerate` keeps climbing, every rollout is failing: stop and look at the first trial's logs under `$HARBOR_ROOT/jobs`.
+  One `Masking a degenerate` line is one rollout that came back with no output (its sandbox did not start in time,
+  or the trial failed before the first model reply); it gets zero weight in the loss instead of aborting the step.
+  A few per step are normal.
 - Per-trial rewards: `cat $HARBOR_ROOT/jobs/*/*/*/*/*/verifier/reward.txt | sort | uniq -c`; the solved ones:
   `grep -l 1 $HARBOR_ROOT/jobs/*/*/*/*/*/verifier/reward.txt`.
 - Conversations: each trial directory `$HARBOR_ROOT/jobs/<date>/swe_lego/<model>/<HHMMSS_hash>/<task>__<id>/` holds
@@ -327,6 +360,8 @@ pods per node and about 40 creates per second cluster-wide. Full API guide: the 
 | HTTP 401 `INVALID_API_KEY` from every create while `/health` is 200 | Key expired or rotated | New key; the wrapper now fails at submit time |
 | HTTP 422 `ValidatingAdmissionPolicy ... denied request` | `secureAccess` missing | `secure_access: true` (already set) |
 | `uv` cannot resolve editable submodules (`Automodel` empty, then nested `Megatron-LM` missing) | Submodules were not initialised recursively | Initialise with `--recursive` and sync them to the cluster |
+| 20 nodes (EP64): `Assertion error internode.cu:3106` in UCCL at the first expert dispatch | The EP32 UCCL buffer settings are too small for 16 trainer nodes | `UCCL_EP_*_CONFIG` with 1024 (set in the 20-node recipe) |
+| 20 nodes (EP64): every trainer process dies without a Python error in the first log-probability pass | Optimizer state and log-probability activations together exceed GPU memory | `policy.offload_optimizer_for_logprob: true` (set in the 20-node recipe) |
 | `Reason=QOSGrpNodeLimit` for days on `normal` | The account's group node cap is filled by other users' jobs | See [Queue etiquette](#queue-etiquette) |
 
 ## Queue etiquette
@@ -343,7 +378,8 @@ pods per node and about 40 creates per second cluster-wide. Full API guide: the 
 
 ## Cleanup
 
-Sandboxes have a TTL (6 h in this setup), and a hard-killed job leaves them behind. Reap them by run id:
+Sandboxes have a TTL (6 h in this setup). Both a killed job and a successful one leave sandboxes behind (a
+successful one, the batch in flight when training ends), so reap them by run id after every run:
 
 ```bash
 cd ~/projects/nemo-rl-apertus2/3rdparty/Gym-workspace/Gym

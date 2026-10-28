@@ -3,6 +3,9 @@
 #   OVERLAY=envs/harbor-osb-proxy-sft.yaml bash run-harbor-osb.sh        (KISTI: kisti/launch-harbor-osb.sh)
 # With harbor-osb.yaml alone, 87% of Daint trials (job 5184052) produced no valid Terminus-2 JSON and
 # about 30% hit the 4096-token context.
+# Result so far (KISTI, 2026-10-28): the template did not raise JSON validity (trials with no valid JSON:
+# micro-tasks 77% -> 89%, SWE-Lego 89% -> 88%); the fix is the SFT checkpoint. 8192 tokens run out of GPU
+# memory on the 12-node recipe: use recipes/apertus2-chonk-vllm-adamw-20n.yaml.
 
 policy:
   tokenizer:
