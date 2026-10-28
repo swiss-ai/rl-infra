@@ -11,7 +11,7 @@
 #                                                     the checkouts setup.sh + setup-gym.sh build on Alps
 #   $HARBOR_ROOT (default $KISTI_SCRATCH/osb/harbor_micro)  tasks/, train.jsonl, validation.jsonl
 #   ~/.opensandbox_token                              OpenSandbox API key, one line (chmod 600)
-# RECIPE (default: the 12-node blueprint), RUN, JOB_TIME, OPENSANDBOX_DOMAIN override the defaults.
+# RECIPE (default: the 12-node blueprint), RUN, JOB_TIME, OPENSANDBOX_DOMAIN, OVERLAY override the defaults.
 set -euo pipefail
 
 RL_INFRA="$(cd "$(dirname "$0")/.." && pwd)"
@@ -77,6 +77,8 @@ export SLURM_NETWORK=disable_rdzv_get
 # --- Config, driver command, ray.sub -------------------------------------------------------------------
 CFG="${OUT}/configs/${RUN}.yaml"
 printf 'defaults:\n  - %s\n  - %s\n' "${RECIPE}" "${TASK}" > "${CFG}"
+# OVERLAY: optional task overlay merged last, e.g. envs/harbor-osb-proxy-sft.yaml
+[[ -z "${OVERLAY:-}" ]] || printf '  - %s\n' "$(realpath "${OVERLAY}")" >> "${CFG}"
 COMMAND="cd /opt/nemo-rl && \
 bash ${RL_INFRA}/kisti/pydeps-kisti.sh && \
 RAY_DEDUP_LOGS=0 DRIVER_RETRIES=0 bash ${RL_INFRA}/backends/nemo-rl/driver_retry.sh \

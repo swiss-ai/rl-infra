@@ -1,0 +1,21 @@
+# Overlay on envs/harbor-osb.yaml: make the base Chonk act a bit more like a chat (SFT) model until the
+# SFT checkpoint exists. Merged after the task file:
+#   OVERLAY=envs/harbor-osb-proxy-sft.yaml bash run-harbor-osb.sh        (KISTI: kisti/launch-harbor-osb.sh)
+# With harbor-osb.yaml alone, 87% of Daint trials (job 5184052) produced no valid Terminus-2 JSON and
+# about 30% hit the 4096-token context.
+
+policy:
+  tokenizer:
+    # Marks the turns ("System: ", "User: ", and "Assistant: " before every reply) so the model can tell
+    # where its answer starts, where harbor-osb.yaml concatenates the messages. Keeps EOS after every
+    # assistant message, which NeMo-RL's HTTP server needs to splice each turn's tokens back in.
+    # No prefill (e.g. '{"analysis": "'): it would be prompt, not reply, and Terminus-2 parses the reply.
+    chat_template: "{{ bos_token }}{% for message in messages %}{% if message['role'] == 'assistant' %}{{ message['content'] }}{{ eos_token }}{% else %}{{ message['role'] | capitalize }}: {{ message['content'] }}\n\n{% if loop.last or messages[loop.index]['role'] == 'assistant' %}Assistant: {% endif %}{% endif %}{% endfor %}"
+  # At 4096 the trainer reserved 68 of 96 GB per GPU (Daint job 5184052); the checkpoint supports 65536.
+  max_total_sequence_length: 8192
+  sequence_packing:
+    train_mb_tokens: 8192
+    logprob_mb_tokens: 8192
+  generation:
+    # per agent turn; 1024 cut Terminus-2 replies (and so their JSON) short
+    max_new_tokens: 2048

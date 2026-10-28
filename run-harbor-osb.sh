@@ -7,7 +7,7 @@
 #
 #   ~/.opensandbox_token   OpenSandbox API key, one line, no username (chmod 600)
 #   HARBOR_ROOT            train.jsonl, validation.jsonl, tasks/ (default $SCRATCH/osb/harbor_micro)
-#   RECIPE, RUN, PARTITION, JOB_TIME, ACCOUNT, OPENSANDBOX_DOMAIN override the defaults.
+#   RECIPE, RUN, PARTITION, JOB_TIME, ACCOUNT, OPENSANDBOX_DOMAIN, OVERLAY override the defaults.
 #   QOS                    optional Slurm QOS (exported as SBATCH_QOS); partition normal needs none.
 set -euo pipefail
 
@@ -63,6 +63,8 @@ mkdir -p "${NEMO_GYM_VENV_DIR}"
 
 CFG="${OUT}/configs/${RUN}.yaml"
 printf 'defaults:\n  - %s\n  - %s\n' "${RECIPE}" "${TASK}" > "${CFG}"
+# OVERLAY: optional task overlay merged last, e.g. envs/harbor-osb-proxy-sft.yaml
+[[ -z "${OVERLAY:-}" ]] || printf '  - %s\n' "$(realpath "${OVERLAY}")" >> "${CFG}"
 echo "== ${RUN}: ${NODES} nodes, partition ${PARTITION}, OpenSandbox ${OPENSANDBOX_DOMAIN}, tasks ${HARBOR_TASKS_DIR}"
 SCRIPT=examples/nemo_gym/run_grpo_nemo_gym.py \
     bash "${APERTUS2_DIR}/launch.sh" "${CFG}" "${NODES}" "${RUN}" "$@"
