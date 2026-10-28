@@ -1,0 +1,199 @@
+From 6eec85f195390038643e88c0a0cd546c70d5005c Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Wed, 28 Oct 2026 11:12:40 +0100
+Subject: [PATCH 12/14] async GRPO: optionally skip prompt groups with zero
+ advantage
+
+grpo.skip_zero_advantage_groups leaves groups whose rewards are all equal
+out of the logprob and training passes; they add nothing to the policy
+gradient. The trained rows are padded with the shortest skipped rows to a
+multiple of optimizer steps x data-parallel ranks, and their advantages
+are scaled by the kept share of loss tokens so each optimizer step equals
+the full-batch one. On DAPO-Math this trains about 2/3 of the rows.
+---
+ nemo_rl/algorithms/grpo.py | 134 +++++++++++++++++++++++++++++++++----
+ 1 file changed, 121 insertions(+), 13 deletions(-)
+
+diff --git a/nemo_rl/algorithms/grpo.py b/nemo_rl/algorithms/grpo.py
+index 73f7cad64..95876f546 100644
+--- a/nemo_rl/algorithms/grpo.py
++++ b/nemo_rl/algorithms/grpo.py
+@@ -358,6 +358,11 @@ class GRPOConfig(BaseModel, extra="allow"):
+     # Legacy async config block; SC reads its async knobs from `async_rl` instead.
+     async_grpo: AsyncGRPOConfig | None = Field(default_factory=AsyncGRPOConfig)
+     overlong_filtering: bool = False
++    # Async GRPO only: leave prompt groups whose rewards are all equal (zero
++    # advantage, so zero gradient) out of the logprob and training passes. The
++    # advantages of the trained rows are scaled so each optimizer step equals the
++    # one with those rows in the batch.
++    skip_zero_advantage_groups: bool = False
+     # whether to enable dynamic sampling, i.e.
+     # whether to discard prompts whose rewards have zero standard deviation
+     use_dynamic_sampling: bool = False
+@@ -2412,6 +2417,38 @@ def _build_async_grpo_train_data(
+     return train_data
+ 
+ 
++def _rows_to_train(
++    rewards: torch.Tensor,
++    prompt_ids: torch.Tensor,
++    loss_tokens: torch.Tensor,
++    multiple: int,
++) -> torch.Tensor:
++    """Rows of the prompt groups whose rewards differ, padded to a multiple of ``multiple``.
++
++    A group whose rewards are all equal has zero GRPO advantage, so its rows add
++    nothing to the policy gradient. The padding takes rows of such groups, those
++    with the fewest loss tokens first, so the count splits evenly into the
++    optimizer steps and data-parallel ranks.
++    """
++    _, group = torch.unique(prompt_ids, dim=0, return_inverse=True)
++    num_groups = int(group.max().item()) + 1
++    r = rewards.float()
++    group_min = torch.full((num_groups,), float("inf")).scatter_reduce(
++        0, group, r, reduce="amin"
++    )
++    group_max = torch.full((num_groups,), float("-inf")).scatter_reduce(
++        0, group, r, reduce="amax"
++    )
++    has_signal = group_max[group] > group_min[group]
++    rows = torch.nonzero(has_signal).flatten()
++    padding = (-rows.numel()) % multiple if rows.numel() else multiple
++    if padding:
++        idle = torch.nonzero(~has_signal).flatten()
++        idle = idle[torch.argsort(loss_tokens[idle])][:padding]
++        rows = torch.cat([rows, idle])
++    return torch.sort(rows).values
++
++
+ def _apply_mask_sample_filter(repeated_batch: BatchedDataDict[DatumSpec]) -> int:
+     """Zero loss_multiplier where mask_sample is True and return the count."""
+     if "mask_sample" not in repeated_batch:
+@@ -5364,6 +5401,33 @@ def async_grpo_train(
+                     )
+                     train_data.to("cpu")
+ 
++                    train_rows = None
++                    if master_config.grpo.skip_zero_advantage_groups:
++                        num_optimizer_steps = (
++                            train_data.size
++                            // master_config.policy["train_global_batch_size"]
++                        )
++                        loss_mask = train_data["token_mask"] * train_data[
++                            "sample_mask"
++                        ].unsqueeze(-1)
++                        train_rows = _rows_to_train(
++                            rewards,
++                            prompt_ids_for_adv,
++                            loss_mask.sum(dim=-1),
++                            num_optimizer_steps
++                            * policy.sharding_annotations.get_axis_size(
++                                "data_parallel"
++                            ),
++                        ).tolist()
++                        rollout_metrics["zero_advantage_rows_skipped"] = (
++                            train_data.size - len(train_rows)
++                        )
++                        print(
++                            f"▶ Training {len(train_rows)} of {train_data.size} rows; "
++                            "the others are in prompt groups with equal rewards",
++                            flush=True,
++                        )
++
+                 generation_logger_metrics = None
+                 if policy_generation.blocks_training():
+                     print("⏸️ Pausing colocated engine + collector for training...")
+@@ -5395,9 +5459,18 @@ def async_grpo_train(
+                     ),
+                 ):
+                     if not skip_prev_logprobs:
+-                        train_data["prev_logprobs"] = policy.get_logprobs(
+-                            train_data, timer=timer
+-                        )["logprobs"]
++                        if train_rows is None:
++                            train_data["prev_logprobs"] = policy.get_logprobs(
++                                train_data, timer=timer
++                            )["logprobs"]
++                        else:
++                            # Rows left out of training keep their generation logprobs.
++                            prev_logprobs = train_data["generation_logprobs"].clone()
++                            logprobs = policy.get_logprobs(
++                                train_data.select_indices(train_rows), timer=timer
++                            )["logprobs"]
++                            prev_logprobs[train_rows, : logprobs.shape[1]] = logprobs
++                            train_data["prev_logprobs"] = prev_logprobs
+                     else:
+                         train_data["prev_logprobs"] = torch.zeros_like(
+                             train_data["generation_logprobs"]
+@@ -5424,11 +5497,22 @@ def async_grpo_train(
+                     # Cannot compute seq-level metrics with placeholder prev_logprobs
+                     seq_logprob_error_metrics = _placeholder_seq_logprob_error_metrics()
+                 else:
+-                    seq_error_result = compute_and_apply_seq_logprob_error_masking(
+-                        train_data=train_data,
+-                        rewards=rewards,
+-                        seq_logprob_error_threshold=seq_logprob_error_threshold,
+-                    )
++                    if train_rows is None:
++                        seq_error_result = compute_and_apply_seq_logprob_error_masking(
++                            train_data=train_data,
++                            rewards=rewards,
++                            seq_logprob_error_threshold=seq_logprob_error_threshold,
++                        )
++                    else:
++                        trained_data = train_data.select_indices(train_rows)
++                        seq_error_result = compute_and_apply_seq_logprob_error_masking(
++                            train_data=trained_data,
++                            rewards=rewards[train_rows],
++                            seq_logprob_error_threshold=seq_logprob_error_threshold,
++                        )
++                        sample_mask = train_data["sample_mask"].clone()
++                        sample_mask[train_rows] = trained_data["sample_mask"]
++                        train_data["sample_mask"] = sample_mask
+                     seq_logprob_error_metrics = seq_error_result
+                     if "num_masked_seqs" in seq_logprob_error_metrics:
+                         seq_logprob_error_metrics[
+@@ -5519,11 +5603,35 @@ def async_grpo_train(
+                         **{"rl.iteration": step + 1},
+                     ),
+                 ):
+-                    train_results = policy.train(
+-                        train_data,
+-                        loss_fn,
+-                        timer=timer,
+-                    )
++                    if train_rows is None:
++                        train_results = policy.train(
++                            train_data,
++                            loss_fn,
++                            timer=timer,
++                        )
++                    else:
++                        # Each optimizer step divides its loss by the loss tokens of its
++                        # rows; scaling the advantages by the kept share of loss tokens
++                        # gives the update the full batch would have given.
++                        trained_data = train_data.select_indices(train_rows)
++                        loss_mask = train_data["token_mask"] * train_data[
++                            "sample_mask"
++                        ].unsqueeze(-1)
++                        kept_share = loss_mask[train_rows].sum() / loss_mask.sum().clamp(
++                            min=1
++                        )
++                        trained_data["advantages"] = (
++                            trained_data["advantages"] * kept_share
++                        )
++                        rollout_metrics["zero_advantage_loss_token_share"] = (
++                            1.0 - kept_share.item()
++                        )
++                        train_results = policy.train(
++                            trained_data,
++                            loss_fn,
++                            gbs=len(train_rows) // num_optimizer_steps,
++                            timer=timer,
++                        )
+ 
+                 is_last_step = step + 1 == max_num_steps
+                 should_save_by_step = (
+-- 
+2.43.0
+

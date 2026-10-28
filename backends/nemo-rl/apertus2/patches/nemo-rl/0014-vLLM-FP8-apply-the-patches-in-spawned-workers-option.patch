@@ -1,0 +1,156 @@
+From dc1e3589cf9e3605cd4dc77838a231bbd1ca86f9 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Wed, 28 Oct 2026 11:12:55 +0100
+Subject: [PATCH 14/14] vLLM FP8: apply the patches in spawned workers;
+ optional unit KV scales
+
+With VLLM_WORKER_MULTIPROC_METHOD=spawn (EP-only, mp executor), the vLLM
+workers did not inherit the FP8 monkey patches. init_fp8 now exports the
+FP8 config in NRL_VLLM_FP8_CONFIG and vllm_backend applies the patches on
+import when it is set. vllm_cfg.fp8_kv_unit_scales keeps the FP8 KV-cache
+scales at 1.0, which skips the per-refit scale calibration and with it
+the synchronous-rollout and PP=1 requirements. Not yet run end to end.
+---
+ nemo_rl/algorithms/grpo.py                    |  4 ++-
+ nemo_rl/models/generation/vllm/config.py      |  4 +++
+ .../generation/vllm/quantization/fp8.py       | 25 +++++++++++++++++--
+ .../models/generation/vllm/vllm_backend.py    |  6 +++++
+ .../models/generation/vllm/vllm_generation.py |  2 ++
+ 5 files changed, 38 insertions(+), 3 deletions(-)
+
+diff --git a/nemo_rl/algorithms/grpo.py b/nemo_rl/algorithms/grpo.py
+index 95876f546..86efeca5b 100644
+--- a/nemo_rl/algorithms/grpo.py
++++ b/nemo_rl/algorithms/grpo.py
+@@ -1564,7 +1564,9 @@ def setup(
+                 f"kv_cache_dtype='{kv_cache_dtype}' requires precision='fp8'. "
+                 "FP8 KV cache can only be used together with FP8 model weights."
+             )
+-        if kv_cache_dtype in REFITTABLE_FP8_KV_CACHE_DTYPES:
++        if kv_cache_dtype in REFITTABLE_FP8_KV_CACHE_DTYPES and not generation_config[
++            "vllm_cfg"
++        ].get("fp8_kv_unit_scales", False):
+             assert policy_config["dtensor_cfg"]["enabled"] == False, (
+                 "DTensor backend is not supported with kv cache fp8 enabled."
+             )
+diff --git a/nemo_rl/models/generation/vllm/config.py b/nemo_rl/models/generation/vllm/config.py
+index d420d1196..d4735357e 100644
+--- a/nemo_rl/models/generation/vllm/config.py
++++ b/nemo_rl/models/generation/vllm/config.py
+@@ -89,6 +89,10 @@ class VllmSpecificArgs(TypedDict):
+     # Supports exact names, substrings, and fnmatch wildcards.
+     quantization_ignore_patterns: NotRequired[list[str]]
+     kv_cache_dtype: Literal["auto", "fp8", "fp8_e4m3", "fp8_ds_mla"]
++    # Keep the FP8 KV cache scales at 1.0 instead of calibrating them on the
++    # trainer at refit. Calibration needs synchronous rollouts and PP=1; this
++    # allows the FP8 KV cache without either.
++    fp8_kv_unit_scales: NotRequired[bool]
+     enforce_eager: NotRequired[bool]
+     enable_return_routed_experts: NotRequired[bool]
+     # Collect vLLM request, cache, and cumulative token counters in a model-owner
+diff --git a/nemo_rl/models/generation/vllm/quantization/fp8.py b/nemo_rl/models/generation/vllm/quantization/fp8.py
+index 3bc7607d7..d5aa20cc5 100644
+--- a/nemo_rl/models/generation/vllm/quantization/fp8.py
++++ b/nemo_rl/models/generation/vllm/quantization/fp8.py
+@@ -12,10 +12,11 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
++import json
+ import os
+ import warnings
+ from collections.abc import Callable, Iterable, Iterator, Sequence
+-from dataclasses import dataclass, field, replace
++from dataclasses import asdict, dataclass, field, replace
+ from typing import Any
+ from unittest.mock import patch
+ 
+@@ -93,6 +94,10 @@ fp8_state: FP8State = FP8State()
+ 
+ fp8_patches_applied = False
+ 
++# init_fp8 publishes the config here for vLLM worker processes that start from a
++# fresh interpreter (see apply_fp8_patches_from_env).
++FP8_CONFIG_ENV = "NRL_VLLM_FP8_CONFIG"
++
+ original_run_engine_core = EngineCoreProc.run_engine_core
+ original_init = CoreEngineProcManager.__init__
+ 
+@@ -161,7 +166,8 @@ def monkey_patch_vllm_ray_executor(fp8_config):
+ 
+ def apply_fp8_patches(self, fp8_config):
+     global global_fp8_config, fp8_patches_applied
+-    assert not fp8_patches_applied
++    if fp8_patches_applied:
++        return
+ 
+     global_fp8_config = fp8_config
+ 
+@@ -239,6 +245,20 @@ def apply_fp8_patches(self, fp8_config):
+     fp8_patches_applied = True
+ 
+ 
++def apply_fp8_patches_from_env():
++    """Apply the FP8 patches in a vLLM process whose parent ran init_fp8.
++
++    With data/expert parallelism and no TP/PP, vLLM runs the model in worker
++    processes of its multiprocessing executor. They are spawned, so they inherit
++    neither the patches nor global_fp8_config from the engine core; the refit
++    would then fail in get_quantized_weight_iterator. vllm_backend calls this on
++    import, which in a worker happens before the model is built.
++    """
++    cfg = os.environ.get(FP8_CONFIG_ENV)
++    if cfg and not fp8_patches_applied:
++        apply_fp8_patches(None, FP8Config(**json.loads(cfg)))
++
++
+ def init_fp8(vllm_cfg, model_name, model_parallel_size):
+     global global_fp8_config
+     # Determine if we're using FP8 weights based on precision setting
+@@ -344,6 +364,7 @@ def init_fp8(vllm_cfg, model_name, model_parallel_size):
+             "pow2_activation_scaling_factors", False
+         )
+     global_fp8_config = FP8Config(**fp8_config_kwargs)
++    os.environ[FP8_CONFIG_ENV] = json.dumps(asdict(global_fp8_config))
+ 
+     # Keep existing DeepGEMM behavior unless a recipe explicitly opts into E8M0.
+     if vllm_cfg.get("use_deep_gemm", False) and not is_mx:
+diff --git a/nemo_rl/models/generation/vllm/vllm_backend.py b/nemo_rl/models/generation/vllm/vllm_backend.py
+index 95898f5da..c37bafbae 100644
+--- a/nemo_rl/models/generation/vllm/vllm_backend.py
++++ b/nemo_rl/models/generation/vllm/vllm_backend.py
+@@ -13,6 +13,7 @@
+ # limitations under the License.
+ import gc
+ import logging
++import os
+ import re
+ import socket
+ from collections.abc import Callable, Iterable, Iterator, Sequence
+@@ -58,6 +59,11 @@ except ImportError:
+         "please run at least once with the environment variable NRL_FORCE_REBUILD_VENVS=true set to force the rebuild of the environment."
+     )
+ 
++if os.environ.get("NRL_VLLM_FP8_CONFIG"):
++    from nemo_rl.models.generation.vllm.quantization import fp8 as _fp8
++
++    _fp8.apply_fp8_patches_from_env()
++
+ 
+ WeightUpdateTransport = Literal["ipc", "collective", "nccl_reshard"]
+ UnsupportedNativeRefitTransport = Literal["checkpoint_engine", "sparse_delta"]
+diff --git a/nemo_rl/models/generation/vllm/vllm_generation.py b/nemo_rl/models/generation/vllm/vllm_generation.py
+index fbfdbed76..4ff91ea51 100644
+--- a/nemo_rl/models/generation/vllm/vllm_generation.py
++++ b/nemo_rl/models/generation/vllm/vllm_generation.py
+@@ -1653,5 +1653,7 @@ class VllmGeneration(GenerationInterface):
+         Only traditional per-tensor FP8 caches expose separately refittable
+         k_scale/v_scale parameters.
+         """
++        if self.cfg["vllm_cfg"].get("fp8_kv_unit_scales", False):
++            return False
+         kv_cache_dtype = self.cfg["vllm_cfg"].get("kv_cache_dtype")
+         return kv_cache_dtype in REFITTABLE_FP8_KV_CACHE_DTYPES
+-- 
+2.43.0
+

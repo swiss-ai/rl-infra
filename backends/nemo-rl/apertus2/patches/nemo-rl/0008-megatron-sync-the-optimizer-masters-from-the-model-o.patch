@@ -1,0 +1,41 @@
+From 6bc1d326ba23d2602fec28c93d883f44d4231f7e Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Wed, 28 Oct 2026 11:12:38 +0100
+Subject: [PATCH 08/14] megatron: sync the optimizer masters from the model on
+ a weights-only resume
+
+A checkpoint saved with save_optimizer=false is resumed with
+load_optim=False. The fp32 masters were then left at their random init,
+because only finetune runs synced them from the loaded model. The first
+optimizer step wrote "random init + update" into the model and the policy
+collapsed (generation KL ~0.0003 -> ~2 after one step). Sync the masters
+from the model whenever the optimizer state is not loaded.
+---
+ nemo_rl/models/megatron/setup.py | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/nemo_rl/models/megatron/setup.py b/nemo_rl/models/megatron/setup.py
+index 6cdd5896c..af3cff8dc 100644
+--- a/nemo_rl/models/megatron/setup.py
++++ b/nemo_rl/models/megatron/setup.py
+@@ -2595,9 +2595,15 @@ def setup_model_and_optimizer(
+         # the BF16 model params over them would silently round-trip the masters
+         # through BF16 and lose precision, so we must skip the sync there.
+         # state.cfg is megatron_cfg (set above), so this reads the value the
+-        # bridge may have just mutated during load_checkpoint.
++        # bridge may have just mutated during load_checkpoint. A resume from a
++        # checkpoint saved without optimizer state (load_optim=False) also leaves
++        # the masters at random init; without the sync, the first optimizer step
++        # writes them into the model and the policy collapses.
+         if optimizer is not None:
+-            if megatron_cfg.checkpoint.finetune:
++            if (
++                megatron_cfg.checkpoint.finetune
++                or not megatron_cfg.checkpoint.load_optim
++            ):
+                 _force_sync_optimizer_fp32_from_model(optimizer, model)
+             elif resume_checkpoint_exists:
+                 _force_sync_model_from_optimizer_fp32(optimizer)
+-- 
+2.43.0
+

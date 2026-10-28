@@ -1,0 +1,623 @@
+From 00e2dd0605fd2d05448346fe3183a6c1cae968aa Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Wed, 28 Oct 2026 11:12:54 +0100
+Subject: [PATCH 13/14] megatron: failure forensics, HBM spill check and NCCL
+ warm-up
+
+Three opt-in helpers for the Megatron worker, all off unless their
+environment variables are set:
+- failure_forensics: per-rank phase tracking and a dump (stacks, CUDA
+  memory, optional memory history) when train or get_logprobs raises
+  (NRL_FORENSICS_DIR, NRL_MEM_HISTORY, NRL_MEM_SAMPLE_S).
+- hbm_spill: checks whether CPU-offloaded optimizer state landed in GPU
+  HBM on GH200 and can bind it to CPU memory (NRL_HBM_SPILL_CHECK,
+  NRL_HBM_BIND_CPU).
+- nccl_warmup: builds the NCCL communicators right after setup, so a
+  slow first collective does not hit the first training step
+  (NRL_NCCL_WARMUP).
+---
+ .../policy/workers/megatron_policy_worker.py  |   7 +
+ nemo_rl/utils/failure_forensics.py            | 176 ++++++++++++
+ nemo_rl/utils/hbm_spill.py                    | 261 ++++++++++++++++++
+ nemo_rl/utils/nccl_warmup.py                  |  85 ++++++
+ 4 files changed, 529 insertions(+)
+ create mode 100644 nemo_rl/utils/failure_forensics.py
+ create mode 100644 nemo_rl/utils/hbm_spill.py
+ create mode 100644 nemo_rl/utils/nccl_warmup.py
+
+diff --git a/nemo_rl/models/policy/workers/megatron_policy_worker.py b/nemo_rl/models/policy/workers/megatron_policy_worker.py
+index a11f9e482..2ba736929 100644
+--- a/nemo_rl/models/policy/workers/megatron_policy_worker.py
++++ b/nemo_rl/models/policy/workers/megatron_policy_worker.py
+@@ -140,6 +140,7 @@ from nemo_rl.models.policy.workers.checkpoint_engine import (
+ )
+ from nemo_rl.models.policy.workers.patches import apply_transformer_engine_patch
+ from nemo_rl.telemetry.setup import init_telemetry_worker
++from nemo_rl.utils import failure_forensics, hbm_spill, nccl_warmup
+ from nemo_rl.utils.grad_norm import warn_if_inf_grad_norm
+ from nemo_rl.utils.nsys import wrap_with_nvtx_name
+ from nemo_rl.utils.nvml import log_gpu_memory_diagnostics
+@@ -636,6 +637,7 @@ class MegatronPolicyWorkerImpl(
+             f"device drift after setup_distributed: current_device="
+             f"{torch.cuda.current_device()}, LOCAL_RANK={local_rank}."
+         )
++        failure_forensics.install(self.rank)
+ 
+         # Step 2: Validate and setup model paths
+         hf_model_name, pretrained_path, pt_checkpoint_exists = validate_model_paths(
+@@ -734,6 +736,8 @@ class MegatronPolicyWorkerImpl(
+         self.mcore_state = model_and_optimizer_state.state
+         self.model = model_and_optimizer_state.model
+         self.optimizer = model_and_optimizer_state.optimizer
++        hbm_spill.install(self.optimizer, self.rank)
++        nccl_warmup.warm_up(self.rank)
+         self.scheduler = model_and_optimizer_state.scheduler
+         self.checkpointing_context = model_and_optimizer_state.checkpointing_context
+         param_sync_func = model_and_optimizer_state.param_sync_func
+@@ -979,6 +983,7 @@ class MegatronPolicyWorkerImpl(
+         self.model.load_state_dict(extra_state, strict=False)
+ 
+     @wrap_with_nvtx_name("megatron_policy_worker/train")
++    @failure_forensics.dump_on_failure
+     def train(
+         self,
+         data: BatchedDataDict,
+@@ -1517,6 +1522,7 @@ class MegatronPolicyWorkerImpl(
+         Args:
+             tag: Phase-boundary name this sample belongs to.
+         """
++        failure_forensics.set_phase(tag)
+         if not torch.cuda.is_available() or not log.isEnabledFor(logging.DEBUG):
+             return
+         dev = torch.cuda.current_device()
+@@ -2247,6 +2253,7 @@ class MegatronPolicyWorkerImpl(
+             self._train_step_state = None
+ 
+     @wrap_with_nvtx_name("megatron_policy_worker/get_logprobs")
++    @failure_forensics.dump_on_failure
+     def get_logprobs(
+         self,
+         *,
+diff --git a/nemo_rl/utils/failure_forensics.py b/nemo_rl/utils/failure_forensics.py
+new file mode 100644
+index 000000000..2b2776f02
+--- /dev/null
++++ b/nemo_rl/utils/failure_forensics.py
+@@ -0,0 +1,176 @@
++# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++"""Leave enough behind on a GPU memory failure to see where and why it happened.
++
++Enabled by ``NRL_FORENSICS_DIR`` (one directory per run, shared by all ranks):
++
++- ``mem-rank<r>.tsv``: every ``NRL_MEM_SAMPLE_S`` seconds (default 10) the CUDA
++  allocator counters, the device's free memory and what the process holds outside
++  PyTorch (NCCL, CUDA context, other libraries), tagged with the last phase the
++  worker logged.
++- ``failure-rank<r>-<time>.txt``: written when a decorated worker method raises
++  (and on any PyTorch out-of-memory error): the exception, the same counters and
++  the allocator summary.
++- ``oom-rank<r>-<time>.pickle``: with ``NRL_MEM_HISTORY=1``, a memory snapshot
++  of every live allocation with the Python stack that made it, written for
++  out-of-memory errors only (PyTorch's, and NCCL's ``Cuda failure 'out of
++  memory'``). Open it at https://pytorch.org/memory_viz.
++
++``NRL_FORENSICS_TEST_OOM=1`` makes the first ``train`` call request 1 TiB of GPU
++memory, to check the whole path in a debug run.
++"""
++
++import functools
++import os
++import socket
++import threading
++import time
++import traceback
++from typing import Any, Callable, Optional
++
++import torch
++
++_GB = float(1 << 30)
++_MAX_REPORTS = 5
++
++_state: dict[str, Any] = {
++    "dir": None,
++    "rank": -1,
++    "device": None,
++    "phase": "init",
++    "history": False,
++    "reports": 0,
++    "snapshots": 0,
++}
++
++
++def _stamp() -> str:
++    return time.strftime("%Y%m%d-%H%M%S")
++
++
++def _counters() -> str:
++    dev = _state["device"]
++    free, total = torch.cuda.mem_get_info(dev)
++    reserved = torch.cuda.memory_reserved(dev)
++    return (
++        f"free={free / _GB:.2f}G total={total / _GB:.2f}G "
++        f"allocated={torch.cuda.memory_allocated(dev) / _GB:.2f}G "
++        f"reserved={reserved / _GB:.2f}G "
++        f"max_allocated={torch.cuda.max_memory_allocated(dev) / _GB:.2f}G "
++        f"max_reserved={torch.cuda.max_memory_reserved(dev) / _GB:.2f}G "
++        f"outside_torch={(total - free - reserved) / _GB:.2f}G"
++    )
++
++
++def set_phase(tag: str) -> None:
++    """Record the phase the worker is in; it tags the memory samples."""
++    _state["phase"] = tag
++
++
++def _sampler(period_s: float) -> None:
++    torch.cuda.set_device(_state["device"])
++    path = os.path.join(_state["dir"], f"mem-rank{_state['rank']}.tsv")
++    with open(path, "a", buffering=1) as f:
++        f.write(f"# host={socket.gethostname()} pid={os.getpid()} device={_state['device']}\n")
++        while True:
++            try:
++                f.write(f"{time.strftime('%F %T')}\t{_state['phase']}\t{_counters()}\n")
++            except Exception as e:
++                f.write(f"{time.strftime('%F %T')}\tsample failed: {e!r}\n")
++            time.sleep(period_s)
++
++
++def _snapshot() -> Optional[str]:
++    if not _state["history"] or _state["snapshots"] >= 1:
++        return None
++    _state["snapshots"] += 1
++    path = os.path.join(_state["dir"], f"oom-rank{_state['rank']}-{_stamp()}.pickle")
++    torch.cuda.memory._dump_snapshot(path)
++    return path
++
++
++def report(reason: str, exc: Optional[BaseException] = None) -> None:
++    """Write the memory state now, plus a snapshot if this is an out-of-memory error."""
++    if _state["dir"] is None or _state["reports"] >= _MAX_REPORTS:
++        return
++    _state["reports"] += 1
++    text = f"{reason}\n{exc!r}" if exc is not None else reason
++    oom = "out of memory" in text.lower()
++    path = os.path.join(_state["dir"], f"failure-rank{_state['rank']}-{_stamp()}.txt")
++    try:
++        with open(path, "w") as f:
++            f.write(
++                f"rank={_state['rank']} host={socket.gethostname()} pid={os.getpid()} "
++                f"device={_state['device']} phase={_state['phase']}\n{reason}\n"
++            )
++            if exc is not None:
++                f.write("".join(traceback.format_exception(exc)))
++            f.write(f"\n{_counters()}\n")
++            snap = _snapshot() if oom else None
++            if snap:
++                f.write(f"memory snapshot: {snap}\n")
++            f.write("\n" + torch.cuda.memory_summary(_state["device"], abbreviated=True))
++        print(f"[forensics] rank={_state['rank']} wrote {path}", flush=True)
++    except Exception as e:
++        print(f"[forensics] rank={_state['rank']} report failed: {e!r}", flush=True)
++
++
++def _on_torch_oom(device: int, alloc: int, device_total: int, device_free: int) -> None:
++    report(
++        f"PyTorch out of memory: requested {alloc / _GB:.2f}G, "
++        f"device total {device_total / _GB:.2f}G, device free {device_free / _GB:.2f}G"
++    )
++
++
++def dump_on_failure(fn: Callable) -> Callable:
++    """Decorate a worker method so a failure inside it leaves a report behind."""
++
++    @functools.wraps(fn)
++    def wrapper(*args: Any, **kwargs: Any) -> Any:
++        try:
++            if fn.__name__ == "train" and os.environ.get("NRL_FORENSICS_TEST_OOM") == "1":
++                torch.empty(1 << 40, dtype=torch.uint8, device="cuda")
++            return fn(*args, **kwargs)
++        except Exception as e:
++            report(f"exception in {fn.__name__}", e)
++            raise
++
++    return wrapper
++
++
++def install(rank: int) -> None:
++    """Start the forensics for this worker; call once its CUDA device is set."""
++    out_dir = os.environ.get("NRL_FORENSICS_DIR")
++    if not out_dir or not torch.cuda.is_available():
++        return
++    os.makedirs(out_dir, exist_ok=True)
++    _state.update(dir=out_dir, rank=rank, device=torch.cuda.current_device())
++    if os.environ.get("NRL_MEM_HISTORY", "0") == "1":
++        torch.cuda.memory._record_memory_history(
++            context="alloc",
++            stacks="python",
++            max_entries=int(os.environ.get("NRL_MEM_HISTORY_ENTRIES", "100000")),
++        )
++        _state["history"] = True
++    torch._C._cuda_attach_out_of_memory_observer(_on_torch_oom)
++    period = float(os.environ.get("NRL_MEM_SAMPLE_S", "10"))
++    threading.Thread(
++        target=_sampler, args=(period,), name="forensics-sampler", daemon=True
++    ).start()
++    print(
++        f"[forensics] rank={rank} writing to {out_dir} "
++        f"(memory history {'on' if _state['history'] else 'off'})",
++        flush=True,
++    )
+diff --git a/nemo_rl/utils/hbm_spill.py b/nemo_rl/utils/hbm_spill.py
+new file mode 100644
+index 000000000..c881e2288
+--- /dev/null
++++ b/nemo_rl/utils/hbm_spill.py
+@@ -0,0 +1,261 @@
++# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++"""Find and stop host memory that the NVIDIA driver moves into GPU memory.
++
++On ATS systems (GH200) a GPU reads and writes pageable host memory directly, and
++the UVM driver migrates pages a GPU accesses often into that GPU's HBM NUMA node
++(access-counter migration, on by default there). The driver only honours a
++memory policy set on the VMA itself (mbind), not the process-wide policy that
++``srun --mem-bind`` sets, so those pages leave the CPU nodes despite a CPU-only
++binding and take HBM that the CUDA allocator then cannot use.
++
++``NRL_HBM_SPILL_CHECK=<n>`` logs, after each of the first n optimizer steps,
++where the CPU-offloaded optimizer's host tensors live and which other anonymous
++mappings of the process sit on GPU nodes. ``NRL_HBM_BIND_CPU=1`` binds every
++large anonymous mapping to the CPU nodes after setup and after every optimizer
++step, moving back pages already on HBM; the driver then keeps them there.
++"""
++
++import bisect
++import ctypes
++import os
++import platform
++from collections import defaultdict
++from typing import Any
++
++import torch
++
++_SYSCALLS = {
++    "aarch64": {"mbind": 235, "move_pages": 239},
++    "x86_64": {"mbind": 237, "move_pages": 279},
++}
++_MPOL_BIND = 2
++_MPOL_MF_MOVE = 1 << 1
++_SAMPLE_BYTES = 8 << 20
++_BIND_MIN_BYTES = 16 << 20
++_GB = float(1 << 30)
++
++
++def _cpu_and_gpu_nodes() -> tuple[list[int], list[int]]:
++    cpu, gpu = [], []
++    root = "/sys/devices/system/node"
++    for name in os.listdir(root):
++        if name.startswith("node") and name[4:].isdigit():
++            with open(f"{root}/{name}/cpulist") as f:
++                (cpu if f.read().strip() else gpu).append(int(name[4:]))
++    return sorted(cpu), sorted(gpu)
++
++
++class _HbmSpill:
++    def __init__(self, rank: int, check_steps: int, bind: bool) -> None:
++        self.rank = rank
++        self.check_steps = check_steps
++        self.bind = bind
++        self.step = 0
++        self.libc = ctypes.CDLL(None, use_errno=True)
++        self.libc.syscall.restype = ctypes.c_long
++        self.nr = _SYSCALLS[platform.machine()]
++        self.cpu_nodes, self.gpu_nodes = _cpu_and_gpu_nodes()
++        mask = sum(1 << n for n in self.cpu_nodes)
++        self.mask = (ctypes.c_ulong * 1)(mask)
++
++    def _host_tensors(self, optimizer: Any) -> dict[str, list[torch.Tensor]]:
++        from megatron.core.optimizer.cpu_offloading import HybridDeviceOptimizer
++
++        groups: dict[str, list[torch.Tensor]] = defaultdict(list)
++        seen: set[int] = set()
++
++        def add(kind: str, t: Any) -> None:
++            if torch.is_tensor(t) and not t.is_cuda and t.numel() > 1:
++                if t.data_ptr() not in seen:
++                    seen.add(t.data_ptr())
++                    groups[kind].append(t)
++
++        for opt in getattr(optimizer, "chained_optimizers", None) or [optimizer]:
++            hdo = getattr(opt, "optimizer", None)
++            if not isinstance(hdo, HybridDeviceOptimizer):
++                continue
++            for t in hdo.gpu_params_map_cpu_copy.values():
++                add("param_copies", t)
++            for t in hdo.param_to_fp32_param.values():
++                add("fp32_params", t)
++            for t in hdo.cpu_copy_map_grad.values():
++                add("grads", t)
++            for sub in hdo.cpu_optimizers:
++                for state in sub.state.values():
++                    for k, v in state.items():
++                        add(f"adam_{k}", v)
++        return groups
++
++    def _node_gb(self, tensors: list[torch.Tensor]) -> dict[str, float]:
++        addrs, weights = [], []
++        for t in tensors:
++            nbytes = t.numel() * t.element_size()
++            n = max(1, nbytes // _SAMPLE_BYTES)
++            for i in range(n):
++                addrs.append(t.data_ptr() + i * (nbytes // n))
++                weights.append(nbytes / n)
++        out: dict[str, float] = defaultdict(float)
++        if not addrs:
++            return out
++        pages = (ctypes.c_void_p * len(addrs))(*addrs)
++        status = (ctypes.c_int * len(addrs))()
++        self.libc.syscall(
++            ctypes.c_long(self.nr["move_pages"]), ctypes.c_long(0),
++            ctypes.c_ulong(len(addrs)), pages, None, status, ctypes.c_int(0),
++        )
++        for s, w in zip(status, weights):
++            key = "hbm" if s in self.gpu_nodes else "cpu" if s >= 0 else "unmapped"
++            out[key] += w / _GB
++        return out
++
++    def _anon_vmas(self) -> list[tuple[int, int, str, float]]:
++        """(start, end, name, GB on GPU nodes) of every writable private anonymous mapping.
++
++        Read-only and PROT_NONE mappings (CUDA's virtual address reservations among
++        them) are left out.
++        """
++        ends, names = {}, {}
++        with open("/proc/self/maps") as f:
++            for line in f:
++                parts = line.split()
++                start, end = (int(x, 16) for x in parts[0].split("-"))
++                name = parts[5] if len(parts) > 5 else ""
++                if name in ("", "[heap]") and parts[1][1] == "w" and parts[1][3] == "p":
++                    ends[start], names[start] = end, name or "anon"
++        vmas = []
++        with open("/proc/self/numa_maps") as f:
++            for line in f:
++                parts = line.split()
++                start = int(parts[0], 16)
++                if start not in ends:
++                    continue
++                kb = 4
++                hbm_pages = 0
++                for p in parts[2:]:
++                    if p.startswith("kernelpagesize_kB="):
++                        kb = int(p.split("=")[1])
++                    elif p[0] == "N" and "=" in p:
++                        node, pages = p[1:].split("=")
++                        if int(node) in self.gpu_nodes:
++                            hbm_pages += int(pages)
++                vmas.append((start, ends[start], names[start], hbm_pages * kb / 1048576))
++        return vmas
++
++    def _bind_all(self, vmas: list[tuple[int, int, str, float]]) -> tuple[int, float, int]:
++        bound, gb, failed = 0, 0.0, 0
++        for start, end, _, _ in vmas:
++            if end - start < _BIND_MIN_BYTES:
++                continue
++            rc = self.libc.syscall(
++                ctypes.c_long(self.nr["mbind"]), ctypes.c_ulong(start),
++                ctypes.c_ulong(end - start), ctypes.c_ulong(_MPOL_BIND), self.mask,
++                ctypes.c_ulong(65), ctypes.c_ulong(_MPOL_MF_MOVE),
++            )
++            if rc == 0:
++                bound += 1
++                gb += (end - start) / _GB
++            else:
++                failed += 1
++        return bound, gb, failed
++
++    def _report(self, optimizer: Any, tag: str) -> list[tuple[int, int, str, float]]:
++        groups = self._host_tensors(optimizer)
++        known = []
++        parts = []
++        for kind, tensors in sorted(groups.items()):
++            gb = self._node_gb(tensors)
++            pinned = sum(t.is_pinned() for t in tensors)
++            parts.append(
++                f"{kind}={gb['hbm']:.1f}/{sum(gb.values()):.1f}G"
++                f"(pinned {pinned}/{len(tensors)})"
++            )
++            for t in tensors:
++                known.append((t.data_ptr(), t.data_ptr() + t.numel() * t.element_size()))
++        known.sort()
++        starts = [s for s, _ in known]
++
++        def overlaps_known(start: int, end: int) -> bool:
++            i = bisect.bisect_left(starts, end) - 1
++            return i >= 0 and known[i][1] > start
++
++        vmas = self._anon_vmas()
++        other = [v for v in vmas if v[3] > 0 and not overlaps_known(v[0], v[1])]
++        other.sort(key=lambda v: -v[3])
++        top = " ".join(
++            f"{hex(s)}+{(e - s) / _GB:.1f}G[{n}]:{g:.1f}G" for s, e, n, g in other[:4]
++        )
++        print(
++            f"[hbm-spill] rank={self.rank} {tag} optimizer host tensors on HBM/total: "
++            f"{' '.join(parts) or 'none'} | anon on HBM {sum(v[3] for v in vmas):.1f}G, "
++            f"outside optimizer tensors {sum(v[3] for v in other):.1f}G {top}",
++            flush=True,
++        )
++        return vmas
++
++    def after_setup(self, optimizer: Any) -> None:
++        vmas = self._report(optimizer, "setup") if self.check_steps else self._anon_vmas()
++        if self.bind:
++            self._log_bind(vmas, "setup")
++
++    def after_step(self, optimizer: Any) -> None:
++        self.step += 1
++        if not (self.step <= self.check_steps or self.bind):
++            return
++        torch.cuda.synchronize()
++        if self.step <= self.check_steps:
++            vmas = self._report(optimizer, f"opt_step={self.step}")
++        else:
++            vmas = self._anon_vmas()
++        if self.bind:
++            self._log_bind(vmas, f"opt_step={self.step}")
++            if self.step <= self.check_steps:
++                self._report(optimizer, f"opt_step={self.step} after bind")
++
++    def _log_bind(self, vmas: list[tuple[int, int, str, float]], tag: str) -> None:
++        bound, gb, failed = self._bind_all(vmas)
++        if tag == "setup" or self.step <= self.check_steps:
++            print(
++                f"[hbm-spill] rank={self.rank} {tag} bound {bound} anon mappings "
++                f"({gb:.1f}G) to CPU nodes {self.cpu_nodes}, {failed} failed",
++                flush=True,
++            )
++
++
++def install(optimizer: Any, rank: int) -> None:
++    """Hook the checks/binding onto every CPU-offloading sub-optimizer."""
++    check_steps = int(os.environ.get("NRL_HBM_SPILL_CHECK", "0"))
++    bind = os.environ.get("NRL_HBM_BIND_CPU", "0") == "1"
++    if optimizer is None or not (check_steps or bind):
++        return
++    from megatron.core.optimizer.cpu_offloading import HybridDeviceOptimizer
++
++    spill = _HbmSpill(rank, check_steps, bind)
++    hdos = [
++        opt.optimizer
++        for opt in getattr(optimizer, "chained_optimizers", None) or [optimizer]
++        if isinstance(getattr(opt, "optimizer", None), HybridDeviceOptimizer)
++    ]
++    if not hdos:
++        return
++
++    def guarded(fn: Any) -> None:
++        try:
++            fn(optimizer)
++        except Exception as e:
++            print(f"[hbm-spill] rank={rank} check failed: {e!r}", flush=True)
++
++    hdos[-1].register_step_post_hook(lambda *_: guarded(spill.after_step))
++    guarded(spill.after_setup)
+diff --git a/nemo_rl/utils/nccl_warmup.py b/nemo_rl/utils/nccl_warmup.py
+new file mode 100644
+index 000000000..3d54f10d4
+--- /dev/null
++++ b/nemo_rl/utils/nccl_warmup.py
+@@ -0,0 +1,85 @@
++# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++"""Create the trainer's NCCL communicators at setup instead of at first use.
++
++``init_process_group("nccl")`` is lazy: each process group gets its NCCL
++communicator, and each pipeline peer its point-to-point connection, the first
++time it is used, and NCCL then allocates its buffers with cudaMalloc. In the
++first training step that can be after the PyTorch allocator has filled the GPU,
++and the collective fails with ``Cuda failure 'out of memory'``. With
++``NRL_NCCL_WARMUP=1`` one tiny all-reduce per process group a training step uses and one
++send/receive between pipeline neighbours run right after setup, while memory is
++free; the allocator later works around the buffers they hold.
++"""
++
++import os
++import time
++
++import torch
++import torch.distributed as dist
++
++# The groups a training step uses: gradient reduce-scatter and parameter all-gather
++# (data parallel with CP, expert data parallel) and finalize_model_grads (tensor+data
++# parallel with CP, pipeline). Each communicator takes about 0.5 GiB of GPU memory, so
++# groups training never touches (e.g. the without-CP twins) are left out.
++_GROUPS = [
++    ("get_data_parallel_group", {"with_context_parallel": True}),
++    ("get_tensor_and_data_parallel_group", {"with_context_parallel": True}),
++    ("get_expert_data_parallel_group", {}),
++    ("get_pipeline_model_parallel_group", {}),
++]
++
++
++def warm_up(rank: int) -> None:
++    if os.environ.get("NRL_NCCL_WARMUP", "0") != "1":
++        return
++    from megatron.core import parallel_state as ps
++
++    start = time.time()
++    free_before = torch.cuda.mem_get_info()[0]
++    done = []
++    for name, kwargs in _GROUPS:
++        getter = getattr(ps, name, None)
++        if getter is None:
++            continue
++        try:
++            group = getter(**kwargs)
++        except Exception:
++            continue
++        if group is None or isinstance(group, list):
++            continue
++        if dist.get_rank(group) < 0 or dist.get_world_size(group) < 2:
++            continue
++        dist.all_reduce(torch.ones(1, device="cuda"), group=group)
++        done.append(name + ("+cp" if kwargs else ""))
++
++    pp = ps.get_pipeline_model_parallel_group()
++    if not isinstance(pp, list) and dist.get_world_size(pp) > 1:
++        send = torch.ones(1, device="cuda")
++        recv = torch.empty(1, device="cuda")
++        ops = [
++            dist.P2POp(dist.isend, send, ps.get_pipeline_model_parallel_next_rank(), group=pp),
++            dist.P2POp(dist.irecv, recv, ps.get_pipeline_model_parallel_prev_rank(), group=pp),
++        ]
++        for req in dist.batch_isend_irecv(ops):
++            req.wait()
++        done.append("pipeline_p2p")
++    torch.cuda.synchronize()
++    used = (free_before - torch.cuda.mem_get_info()[0]) / float(1 << 30)
++    print(
++        f"[nccl-warmup] rank={rank} {len(done)} communicators in {time.time() - start:.1f}s, "
++        f"{used:.2f}G of GPU memory: {' '.join(done)}",
++        flush=True,
++    )
+-- 
+2.43.0
+
