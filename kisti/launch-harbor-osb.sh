@@ -37,7 +37,7 @@ if [[ -z "${OPENSANDBOX_API_KEY:-}" ]]; then
     [[ -r "${HOME}/.opensandbox_token" ]] || { echo "ERROR: no OPENSANDBOX_API_KEY and no ~/.opensandbox_token" >&2; exit 1; }
     OPENSANDBOX_API_KEY="$(tr -d '\n' < "${HOME}/.opensandbox_token")"
 fi
-export OPENSANDBOX_API_KEY OPENSANDBOX_DOMAIN="${OPENSANDBOX_DOMAIN:-https://opensandbox.breithorn.svc.cscs.ch}"
+export OPENSANDBOX_API_KEY OPENSANDBOX_DOMAIN="${OPENSANDBOX_DOMAIN:-https://opensandbox-gvisor.breithorn.svc.cscs.ch}"
 code="$(curl -s -m 15 -o /dev/null -w '%{http_code}' -H "OPEN-SANDBOX-API-KEY: ${OPENSANDBOX_API_KEY}" \
     "${OPENSANDBOX_DOMAIN%/}/v1/sandboxes?pageSize=1" || true)"
 [[ "${code}" == 200 ]] || { echo "ERROR: OpenSandbox rejected the key or is unreachable (HTTP ${code:-none})" >&2; exit 1; }

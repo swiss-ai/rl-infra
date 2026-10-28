@@ -107,7 +107,7 @@ Proven:
 
    ```bash
    curl -s -o /dev/null -w "%{http_code}\n" -H "OPEN-SANDBOX-API-KEY: $(tr -d '\n' < ~/.opensandbox_token)" \
-     "https://opensandbox.breithorn.svc.cscs.ch/v1/sandboxes?pageSize=1"      # expect 200
+     "https://opensandbox-gvisor.breithorn.svc.cscs.ch/v1/sandboxes?pageSize=1"      # expect 200
    ```
 4. **No registry credential** is needed for the micro-tasks or for the public Harbor project `swe_lego_v05_1`.
    The wrapper sends the placeholder `anonymous` / `unused`, which the public project accepts.
@@ -330,7 +330,7 @@ Sandboxes have a TTL (6 h in this setup), and a hard-killed job leaves them behi
 ```bash
 cd ~/projects/nemo-rl-apertus2/3rdparty/Gym-workspace/Gym
 uv run --extra nemo_gym python -m nemo_gym.sandbox.providers.opensandbox.cleanup_sandboxes \
-  --domain https://opensandbox.breithorn.svc.cscs.ch --api-key "$(tr -d '\n' < ~/.opensandbox_token)" \
+  --domain https://opensandbox-gvisor.breithorn.svc.cscs.ch --api-key "$(tr -d '\n' < ~/.opensandbox_token)" \
   --run-id <RUN> --user "$USER" --reap
 ```
 
