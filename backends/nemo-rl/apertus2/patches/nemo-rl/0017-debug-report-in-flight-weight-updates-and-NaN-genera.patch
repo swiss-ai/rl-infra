@@ -1,0 +1,81 @@
+From 8d7938f9b44fbc37c4dadcd4e9c2c7a81dd3b579 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Wed, 28 Oct 2026 11:22:18 +0100
+Subject: [PATCH 17/17] debug: report in-flight weight updates and NaN
+ generations
+
+Each in-flight weight update prints "[nan-gen] weight update N: K requests
+in flight" per engine, and each response with non-finite logprobs prints a
+[nan-gen] line with where they start and the response length at each
+weight update it saw.
+---
+ .../generation/vllm/vllm_worker_async.py      | 38 +++++++++++++++++--
+ 1 file changed, 35 insertions(+), 3 deletions(-)
+
+diff --git a/nemo_rl/models/generation/vllm/vllm_worker_async.py b/nemo_rl/models/generation/vllm/vllm_worker_async.py
+index e84987a41..3dbe892b1 100644
+--- a/nemo_rl/models/generation/vllm/vllm_worker_async.py
++++ b/nemo_rl/models/generation/vllm/vllm_worker_async.py
+@@ -1562,10 +1562,20 @@ class VllmAsyncGenerationWorkerImpl(
+                 request_id=request_id,
+             )
+ 
+-            # Get the final result from the generator
++            # Get the final result from the generator, noting how many tokens the
++            # response had when each in-flight weight update finished
+             final_request_output = None
+-            async for req_output in vllm_request_generator:
+-                final_request_output = req_output
++            refits_seen = getattr(self, "_nrl_refits", 0)
++            refit_positions = []
++            self._nrl_in_flight = getattr(self, "_nrl_in_flight", 0) + 1
++            try:
++                async for req_output in vllm_request_generator:
++                    final_request_output = req_output
++                    if getattr(self, "_nrl_refits", 0) != refits_seen:
++                        refits_seen = self._nrl_refits
++                        refit_positions.append(len(req_output.outputs[0].token_ids))
++            finally:
++                self._nrl_in_flight -= 1
+ 
+             if final_request_output is None:
+                 raise RuntimeError(f"No output received for request {request_id}")
+@@ -1627,6 +1637,20 @@ class VllmAsyncGenerationWorkerImpl(
+                                     logprob_value
+                                 )
+ 
++            nonfinite = torch.nonzero(
++                ~torch.isfinite(logprobs_single_item[0, current_input_actual_length:])
++            )
++            if nonfinite.numel() > 0:
++                print(
++                    f"[nan-gen] request={request_id} prompt_tokens={current_input_actual_length} "
++                    f"generated={num_generated_tokens} first_nonfinite_at={int(nonfinite[0])} "
++                    f"nonfinite={nonfinite.numel()} "
++                    f"token_at_first={generated_token_ids[int(nonfinite[0])]} "
++                    f"finish={generation_details.finish_reason} "
++                    f"weight_updates_at={refit_positions}",
++                    flush=True,
++                )
++
+             # Generation lengths
+             generation_lengths_tensor = torch.tensor(
+                 [num_generated_tokens],
+@@ -2063,6 +2087,14 @@ class VllmAsyncGenerationWorkerImpl(
+                 "resume_generation_async can only be used with async_engine=True"
+             )
+ 
++        # Counts in-flight weight updates, so generate_async can tell where in each
++        # response they happened (see the [nan-gen] report there).
++        self._nrl_refits = getattr(self, "_nrl_refits", 0) + 1
++        print(
++            f"[nan-gen] weight update {self._nrl_refits}: "
++            f"{getattr(self, '_nrl_in_flight', 0)} requests in flight",
++            flush=True,
++        )
+         await self.llm.resume_generation()
+         return True
+ 
+-- 
+2.43.0
+

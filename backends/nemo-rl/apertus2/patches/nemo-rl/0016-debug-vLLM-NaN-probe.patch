@@ -1,0 +1,763 @@
+From 7b924f77d1ca324140badc373e8c7b5b453d0e25 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Wed, 28 Oct 2026 11:22:18 +0100
+Subject: [PATCH 16/17] debug: vLLM NaN probe
+
+NRL_DEBUG_NAN_PROBE=1 patches vLLM's GPU model runner in each worker and
+prints [nan-probe] lines around in-flight weight updates: persistent-batch
+changes, dummy steps during the pause, block-table rows that point at live
+requests' state blocks, and non-finite linear-attention state. It syncs the
+GPU every decode step; never enable it in production.
+---
+ .../models/generation/vllm/vllm_backend.py    |   6 +
+ nemo_rl/utils/vllm_nan_probe.py               | 724 ++++++++++++++++++
+ 2 files changed, 730 insertions(+)
+ create mode 100644 nemo_rl/utils/vllm_nan_probe.py
+
+diff --git a/nemo_rl/models/generation/vllm/vllm_backend.py b/nemo_rl/models/generation/vllm/vllm_backend.py
+index c37bafbae..7fe5ff493 100644
+--- a/nemo_rl/models/generation/vllm/vllm_backend.py
++++ b/nemo_rl/models/generation/vllm/vllm_backend.py
+@@ -2202,3 +2202,9 @@ class VllmInternalWorkerExtensionWithCheckpointEngine(
+ 
+     def _validate_checkpoint_engine_weight_update(self) -> None:
+         self._reject_unsupported_native_refit("checkpoint_engine")
++
++
++if os.environ.get("NRL_DEBUG_NAN_PROBE") == "1":
++    from nemo_rl.utils import vllm_nan_probe
++
++    vllm_nan_probe.install(VllmInternalWorkerExtension)
+diff --git a/nemo_rl/utils/vllm_nan_probe.py b/nemo_rl/utils/vllm_nan_probe.py
+new file mode 100644
+index 000000000..900ba1be3
+--- /dev/null
++++ b/nemo_rl/utils/vllm_nan_probe.py
+@@ -0,0 +1,724 @@
++# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++"""Debug probe: why vLLM samples NaN right after an in-flight weight update.
++
++Enabled by ``NRL_DEBUG_NAN_PROBE=1`` in the vLLM worker environment;
++``vllm_backend`` installs it when imported in each vLLM GPU worker process. It
++patches vLLM's GPU model runner and prints ``[nan-probe]`` lines:
++
++- on the first step after each weight update: how vLLM's persistent batch
++  changed (requests moved to another row or re-added), how many steps with no
++  scheduled tokens ran during the pause, how many cache blocks that step zeroes
++  or copies, which requests' linear-attention state is already non-finite
++  before the forward, which block-table rows past the live requests (the rows
++  CUDA-graph padding reads) point at a live request's state block, and the free
++  GPU memory;
++- on the same step: how many DP dummy steps ran before and after the update,
++  whether any live request's cache blocks were written during the pause, by the
++  weight update itself, or between the update and this step (per-block
++  checksums of every KV/state tensor), and which requests' attention K/V
++  already hold non-finite values before the forward;
++- the first time a request's logits are non-finite: that request's rows, state
++  blocks and computed tokens, whether the update step touched its blocks, which
++  linear-attention layers hold a non-finite state for it, which attention
++  layers hold non-finite K/V for it, and the first attention layer whose query,
++  new K/V or output was non-finite for it (only observable when attention runs
++  outside a full CUDA graph);
++- after the first step following each update: which state pages the
++  linear-attention kernels were given by the DP dummy steps of the pause and by
++  that step (from the metadata builders, so also under full CUDA graphs), which
++  of them are not their row's own state page and who owns them, and which pages
++  the step wrote outside the requests' own pages (checksums before and after
++  the forward). A NaN report names the page holding the request's first bad K/V
++  and whether a dummy row or that step's stray writes touched it.
++
++Debugging code, to be removed with the rest of the NaN investigation.
++"""
++
++import contextlib
++import functools
++import re
++from typing import Any
++
++import torch
++
++_state: dict[str, Any] = {
++    "updates": 0,
++    "warned": set(),
++    "watch": False,
++    "attn": {},
++    "record": None,
++    "builds": [],
++}
++
++_INT_VIEW = {1: torch.int8, 2: torch.int16, 4: torch.int32, 8: torch.int64}
++
++
++def _warn_once(msg: str) -> None:
++    if msg not in _state["warned"]:
++        _state["warned"].add(msg)
++        print(f"[nan-probe] {msg}", flush=True)
++
++
++def _sync_ok() -> Any:
++    try:
++        from vllm.utils.gpu_sync_debug import gpu_sync_allowed
++
++        return gpu_sync_allowed()
++    except Exception:
++        return contextlib.nullcontext()
++
++
++def _free_gpu() -> str:
++    free, total = torch.cuda.mem_get_info()
++    return f"{free / (1 << 30):.1f}/{total / (1 << 30):.1f}G free"
++
++
++def _short(req_id: Any) -> str:
++    return str(req_id)[:8]
++
++
++def _layer_index(name: str) -> int:
++    m = re.search(r"layers\.(\d+)", name)
++    return int(m.group(1)) if m else 1 << 30
++
++
++def _layer(name: str) -> str:
++    m = re.search(r"layers\.(\d+)", name)
++    return f"L{m.group(1)}" if m else name
++
++
++def _tensors_of(kv: Any) -> list[torch.Tensor]:
++    if isinstance(kv, torch.Tensor):
++        return [kv]
++    if isinstance(kv, (list, tuple)) and kv and isinstance(kv[0], (list, tuple)):
++        kv = kv[0]
++    return [t for t in kv if isinstance(t, torch.Tensor)]
++
++
++def _layout(runner: Any) -> tuple[list[tuple[int, list[tuple[str, list[torch.Tensor]]]]], int]:
++    """Linear-attention groups as (group id, [(layer name, state tensors)]) and block size."""
++    if getattr(runner, "_np_layout", None) is None:
++        from vllm.v1.worker import mamba_utils
++
++        group_ids, spec = mamba_utils.get_mamba_groups(runner.kv_cache_config)
++        ctx = runner.compilation_config.static_forward_context
++        groups = []
++        for g in group_ids:
++            layers = []
++            for name in runner.kv_cache_config.kv_cache_groups[g].layer_names:
++                tensors = _tensors_of(ctx[name].kv_cache)
++                if tensors:
++                    layers.append((name, tensors))
++            groups.append((g, layers))
++        runner._np_layout = (groups, spec.block_size)
++    return runner._np_layout
++
++
++def _all_tensors(runner: Any) -> list[tuple[int, str, torch.Tensor, int | None]]:
++    """Every KV/state tensor as (group id, layer name, block-major view, position dim or None)."""
++    if getattr(runner, "_np_all", None) is None:
++        num_blocks = runner.kv_cache_config.num_blocks
++        mamba_groups = {g for g, _ in _layout(runner)[0]}
++        ctx = runner.compilation_config.static_forward_context
++        out = []
++        for g, group in enumerate(runner.kv_cache_config.kv_cache_groups):
++            block_size = group.kv_cache_spec.block_size
++            for name in group.layer_names:
++                for t in _tensors_of(ctx[name].kv_cache):
++                    if num_blocks not in t.shape:
++                        continue
++                    x = t.movedim(list(t.shape).index(num_blocks), 0)
++                    pos = None
++                    if g not in mamba_groups and block_size in x.shape[1:]:
++                        pos = 1 + list(x.shape[1:]).index(block_size)
++                    out.append((g, name, x, pos))
++        runner._np_all = out
++    return runner._np_all
++
++
++def _checksums(runner: Any) -> list[torch.Tensor] | None:
++    """Per-block integer sums of every KV/state tensor, to detect writes between two points."""
++    try:
++        torch.cuda.synchronize()
++        sums = []
++        for _, _, x, _ in _all_tensors(runner):
++            v = x.view(_INT_VIEW[x.element_size()])
++            if v.dim() == 1:
++                sums.append(v.to(torch.int64))
++                continue
++            dims = tuple(range(1, v.dim()))
++            sums.append(
++                torch.cat([v[i : i + 256].sum(dim=dims) for i in range(0, v.shape[0], 256)])
++            )
++        torch.cuda.synchronize()
++        return sums
++    except Exception as e:
++        _warn_once(f"checksum failed: {e!r}")
++        return None
++
++
++def _owners(runner: Any) -> dict[tuple[int, int], list[str]]:
++    owners: dict[tuple[int, int], list[str]] = {}
++    for r, req in runner.requests.items():
++        for g, ids in enumerate(req.block_ids):
++            for blk in ids:
++                if blk:
++                    owners.setdefault((g, blk), []).append(r)
++    return owners
++
++
++def _changed(runner: Any, before: list[torch.Tensor] | None, after: list[torch.Tensor] | None) -> str:
++    """Which (layer, block) pairs differ between two checksum sets, and which live requests own them."""
++    if before is None or after is None:
++        return "not measured"
++    with _sync_ok():
++        masks = torch.stack([b != a for b, a in zip(before, after)]).cpu()
++    total = int(masks.sum())
++    if not total:
++        return "nothing"
++    owners = _owners(runner)
++    hits: dict[str, set[str]] = {}
++    for (g, name, _, _), row in zip(_all_tensors(runner), masks):
++        for blk in row.nonzero().flatten().tolist():
++            for r in owners.get((g, blk), []):
++                hits.setdefault(_short(r), set()).add(f"{_layer(name)}@{blk}")
++    live = {r: sorted(v, key=lambda s: _layer_index("layers." + s[1:]))[:8] for r, v in hits.items()}
++    return f"{total} (layer, block) pairs, of live requests: {live or 'none'}"
++
++
++def _owner_roles(runner: Any) -> dict[int, list[str]]:
++    """Every page's current owners, as request:group#index (stale for a non-running state page)."""
++    mamba_groups = {g for g, _ in _layout(runner)[0]}
++    roles: dict[int, list[str]] = {}
++    for r, req in runner.requests.items():
++        for g, ids in enumerate(req.block_ids):
++            kind = f"kda{g}" if g in mamba_groups else "attn"
++            for j, blk in enumerate(ids):
++                if not blk:
++                    continue
++                stale = g in mamba_groups and j != runner.mamba_state_idx.get(r, j)
++                roles.setdefault(blk, []).append(
++                    f"{_short(r)}:{kind}#{j}{'(stale)' if stale else ''}"
++                )
++    return roles
++
++
++def _builder_groups(runner: Any) -> dict[int, int]:
++    if getattr(runner, "_np_builder_groups", None) is None:
++        runner._np_builder_groups = {
++            id(builder): group.kv_cache_group_id
++            for groups in runner.attn_groups
++            for group in groups
++            for builder in group.metadata_builders
++        }
++    return runner._np_builder_groups
++
++
++def _recorded_pages(runner: Any, mode: str) -> list[tuple[int | None, int, int]]:
++    """(group, row, state page) given to the linear-attention kernels by builds of ``mode``."""
++    groups = _builder_groups(runner)
++    out = []
++    with _sync_ok():
++        for m, builder_id, idx in _state["builds"]:
++            if m == mode and idx is not None:
++                for row, page in enumerate(idx.flatten().cpu().tolist()):
++                    out.append((groups.get(builder_id), row, page))
++    return out
++
++
++def _own_pages(runner: Any) -> set[int]:
++    """Pages the live rows legitimately write this step: new-token K/V pages and state pages."""
++    mamba_groups = {g for g, _ in _layout(runner)[0]}
++    pages = {0}
++    for r in runner.input_batch.req_ids[: runner.input_batch.num_reqs]:
++        req = runner.requests.get(r) if r is not None else None
++        if req is None:
++            continue
++        n = req.num_computed_tokens
++        for g, ids in enumerate(req.block_ids):
++            block_size = runner.kv_cache_config.kv_cache_groups[g].kv_cache_spec.block_size
++            idxs = {max(n - 1, 0) // block_size}
++            if g in mamba_groups:
++                idxs.add(runner.mamba_state_idx.get(r, -1))
++            else:
++                idxs.add(n // block_size)
++            pages.update(ids[j] for j in idxs if 0 <= j < len(ids))
++    return pages
++
++
++def _changed_pages(
++    runner: Any, before: list[torch.Tensor], after: list[torch.Tensor]
++) -> dict[int, list[str]]:
++    """Pages whose bytes differ between two checksum sets, with the layers whose view changed."""
++    with _sync_ok():
++        masks = torch.stack([b != a for b, a in zip(before, after)]).cpu()
++    pages: dict[int, set[str]] = {}
++    for (_, name, _, _), row in zip(_all_tensors(runner), masks):
++        for blk in row.nonzero().flatten().tolist():
++            pages.setdefault(blk, set()).add(_layer(name))
++    return {p: sorted(v, key=lambda s: int(s[1:])) for p, v in pages.items()}
++
++
++def _first_step_report(runner: Any) -> None:
++    """After the first forward following an update: which state pages it and the pause used."""
++    roles = _owner_roles(runner)
++    req_ids = runner.input_batch.req_ids
++    num_reqs = runner.input_batch.num_reqs
++    foreign = []
++    for g, row, page in _recorded_pages(runner, "real"):
++        if not page:
++            continue
++        r = req_ids[row] if row < num_reqs else None
++        req = runner.requests.get(r) if r is not None else None
++        own = set()
++        if req is not None:
++            idx = runner.mamba_state_idx.get(r)
++            ids = req.block_ids[g] if g is not None else []
++            own = {ids[idx]} if idx is not None and idx < len(ids) else set()
++        if page not in own:
++            who = _short(r) if r else "padding"
++            foreign.append(f"kda{g} row {row} ({who}) -> page {page} {roles.get(page, ['free'])}")
++    stray: dict[int, list[str]] = {}
++    before = getattr(runner, "_np_before_fwd", None)
++    after = _checksums(runner)
++    if before is not None and after is not None:
++        own_pages = _own_pages(runner)
++        changed = _changed_pages(runner, before, after)
++        stray = {p: v for p, v in changed.items() if p not in own_pages}
++    runner._np_stray = stray
++    pause = getattr(runner, "_np_pause_pages", {})
++    taken = {p: v for p, v in pause.items() if any(":attn#" in s for s in roles.get(p, []))}
++    print(
++        f"[nan-probe] update {_state['updates']} first step: the pause's dummy steps gave the "
++        f"state kernels {len(pause)} pages, {len(taken)} of them now attention pages of "
++        f"requests ({ {p: (pause[p][:2], roles.get(p)) for p in list(taken)[:6]} or 'none'}); "
++        f"this step's state pages outside their row's own: {foreign[:8] or 'none'}; pages "
++        f"written outside the rows' own pages: "
++        f"{ {p: (v[:4] + (['...', v[-1]] if len(v) > 4 else []), roles.get(p, ['free'])) for p, v in list(stray.items())[:8]} or 'none'}"
++        f" ({len(stray)} pages)",
++        flush=True,
++    )
++
++
++def _nonfinite_kv(
++    runner: Any, req_ids: list[str], extra: int = 0
++) -> dict[str, list[tuple[str, int, int]]]:
++    """Attention layers whose cached K/V at already-computed positions hold non-finite values,
++    as (layer, first bad position, page holding it)."""
++    flags = []
++    for g, name, x, pos in _all_tensors(runner):
++        if pos is None:
++            continue
++        block_size = x.shape[pos]
++        for r in req_ids:
++            req = runner.requests.get(r)
++            if req is None:
++                continue
++            n = req.num_computed_tokens + extra
++            ids = req.block_ids[g][: -(-n // block_size)]
++            if not ids:
++                continue
++            sel = x.index_select(0, torch.tensor(ids, device=x.device))
++            fin = torch.isfinite(sel).movedim(pos, 1).reshape(len(ids), block_size, -1)
++            fin = fin.all(dim=-1).flatten()
++            bad = ~fin & (torch.arange(fin.numel(), device=x.device) < n)
++            flags.append((r, name, bad.any(), bad.int().argmax(), ids, block_size))
++    if not flags:
++        return {}
++    with _sync_ok():
++        anys = torch.stack([f[2] for f in flags]).cpu().tolist()
++        firsts = torch.stack([f[3] for f in flags]).cpu().tolist()
++    out: dict[str, list[tuple[str, int, int]]] = {}
++    for (r, name, _, _, ids, block_size), bad, first in zip(flags, anys, firsts):
++        if bad:
++            out.setdefault(_short(r), []).append((_layer(name), first, ids[first // block_size]))
++    return out
++
++
++def _fmt_kv(found: dict[str, list[tuple[str, int, int]]] | list[tuple[str, int, int]] | None) -> Any:
++    if not found:
++        return "none"
++    if isinstance(found, dict):
++        return {r: _fmt_kv(v) for r, v in found.items()}
++    return [f"{layer}@pos{pos}(page {page})" for layer, pos, page in found]
++
++
++def _state_block(runner: Any, req_id: str, group: int, block_size: int, after_forward: bool) -> int | None:
++    """Physical block that holds the request's running linear-attention state."""
++    req = runner.requests.get(req_id)
++    if req is None:
++        return None
++    ids = req.block_ids[group]
++    if runner.cache_config.mamba_cache_mode != "align":
++        idx = 0
++    elif after_forward and req_id in runner.mamba_state_idx:
++        idx = runner.mamba_state_idx[req_id]
++    else:
++        idx = max(req.num_computed_tokens - 1, 0) // block_size
++    return ids[idx] if idx < len(ids) else None
++
++
++def _nonfinite_layers(runner: Any, blocks: dict[str, dict[int, int | None]]) -> dict[str, list[str]]:
++    groups, _ = _layout(runner)
++    flags = []
++    for g, layers in groups:
++        for req_id, by_group in blocks.items():
++            blk = by_group.get(g)
++            if blk is None:
++                continue
++            for name, tensors in layers:
++                ok = torch.stack([torch.isfinite(t[blk]).all() for t in tensors]).all()
++                flags.append((req_id, name, ok))
++    if not flags:
++        return {}
++    with _sync_ok():
++        oks = torch.stack([f[2] for f in flags]).cpu().tolist()
++    bad: dict[str, list[str]] = {}
++    for (req_id, name, _), ok in zip(flags, oks):
++        if not ok:
++            bad.setdefault(req_id, []).append(_layer(name))
++    return bad
++
++
++def _padding_aliases(runner: Any, live: dict[tuple[int, int], str]) -> dict[str, list[int]]:
++    """Live requests whose state block appears in a block-table row past the live rows."""
++    groups, _ = _layout(runner)
++    n = runner.input_batch.num_reqs
++    aliases: dict[str, list[int]] = {}
++    for g, _ in groups:
++        gpu_rows = runner.input_batch.block_table[g].block_table.gpu
++        with _sync_ok():
++            pad = gpu_rows[n : n + 256].cpu()
++        for offset, row in enumerate(pad.tolist()):
++            for blk in row:
++                owner = live.get((g, blk)) if blk else None
++                if owner is not None:
++                    aliases.setdefault(owner, []).append(n + offset)
++    return aliases
++
++
++def _reset_idle(runner: Any) -> None:
++    runner._np_idle_snap = None
++    runner._np_dummy_before = 0
++    runner._np_dummy_after = 0
++    _state["builds"] = []
++
++
++def _after_update_states(runner: Any, scheduler_output: Any, rows_before: dict[str, int]) -> None:
++    if scheduler_output.total_num_scheduled_tokens == 0:
++        runner._np_empty_steps = getattr(runner, "_np_empty_steps", 0) + 1
++        return
++    seen = getattr(runner, "_np_seen", None)
++    if seen is None or seen == _state["updates"]:
++        runner._np_seen = _state["updates"]
++        runner._np_steps_since = getattr(runner, "_np_steps_since", 0) + 1
++        _reset_idle(runner)
++        return
++    runner._np_seen = _state["updates"]
++    runner._np_steps_since = 0
++    rows_after = dict(runner.input_batch.req_id_to_index)
++    moved = {r for r in rows_after if r in rows_before and rows_before[r] != rows_after[r]}
++    added = {r for r in rows_after if r not in rows_before}
++    zeroed = set(getattr(scheduler_output, "new_block_ids_to_zero", None) or [])
++    copies = getattr(scheduler_output, "kv_cache_block_copies", None) or []
++    groups, block_size = _layout(runner)
++    blocks = {
++        r: {g: _state_block(runner, r, g, block_size, False) for g, _ in groups}
++        for r in rows_after
++    }
++    bad = _nonfinite_layers(runner, blocks)
++    live = {(g, b): r for r, by_group in blocks.items() for g, b in by_group.items() if b}
++    aliases = _padding_aliases(runner, live)
++    runner._np_last_update = {
++        "update": _state["updates"],
++        "rows": {r: (rows_before.get(r), rows_after[r]) for r in rows_after},
++        "moved": moved,
++        "added": added,
++        "zeroed": zeroed,
++        "aliases": aliases,
++        "blocks": blocks,
++    }
++    print(
++        f"[nan-probe] update {_state['updates']}: first step after it has {len(rows_after)} "
++        f"requests ({len(rows_before)} in the batch before), {len(moved)} moved rows, "
++        f"{len(added)} re-added, {getattr(runner, '_np_empty_steps', 0)} empty steps since "
++        f"the previous update, {len(zeroed)} blocks zeroed, {len(copies)} block copies; "
++        f"non-finite state before the forward: "
++        f"{ {_short(r): v for r, v in bad.items()} or 'none'}; padding rows pointing at "
++        f"live state blocks: { {_short(r): v for r, v in aliases.items()} or 'none'}; "
++        f"GPU {_free_gpu()}",
++        flush=True,
++    )
++    runner._np_empty_steps = 0
++    runner._np_before_fwd = None
++    runner._np_pause_pages = {}
++    try:
++        now = _checksums(runner)
++        runner._np_before_fwd = now
++        pause_pages: dict[int, list[tuple[int | None, int, str]]] = {}
++        for g, row, page in _recorded_pages(runner, "dummy"):
++            if page:
++                r = runner.input_batch.req_ids[row] if row < runner.input_batch.num_reqs else None
++                entry = (g, row, _short(r) if r else "padding")
++                if entry not in pause_pages.setdefault(page, []):
++                    pause_pages[page].append(entry)
++        runner._np_pause_pages = pause_pages
++        rpc_before, rpc_after = getattr(runner, "_np_rpc", (None, None))
++        idle = getattr(runner, "_np_idle_snap", None)
++        pause = _changed(runner, idle, rpc_before) if idle is not None else "no dummy steps"
++        kv_bad = _nonfinite_kv(runner, list(rows_after))
++        print(
++            f"[nan-probe] update {_state['updates']} cache check: "
++            f"{getattr(runner, '_np_dummy_before', 0)} dummy steps before the update and "
++            f"{getattr(runner, '_np_dummy_after', 0)} after it; blocks changed during the "
++            f"pause before the update: {pause}; during the update: "
++            f"{_changed(runner, rpc_before, rpc_after)}; between the update and this step: "
++            f"{_changed(runner, rpc_after, now)}; non-finite attention K/V before the "
++            f"forward: {_fmt_kv(kv_bad)}",
++            flush=True,
++        )
++    finally:
++        _reset_idle(runner)
++        _state["attn"] = {}
++        _state["watch"] = True
++        _state["record"] = "real"
++
++
++def _attention_summary(runner: Any, row: int) -> str:
++    seen = _state["attn"]
++    if getattr(runner, "_np_steps_since", 0):
++        return "attention not watched (only the first step after an update is)"
++    if not seen:
++        return "attention not observed (it ran inside a full CUDA graph)"
++    qsl = runner.query_start_loc.np
++    lo, hi = int(qsl[row]), int(qsl[row + 1])
++    names = sorted(seen, key=_layer_index)
++    with _sync_ok():
++        flags = {name: [bool(m[lo:hi].any()) for m in seen[name]] for name in names}
++    parts = []
++    for label, i in (("query", 0), ("new k/v", 1), ("output", 2)):
++        hit = next((_layer(name) for name in names if flags[name][i]), None)
++        parts.append(f"{label} {hit or 'finite'}")
++    return "first non-finite attention " + ", ".join(parts)
++
++
++def _check_logits(runner: Any, logits: torch.Tensor) -> None:
++    bad_rows = (~torch.isfinite(logits)).any(dim=-1)
++    with _sync_ok():
++        if not bool(bad_rows.any()):
++            return
++        rows = bad_rows.nonzero().flatten().cpu().tolist()
++    reported = runner.__dict__.setdefault("_np_reported", set())
++    req_ids = runner.input_batch.req_ids
++    groups, block_size = _layout(runner)
++    last = getattr(runner, "_np_last_update", {})
++    for i in rows:
++        if i >= len(req_ids) or req_ids[i] is None or req_ids[i] in reported:
++            continue
++        r = req_ids[i]
++        reported.add(r)
++        req = runner.requests.get(r)
++        blocks_now = {g: _state_block(runner, r, g, block_size, True) for g, _ in groups}
++        touched = any(
++            b in last.get("zeroed", set())
++            for b in list(blocks_now.values()) + list(last.get("blocks", {}).get(r, {}).values())
++        )
++        bad = _nonfinite_layers(runner, {r: blocks_now}).get(r)
++        kv_bad = _nonfinite_kv(runner, [r], extra=1).get(_short(r))
++        pause_pages = getattr(runner, "_np_pause_pages", {})
++        stray = getattr(runner, "_np_stray", {})
++        victim = {
++            page: {
++                "dummy rows": pause_pages.get(page, "none"),
++                "stray write": stray.get(page, "none") if not getattr(runner, "_np_steps_since", 0) else "n/a",
++            }
++            for page in sorted({p for _, _, p in kv_bad or []})
++        }
++        print(
++            f"[nan-probe] non-finite logits: request {_short(r)} at row {i}, "
++            f"{getattr(runner, '_np_steps_since', 0)} steps after update {last.get('update')}, "
++            f"computed tokens {getattr(req, 'num_computed_tokens', None)}, "
++            f"rows before/after that update {last.get('rows', {}).get(r)}, "
++            f"moved {r in last.get('moved', set())}, re-added {r in last.get('added', set())}, "
++            f"state blocks then {last.get('blocks', {}).get(r)} now {blocks_now}, "
++            f"zeroed at that update {touched}, padding rows pointing at it "
++            f"{last.get('aliases', {}).get(r)}, layers with non-finite state now "
++            f"{bad or 'none'}, attention layers with non-finite K/V now "
++            f"{_fmt_kv(kv_bad)}, pages holding them: {victim or 'none'}, "
++            f"{_attention_summary(runner, i)}; GPU {_free_gpu()}",
++            flush=True,
++        )
++
++
++def _watch_attention() -> None:
++    """Record per-token finiteness of attention inputs/outputs on the first step after an update."""
++    from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
++
++    forward = FlashAttentionImpl.forward
++
++    @functools.wraps(forward)
++    def wrapper(
++        self: Any,
++        layer: Any,
++        query: Any,
++        key: Any,
++        value: Any,
++        kv_cache: Any,
++        attn_metadata: Any,
++        *args: Any,
++        **kwargs: Any,
++    ) -> Any:
++        result = forward(self, layer, query, key, value, kv_cache, attn_metadata, *args, **kwargs)
++        if _state["watch"] and attn_metadata is not None:
++            try:
++                out = kwargs.get("output", args[0] if args else result)
++                n = attn_metadata.num_actual_tokens
++
++                def bad(t: Any) -> torch.Tensor:
++                    if t is None:
++                        return torch.zeros(n, dtype=torch.bool, device=query.device)
++                    return (~torch.isfinite(t[:n].reshape(n, -1))).any(-1)
++
++                _state["attn"][layer.layer_name] = (bad(query), bad(key) | bad(value), bad(out))
++            except Exception as e:
++                _warn_once(f"attention check failed: {e!r}")
++        return result
++
++    FlashAttentionImpl.forward = wrapper
++
++
++def _watch_state_inputs() -> None:
++    """Record the state pages each linear-attention metadata build hands its kernels."""
++    from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
++
++    build = GDNAttentionMetadataBuilder.build
++
++    @functools.wraps(build)
++    def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
++        md = build(self, *args, **kwargs)
++        mode = _state["record"]
++        if mode is not None:
++            try:
++                idx = md.non_spec_state_indices_tensor
++                _state["builds"].append((mode, id(self), None if idx is None else idx.clone()))
++            except Exception as e:
++                _warn_once(f"state-input record failed: {e!r}")
++        return md
++
++    GDNAttentionMetadataBuilder.build = wrapper
++
++
++def install(extension_cls: Any) -> None:
++    """Patch vLLM's GPU model runner and count the refits done through ``extension_cls``."""
++    from vllm.v1.worker import gpu_model_runner
++
++    runner_cls = gpu_model_runner.GPUModelRunner
++    if getattr(runner_cls, "_np_installed", False):
++        return
++
++    update_states = runner_cls._update_states
++    sample = runner_cls._sample
++    dummy_run = runner_cls._dummy_run
++
++    def _counting(method: Any) -> Any:
++        @functools.wraps(method)
++        def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
++            runner = getattr(self, "model_runner", None)
++            before = _checksums(runner) if runner is not None else None
++            out = method(self, *args, **kwargs)
++            if runner is not None:
++                runner._np_rpc = (before, _checksums(runner))
++            _state["updates"] += 1
++            return out
++
++        return wrapper
++
++    for name in ("update_weights_from_collective", "update_weights_via_ipc_zmq"):
++        if hasattr(extension_cls, name):
++            setattr(extension_cls, name, _counting(getattr(extension_cls, name)))
++
++    def _update_states(self: Any, scheduler_output: Any) -> Any:
++        rows_before = dict(self.input_batch.req_id_to_index)
++        out = update_states(self, scheduler_output)
++        try:
++            _after_update_states(self, scheduler_output, rows_before)
++        except Exception as e:
++            _warn_once(f"update-states check failed: {e!r}")
++        return out
++
++    def _sample(self: Any, logits: Any, spec_decode_metadata: Any) -> Any:
++        try:
++            if _state["record"] == "real":
++                _first_step_report(self)
++        except Exception as e:
++            _warn_once(f"first-step report failed: {e!r}")
++        finally:
++            _state["record"] = None
++            _state["builds"] = []
++        try:
++            if logits is not None:
++                _check_logits(self, logits)
++        except Exception as e:
++            _warn_once(f"logits check failed: {e!r}")
++        finally:
++            _state["watch"] = False
++        return sample(self, logits, spec_decode_metadata)
++
++    def _dummy_run(self: Any, num_tokens: int, *args: Any, **kwargs: Any) -> Any:
++        capturing = kwargs.get("is_graph_capturing") or kwargs.get("is_profile")
++        recording = False
++        if not capturing and getattr(self, "_np_seen", None) is not None:
++            try:
++                if self._np_seen != _state["updates"]:
++                    self._np_dummy_after = getattr(self, "_np_dummy_after", 0) + 1
++                else:
++                    self._np_dummy_before = getattr(self, "_np_dummy_before", 0) + 1
++                    if getattr(self, "_np_idle_snap", None) is None:
++                        self._np_idle_snap = _checksums(self)
++                recording = _state["record"] is None
++            except Exception as e:
++                _warn_once(f"dummy-run check failed: {e!r}")
++        if recording:
++            _state["record"] = "dummy"
++        try:
++            return dummy_run(self, num_tokens, *args, **kwargs)
++        finally:
++            if recording:
++                _state["record"] = None
++
++    runner_cls._update_states = _update_states
++    runner_cls._sample = _sample
++    runner_cls._dummy_run = _dummy_run
++    try:
++        _watch_attention()
++    except Exception as e:
++        _warn_once(f"attention watch not installed: {e!r}")
++    try:
++        _watch_state_inputs()
++    except Exception as e:
++        _warn_once(f"state-input watch not installed: {e!r}")
++    try:
++        import inspect
++
++        fix_loaded = "Point every dummy row at the null block" in inspect.getsource(dummy_run)
++    except Exception:
++        fix_loaded = None
++    runner_cls._np_installed = True
++    print(
++        f"[nan-probe] installed in this vLLM worker (dummy-run block-table fix loaded: "
++        f"{fix_loaded})",
++        flush=True,
++    )
+-- 
+2.43.0
+

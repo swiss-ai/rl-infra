@@ -1,0 +1,107 @@
+From edeeefe285a5be5d38b9af4d5f8edb75c2b474ca Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Wed, 28 Oct 2026 11:22:18 +0100
+Subject: [PATCH 15/17] debug: refit-only mode for layouts too small to train
+
+NRL_DEBUG_REFIT_ONLY=<eps> makes the Megatron worker's train run the
+forward pass only and then scale every weight by 1 + eps (and back on the
+next call), so each step still ends with a refit of changed weights while
+vLLM generates, without the optimizer step the 4-node debug layout cannot
+hold. Off unless the variable is set.
+---
+ .../policy/workers/megatron_policy_worker.py  |  6 ++-
+ nemo_rl/utils/debug_refit.py                  | 51 +++++++++++++++++++
+ 2 files changed, 56 insertions(+), 1 deletion(-)
+ create mode 100644 nemo_rl/utils/debug_refit.py
+
+diff --git a/nemo_rl/models/policy/workers/megatron_policy_worker.py b/nemo_rl/models/policy/workers/megatron_policy_worker.py
+index 2ba736929..122973712 100644
+--- a/nemo_rl/models/policy/workers/megatron_policy_worker.py
++++ b/nemo_rl/models/policy/workers/megatron_policy_worker.py
+@@ -140,7 +140,7 @@ from nemo_rl.models.policy.workers.checkpoint_engine import (
+ )
+ from nemo_rl.models.policy.workers.patches import apply_transformer_engine_patch
+ from nemo_rl.telemetry.setup import init_telemetry_worker
+-from nemo_rl.utils import failure_forensics, hbm_spill, nccl_warmup
++from nemo_rl.utils import debug_refit, failure_forensics, hbm_spill, nccl_warmup
+ from nemo_rl.utils.grad_norm import warn_if_inf_grad_norm
+ from nemo_rl.utils.nsys import wrap_with_nvtx_name
+ from nemo_rl.utils.nvml import log_gpu_memory_diagnostics
+@@ -1017,6 +1017,9 @@ class MegatronPolicyWorkerImpl(
+             if hasattr(module, "_inference_key_value_memory"):
+                 module._inference_key_value_memory = None
+ 
++        if debug_refit.enabled():
++            eval_mode = True
++
+         if gbs is None:
+             gbs = self.cfg["train_global_batch_size"]
+         if mbs is None:
+@@ -1356,6 +1359,7 @@ class MegatronPolicyWorkerImpl(
+                 metrics["num_ranks"] = torch.distributed.get_world_size()
+             except Exception as e:
+                 warnings.warn(f"Failed to compute FLOPs for MFU reporting: {e}")
++        debug_refit.after_train(self.model)
+         self.timer.stop("train")
+         return metrics
+ 
+diff --git a/nemo_rl/utils/debug_refit.py b/nemo_rl/utils/debug_refit.py
+new file mode 100644
+index 000000000..83895b3bd
+--- /dev/null
++++ b/nemo_rl/utils/debug_refit.py
+@@ -0,0 +1,51 @@
++# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++"""Refits without optimizer steps, for debug runs on layouts too small to train.
++
++``NRL_DEBUG_REFIT_ONLY=<eps>`` makes the Megatron worker's ``train`` run the forward
++pass only (as in eval mode) and then scale every weight by ``1 + eps`` and, on the
++next call, back by ``1 / (1 + eps)``. Each step therefore still ends with a refit that
++sends changed weights to the generation engines while they are generating, without
++the optimizer step (whose CPU-offloaded state the 4-node debug layout cannot hold).
++Use an eps of at least 0.01: smaller factors leave most bfloat16 weights unchanged.
++"""
++
++import os
++from typing import Any
++
++import torch
++
++
++_calls = 0
++
++
++def enabled() -> bool:
++    return float(os.environ.get("NRL_DEBUG_REFIT_ONLY", "0")) != 0
++
++
++def after_train(model: Any) -> None:
++    """Scale the weights for the coming refit; call at the end of ``train``."""
++    global _calls
++    eps = float(os.environ.get("NRL_DEBUG_REFIT_ONLY", "0"))
++    if eps == 0:
++        return
++    _calls += 1
++    scale = 1 + eps if _calls % 2 else 1 / (1 + eps)
++    with torch.no_grad():
++        for param in model.parameters():
++            param.mul_(scale)
++    print(
++        f"[debug-refit] train call {_calls}: weights scaled by {scale:.6f}", flush=True
++    )
+-- 
+2.43.0
+
