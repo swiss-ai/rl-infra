@@ -145,8 +145,6 @@ Problems we met in this step (all fixed by hand, none in the scripts yet):
   into `megatron_policy_worker.py` conflicted, which then broke the `ray.sub` patch. We pinned that PR at commit
   `05db6ab36` (2026-05-30). If you hit the same conflict: build the clone by hand, merging the pinned commits
   from `pin` in order, with that commit for #2517.
-- `lfs setstripe` on a **non-existent** `container-images` directory created a 0-byte *file* of that name, and the
-  following `mkdir` failed. Remove the empty file, `mkdir -p` the directory and re-run.
 - The clone has no GitHub push access by design (`remote set-url --push origin no_push`).
 
 ### 3. Gym with OpenSandbox
