@@ -98,7 +98,8 @@ SBATCH_FLAGS=(--nodes="${NODES}" --account="${ACCOUNT}" --partition="${PARTITION
 # RAY_DEDUP_LOGS=0: Ray otherwise folds similar lines from different workers into one
 # "[repeated Nx]" line, which drops per-rank errors (NCCL's failing CUDA call) and the
 # per-rank [gpumem] lines.
-COMMAND="RAY_DEDUP_LOGS=${RAY_DEDUP_LOGS:-0} DRIVER_RETRIES=${DRIVER_RETRIES:-2} bash ${HERE}/driver_retry.sh \
+# DRIVER_WRAPPER: optional command put in front of it all, e.g. run-harbor-osb.sh's sandbox reaper.
+COMMAND="RAY_DEDUP_LOGS=${RAY_DEDUP_LOGS:-0} DRIVER_RETRIES=${DRIVER_RETRIES:-2} ${DRIVER_WRAPPER:+${DRIVER_WRAPPER} }bash ${HERE}/driver_retry.sh \
 ${DRIVER_PYTHON:-/opt/nemo_rl_venv/bin/python} ${SCRIPT} --config ${CONFIG} \
 cluster.num_nodes=${NODES} cluster.gpus_per_node=4 \
 checkpointing.checkpoint_dir=${OUT}/results/${RUN} \

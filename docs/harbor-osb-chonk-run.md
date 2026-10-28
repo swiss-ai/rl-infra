@@ -24,7 +24,8 @@ Newest first. If you followed an earlier version, the entries marked **action** 
     See [Larger layouts](#larger-layouts).
   - `OVERLAY=<file>` in both launchers merges a task overlay last; `envs/harbor-osb-proxy-sft.yaml` is an experiment
     (role-marked chat template, 8192 tokens) that did not improve the base model's JSON validity.
-  - Sandboxes also outlive **successful** runs (the batch in flight at the end): reap them after every run, see [Cleanup](#cleanup).
+  - Sandboxes also outlive **successful** runs (the batch in flight at the end). The launchers now delete the run's
+    sandboxes when the driver exits (`envs/reap_after.sh`); after `scancel` or a time limit, reap by hand, see [Cleanup](#cleanup).
 - **2026-10-28 (evening)**
   - **Action:** OpenSandbox moved to **`https://opensandbox-gvisor.breithorn.svc.cscs.ch`**, with new API keys. The old
     `opensandbox.breithorn.svc.cscs.ch` has served Traefik's default self-signed certificate and 404 since 11:32 today.
@@ -378,8 +379,10 @@ pods per node and about 40 creates per second cluster-wide. Full API guide: the 
 
 ## Cleanup
 
-Sandboxes have a TTL (6 h in this setup). Both a killed job and a successful one leave sandboxes behind (a
-successful one, the batch in flight when training ends), so reap them by run id after every run:
+Sandboxes have a TTL (6 h in this setup), and every run leaves some behind (a successful one, the batch in flight
+when training ends). The launchers reap them when the driver exits (`envs/reap_after.sh`; the driver log ends with
+`Deleting N OpenSandbox sandbox(es) for run ...`). A job that Slurm kills (`scancel`, time limit) never gets there,
+so reap its sandboxes by run id:
 
 ```bash
 cd ~/projects/nemo-rl-apertus2/3rdparty/Gym-workspace/Gym

@@ -81,7 +81,7 @@ printf 'defaults:\n  - %s\n  - %s\n' "${RECIPE}" "${TASK}" > "${CFG}"
 [[ -z "${OVERLAY:-}" ]] || printf '  - %s\n' "$(realpath "${OVERLAY}")" >> "${CFG}"
 COMMAND="cd /opt/nemo-rl && \
 bash ${RL_INFRA}/kisti/pydeps-kisti.sh && \
-RAY_DEDUP_LOGS=0 DRIVER_RETRIES=0 bash ${RL_INFRA}/backends/nemo-rl/driver_retry.sh \
+RAY_DEDUP_LOGS=0 DRIVER_RETRIES=0 bash ${RL_INFRA}/envs/reap_after.sh bash ${RL_INFRA}/backends/nemo-rl/driver_retry.sh \
 bash ${RL_INFRA}/backends/nemo-rl/apertus2/driver.sh examples/nemo_gym/run_grpo_nemo_gym.py --config ${CFG} \
 cluster.num_nodes=${NODES} cluster.gpus_per_node=4 \
 checkpointing.checkpoint_dir=${OUT}/results/${RUN} logger.log_dir=${OUT}/logs/${RUN} $*"

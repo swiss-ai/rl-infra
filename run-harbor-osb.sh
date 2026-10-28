@@ -66,5 +66,6 @@ printf 'defaults:\n  - %s\n  - %s\n' "${RECIPE}" "${TASK}" > "${CFG}"
 # OVERLAY: optional task overlay merged last, e.g. envs/harbor-osb-proxy-sft.yaml
 [[ -z "${OVERLAY:-}" ]] || printf '  - %s\n' "$(realpath "${OVERLAY}")" >> "${CFG}"
 echo "== ${RUN}: ${NODES} nodes, partition ${PARTITION}, OpenSandbox ${OPENSANDBOX_DOMAIN}, tasks ${HARBOR_TASKS_DIR}"
-SCRIPT=examples/nemo_gym/run_grpo_nemo_gym.py \
+# envs/reap_after.sh deletes the run's sandboxes when the driver exits (a run leaves its last batch behind).
+SCRIPT=examples/nemo_gym/run_grpo_nemo_gym.py DRIVER_WRAPPER="bash ${ROOT}/envs/reap_after.sh" \
     bash "${APERTUS2_DIR}/launch.sh" "${CFG}" "${NODES}" "${RUN}" "$@"
