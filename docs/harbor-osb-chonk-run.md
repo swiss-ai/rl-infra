@@ -6,7 +6,8 @@ swiss-ai organisation with Clariden access can reproduce it from a clean account
 
 **Status (2026-10-28): the full Chonk job runs end to end on KISTI** (job 1153929, 12 nodes: 5 GRPO steps,
 302 of 320 rollouts real, multi-turn agent trials on OpenSandbox sandboxes, reward 0 as expected). **It also runs end to end on CSCS Alps (Daint)**
-(job 5184052, 12 nodes: 5 GRPO steps, 411 trials, one trial with reward 1). It has not run on Clariden yet (queued).
+(job 5184052, 12 nodes: 5 GRPO steps, 411 trials, one trial with reward 1), and at **8192 tokens on 20 nodes**
+(job 5188206: 5 steps, 448 trials, three trials with reward 1). It has not run on Clariden yet (queued).
 What is proven and what is not is listed in [Status](#status) below.
 
 Contents: [Changelog](#changelog) · [What it is](#what-it-is) · [Status](#status) · [Access](#access-you-need) ·
@@ -24,6 +25,10 @@ Newest first. If you followed an earlier version, the entries marked **action** 
     The launchers and `validate_micro_tasks.py` now default to the new endpoint; put the new key in `~/.opensandbox_token`.
   - Real SWE tasks: new `envs/prepare_swe_lego_tasks.py` builds a `HARBOR_ROOT` from Ambroise's 1,830 validated SWE-Lego
     tasks, see [Using real SWE tasks](#using-real-swe-tasks).
+  - New `recipes/apertus2-chonk-vllm-adamw-20n.yaml`: the 12-node recipe with 16 trainer nodes (EP64) and the same
+    4 vLLM nodes. With it 8192 tokens fit (Daint job 5188206: 5 steps, 3 rewards of 1, peak 71.8 GB reserved per GPU);
+    on 12 nodes 8192 runs out of GPU memory (job 5186694). `envs/harbor-osb.yaml` stays at 4096, so pass 8192 on the
+    command line, see [Submit](#6-submit). The 6-node layout is dropped.
 - **2026-10-28**
   - **Action:** pull the branch. `envs/harbor-osb.yaml` gained three settings without which every rollout is empty:
     `harbor_agent_environment_server: null`, `vllm_cfg.http_server_serving_chat_kwargs.chat_template`, and a
@@ -84,19 +89,21 @@ Proven:
 | **Chonk GRPO with Harbor + OpenSandbox runs end to end** (12 nodes, blueprint layout, async GRPO) | KISTI job 1153929: 5 steps in 20.5 min; 302 of 320 rollouts real (18 masked); 200 trials checked had no exception, mean 4.2 Terminus-2 turns (max 20); a sandbox per trial on Breithorn, verifier reward read for all 320; weight sync about 4.6 s; generation KL error 0.0006; step times 16 to 235 s. Reward 0.0 everywhere, so the loss is 0 and nothing is learned yet |
 | Chonk serves from David's image with the blueprint's vLLM layout (TP1, DP4, expert parallel per node) | KISTI job 1152908: weights load in 113 s (58 GiB per GPU, 16.9 GiB left for KV cache at 0.85 utilisation), and a completion returns "Bern." for "The capital of Switzerland is". See [KISTI HANGANG](#kisti-hangang) |
 | **The same on CSCS Alps (Daint)**, 12 nodes, branch as of 2026-10-28 | Daint job 5184052 (`csstaff`, `normal`): 5 steps, driver exit 0; start-up about 9.5 min (`ray.sub` start to step 1), step times 241 / 27 / 129 / 73 / 100 s; 411 trials over all 8 families, 16 masked; **one trial scored 1** in step 1 (mean 0.0156 over 64), 0 afterwards. Peak trainer memory per GPU 59.6 GB allocated, 68.2 GB reserved |
+| **8192 tokens on 20 nodes** (16 trainer EP64 + 4 vLLM, `recipes/apertus2-chonk-vllm-adamw-20n.yaml`) | Daint job 5188206: 5 steps, driver exit 0 after 1725 s (start-up about 13.5 min), step times 166 / 53 / 322 / 46 / 326 s; 448 trials, 7 masked; rewards 1 in step 2 (one trial) and step 4 (two trials). Per GPU: 40.3 GB allocated at train start (EP32: 47.7), peaks 60.9 GB allocated and 71.8 GB reserved |
 
 **Not proven** (nobody has run these):
 
-- A model that learns. Daint job 5184052 had one reward of 1 (step 1, so one step with a non-zero gradient); otherwise
+- A model that learns. Daint job 5184052 had one reward of 1 (step 1, so one step with a non-zero gradient) and job
+  5188206 three (steps 2 and 4); otherwise
   Chonk, a pretraining checkpoint, produced no correct Terminus-2 answer in 320 KISTI trials and 410 of 411 Daint trials.
   359 of the 411 Daint trials had at least one "No valid JSON object found" parser warning (5034 in total).
   Next: a chat/SFT checkpoint, or easier tasks.
-- Contexts longer than 4096 tokens: 661 agent calls were refused with HTTP 400 because the conversation outgrew
-  `max_model_len` (the trial then ends); on Daint 615 calls, and 125 trials ended with `ContextLengthExceededError`.
-  Memory allows more on 12 nodes (68.2 of 96 GB reserved at 4096). Raise `max_total_sequence_length`.
+- Contexts longer than 8192 tokens. At 4096, 661 agent calls (KISTI) and 615 (Daint) were refused with HTTP 400 because
+  the conversation outgrew `max_model_len` (the trial then ends), and 125 of 411 Daint trials ended with
+  `ContextLengthExceededError`. At 8192 on 20 nodes it is 74 of 448 trials (16.5%). 8192 does not fit on 12 nodes.
 - The same run on Clariden (jobs queued).
 - The 6-node layout (4 trainer EP16 + 2 vLLM) does not fit at 4096 tokens: out of GPU memory in the first training
-  step (Daint job 5184751, see [Errors we hit](#errors-we-hit)).
+  step (Daint job 5184751, see [Errors we hit](#errors-we-hit)). Dropped.
 
 ## Access you need
 
@@ -141,7 +148,8 @@ The branch adds to David's blueprint:
 |---|---|
 | `run-harbor-osb.sh` | Launcher. Reads the key, checks it with an authenticated call, sets the labels the reaper uses, writes the merged config, calls `launch.sh` |
 | `envs/harbor-osb.yaml` | Task file merged over the recipe: Harbor agent, OpenSandbox, 64 sandboxes, 4096 tokens |
-| `recipes/apertus2-chonk-vllm-adamw-6n.yaml` | The 12-node recipe cut to 6 nodes (4 trainer EP16 + 2 vLLM). Unvalidated |
+| `recipes/apertus2-chonk-vllm-adamw-6n.yaml` | The 12-node recipe cut to 6 nodes (4 trainer EP16 + 2 vLLM). Does not fit, dropped |
+| `recipes/apertus2-chonk-vllm-adamw-20n.yaml` | The 12-node recipe with 16 trainer nodes (EP64) + 4 vLLM. Fits 8192 tokens |
 | `envs/make_micro_tasks.py` | Generates the micro-tasks and the `train.jsonl` / `validation.jsonl` rows |
 | `envs/validate_micro_tasks.py` | Checks the tasks on real sandboxes (reward 0 before, 1 after the reference solution) |
 | `backends/nemo-rl/apertus2/setup-gym.sh` | Puts Gym with the OpenSandbox provider into the NeMo-RL clone |
@@ -235,10 +243,20 @@ private `swe_lego_v04_1` project and needs registry credentials.
 ```bash
 cd ~/rl-infra
 export HARBOR_ROOT=$SCRATCH/osb/harbor_micro PARTITION=normal JOB_TIME=02:00:00
-export RECIPE=recipes/apertus2-chonk-vllm-adamw-6n.yaml      # 6 nodes; omit for the 12-node blueprint layout
 export RUN=chonk-harbor-micro-$(date +%m%d-%H%M)
-bash run-harbor-osb.sh
+bash run-harbor-osb.sh                                       # 12 nodes, 4096 tokens
 ```
+
+For 8192 tokens use 20 nodes (on 12 nodes it runs out of GPU memory). The overrides win over `envs/harbor-osb.yaml`:
+
+```bash
+export RECIPE=recipes/apertus2-chonk-vllm-adamw-20n.yaml RUN=chonk-harbor-20n-8k-$(date +%m%d-%H%M)
+bash run-harbor-osb.sh policy.max_total_sequence_length=8192 \
+  policy.sequence_packing.train_mb_tokens=8192 policy.sequence_packing.logprob_mb_tokens=8192
+```
+
+Set a new `RUN` for every submission: a reused name overwrites `$SCRATCH/nemo-rl/configs/$RUN.yaml` and mixes the
+metrics of both runs in one log directory.
 
 The wrapper stops if the OpenSandbox key is rejected. The key is exported **before** `sbatch` and is baked into
 the job, so replace a bad key by cancelling the job and resubmitting. The wrapper writes `$SCRATCH/nemo-rl/configs/$RUN.yaml`
@@ -323,6 +341,8 @@ pods per node and about 40 creates per second cluster-wide. Full API guide: the 
 | HTTP 500 on every second agent turn, `AssertionError: EOS token #0 not found in template_token_ids` | The pass-through template has no EOS, which NeMo-RL needs to find the end of the previous turn | Template with EOS after assistant messages |
 | HTTP 400 `Prompt exceeds max_model_len` (not an error) | The conversation outgrew 4096 tokens; the trial ends | Raise `max_total_sequence_length` when memory allows |
 | 6 nodes: `ncclUnhandledCudaError ... Failed to CUDA calloc async 4 bytes` while creating an NCCL communicator in `_log_microbatch_router_metrics` (`finalize_model_grads`), first `policy.train()` | GPU out of memory: EP16 puts twice the experts on each GPU. Per GPU (96 GB): 65.4 GB allocated before the forward/backward, peaks 77.5 GB allocated and 88.8 GB reserved (12 nodes: 59.6 / 68.2 GB) | Use the 12-node layout. Untested: 2048 tokens, or `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (reserved minus allocated was 4 to 11 GB) |
+| 12 nodes at 8192 tokens: `ncclCuMemAlloc ... Cuda failure 2 'out of memory'` in `finish_grad_sync` (`finalize_model_grads`), first `policy.train()` | GPU out of memory: the log-prob pass already peaked at 82.5 GB reserved per GPU (4096: 66.4). Full activation recompute is already on | 20 nodes (`apertus2-chonk-vllm-adamw-20n.yaml`, EP64): 71.8 GB peak (Daint 5188206) |
+| HTTP 504 `KUBERNETES::POD_READY_TIMEOUT ... Timeout waiting for sandbox ... to be Running with IP. Elapsed: 180s` | Sandbox pod not ready within 180 s on Breithorn (34 of about 450 creates in Daint job 5188206) | Harbor retries the trial; only 7 rollouts ended masked |
 | Agent turns truncated at "Question:" (not an error) | `stop_strings: ['Question:']` inherited from the GSM8K recipe | `policy.generation.stop_strings: null` |
 | HTTP 401 `INVALID_API_KEY` from every create while `/health` is 200 | Key expired or rotated | New key; the wrapper now fails at submit time |
 | HTTP 422 `ValidatingAdmissionPolicy ... denied request` | `secureAccess` missing | `secure_access: true` (already set) |
@@ -367,13 +387,14 @@ it uses are in `kisti/` of this branch.
 - Does Chonk fit 4096-token multi-turn sequences, and does it follow the Terminus-2 JSON format? A reward of 0 would be expected
   and would prove the plumbing but not that the model can use the tools.
   *Daint 5184052:* memory fits with headroom (68.2 of 96 GB reserved); the JSON format mostly not (359 of 411 trials
-  with parser warnings, one trial solved).
+  with parser warnings, one trial solved). *8192:* fits on 20 nodes, not on 12 (Daint 5188206, 5186694).
 - Does async GRPO work with Gym at this scale? If the first step fails in the async code, a synchronous run is the fallback
   (`grpo.async_grpo.enabled: false`; the 6-node recipe then needs a re-check of the trainer/inference split).
   *Yes:* KISTI 1153929 and Daint 5184052 both ran 5 async steps (`max_trajectory_age_steps: 1`); on Daint, steps 3 to 5
   waited on the trajectory buffer, as expected.
 - Is the 6-node layout stable (EP16, UCCL dispatch settings)? The 12-node layout is the one David validated.
   *Daint 5184751:* not at 4096 tokens; out of GPU memory in the first training step (see [Errors we hit](#errors-we-hit)).
+  Dropped; for longer sequences go up to 20 nodes instead.
 - Can runc be requested per sandbox? Is a sandbox that lives for hours supported? Is the 110-pods-per-node cap compatible
   with 1k+ sandboxes?
 - For datasets of 100k images: sandbox creation waits on image pulls (about 26 s cold, about 4 s warm). Async age 1 hides one step. Options:
@@ -398,6 +419,9 @@ it uses are in `kisti/` of this branch.
 | 5167352 | Daint, 6 nodes, plus `devtools`, `yappi`, `pydot` | `ImportError: Moderation` (`openai` 2.7.2) |
 | 5184052 | Daint, 12 nodes, branch as of 2026-10-28 | **Passed:** 5 steps in 1198 s, one reward 1 |
 | 5184751 | Daint, 6 nodes, branch as of 2026-10-28 | GPU out of memory in the first training step after 788 s |
+| 5185631 | Daint, 6 nodes, 2048 tokens, `expandable_segments` | Every sandbox create HTTP 404 (old endpoint lost its route); a trainer rank died in the first training step while host RAM on the trainer nodes ran low |
+| 5186694 | Daint, 12 nodes, 8192 tokens | GPU out of memory in the first training step after 913 s |
+| 5188206 | Daint, 20 nodes (16 trainer EP64 + 4 vLLM), 8192 tokens | **Passed:** 5 steps in 1725 s, three rewards 1 |
 | KISTI jobs | 1 to 12 nodes | See `swiss-ai/kisti-docs`, folder `rl/` |
 
 ## Credits and sources

@@ -1,0 +1,14 @@
+# The 12-node recipe with the trainer doubled: 16 trainer nodes (EP64) + the same 4 vLLM nodes.
+# Halves the experts per GPU, for longer sequences (8192 OOMed with EP32, Daint job 5186694).
+# UCCL combine config from experiments/grpo-chonk/trainer-16n-ep64-md-decoupling.yaml (EP64).
+# Not validated by the Apertus 2 blueprint with AdamW.
+defaults: apertus2-chonk-vllm-adamw.yaml
+
+cluster:
+  num_nodes: 20
+
+policy:
+  megatron_cfg:
+    expert_model_parallel_size: 64
+    env_vars:
+      UCCL_EP_COMBINE_CONFIG: "24,7,1024,32,512"
