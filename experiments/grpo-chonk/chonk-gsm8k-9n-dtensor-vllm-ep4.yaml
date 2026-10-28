@@ -35,6 +35,7 @@ policy:
   generation:
     max_new_tokens: 256
     stop_strings: ["Question:"]
+    stop_token_ids: [2, 0]
     colocated:
       enabled: false
       resources:

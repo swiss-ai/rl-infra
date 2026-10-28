@@ -1,0 +1,26 @@
+defaults: chonk-gsm8k-12n-megatron-128x16-2k-async.yaml
+
+grpo:
+  max_val_samples: 960
+  val_batch_size: 960
+
+policy:
+  max_total_sequence_length: 16384
+  logprob_chunk_size: 512
+  generation:
+    max_new_tokens: 16384
+  sequence_packing:
+    train_mb_tokens: 16384
+    logprob_mb_tokens: 16384
+  megatron_cfg:
+    defer_fp32_logits: true
+    pipeline_model_parallel_size: 2
+    expert_model_parallel_size: 16
+
+data:
+  train:
+    dataset_name: DAPOMath17K
+  validation:
+    dataset_name: DAPOMathAIME2024
+  default:
+    prompt_file: null
