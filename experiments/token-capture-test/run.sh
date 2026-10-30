@@ -8,7 +8,8 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "${HERE}/../.." && pwd)"
-source "${ROOT}/backends/nemo-rl/apertus2/env"
+APERTUS2_DIR="${ROOT}/backends/nemo-rl/apertus2"
+source "${APERTUS2_DIR}/env"
 source "${ROOT}/site.env"
 
 export HARBOR_ROOT="${HARBOR_ROOT:-${SCRATCH}/osb/mini_swe}"
