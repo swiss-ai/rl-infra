@@ -48,6 +48,18 @@ else
         git -C "${NEMO_RL_DIR}" fetch "https://github.com/${repo}.git" "pull/${pr}/head"
         "${GIT[@]}" -C "${NEMO_RL_DIR}" merge --no-edit -m "Merge ${repo} PR #${pr}" "${sha}"
     done <<< "${NEMO_RL_PRS}"
+    # Patches added after the clone was made, matched by subject.
+    applied="$(git -C "${NEMO_RL_DIR}" log --format=%s)"
+    for p in "${ROOT}"/backends/nemo-rl/patches/*.patch "${APERTUS2_DIR}"/patches/nemo-rl/*.patch; do
+        subject="$(git mailinfo /dev/null /dev/null < "${p}" | sed -n 's/^Subject: //p')"
+        grep -qxF -- "${subject}" <<< "${applied}" && continue
+        echo "== NeMo-RL: applying $(basename "${p}")"
+        "${GIT[@]}" -C "${NEMO_RL_DIR}" am -3 "${p}" || {
+            git -C "${NEMO_RL_DIR}" am --abort
+            echo "ERROR: $(basename "${p}") does not apply; move ${NEMO_RL_DIR} aside for a fresh clone" >&2
+            exit 1
+        }
+    done
 fi
 # Plain clone, not `submodule update`: the pinned commit is only reachable from a full fetch.
 AM="${NEMO_RL_DIR}/3rdparty/Automodel-workspace/Automodel"
