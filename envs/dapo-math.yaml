@@ -1,3 +1,5 @@
+defaults: ../recipes/apertus2-chonk-vllm-adamw-dapo.yaml
+
 data:
   train:
     dataset_name: DAPOMath17K
