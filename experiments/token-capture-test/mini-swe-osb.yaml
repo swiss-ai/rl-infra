@@ -1,5 +1,5 @@
 # Task file: Gym's mini_swe_agent_2 on SWE-bench Verified, every task container a pod on the
-# OpenSandbox cluster (Breithorn). Merged over qwen2.5-1.5b-1n.yaml by run.sh in this directory.
+# OpenSandbox cluster (Breithorn). Merged over qwen3-4b-1n.yaml by run.sh in this directory.
 #
 # Purpose: check whether NeMo-RL's legacy GRPO path (examples/nemo_gym/run_grpo_nemo_gym.py) can
 # train on a harness whose Gym wrapper does not carry token ids. mini-swe-agent's loop runs in the

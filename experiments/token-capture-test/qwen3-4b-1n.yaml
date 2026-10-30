@@ -1,5 +1,7 @@
-# Qwen2.5-1.5B-Instruct on one node (4 GH200): Megatron trainer and vLLM colocated on the same
-# GPUs, synchronous GRPO. Small enough for agent-path tests that do not need Chonk.
+# Qwen3-4B-Instruct-2507 on one node (4 GH200): Megatron trainer and vLLM colocated on the same
+# GPUs, synchronous GRPO. Small enough for agent-path tests that do not need Chonk. Qwen2.5-1.5B
+# was too weak: no parsable tool call in 40 tries (job 5212139). The distributed optimizer of the
+# base config shards the optimizer state over the 4 GPUs.
 # Shape from Kostas's grpo_math_1B_megatron_harbor_agent_osb.yaml (swiss-ai/nemo-rl-development,
 # swissai/harbor_agent_osb_v0.8.0).
 defaults: /opt/nemo-rl/examples/configs/grpo_math_1B_megatron.yaml
@@ -12,7 +14,7 @@ checkpointing:
   enabled: false
 
 policy:
-  model_name: Qwen/Qwen2.5-1.5B-Instruct
+  model_name: Qwen/Qwen3-4B-Instruct-2507
   tokenizer:
     name: ${policy.model_name}
     chat_template_kwargs: null
