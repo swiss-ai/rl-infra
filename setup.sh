@@ -1,15 +1,17 @@
 #!/bin/bash
 # One-time setup on the login node (safe to re-run):
 #   1. clone NeMo-RL at the pinned commit, with submodules, if it is not there yet
-#   2. render the EDF into ~/.edf/<EDF_NAME>.toml (the old one is backed up if it differs)
+#   2. on EDF sites (Alps), render the EDF into ~/.edf/<EDF_NAME>.toml (the old one is backed up
+#      if it differs)
 #   3. stage the container image working copy on scratch
+# Settings come from sites/load.sh (cluster profile, optional site.env).
 # Nothing is pip-installed: the NGC image ships every venv, prebuilt for the pinned commit.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-[[ -f "${ROOT}/site.env" ]] || { echo "ERROR: copy site.env.example to site.env and edit it" >&2; exit 1; }
-source "${ROOT}/site.env"
-source "${ROOT}/backends/nemo-rl/pin"
+source "${ROOT}/sites/load.sh" && rl_infra_load
+source "${PIN_FILE}"
+source "${ROOT}/backends/nemo-rl/container.sh"
 
 # 1. NeMo-RL source
 if [[ ! -d "${NEMO_RL_DIR}/.git" ]]; then
@@ -33,28 +35,17 @@ else
     fi
 fi
 
-# 2. EDF
-EDF_FILE="${HOME}/.edf/${EDF_NAME}.toml"
-mkdir -p "${HOME}/.edf"
-rendered="$(mktemp)"
-sed -e "s|@@IMAGE_WORK@@|${IMAGE_WORK}|g" \
-    -e "s|@@NEMO_RL_DIR@@|${NEMO_RL_DIR}|g" \
-    -e "s|@@SCRATCH@@|${SCRATCH}|g" \
-    "${ROOT}/backends/nemo-rl/edf.toml.template" > "${rendered}"
-if [[ -f "${EDF_FILE}" ]] && cmp -s "${rendered}" "${EDF_FILE}"; then
-    echo "== EDF up to date: ${EDF_FILE}"
-    rm -f "${rendered}"
+# 2. Container: the EDF on Alps; pyxis flags are built from the same spec at launch.
+if [[ "${CONTAINER_RUNTIME}" == edf ]]; then
+    container_install_edf
 else
-    if [[ -f "${EDF_FILE}" ]]; then
-        cp "${EDF_FILE}" "${EDF_FILE}.bak.$(date +%Y%m%d-%H%M%S)"
-        echo "== EDF changed; previous version backed up next to it"
-    fi
-    mv "${rendered}" "${EDF_FILE}"
-    echo "== EDF written: ${EDF_FILE}"
+    echo "== container runtime ${CONTAINER_RUNTIME}: nothing to install (launch.sh builds the flags)"
 fi
 
 # 3. Image working copy (striped for many-node opens)
 if [[ ! -s "${IMAGE_WORK}" ]]; then
+    [[ "${IMAGE_WORK}" != "${IMAGE_MASTER}" && -s "${IMAGE_MASTER}" ]] \
+        || { echo "ERROR: image ${IMAGE_WORK} missing and no master to stage it from" >&2; exit 1; }
     echo "== staging image ${IMAGE_WORK}"
     mkdir -p "$(dirname "${IMAGE_WORK}")"
     lfs setstripe -c 16 -S 4M "$(dirname "${IMAGE_WORK}")" 2>/dev/null || true

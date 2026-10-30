@@ -2,9 +2,7 @@
 image = "@@IMAGE_WORK@@"
 
 mounts = [
-  "/iopsstor",
-  "/users",
-  "/capstor",
+  @@SITE_MOUNTS@@
   "@@NEMO_RL_DIR@@:/opt/nemo-rl",
   "/usr/lib64/libhwloc.so.15:/usr/lib/libhwloc.so.15",
   "/usr/lib64/libpciaccess.so.0:/usr/lib/libpciaccess.so.0",

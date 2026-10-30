@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Wed, 28 Oct 2026 22:00:00 +0900
+Subject: [PATCH] ray.sub: PYXIS_EXTRA_ARGS for extra pyxis container flags
+
+The pyxis path builds its srun flags from CONTAINER and MOUNTS only. Running
+the EDF-described stacks under pyxis (KISTI HANGANG has no container engine)
+also needs --container-writable and --container-env=<vars> so the exported
+environment replaces the image's own values; PYXIS_EXTRA_ARGS carries them
+instead of being smuggled through CONTAINER's word splitting.
+
+---
+ ray.sub | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/ray.sub b/ray.sub
+--- a/ray.sub
++++ b/ray.sub
+@@ -232,6 +232,10 @@ else
+   COMMON_SRUN_ARGS+=" --container-mounts=$MOUNTS"
+   COMMON_SRUN_ARGS+=" --container-image=$CONTAINER"
+   COMMON_SRUN_ARGS+=" --container-workdir=$SLURM_SUBMIT_DIR"
++  # Extra pyxis flags, e.g. --container-writable --container-env=VAR,... (word-split on purpose).
++  if [[ -n "${PYXIS_EXTRA_ARGS:-}" ]]; then
++    COMMON_SRUN_ARGS+=" $PYXIS_EXTRA_ARGS"
++  fi
+   HEAD_CONTAINER_ARGS="--container-name=ray-head"
+   WORKER_CONTAINER_ARGS="--container-name=ray-worker"
+ fi
+--
+2.43.0
+

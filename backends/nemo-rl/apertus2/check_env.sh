@@ -1,5 +1,5 @@
 #!/bin/bash
-# Sanity check of the Apertus 2 stack: run it INSIDE the nemo-rl-apertus2 EDF on a GPU node
+# Sanity check of the Apertus 2 stack: run it INSIDE the stack's container on a GPU node
 # (cwd /opt/nemo-rl) before the first job. Imports the modules the Ray actors import (trainer
 # workers, Automodel setup, vLLM worker; Megatron-Bridge builds the Chonk provider from the
 # checkpoint config), then builds Chonk on the meta device (no weights, no
@@ -7,7 +7,8 @@
 # (per-expert keys stacked), so a silently dropped or missing weight shows up here.
 # MODEL overrides the staged checkpoint.
 set -u
-MODEL="${MODEL:-/iopsstor/scratch/cscs/${USER}/models/apertus2-chonk-lc-iter3576}"
+# SCRATCH is set in the container by the spec's [env] ($USER is root under pyxis).
+MODEL="${MODEL:-${SCRATCH}/models/apertus2-chonk-lc-iter3576}"
 PY=/usr/bin/python3.12
 
 echo "== python";   which "${PY}" uv ray; "${PY}" -V; echo "PYTHONPATH=${PYTHONPATH:-<unset>}"

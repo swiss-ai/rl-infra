@@ -1,0 +1,67 @@
+From bda729c11e6acdf8f39f62551a8615aa371bcb17 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Thu, 29 Oct 2026 06:48:48 +0900
+Subject: [PATCH] vLLM FP8: build the MoE kernel without layer on the
+ swiss-ai/vllm fork
+
+make_fp8_moe_kernel in the 0.28-based swiss-ai/vllm fork of the Apertus 2
+image has no layer argument, so every FP8 MoE engine failed at startup in
+process_weights_after_loading_moe with a TypeError. Pass layer only where
+the installed vLLM takes it, for both the FP8 and MXFP8 paths.
+---
+ .../models/generation/vllm/quantization/fp8.py | 18 ++++++++++++++++--
+ 1 file changed, 16 insertions(+), 2 deletions(-)
+
+diff --git a/nemo_rl/models/generation/vllm/quantization/fp8.py b/nemo_rl/models/generation/vllm/quantization/fp8.py
+index d5aa20cc5..efd18368d 100644
+--- a/nemo_rl/models/generation/vllm/quantization/fp8.py
++++ b/nemo_rl/models/generation/vllm/quantization/fp8.py
+@@ -12,6 +12,7 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
++import inspect
+ import json
+ import os
+ import warnings
+@@ -1128,6 +1129,17 @@ def create_weights_mxfp8_moe(
+     )
+ 
+ 
++def _make_fp8_moe_kernel(make_fp8_moe_kernel: Callable[..., Any], **kwargs: Any) -> Any:
++    """Call vLLM's make_fp8_moe_kernel, passing ``layer`` only where it takes one.
++
++    Newer vLLM builds the kernel from the RoutedExperts layer as well; the
++    0.28-based swiss-ai/vllm fork's signature has no ``layer`` argument.
++    """
++    if "layer" not in inspect.signature(make_fp8_moe_kernel).parameters:
++        kwargs.pop("layer", None)
++    return make_fp8_moe_kernel(**kwargs)
++
++
+ def process_weights_after_loading_moe(self, layer) -> None:
+     """This function is used to process the weights after loading for a FusedMoE layer.
+ 
+@@ -1189,7 +1201,8 @@ def process_weights_after_loading_moe(self, layer) -> None:
+         from vllm.model_executor.layers.quantization.fp8 import make_fp8_moe_kernel
+ 
+         assert self.experts_cls is not None
+-        self.moe_kernel = make_fp8_moe_kernel(
++        self.moe_kernel = _make_fp8_moe_kernel(
++            make_fp8_moe_kernel,
+             moe_quant_config=self.moe_quant_config,
+             moe_config=self.moe,
+             fp8_backend=self.fp8_backend,
+@@ -1518,7 +1531,8 @@ def process_weights_after_loading_mxfp8_moe(self, layer) -> None:
+         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+         assert self.moe_quant_config is not None
+         assert self.experts_cls is not None
+-        self.moe_kernel = make_fp8_moe_kernel(
++        self.moe_kernel = _make_fp8_moe_kernel(
++            make_fp8_moe_kernel,
+             moe_quant_config=self.moe_quant_config,
+             moe_config=kernel_moe_config,
+             fp8_backend=self.mxfp8_backend,
+-- 
+2.43.0
+

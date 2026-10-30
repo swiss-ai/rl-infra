@@ -7,7 +7,8 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APERTUS2_DIR="$(cd "${HERE}/.." && pwd)"
-source "${APERTUS2_DIR}/env"
+ROOT="$(cd "${APERTUS2_DIR}/../../.." && pwd)"
+source "${ROOT}/sites/load.sh" && rl_infra_load "${APERTUS2_DIR}/env"
 
 SRC_IMAGE="${BASE_IMAGE_WORK}"
 OUT_IMAGE="${IMAGE_WORK}"
@@ -44,7 +45,12 @@ trap cleanup EXIT
   cp "${APERTUS2_DIR}"/patches/uccl/*.patch "${rootfs}/opt/uccl-fix/patches/"
 
   echo "== $(date) rebuilding UCCL"
-  enroot start --root --rw "${NAME}" bash /opt/uccl-fix/rebuild_uccl.sh /opt/uccl-fix/patches
+  # The site's container environment (sites/<SITE>.env), e.g. HANGANG's PyPI index for uv;
+  # ENROOT_RESTRICT_ENV keeps the rest of the host environment out.
+  env_args=()
+  for kv in "${SITE_ENV[@]+"${SITE_ENV[@]}"}"; do env_args+=(--env "${kv}"); done
+  enroot start --root --rw ${env_args[@]+"${env_args[@]}"} "${NAME}" \
+    bash /opt/uccl-fix/rebuild_uccl.sh /opt/uccl-fix/patches
   rm -rf "${rootfs}/opt/uccl-fix"
 
   echo "== $(date) exporting"

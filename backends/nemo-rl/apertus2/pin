@@ -33,3 +33,7 @@ BRIDGE_REF=pull/5/head
 # The runner at the merge commit is the image's one plus that fix; the EDF mounts it over it.
 VLLM_RUNNER_URL=https://raw.githubusercontent.com/swiss-ai/vllm/b5161a48e6946d96f499c8b019d0d8020223a02b/vllm/v1/worker/gpu_model_runner.py
 VLLM_RUNNER_BLOB=4ec55eef55352090b50a255ee021cbe41daae06f
+# The image's Apertus 2 model, which refuses any quantization; setup.sh applies patches/vllm to it
+# (block FP8 for precision: fp8) and the EDF mounts the result over the image's copy.
+VLLM_APERTUS2_URL=https://raw.githubusercontent.com/swiss-ai/vllm/d4d41485a1cc1aee0d906d19f41523d2fdc67463/vllm/model_executor/models/apertus2.py
+VLLM_APERTUS2_BLOB=722fd25e74a8cc1af56c1501cbb3eaa614a1615b

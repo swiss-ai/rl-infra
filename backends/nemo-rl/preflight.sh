@@ -73,11 +73,13 @@ if [[ "${backend}" == megatron ]]; then
   echo "  generation: megatron TP${gen_tp} PP${gen_pp} EP${gen_ep}, dispatcher ${gen_dispatcher} (deepep ${gen_deepep}), buffer $(g buffer_size_gb) GB, max requests $(g max_requests), cuda graphs $(g cuda_graph_impl)/$(g inference_cuda_graph_scope), kv cache $(g kv_cache_management_mode), logprobs $(g logprobs_mode), refit $(r policy.generation.refit_transport)"
 else
   echo "  generation: ${backend} TP$(r policy.generation.vllm_cfg.tensor_parallel_size) EP$(r policy.generation.vllm_cfg.expert_parallel_size), async engine $(r policy.generation.vllm_cfg.async_engine), enforce eager $(r policy.generation.vllm_cfg.enforce_eager), prefix caching $(v=$(r policy.generation.vllm_cfg.enable_prefix_caching); echo "${v:-on (NeMo-RL default)}"), gpu mem $(r policy.generation.vllm_cfg.gpu_memory_utilization)"
+  echo "  vllm memory: gpu_memory_utilization $(r policy.generation.vllm_cfg.gpu_memory_utilization)"
 fi
 echo "  trainer: $([[ "${megatron}" == true ]] && echo "megatron TP$(r policy.megatron_cfg.tensor_model_parallel_size) PP$(r policy.megatron_cfg.pipeline_model_parallel_size) EP$(r policy.megatron_cfg.expert_model_parallel_size) CP$(r policy.megatron_cfg.context_parallel_size), dispatcher $(r policy.megatron_cfg.moe_token_dispatcher_type) (deepep $(r policy.megatron_cfg.moe_enable_deepep)), activation ckpt $(r policy.megatron_cfg.activation_checkpointing), lr $(r policy.megatron_cfg.optimizer.lr), warmup $(r policy.megatron_cfg.scheduler.lr_warmup_iters) from $(r policy.megatron_cfg.scheduler.lr_warmup_init)" || echo "dtensor, lr $(r policy.optimizer.kwargs.lr)")"
 echo "  batch: ${prompts} prompts x ${gens} = $(( prompts * gens )) samples, global batch ${gbs} ($(( prompts * gens / gbs )) optimizer steps), micro-batch $(r policy.train_micro_batch_size)"
 echo "  length: total ${maxlen}, new tokens $(r policy.generation.max_new_tokens), packing ${packing} (train ${mb_tokens}, logprob ${lp_tokens} tokens)"
 echo "  grpo: ${max_steps:=$(r grpo.max_num_steps)} steps, val every $(r grpo.val_period) (start $(r grpo.val_at_start), end $(r grpo.val_at_end)), async ${async} (age $(r grpo.async_grpo.max_trajectory_age_steps), in-flight $(r grpo.async_grpo.in_flight_weight_updates))"
+echo "  rewards: skip zero-advantage groups $(r grpo.skip_zero_advantage_groups), reward shaping $(r grpo.reward_shaping.enabled), truncated reward coefficient $(r grpo.reward_shaping.stop_properly_penalty_coef)"
 echo "  loss: IS correction $(r loss_fn.use_importance_sampling_correction) ($(r loss_fn.truncated_importance_sampling_type) $(r loss_fn.truncated_importance_sampling_ratio)), KL $(r loss_fn.reference_policy_kl_penalty), clip $(r loss_fn.ratio_clip_min)/$(r loss_fn.ratio_clip_max), dual-clip $(r loss_fn.ratio_clip_c); advantage: normalized $(r grpo.normalize_rewards), leave-one-out $(r grpo.use_leave_one_out_baseline)"
 echo "  checkpoints: enabled $(r checkpointing.enabled), every $(r checkpointing.save_period), keep $(r checkpointing.keep_top_k), save-and-stop by $(r checkpointing.checkpoint_must_save_by); job time ${JOB_TIME:-?}"
 o() { r "policy.megatron_cfg.optimizer.$1"; }
@@ -153,6 +155,26 @@ if [[ "${async}" == true ]]; then
     [[ "$(r policy.generation.vllm_cfg.async_engine)" == true ]] || err "async GRPO needs policy.generation.vllm_cfg.async_engine"
   fi
 fi
+# vLLM block FP8 rollouts (precision: fp8). With Apertus 2 (apertus2/patches/vllm) the refit can
+# map neither KDA's in_proj_qkvgfab (b_proj and f_a_proj share a 128-row scale block) nor full
+# attention's q/k/v_proj onto FP8 parameters, and would load them wrong without an error.
+vc() { r "policy.generation.vllm_cfg.$1"; }
+if [[ "${backend}" == vllm && "$(vc precision)" == fp8 ]]; then
+  echo "  fp8: weights fp8, kv cache $(vc kv_cache_dtype) (unit scales $(vc fp8_kv_unit_scales)), deep_gemm $(vc use_deep_gemm), bf16 layers matching: $(vc quantization_ignored_layer_kws | sed 's/^- //' | tr '\n' ' ')"
+  model="$(r policy.model_name | sed "s|\${oc.env:SCRATCH}|${SCRATCH:-}|")"
+  if grep -qs '"model_type": *"apertus2"' "${model}/config.json"; then
+    vc quantization_ignored_layer_kws | grep -qx -- '- self_attn' \
+      || err "FP8 with Apertus 2 needs quantization_ignored_layer_kws: [self_attn]; the refit would load its attention projections wrong"
+    [[ "$(vc use_deep_gemm)" == true ]] \
+      && err "use_deep_gemm forces DeepGEMM for the FP8 experts, which lacks Apertus 2's sssglu activation; leave it false"
+  elif [[ ! -f "${model}/config.json" ]]; then
+    warn "cannot read ${model}/config.json; the Apertus 2 FP8 checks were skipped"
+  fi
+  if [[ "$(vc kv_cache_dtype)" == fp8* && "$(vc fp8_kv_unit_scales)" != true ]]; then
+    [[ "${async}" == true || "$(r policy.megatron_cfg.pipeline_model_parallel_size)" != 1 ]] \
+      && err "FP8 KV scale calibration needs sync rollouts and trainer PP1; set fp8_kv_unit_scales: true"
+  fi
+fi
 if [[ "${backend}" == megatron ]]; then
   [[ "${megatron}" == true ]] || err "megatron generation needs the Megatron trainer (policy.megatron_cfg.enabled)"
   if [[ "${colocated}" == false ]] && isnum "${gen_nodes}" && isnum "${gen_tp}" && isnum "${gen_pp}" && isnum "${gen_ep}"; then
@@ -178,7 +200,7 @@ for v in NRL_REFIT_BUFFER_MEMORY_RATIO NRL_REFIT_NUM_BUFFERS; do
   [[ "$t" == "$gv" ]] || err "$v differs between trainer ('$t') and generation ('$gv'); the refit broadcast hangs"
 done
 must=$(r checkpointing.checkpoint_must_save_by)
-if [[ -n "${must}" && "${must}" != null && -n "${JOB_TIME:-}" ]]; then
+if [[ "$(r checkpointing.enabled)" != false && -n "${must}" && "${must}" != null && -n "${JOB_TIME:-}" ]]; then
   secs() { local s=$1 d=0; [[ "$s" == *-* ]] && { d=${s%%-*}; s=${s#*-}; }; IFS=: read -r a b c <<<"$s"; echo $(( d*86400 + 10#$a*3600 + 10#$b*60 + 10#${c:-0} )); }
   IFS=: read -r md mh mm ms <<<"${must}"
   must_s=$(( 10#$md*86400 + 10#$mh*3600 + 10#$mm*60 + 10#$ms ))

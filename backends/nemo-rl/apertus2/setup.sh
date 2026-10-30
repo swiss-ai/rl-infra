@@ -4,18 +4,20 @@
 #      refit fixes) and check out the Automodel submodule the DTensor (HF) trainer imports (+ our loader patch)
 #      and the Megatron-LM-MoE / Megatron-Bridge sources the Megatron trainer imports, and
 #      fetch the vLLM runner with the NaN fix the image predates (see the pin)
-#   2. render the EDF into ~/.edf/<EDF_NAME>.toml (the old one is backed up if it differs)
-#   3. images: stage the scratch working copy jobs read from its capstor master; when that master
-#      is missing, import the base image from JFrog (enroot, needs your JFrog login) for
-#      uccl-fix/build_image.sh
+#   2. on EDF sites (Alps), render the EDF into ~/.edf/<EDF_NAME>.toml (the old one is backed up
+#      if it differs); pyxis sites (HANGANG) get their flags from the same spec at launch
+#   3. images: stage the scratch working copy jobs read from its persistent master (a site may run
+#      the master in place); when that master is missing, import the base image from the site's
+#      registry (JFrog on Alps: enroot, needs your JFrog login) for uccl-fix/build_image.sh
+# Settings come from sites/load.sh (cluster profile, optional site.env, then ./env).
 # SKIP_VLLM_IMAGE=1 skips the standalone vLLM image (not needed for NeMo-RL runs).
 set -euo pipefail
 
 APERTUS2_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "${APERTUS2_DIR}/../../.." && pwd)"
-source "${APERTUS2_DIR}/env"
-source "${ROOT}/site.env"
+source "${ROOT}/sites/load.sh" && rl_infra_load "${APERTUS2_DIR}/env"
 source "${PIN_FILE}"
+source "${ROOT}/backends/nemo-rl/container.sh"
 GIT=(git -c user.name="$(git -C "${ROOT}" config user.name || echo rl-infra)" -c user.email="$(git -C "${ROOT}" config user.email || echo rl-infra@localhost)" -c commit.gpgsign=false)
 
 # 1. NeMo-RL source
@@ -61,7 +63,7 @@ for p in "${APERTUS2_DIR}"/patches/automodel/*.patch; do
     git -C "${AM}" apply "${p}"
     echo "== Automodel: applied $(basename "${p}")"
 done
-# Megatron-LM-MoE and Megatron-Bridge for the Megatron trainer (PYTHONPATH via the EDF).
+# Megatron-LM-MoE and Megatron-Bridge for the Megatron trainer (PYTHONPATH via the container spec).
 checkout_at() {   # <url> <dir> <commit> <ref the commit is reachable from>
     local url="$1" dir="$2" commit="$3" ref="$4"
     [[ "$(git -C "${dir}" rev-parse HEAD 2>/dev/null)" == "${commit}" ]] && return 0
@@ -89,29 +91,38 @@ if [[ "$(git hash-object "${VLLM_RUNNER}" 2>/dev/null)" != "${VLLM_RUNNER_BLOB}"
     fi
     mv "${VLLM_RUNNER}.tmp.$$" "${VLLM_RUNNER}"
 fi
-
-# 2. EDF
-EDF_FILE="${HOME}/.edf/${EDF_NAME}.toml"
-mkdir -p "${HOME}/.edf"
-rendered="$(mktemp)"
-sed -e "s|@@IMAGE_WORK@@|${IMAGE_WORK}|g" \
-    -e "s|@@NEMO_RL_DIR@@|${NEMO_RL_DIR}|g" \
-    -e "s|@@SCRATCH@@|${SCRATCH}|g" \
-    -e "s|@@PYDEPS@@|${PYDEPS}|g" \
-    -e "s|@@MEGATRON_DIR@@|${MEGATRON_DIR}|g" \
-    -e "s|@@BRIDGE_DIR@@|${BRIDGE_DIR}|g" \
-    -e "s|@@VLLM_RUNNER@@|${VLLM_RUNNER}|g" \
-    "${APERTUS2_DIR}/edf.toml.template" > "${rendered}"
-if [[ -f "${EDF_FILE}" ]] && cmp -s "${rendered}" "${EDF_FILE}"; then
-    echo "== EDF up to date: ${EDF_FILE}"
-    rm -f "${rendered}"
-else
-    if [[ -f "${EDF_FILE}" ]]; then
-        cp "${EDF_FILE}" "${EDF_FILE}.bak.$(date +%Y%m%d-%H%M%S)"
-        echo "== EDF changed; previous version backed up next to it"
+# The image's Apertus 2 model with patches/vllm applied, mounted over the image's copy (see the pin).
+# The upstream file is kept next to it; the patched one is rebuilt from it on every run and
+# replaced only when that changes it. Running jobs mount the file itself, and a rename leaves
+# their mount on the old file, which Lustre deletes: model imports in a driver retry then fail
+# (vLLM "Model architectures ['Apertus2KDAForCausalLM'] failed to be inspected").
+if [[ "$(git hash-object "${VLLM_APERTUS2}.orig" 2>/dev/null)" != "${VLLM_APERTUS2_BLOB}" ]]; then
+    echo "== vLLM Apertus 2 model: ${VLLM_APERTUS2}"
+    mkdir -p "$(dirname "${VLLM_APERTUS2}")"
+    curl -fsSL -o "${VLLM_APERTUS2}.tmp.$$" "${VLLM_APERTUS2_URL}"
+    if [[ "$(git hash-object "${VLLM_APERTUS2}.tmp.$$")" != "${VLLM_APERTUS2_BLOB}" ]]; then
+        rm -f "${VLLM_APERTUS2}.tmp.$$"
+        echo "ERROR: ${VLLM_APERTUS2_URL} is not blob ${VLLM_APERTUS2_BLOB}" >&2
+        exit 1
     fi
-    mv "${rendered}" "${EDF_FILE}"
-    echo "== EDF written: ${EDF_FILE}"
+    mv "${VLLM_APERTUS2}.tmp.$$" "${VLLM_APERTUS2}.orig"
+fi
+cp "${VLLM_APERTUS2}.orig" "${VLLM_APERTUS2}.tmp.$$"
+for p in "${APERTUS2_DIR}"/patches/vllm/*.patch; do
+    patch -s --fuzz=0 --no-backup-if-mismatch "${VLLM_APERTUS2}.tmp.$$" < "${p}" \
+        || { rm -f "${VLLM_APERTUS2}.tmp.$$"*; echo "ERROR: $(basename "${p}") does not apply" >&2; exit 1; }
+done
+if cmp -s "${VLLM_APERTUS2}.tmp.$$" "${VLLM_APERTUS2}"; then
+    rm -f "${VLLM_APERTUS2}.tmp.$$"
+else
+    mv "${VLLM_APERTUS2}.tmp.$$" "${VLLM_APERTUS2}"
+fi
+
+# 2. Container: the EDF on Alps; pyxis flags are built from the same spec at launch.
+if [[ "${CONTAINER_RUNTIME}" == edf ]]; then
+    container_install_edf
+else
+    echo "== container runtime ${CONTAINER_RUNTIME}: nothing to install (launch.sh builds the flags)"
 fi
 
 # 3. Images. enroot layer cache on scratch, never in the NFS home. The unpack space must be
@@ -121,6 +132,8 @@ ENROOT_TMP_BASE="${ENROOT_TMP_BASE:-/tmp}"
 stage_image() {   # <ref> <master> <work>
     local ref="$1" master="$2" work="$3" tmp
     if [[ ! -s "${master}" ]]; then
+        [[ -n "${ref}" && -n "${master}" ]] \
+            || { echo "ERROR: image master '${master}' missing and no registry to import it from on ${SITE}" >&2; return 1; }
         echo "== importing ${ref}"
         export ENROOT_TEMP_PATH="${ENROOT_TMP_BASE}/enroot-tmp-${USER}.$$"
         mkdir -p "${ENROOT_CACHE_PATH}" "${ENROOT_DATA_PATH}" "${ENROOT_TEMP_PATH}" "$(dirname "${work}")"
@@ -140,7 +153,8 @@ stage_image() {   # <ref> <master> <work>
         echo "== image present: ${work}"
     fi
 }
-lfs setstripe -c 16 -S 4M "$(dirname "${IMAGE_WORK}")" 2>/dev/null || true
+# Striped for many-node opens; not where the image is a shared master used in place.
+[[ "${IMAGE_WORK}" == "${IMAGE_MASTER}" ]] || lfs setstripe -c 16 -S 4M "$(dirname "${IMAGE_WORK}")" 2>/dev/null || true
 if [[ -s "${IMAGE_MASTER}" ]]; then
     stage_image "" "${IMAGE_MASTER}" "${IMAGE_WORK}"
 else

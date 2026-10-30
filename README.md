@@ -1,7 +1,7 @@
 # rl-infra
 
-Launch scripts and experiment configs for running RL post-training on the CSCS Alps
-(Clariden) GH200 nodes. The training frameworks themselves are not part of this repo:
+Launch scripts and experiment configs for running RL post-training on GH200 clusters: CSCS
+Alps (Clariden) and KISTI HANGANG (see [Clusters](#clusters)). The training frameworks themselves are not part of this repo:
 each backend is an untouched local clone that this repo pins, mounts into a container
 and launches, the same way a verl checkout sits next to the code that drives it. The
 only backend so far is [NeMo-RL](https://github.com/NVIDIA-NeMo/RL).
@@ -13,8 +13,8 @@ git clone https://github.com/swiss-ai/rl-infra.git && cd rl-infra
 bash run.sh envs/gsm8k.yaml
 ```
 
-This trains Apertus 2 Chonk on GSM8K with GRPO, on 12 nodes of the `infra01` account, in
-about an hour and a half, and saves the final weights. A new RL environment needs only a
+This trains Apertus 2 Chonk on GSM8K with GRPO, on 12 nodes of the cluster profile's account
+(`infra01` on Alps, `in0138` on HANGANG), in about an hour and a half, and saves the final weights. A new RL environment needs only a
 task file like `envs/gsm8k.yaml`, with its dataset, prompt and reward; the training recipe
 stays as it is. The first run also sets everything up, cloning the pinned sources and
 copying the 200 GB model to your scratch, so it takes a while to start; later runs start
@@ -51,9 +51,12 @@ the command line (`grpo.max_num_steps=50`) are applied last.
 ## Setup
 
 ```bash
-cp site.env.example site.env   # then set account, scratch and clone paths
-bash setup.sh                  # clones NeMo-RL, writes ~/.edf/nemo-rl.toml, stages the image
+bash setup.sh                  # clones NeMo-RL, writes ~/.edf/nemo-rl.toml (Alps), stages the image
 ```
+
+The cluster is detected and its profile `sites/<SITE>.env` supplies the account, partition,
+filesystems and container runtime; `site.env` (copied from `site.env.example`, optional)
+overrides any of it for you, and `sites/load.sh` documents the order.
 
 ## Running
 
@@ -63,7 +66,8 @@ PARTITION=preemptable bash backends/nemo-rl/launch.sh \
     grpo.max_num_steps=3 checkpointing.enabled=false
 ```
 
-The arguments are the config, the number of nodes, a run name, and any overrides. Each
+The arguments are the config, the number of nodes, a run name, and any overrides;
+`DRY_RUN=1` prints the sbatch command and the container setup instead of submitting. Each
 job writes under `$OUT` (from `site.env`): `slurm/<jobid>-logs/ray-driver.log` is the
 training output, `slurm/<jobid>-<run>.out` is the Slurm-side trace of `ray.sub`,
 `logs/<run>/` holds metrics and `results/<run>/` checkpoints. Vision-language recipes use
@@ -84,6 +88,22 @@ container environment, each with the reasoning next to it in the code:
 - Triton and Inductor caches are node-local, the other caches live on scratch, and the
   image is re-staged from a persistent copy when the scratch purge removes it.
 
+## Clusters
+
+| | Alps (`sites/alps.env`) | HANGANG (`sites/hangang.env`) |
+|---|---|---|
+| Container runtime | CSCS Container Engine: `--environment=<EDF>` | pyxis/enroot: `--container-image` etc. |
+| Slurm | account `infra01`, `run.sh` on `preemptable` | account `in0138`, partition `intTest`, plus the mandatory `--gres=gpu:4 --exclusive --comment=field=...;appl=...` |
+| Scratch, clones | `/iopsstor/scratch/cscs/$USER`, `/users/$USER/projects` | `/scratch/$USER` (purged after 15 days unaccessed), `$HOME/projects` |
+| Images, Chonk model | copied to scratch from capstor | hanint02's copies in `/scratch/hanint02`, read in place (the model is linked into scratch) |
+| Network | EDF hooks and `[env]` | the image's libfabric plugin, plus KISTI's `NCCL_PROTO=^LL128 FI_PROVIDER=cxi NCCL_IB_DISABLE=1` (LL128 gives wrong inter-node all-reduce results there) |
+
+Each stack describes its container once, as an EDF template (`edf.toml.template`). On Alps
+`setup.sh` installs it in `~/.edf`; on pyxis sites `backends/nemo-rl/container.sh` turns the same
+file into `ray.sub`'s `CONTAINER`, `MOUNTS` and `PYXIS_EXTRA_ARGS` and exports its `[env]` for
+the job. A new cluster needs a `sites/<name>.env` and, if it cannot be told from its
+filesystems, `SITE=<name>`.
+
 ## Status
 
 Dense models train with the PyTorch (DTensor) backend and colocated vLLM: Qwen3-8B-Base
@@ -93,6 +113,6 @@ which loads the checkpoint once and broadcasts it instead of loading it on every
 The Megatron backend's weight refit to vLLM is broken in NeMo-RL v0.7.0 for the MoE/VLM
 models tried (`experiments/vlm-geo3k/`).
 
-The patch in `backends/nemo-rl/patches/` modifies NeMo-RL's `ray.sub` (Copyright NVIDIA,
+The patches in `backends/nemo-rl/patches/` modify NeMo-RL's `ray.sub` (Copyright NVIDIA,
 Apache-2.0); it adds the container-engine (EDF) mode, the single-step launch, memory
-binding and the NUMA watcher.
+binding, the NUMA watcher and extra pyxis flags (`PYXIS_EXTRA_ARGS`).
