@@ -4,6 +4,6 @@ cluster:
   num_nodes: 16
 
 checkpointing:
-  checkpoint_must_save_by: "00:04:40:00"
+  checkpoint_must_save_by: "00:11:30:00"
   save_period: 1000
   save_optimizer: false

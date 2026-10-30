@@ -27,12 +27,12 @@ The sections below describe the general launcher underneath.
 DAPO-Math with AIME 2024 validation, on 8 trainer and 8 vLLM nodes:
 
 ```bash
-bash run.sh envs/dapo-math.yaml
+PARTITION=normal JOB_TIME=12:00:00 bash run.sh envs/dapo-math.yaml
 ```
 
-The task names its recipe in `defaults:`, and `RECIPE` still replaces it. This is the same
-5-hour job, about 60 GRPO steps. For a longer one, set `JOB_TIME` and add
-`checkpointing.checkpoint_must_save_by=DD:HH:MM:SS`, some time before the job ends, to the
+The task names its recipe in `defaults:`, and `RECIPE` still replaces it. This is a 12-hour job,
+about 120 GRPO steps: the recipe saves the weights and stops after 11:30, so another `JOB_TIME`
+needs `checkpointing.checkpoint_must_save_by=DD:HH:MM:SS`, some time before the job ends, on the
 command. Re-running on an existing checkout also brings its NeMo-RL clone up to date.
 
 ## How a NeMo-RL run is put together
