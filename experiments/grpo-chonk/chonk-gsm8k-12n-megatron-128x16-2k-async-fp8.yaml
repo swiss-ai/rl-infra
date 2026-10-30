@@ -1,0 +1,3 @@
+defaults:
+  - chonk-gsm8k-12n-megatron-128x16-2k-async.yaml
+  - generation-vllm-fp8.yaml

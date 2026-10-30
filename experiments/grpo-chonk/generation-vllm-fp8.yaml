@@ -1,0 +1,8 @@
+policy:
+  generation:
+    vllm_cfg:
+      precision: fp8
+      kv_cache_dtype: auto
+      use_deep_gemm: false
+      quantization_ignored_layer_kws:
+        - self_attn

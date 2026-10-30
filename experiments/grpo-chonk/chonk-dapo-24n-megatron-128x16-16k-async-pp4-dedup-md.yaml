@@ -1,0 +1,8 @@
+defaults: chonk-dapo-24n-megatron-128x16-16k-async-pp2-dedup-md.yaml
+
+policy:
+  megatron_cfg:
+    pipeline_model_parallel_size: 4
+    expert_model_parallel_size: 16
+    num_layers_in_first_pipeline_stage: 11
+    num_layers_in_last_pipeline_stage: 9
