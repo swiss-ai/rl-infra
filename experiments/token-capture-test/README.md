@@ -15,7 +15,7 @@ OpenSandbox traffic.
 
 | File | What |
 |---|---|
-| `qwen2.5-1.5b-1n.yaml` | recipe: Qwen2.5-1.5B-Instruct, 1 node, Megatron + colocated vLLM, sync GRPO, Hermes tool parser |
+| `qwen3-4b-1n.yaml` | recipe: Qwen3-4B-Instruct-2507, 1 node, Megatron + colocated vLLM, sync GRPO, Hermes tool parser |
 | `mini-swe-osb.yaml` | task file: mini_swe_agent_2 on OpenSandbox, 2 prompts x 2 generations, 1 step, `step_limit: 10` |
 | `make_rows.py` | 2 train + 1 validation rows from Gym's `mini_swe_agent_2/data/example.jsonl` (SWE-bench Verified) |
 | `run.sh` | builds the rows in `$HARBOR_ROOT` (default `$SCRATCH/osb/mini_swe`) and calls `run-harbor-osb.sh` |
@@ -48,7 +48,7 @@ mini_swe_agent_2 venv left over with a newer litellm, so the next run rebuilds i
 
 Per-rollout files: mini_swe_agent_2 writes them under the Gym server's working directory, which
 is its server directory (Gym starts every server with `cd <server dir>`), so in
-`$NEMO_RL_DIR/3rdparty/Gym-workspace/Gym/responses_api_agents/mini_swe_agent_2/results/verified/Qwen/Qwen2.5-1.5B-Instruct/<instance_id>/`: the mini-swe-agent trajectory
+`$NEMO_RL_DIR/3rdparty/Gym-workspace/Gym/responses_api_agents/mini_swe_agent_2/results/verified/Qwen/Qwen3-4B-Instruct-2507/<instance_id>/`: the mini-swe-agent trajectory
 (`<instance_id>_<run_id>.traj.json`, every model reply with the full response in `extra.response`),
 the patch, the test output, the SWE-bench report, and `<instance_id>.json` (the `/run` result; the
 two generations of an instance overwrite each other's). A token id field in `extra.response`
