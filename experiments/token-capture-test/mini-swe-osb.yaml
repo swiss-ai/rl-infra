@@ -1,0 +1,108 @@
+# Task file: Gym's mini_swe_agent_2 on SWE-bench Verified, every task container a pod on the
+# OpenSandbox cluster (Breithorn). Merged over qwen2.5-1.5b-1n.yaml by run.sh in this directory.
+#
+# Purpose: check whether NeMo-RL's legacy GRPO path (examples/nemo_gym/run_grpo_nemo_gym.py) can
+# train on a harness whose Gym wrapper does not carry token ids. mini-swe-agent's loop runs in the
+# Gym process on the training node, calls the policy through Gym's vLLM model server, and runs each
+# bash action in the pod over the OpenSandbox API (sandbox_environment.py), so no pod -> Daint
+# traffic is needed. Its wrapper returns output items without prompt/generation token ids
+# (app.py _split_trajectory_for_responses). See README.md for the expected outcome.
+
+grpo:
+  num_prompts_per_step: 2
+  num_generations_per_prompt: 2        # 4 rollouts = 4 sandboxes in flight
+  max_num_steps: 1
+  max_num_epochs: 1
+  use_leave_one_out_baseline: true
+  normalize_rewards: true
+  overlong_filtering: true
+  # the Gym entrypoint refuses a non-null value
+  max_val_samples: null
+  val_batch_size: null
+  val_num_generations_per_prompt: 1
+  val_period: 0
+  val_at_start: false
+  val_at_end: false
+
+checkpointing:
+  enabled: false
+
+policy:
+  # = prompts x generations
+  train_global_batch_size: 4
+  max_total_sequence_length: 16384
+  sequence_packing:
+    enabled: true
+    train_mb_tokens: 16384
+    logprob_mb_tokens: 16384
+  generation:
+    # per agent turn
+    max_new_tokens: 2048
+    stop_strings: null
+    # Gym's vLLM server asserts that every request carries the on-policy sampling parameters;
+    # the rows carry the same values (make_rows.py).
+    temperature: 1.0
+    top_p: 1.0
+    top_k: null
+    vllm_cfg:
+      max_model_len: ${policy.max_total_sequence_length}
+      async_engine: true
+      # Gym's model server talks to the policy over an OpenAI-compatible HTTP endpoint.
+      expose_http_server: true
+
+data:
+  max_input_seq_length: null
+  shuffle: false
+  num_workers: 0
+  use_multiple_dataloader: false
+  train:
+    dataset_name: NemoGymDataset
+    data_path: ${oc.env:HARBOR_ROOT}/train.jsonl
+  validation:
+    dataset_name: NemoGymDataset
+    data_path: ${oc.env:HARBOR_ROOT}/validation.jsonl
+  default:
+    dataset_name: NemoGymDataset
+    env_name: nemo_gym
+    prompt_file: null
+    system_prompt_file: null
+    processor: nemo_gym_data_processor
+  _override_: true
+
+env:
+  should_use_nemo_gym: true
+  should_log_nemo_gym_responses: true
+  should_mask_flagged_samples: true
+  nemo_gym:
+    port_range_low: 5000
+    port_range_high: 5999
+    is_trajectory_collection: false
+    use_absolute_ip: true
+    # Same as envs/harbor-osb.yaml (patch 0008). Masks only rollouts the agent flags with
+    # instance_config.mask_sample; mini_swe_agent_2 does not flag tokenless rollouts.
+    mask_degenerate_rollouts: true
+    config_paths:
+    - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+    # defines `sandbox`, which mini_swe_agent_2 references through sandbox_provider: sandbox
+    - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+    - responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml
+    sandbox:
+      opensandbox:
+        connection:
+          # as in envs/harbor-osb.yaml: the pooled aiohttp client breaks inside Ray workers
+          transport_backend: httpx
+    mini_swe_agent_2:
+      responses_api_agents:
+        mini_swe_agent_2:
+          concurrency: ${mul:${grpo.num_prompts_per_step}, ${grpo.num_generations_per_prompt}}
+          # short trajectories: the test needs a few model calls per rollout, not a solved task
+          step_limit: 10
+          sandbox_spec:
+            provider_options:
+              # the cluster rejects every create without it (ValidatingAdmissionPolicy)
+              secure_access: true
+  _override_: true
+
+logger:
+  tensorboard_enabled: true
+  wandb_enabled: false
