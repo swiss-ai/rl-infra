@@ -47,8 +47,8 @@ mcp 1.30.0; nothing pinned litellm, and from 1.103 it needs mcp>=2, which Gym ca
 mini_swe_agent_2 venv left over with a newer litellm, so the next run rebuilds it.
 
 Per-rollout files: mini_swe_agent_2 writes them under the Gym server's working directory, which
-is the clone mount `/opt/nemo-rl` (= `$NEMO_RL_DIR`, gitignored `results/`), in
-`results/verified/Qwen/Qwen2.5-1.5B-Instruct/<instance_id>/`: the mini-swe-agent trajectory
+is its server directory (Gym starts every server with `cd <server dir>`), so in
+`$NEMO_RL_DIR/3rdparty/Gym-workspace/Gym/responses_api_agents/mini_swe_agent_2/results/verified/Qwen/Qwen2.5-1.5B-Instruct/<instance_id>/`: the mini-swe-agent trajectory
 (`<instance_id>_<run_id>.traj.json`, every model reply with the full response in `extra.response`),
 the patch, the test output, the SWE-bench report, and `<instance_id>.json` (the `/run` result; the
 two generations of an instance overwrite each other's). A token id field in `extra.response`
