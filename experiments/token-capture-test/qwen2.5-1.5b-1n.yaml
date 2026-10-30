@@ -1,0 +1,43 @@
+# Qwen2.5-1.5B-Instruct on one node (4 GH200): Megatron trainer and vLLM colocated on the same
+# GPUs, synchronous GRPO. Small enough for agent-path tests that do not need Chonk.
+# Shape from Kostas's grpo_math_1B_megatron_harbor_agent_osb.yaml (swiss-ai/nemo-rl-development,
+# swissai/harbor_agent_osb_v0.8.0).
+defaults: /opt/nemo-rl/examples/configs/grpo_math_1B_megatron.yaml
+
+cluster:
+  num_nodes: 1
+  gpus_per_node: 4
+
+checkpointing:
+  enabled: false
+
+policy:
+  model_name: Qwen/Qwen2.5-1.5B-Instruct
+  tokenizer:
+    name: ${policy.model_name}
+    chat_template_kwargs: null
+  precision: bfloat16
+  train_micro_batch_size: 1
+  logprob_batch_size: 1
+  # Megatron owns the LR schedule (megatron_cfg.scheduler).
+  scheduler: null
+  dynamic_batching:
+    enabled: false
+  megatron_cfg:
+    enabled: true
+    tensor_model_parallel_size: 1
+    pipeline_model_parallel_size: 1
+    context_parallel_size: 1
+    activation_checkpointing: true
+    recompute_granularity: full
+  generation:
+    backend: vllm
+    vllm_cfg:
+      tensor_parallel_size: 1
+      # colocated: leave room for the Megatron weights and optimizer around each generation phase
+      gpu_memory_utilization: 0.55
+      # Without a tool parser vLLM returns Qwen's "<tool_call>{...}</tool_call>" as plain text and
+      # tool-calling harnesses (mini-swe-agent 2) see no action. Qwen chat templates emit Hermes.
+      http_server_serving_chat_kwargs:
+        enable_auto_tools: true
+        tool_parser: hermes

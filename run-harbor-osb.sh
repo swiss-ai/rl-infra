@@ -7,12 +7,12 @@
 #
 #   ~/.opensandbox_token   OpenSandbox API key, one line, no username (chmod 600)
 #   HARBOR_ROOT            train.jsonl, validation.jsonl, tasks/ (default $SCRATCH/osb/harbor_micro)
-#   RECIPE, RUN, PARTITION, JOB_TIME, ACCOUNT, OPENSANDBOX_DOMAIN override the defaults.
+#   TASK, RECIPE, RUN, PARTITION, JOB_TIME, ACCOUNT, OPENSANDBOX_DOMAIN override the defaults.
 #   QOS                    optional Slurm QOS (exported as SBATCH_QOS); partition normal needs none.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-TASK="${ROOT}/envs/harbor-osb.yaml"
+TASK="$(realpath "${TASK:-${ROOT}/envs/harbor-osb.yaml}")"
 RECIPE="$(realpath "${RECIPE:-${ROOT}/recipes/apertus2-chonk-vllm-adamw.yaml}")"
 NODES="$(yq r "${RECIPE}" cluster.num_nodes)"
 RUN="${RUN:-harbor-osb-$(date +%Y%m%d-%H%M%S)}"
