@@ -40,6 +40,12 @@ images are public `docker.io/swebench/sweb.eval.x86_64.*` images.
 | The step finishes and the training metrics show tokens for these samples | Legacy GRPO got token ids from this agent; no switch is needed for it. Not expected from the code. |
 | `0 items`, `Error running mini-swe-agent`, or no `[EVAL]` lines | Inconclusive: the rollout failed before any model call (sandbox create, image pull, agent venv). Fix that and rerun. |
 
+Job 5211452 (2026-10-30) was inconclusive this way: every model call in the agent failed with
+`ImportError: cannot import name 'CacheableResult' from 'mcp.types'` (litellm 1.106.6 with
+mcp 1.30.0; nothing pinned litellm, and from 1.103 it needs mcp>=2, which Gym caps below 2).
+`run.sh` now exports `UV_CONSTRAINT` with `litellm<1.103` (resolves to 1.102.4) and deletes a
+mini_swe_agent_2 venv left over with a newer litellm, so the next run rebuilds it.
+
 Per-rollout files: mini_swe_agent_2 writes them under the Gym server's working directory, which
 is the clone mount `/opt/nemo-rl` (= `$NEMO_RL_DIR`, gitignored `results/`), in
 `results/verified/Qwen/Qwen2.5-1.5B-Instruct/<instance_id>/`: the mini-swe-agent trajectory
