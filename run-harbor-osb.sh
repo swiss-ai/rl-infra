@@ -8,6 +8,7 @@
 #   ~/.opensandbox_token   OpenSandbox API key, one line, no username (chmod 600)
 #   HARBOR_ROOT            train.jsonl, validation.jsonl, tasks/ (default $SCRATCH/osb/harbor_micro)
 #   TASK, RECIPE, RUN, PARTITION, JOB_TIME, ACCOUNT, OPENSANDBOX_DOMAIN, OVERLAY override the defaults.
+#   SCRIPT                 NeMo-RL entrypoint (default examples/nemo_gym/run_grpo_nemo_gym.py).
 #   QOS                    optional Slurm QOS (exported as SBATCH_QOS); partition normal needs none.
 set -euo pipefail
 
@@ -67,5 +68,5 @@ printf 'defaults:\n  - %s\n  - %s\n' "${RECIPE}" "${TASK}" > "${CFG}"
 [[ -z "${OVERLAY:-}" ]] || printf '  - %s\n' "$(realpath "${OVERLAY}")" >> "${CFG}"
 echo "== ${RUN}: ${NODES} nodes, partition ${PARTITION}, OpenSandbox ${OPENSANDBOX_DOMAIN}, tasks ${HARBOR_TASKS_DIR}"
 # envs/reap_after.sh deletes the run's sandboxes when the driver exits (a run leaves its last batch behind).
-SCRIPT=examples/nemo_gym/run_grpo_nemo_gym.py DRIVER_WRAPPER="bash ${ROOT}/envs/reap_after.sh" \
+SCRIPT="${SCRIPT:-examples/nemo_gym/run_grpo_nemo_gym.py}" DRIVER_WRAPPER="bash ${ROOT}/envs/reap_after.sh" \
     bash "${APERTUS2_DIR}/launch.sh" "${CFG}" "${NODES}" "${RUN}" "$@"

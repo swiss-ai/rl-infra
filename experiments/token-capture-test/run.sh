@@ -2,8 +2,9 @@
 # Token-capture test: mini_swe_agent_2 on OpenSandbox with Qwen3-4B on one node, through
 # NeMo-RL's legacy GRPO entrypoint (run-harbor-osb.sh). See README.md.
 #   bash experiments/token-capture-test/run.sh [overrides...]
-# Env: PARTITION (default normal), JOB_TIME (default 01:00:00), RUN, HARBOR_ROOT
-# (default $SCRATCH/osb/mini_swe), everything run-harbor-osb.sh reads.
+# Env: TASK, RECIPE (default the two yaml files here), PARTITION (default normal), JOB_TIME
+# (default 01:00:00), RUN, HARBOR_ROOT (default $SCRATCH/osb/mini_swe), everything
+# run-harbor-osb.sh reads.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -32,7 +33,7 @@ if [[ -n "${litellm_v}" && "$(printf '%s\n' 1.103 "${litellm_v}" | sort -V | hea
     rm -rf "${MSA_VENV}"
 fi
 
-export TASK="${HERE}/mini-swe-osb.yaml" RECIPE="${HERE}/qwen3-4b-1n.yaml"
+export TASK="${TASK:-${HERE}/mini-swe-osb.yaml}" RECIPE="${RECIPE:-${HERE}/qwen3-4b-1n.yaml}"
 export RUN="${RUN:-token-test-$(date +%Y%m%d-%H%M%S)}"
 export JOB_TIME="${JOB_TIME:-01:00:00}"
 export NEMO_GYM_WORKLOAD="${NEMO_GYM_WORKLOAD:-token-capture-test}"
