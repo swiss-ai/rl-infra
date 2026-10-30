@@ -40,5 +40,13 @@ images are public `docker.io/swebench/sweb.eval.x86_64.*` images.
 | The step finishes and the training metrics show tokens for these samples | Legacy GRPO got token ids from this agent; no switch is needed for it. Not expected from the code. |
 | `0 items`, `Error running mini-swe-agent`, or no `[EVAL]` lines | Inconclusive: the rollout failed before any model call (sandbox create, image pull, agent venv). Fix that and rerun. |
 
+Per-rollout files: mini_swe_agent_2 writes them under the Gym server's working directory, which
+is the clone mount `/opt/nemo-rl` (= `$NEMO_RL_DIR`, gitignored `results/`), in
+`results/verified/Qwen/Qwen2.5-1.5B-Instruct/<instance_id>/`: the mini-swe-agent trajectory
+(`<instance_id>_<run_id>.traj.json`, every model reply with the full response in `extra.response`),
+the patch, the test output, the SWE-bench report, and `<instance_id>.json` (the `/run` result; the
+two generations of an instance overwrite each other's). A token id field in `extra.response`
+(e.g. `prompt_token_ids`) shows the ids reached the agent and were dropped by its wrapper.
+
 Sandboxes carry `nemo-gym.nvidia.com/workload=token-capture-test` and the run id; reap them as in
 `docs/harbor-osb-chonk-run.md`.
