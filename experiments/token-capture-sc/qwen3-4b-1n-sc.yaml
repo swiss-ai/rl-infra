@@ -1,0 +1,15 @@
+# Qwen3-4B-Instruct-2507 on one node (4 GH200) for NeMo-RL's Single-Controller path: the legacy
+# test's recipe with vLLM moved off the trainer GPUs. Single-Controller rejects colocated vLLM, so
+# 2 GPUs serve (two TP1 engines) and 2 train (Megatron, distributed optimizer over DP2).
+defaults: ../token-capture-test/qwen3-4b-1n.yaml
+
+policy:
+  generation:
+    colocated:
+      enabled: false
+      resources:
+        num_nodes: 1
+        gpus_per_node: 2
+    vllm_cfg:
+      # the engines no longer share their GPUs with Megatron
+      gpu_memory_utilization: 0.85
