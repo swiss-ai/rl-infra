@@ -1,0 +1,277 @@
+diff --git a/resources_servers/code_gen/app.py b/resources_servers/code_gen/app.py
+index 72048daa..a3acc5ad 100644
+--- a/resources_servers/code_gen/app.py
++++ b/resources_servers/code_gen/app.py
+@@ -17,8 +17,9 @@ import base64
+ import json
+ import zlib
+ from asyncio import Semaphore
++from pathlib import Path
+ from time import time
+-from typing import Any, Dict, List, Optional, Union
++from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+ 
+ from lcb_integration.compute_code_generation_metrics import check_correctness_remote
+ from lcb_integration.extraction_utils import LMStyle, extract_code
+@@ -37,6 +38,7 @@ from nemo_gym.reward_profile import (
+     compute_subset_metrics,
+     highest_k_metrics,
+ )
++from nemo_gym.server_utils import get_response_json, request
+ 
+ 
+ # ----------------------------
+@@ -47,6 +49,12 @@ class CompCodingResourcesServerConfig(BaseResourcesServerConfig):
+     unit_test_timeout_secs: int
+     debug: bool
+     reasoning_format_penalty: float = 0.0
++    # JSON file with the url and token of a sandbox service, which runs the unit tests. Without one
++    # they run on any node of the Ray cluster, with no sandbox.
++    sandbox_endpoint_file: Optional[str] = None
++    # "all_tests": 1 if every test passes. "fraction": the share of tests passed, which needs a
++    # runner that goes on after a failure, such as the sandbox service.
++    reward_mode: Literal["all_tests", "fraction"] = "all_tests"
+ 
+ 
+ # ----------------------------
+@@ -77,6 +85,7 @@ class CompCodingVerifyResponse(BaseVerifyResponse):
+     unit_tests_time_taken: Optional[float] = None
+     reasoning_format_violation_rate: float = 0.0
+     difficulty: Optional[str] = None
++    all_tests_passed: bool = False
+ 
+ 
+ # ----------------------------
+@@ -87,6 +96,11 @@ class CompCodingResourcesServer(SimpleResourcesServer):
+ 
+     def model_post_init(self, context):
+         self._semaphore: Semaphore = Semaphore(value=self.config.num_processes)
++        self._sandbox: Optional[Dict[str, str]] = None
++        if self.config.sandbox_endpoint_file:
++            self._sandbox = json.loads(Path(self.config.sandbox_endpoint_file).read_text())
++        elif self.config.reward_mode == "fraction":
++            raise ValueError("reward_mode fraction needs sandbox_endpoint_file: the local runner stops at a failure.")
+ 
+     @staticmethod
+     def _has_reasoning_format_violation(response) -> bool:
+@@ -113,7 +127,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
+ 
+     @staticmethod
+     def _code_score_fn(r: dict) -> Dict[str, float]:
+-        return {"accuracy": float(r["reward"] > 0)}
++        return {"accuracy": float(r.get("all_tests_passed", r["reward"] > 0))}
+ 
+     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+         """Compute code generation metrics: pass@k, majority@k, per-sample statistics.
+@@ -147,6 +161,22 @@ class CompCodingResourcesServer(SimpleResourcesServer):
+ 
+         return key
+ 
++    async def _run_in_sandbox(self, tests: UnitTests, code: str) -> Tuple[List[Union[int, bool]], Dict[str, Any]]:
++        response = await request(
++            method="POST",
++            url=f"{self._sandbox['url']}/run",
++            headers={"Authorization": f"Bearer {self._sandbox['token']}"},
++            json={**tests.model_dump(), "code": code, "timeout": self.config.unit_test_timeout_secs},
++        )
++        response.raise_for_status()
++        report = await get_response_json(response)
++        return report["results"], report["metadata"]
++
++    def _score(self, result: List[Union[int, bool]]) -> float:
++        if self.config.reward_mode == "fraction":
++            return sum(r == True for r in result) / max(len(result), 1)  # noqa: E712
++        return 1.0 if all(r == True for r in result) else 0.0  # noqa: E712
++
+     async def verify(self, body: CompCodingVerifyRequest) -> CompCodingVerifyResponse:
+         model_out = body.response.output_text
+         difficulty = (body.verifier_metadata or {}).get("difficulty")
+@@ -184,7 +214,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
+                 difficulty=difficulty,
+             )
+ 
+-        # 4) run (no sandbox)
++        # 4) run: in the sandbox service if there is one, else with no sandbox
+         async with self._semaphore:
+             """
+             Sample looks like this:
+@@ -212,15 +242,18 @@ class CompCodingResourcesServer(SimpleResourcesServer):
+             # We can directly measure here since we are inside the semaphore.
+             start_time = time()
+ 
+-            task_args = (
+-                {"input_output": tests.model_dump_json()},  # sample
+-                code,  # generation
+-                self.config.unit_test_timeout_secs,  # timeout
+-                self.config.debug,  # debug
+-            )
++            if self._sandbox:
++                result, metadata = await self._run_in_sandbox(tests, code)
++            else:
++                task_args = (
++                    {"input_output": tests.model_dump_json()},  # sample
++                    code,  # generation
++                    self.config.unit_test_timeout_secs,  # timeout
++                    self.config.debug,  # debug
++                )
+ 
+-            future = check_correctness_remote.remote(*task_args)
+-            result, metadata = await future
++                future = check_correctness_remote.remote(*task_args)
++                result, metadata = await future
+ 
+             unit_tests_time_taken = time() - start_time
+ 
+@@ -228,11 +261,8 @@ class CompCodingResourcesServer(SimpleResourcesServer):
+ 
+         return CompCodingVerifyResponse(
+             **body.model_dump(),
+-            reward=(
+-                self.config.reasoning_format_penalty
+-                if has_violation
+-                else (1.0 if all(r == True for r in result) else 0.0)
+-            ),
++            reward=self.config.reasoning_format_penalty if has_violation else self._score(result),
++            all_tests_passed=all(r == True for r in result),  # noqa: E712
+             extracted_model_output=model_out,
+             extracted_model_code=code,
+             result=result,
+diff --git a/resources_servers/code_gen/configs/code_gen.yaml b/resources_servers/code_gen/configs/code_gen.yaml
+index 0006cd66..1c01ec8a 100644
+--- a/resources_servers/code_gen/configs/code_gen.yaml
++++ b/resources_servers/code_gen/configs/code_gen.yaml
+@@ -10,6 +10,8 @@ code_gen:
+       num_processes: 8
+       unit_test_timeout_secs: 10
+       debug: false
++      sandbox_endpoint_file: null
++      reward_mode: all_tests
+ code_gen_simple_agent:
+   responses_api_agents:
+     simple_agent:
+diff --git a/resources_servers/code_gen/tests/test_app.py b/resources_servers/code_gen/tests/test_app.py
+index a0c82ca3..758377ce 100644
+--- a/resources_servers/code_gen/tests/test_app.py
++++ b/resources_servers/code_gen/tests/test_app.py
+@@ -13,8 +13,10 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
++import json
++from pathlib import Path
+ from typing import Generator
+-from unittest.mock import MagicMock
++from unittest.mock import AsyncMock, MagicMock, patch
+ 
+ import pytest
+ import ray
+@@ -288,6 +290,109 @@ def _make_server():
+     )
+ 
+ 
++class TestSandbox:
++    @staticmethod
++    def _server(endpoint_file: Path, reward_mode: str) -> CompCodingResourcesServer:
++        return CompCodingResourcesServer(
++            config=CompCodingResourcesServerConfig(
++                host="0.0.0.0",
++                port=8080,
++                entrypoint="",
++                name="",
++                num_processes=1,
++                unit_test_timeout_secs=10,
++                debug=False,
++                sandbox_endpoint_file=str(endpoint_file),
++                reward_mode=reward_mode,
++            ),
++            server_client=MagicMock(spec=ServerClient),
++        )
++
++    @staticmethod
++    def _request() -> CompCodingVerifyRequest:
++        response = NeMoGymResponse(
++            id="resp",
++            created_at=0.0,
++            model="dummy",
++            object="response",
++            output=[
++                {
++                    "id": "msg",
++                    "content": [{"annotations": [], "text": "```python\nprint(1)\n```", "type": "output_text"}],
++                    "role": "assistant",
++                    "status": "completed",
++                    "type": "message",
++                }
++            ],
++            parallel_tool_calls=False,
++            tool_choice="none",
++            tools=[],
++        )
++        return CompCodingVerifyRequest(
++            responses_create_params={"input": [{"role": "user", "content": "x"}]},
++            response=response,
++            verifier_metadata={"unit_tests": {"inputs": ["1", "2", "3", "4"], "outputs": ["1", "1", "1", "1"]}},
++            **{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0},
++        )
++
++    @pytest.mark.parametrize(
++        "reward_mode, results, reward, all_passed",
++        [
++            ("fraction", [True, -2, True, True], 0.75, False),
++            ("fraction", [True, True, True, True], 1.0, True),
++            ("fraction", [-1, -1, -1, -1], 0.0, False),
++            ("all_tests", [True, -2, True, True], 0.0, False),
++            ("all_tests", [True, True, True, True], 1.0, True),
++        ],
++    )
++    async def test_verify_scores_the_sandbox_results(
++        self, tmp_path: Path, reward_mode: str, results: list, reward: float, all_passed: bool
++    ) -> None:
++        endpoint = tmp_path / "endpoint.json"
++        endpoint.write_text(json.dumps({"url": "http://sandbox:1", "token": "secret"}))
++        server = self._server(endpoint, reward_mode)
++        http_response = MagicMock()
++        with (
++            patch("app.request", AsyncMock(return_value=http_response)) as post,
++            patch("app.get_response_json", AsyncMock(return_value={"results": results, "metadata": None})),
++            patch("app.check_correctness_remote") as local_runner,
++        ):
++            verified = await server.verify(self._request())
++        assert verified.reward == reward
++        assert verified.all_tests_passed is all_passed
++        local_runner.remote.assert_not_called()
++        assert post.call_args.kwargs["url"] == "http://sandbox:1/run"
++        assert post.call_args.kwargs["headers"] == {"Authorization": "Bearer secret"}
++        assert post.call_args.kwargs["json"]["code"] == "print(1)"
++        http_response.raise_for_status.assert_called_once()
++
++    def test_a_missing_endpoint_file_fails_at_start(self, tmp_path: Path) -> None:
++        with pytest.raises(FileNotFoundError):
++            self._server(tmp_path / "missing.json", "fraction")
++
++    def test_the_fraction_needs_the_sandbox(self) -> None:
++        with pytest.raises(ValueError, match="sandbox_endpoint_file"):
++            CompCodingResourcesServer(
++                config=CompCodingResourcesServerConfig(
++                    host="0.0.0.0",
++                    port=8080,
++                    entrypoint="",
++                    name="",
++                    num_processes=1,
++                    unit_test_timeout_secs=10,
++                    debug=False,
++                    reward_mode="fraction",
++                ),
++                server_client=MagicMock(spec=ServerClient),
++            )
++
++
++class TestScoreFn:
++    def test_a_partial_reward_is_not_accuracy(self) -> None:
++        assert CompCodingResourcesServer._code_score_fn({"reward": 0.75, "all_tests_passed": False}) == {"accuracy": 0.0}
++        assert CompCodingResourcesServer._code_score_fn({"reward": 1.0}) == {"accuracy": 1.0}
++
++
+ class TestComputeMetrics:
+     def test_produces_pass_at_k_and_subsets(self) -> None:
+         server = _make_server()
