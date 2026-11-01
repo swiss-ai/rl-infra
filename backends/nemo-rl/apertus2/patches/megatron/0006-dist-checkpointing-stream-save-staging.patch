@@ -1,0 +1,14 @@
+--- a/megatron/core/dist_checkpointing/strategies/torch.py
++++ b/megatron/core/dist_checkpointing/strategies/torch.py
+@@ -630,8 +630,9 @@ class TorchDistSaveShardedStrategy:
+         self.thread_count = thread_count
+         # Host staging of GPU shards, see FileSystemWriterAsync.staging_mode. Anything other
+         # than "pinned" is only implemented by the MCore writer, so async_save switches to
+-        # the mcore backend for those modes.
+-        self.staging_mode = "pinned"
++        # the mcore backend for those modes. Streamed keeps the host peak of a synchronous save
++        # to one tensor; an async save needs "pageable" or "pinned", as its writer has no GPU.
++        self.staging_mode = "streamed"
+ 
+         # Cached SavePlans to skip plan in `save_state_dict_async_plan`
+         # cached outcome of `SavePlan.prepare_global_plan`,

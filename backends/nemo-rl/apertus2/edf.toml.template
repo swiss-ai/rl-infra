@@ -26,10 +26,15 @@ NCCL_CROSS_NIC = "0"
 UCCL_EP_TRANSPORT = "cxi"
 
 # NeMo-RL, Automodel, Megatron-LM and Megatron-Bridge are not installed in the image: the clone,
-# its Automodel checkout and the Megatron checkouts are imported from the mounts. PYDEPS = runtime
-# overlay (driver.sh).
-PYTHONPATH = "/opt/nemo-rl:/opt/nemo-rl/3rdparty/Automodel-workspace/Automodel:@@BRIDGE_DIR@@/src:@@MEGATRON_DIR@@:@@PYDEPS@@"
+# its Automodel and Gym checkouts and the Megatron checkouts are imported from the mounts. PYDEPS =
+# runtime overlay (driver.sh); PYDEPS_GYM = 1 adds what NeMo Gym needs to it. Gym builds its server
+# venvs in NEMO_GYM_VENV_DIR, which every node sees.
+PYTHONPATH = "/opt/nemo-rl:/opt/nemo-rl/3rdparty/Automodel-workspace/Automodel:/opt/nemo-rl/3rdparty/Gym-workspace/Gym:@@BRIDGE_DIR@@/src:@@MEGATRON_DIR@@:@@PYDEPS@@"
 PYDEPS = "@@PYDEPS@@"
+PYDEPS_APERTUS2 = "@@PYDEPS_APERTUS2@@"
+PYDEPS_GYM = "@@PYDEPS_GYM@@"
+NEMO_GYM_VENV_DIR = "@@SCRATCH@@/nemo-rl-apertus2/gym-venvs"
+UV_LINK_MODE = "copy"
 PYTHONNOUSERSITE = "1"
 PYTHONDONTWRITEBYTECODE = "1"
 TOKENIZERS_PARALLELISM = "false"

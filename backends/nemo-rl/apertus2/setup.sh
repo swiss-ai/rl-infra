@@ -86,6 +86,9 @@ checkout_at() {   # <url> <dir> <commit> <ref the commit is reachable from>
 }
 checkout_at "${MEGATRON_URL}" "${MEGATRON_DIR}" "${MEGATRON_COMMIT}" "${MEGATRON_REF}"
 checkout_at "${BRIDGE_URL}" "${BRIDGE_DIR}" "${BRIDGE_COMMIT}" "${BRIDGE_REF}"
+if [[ -n "${PYDEPS_APERTUS2:-}" ]]; then
+    checkout_at "${APERTUS_COMMON_URL}" "${PYDEPS_APERTUS2}" "${APERTUS_COMMON_COMMIT}" "${APERTUS_COMMON_REF}"
+fi
 for p in "${APERTUS2_DIR}"/patches/megatron/*.patch; do
     if git -C "${MEGATRON_DIR}" apply --reverse --check "${p}" 2>/dev/null; then continue; fi
     git -C "${MEGATRON_DIR}" apply "${p}"

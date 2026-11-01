@@ -1,0 +1,17 @@
+defaults: ../recipes/apertus2-chonk-sft-vllm-adamw.yaml
+
+data:
+  train:
+    dataset_name: gsm8k
+    split_validation_size: 0.0
+  validation:
+    dataset_name: gsm8k
+    split: test
+  default:
+    prompt_file: null
+    env_name: math
+
+env:
+  math:
+    num_workers: 8
+    math_verify_impl: hf_math_verify

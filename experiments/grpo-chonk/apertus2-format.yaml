@@ -1,0 +1,20 @@
+# Runs a checkpoint trained on the Apertus 2 message format instead of the pretraining format, on the
+# math environment. The prompt is a system frame and a user frame encoded straight to token IDs by
+# apertus-common, and generation ends at <|wait|> with the format's special tokens blocked. The reward
+# reads one frame of the output, parsed from its token IDs; the other is verified as a metric.
+policy:
+  tokenizer:
+    chat_template: null
+  generation:
+    output_format: apertus2
+    stop_token_ids: [12]
+    stop_strings: null
+
+data:
+  default:
+    processor: apertus2_math_data_processor
+    system_prompt_file: ${oc.env:RL_INFRA_DIR}/envs/apertus2-system.json
+
+env:
+  math:
+    reward_frame: claim

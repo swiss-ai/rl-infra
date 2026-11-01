@@ -10,4 +10,4 @@ policy:
 checkpointing:
   checkpoint_must_save_by: "00:04:40:00"
   save_period: 1000
-  save_optimizer: false
+  save_optimizer: true

@@ -1,0 +1,25 @@
+# DAPO-Math recipe on an SFT checkpoint with Muon: the same training as the pretrained base, in the
+# Apertus 2 message format. sft_export is the HF export under $SCRATCH that run.sh stages to
+# policy.model_name.
+defaults:
+  - ../experiments/grpo-chonk/chonk-dapo-24n-megatron-128x16-16k-async-pp4-dedup-md-fp8-skip-trunc0.yaml
+  - ../experiments/grpo-chonk/apertus2-format.yaml
+
+sft_export: chonk-sft/models/chonk-lc-16k-v0.1-ep1-iter_0008075
+
+# 16 trainer nodes and 8 vLLM nodes.
+cluster:
+  num_nodes: 24
+
+# As in the base DAPO runs: a run ends after one epoch of 135 steps, with checkpoints to resume from.
+checkpointing:
+  checkpoint_must_save_by: "00:23:30:00"
+  save_period: 20
+
+policy:
+  model_name: ${oc.env:SCRATCH}/models/chonk-lc-16k-v0.1-ep1-iter_0008075
+  megatron_cfg:
+    optimizer:
+      lr: 1.0e-6
+      gains_lr: 1.0e-6
+      matrix_lr: 4.0e-5

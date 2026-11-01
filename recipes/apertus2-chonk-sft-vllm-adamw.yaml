@@ -1,0 +1,13 @@
+# GSM8K recipe on an SFT checkpoint: the same training as the pretrained base, in the Apertus 2
+# message format. sft_export is the HF export under $SCRATCH that run.sh stages to policy.model_name.
+defaults:
+  - apertus2-chonk-vllm-adamw.yaml
+  - ../experiments/grpo-chonk/apertus2-format.yaml
+
+sft_export: chonk-sft/models/chonk-lc-16k-v0.1-ep1-iter_0008075
+
+cluster:
+  num_nodes: 12
+
+policy:
+  model_name: ${oc.env:SCRATCH}/models/chonk-lc-16k-v0.1-ep1-iter_0008075

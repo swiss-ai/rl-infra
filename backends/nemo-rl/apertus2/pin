@@ -37,3 +37,11 @@ VLLM_RUNNER_BLOB=4ec55eef55352090b50a255ee021cbe41daae06f
 # (block FP8 for precision: fp8) and the EDF mounts the result over the image's copy.
 VLLM_APERTUS2_URL=https://raw.githubusercontent.com/swiss-ai/vllm/d4d41485a1cc1aee0d906d19f41523d2fdc67463/vllm/model_executor/models/apertus2.py
 VLLM_APERTUS2_BLOB=722fd25e74a8cc1af56c1501cbb3eaa614a1615b
+# NeMo Gym for tasks that run on it (setup-gym.sh): the commit the NeMo-RL fork pins, plus patches/gym.
+GYM_URL=https://github.com/swiss-ai/nemo-gym.git
+GYM_COMMIT=267305e2a7bf88153e8ebbca1029ecc1e0f67b25
+# The Apertus 2 message format, for tasks on checkpoints trained on it. The commit that tokenized the
+# SFT data. The repository is private, so setup.sh clones it on the login node and jobs install it from there.
+APERTUS_COMMON_URL=https://github.com/swiss-ai/apertus-common.git
+APERTUS_COMMON_COMMIT=494c2be79080aa8fbcd46409b96560f72707cd69
+APERTUS_COMMON_REF=main

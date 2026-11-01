@@ -8,6 +8,8 @@
 # vLLM does not need step 2/3: it has its own Apertus2KDAForCausalLM.
 # CHONK_MODEL_STAGE=link (sites/hangang.env) instead links DST to a source that already went
 # through all three steps (a shared copy that is only read), after checking its modeling code.
+# STAGE_SHARDS=link links the shards instead of copying them, for a source that stays on this
+# filesystem, such as an SFT export that lacks only the modeling code.
 # SRC and the mode come from the cluster profile (sites/<SITE>.env).
 set -euo pipefail
 
@@ -47,6 +49,10 @@ lfs setstripe -c 8 -S 4M "${DST}" 2>/dev/null || true
 # 1. Shards and small files; per-file temp name + rename, so DST only holds complete files.
 copy_one() {
     local src="$1" dst="$2/$(basename "$1")"
+    if [[ "${STAGE_SHARDS:-copy}" == link && "${src}" == *.safetensors ]]; then
+        ln -sfn "${src}" "${dst}"
+        return 0
+    fi
     if [[ -f "${dst}" && $(stat -c %s "${dst}") == $(stat -c %s "${src}") ]]; then return 0; fi
     cp "${src}" "${dst}.tmp.$$" && mv "${dst}.tmp.$$" "${dst}"
 }

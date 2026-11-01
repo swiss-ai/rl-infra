@@ -55,6 +55,10 @@ gen_nodes=$(r policy.generation.colocated.resources.num_nodes)
 colocated=$(r policy.generation.colocated.enabled)
 train_nodes=${NODES}
 [[ "${colocated}" == false ]] && train_nodes=$(( NODES - ${gen_nodes:-0} ))
+# LLM judges on nodes of their own (env.judge_pool): NeMo-RL takes them out of the same total.
+judge_nodes=$(r env.judge_pool.num_nodes)
+[[ "${judge_nodes}" =~ ^[0-9]+$ ]] || judge_nodes=0
+train_nodes=$(( train_nodes - judge_nodes ))
 megatron=$(r policy.megatron_cfg.enabled)
 prompts=$(r grpo.num_prompts_per_step); gens=$(r grpo.num_generations_per_prompt)
 gbs=$(r policy.train_global_batch_size); maxlen=$(r policy.max_total_sequence_length)
@@ -68,7 +72,7 @@ gen_pp=$(g pipeline_model_parallel_size); gen_pp=${gen_pp:-$(r policy.megatron_c
 gen_ep=$(g expert_model_parallel_size); gen_ep=${gen_ep:-$(r policy.megatron_cfg.expert_model_parallel_size)}
 gen_dispatcher=$(g moe_token_dispatcher_type); gen_dispatcher=${gen_dispatcher:-$(r policy.megatron_cfg.moe_token_dispatcher_type)}
 gen_deepep=$(g moe_enable_deepep); gen_deepep=${gen_deepep:-$(r policy.megatron_cfg.moe_enable_deepep)}
-echo "  nodes: ${NODES} = ${train_nodes} train + ${gen_nodes:-0} generation (colocated: ${colocated})"
+echo "  nodes: ${NODES} = ${train_nodes} train + ${gen_nodes:-0} generation$( (( judge_nodes > 0 )) && echo " + ${judge_nodes} judge") (colocated: ${colocated})"
 if [[ "${backend}" == megatron ]]; then
   echo "  generation: megatron TP${gen_tp} PP${gen_pp} EP${gen_ep}, dispatcher ${gen_dispatcher} (deepep ${gen_deepep}), buffer $(g buffer_size_gb) GB, max requests $(g max_requests), cuda graphs $(g cuda_graph_impl)/$(g inference_cuda_graph_scope), kv cache $(g kv_cache_management_mode), logprobs $(g logprobs_mode), refit $(r policy.generation.refit_transport)"
 else
@@ -80,6 +84,7 @@ echo "  batch: ${prompts} prompts x ${gens} = $(( prompts * gens )) samples, glo
 echo "  length: total ${maxlen}, new tokens $(r policy.generation.max_new_tokens), packing ${packing} (train ${mb_tokens}, logprob ${lp_tokens} tokens)"
 echo "  grpo: ${max_steps:=$(r grpo.max_num_steps)} steps, val every $(r grpo.val_period) (start $(r grpo.val_at_start), end $(r grpo.val_at_end)), async ${async} (age $(r grpo.async_grpo.max_trajectory_age_steps), in-flight $(r grpo.async_grpo.in_flight_weight_updates))"
 echo "  rewards: skip zero-advantage groups $(r grpo.skip_zero_advantage_groups), reward shaping $(r grpo.reward_shaping.enabled), truncated reward coefficient $(r grpo.reward_shaping.stop_properly_penalty_coef)"
+[[ -n "$(r policy.megatron_cfg.env_vars.FI_CXI_REQ_BUF_SIZE)" ]] && echo "  trainer rx buffers: request $(r policy.megatron_cfg.env_vars.FI_CXI_REQ_BUF_SIZE), overflow $(r policy.megatron_cfg.env_vars.FI_CXI_OFLOW_BUF_SIZE) bytes"
 echo "  loss: IS correction $(r loss_fn.use_importance_sampling_correction) ($(r loss_fn.truncated_importance_sampling_type) $(r loss_fn.truncated_importance_sampling_ratio)), KL $(r loss_fn.reference_policy_kl_penalty), clip $(r loss_fn.ratio_clip_min)/$(r loss_fn.ratio_clip_max), dual-clip $(r loss_fn.ratio_clip_c); advantage: normalized $(r grpo.normalize_rewards), leave-one-out $(r grpo.use_leave_one_out_baseline)"
 echo "  checkpoints: enabled $(r checkpointing.enabled), every $(r checkpointing.save_period), keep $(r checkpointing.keep_top_k), save-and-stop by $(r checkpointing.checkpoint_must_save_by); job time ${JOB_TIME:-?}"
 o() { r "policy.megatron_cfg.optimizer.$1"; }
