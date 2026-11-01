@@ -1,0 +1,12 @@
+# Rubric rewards on an SFT checkpoint with AdamW. sft_export is the HF export under $SCRATCH that run.sh
+# stages to policy.model_name; envs/ultrafeedback-rubric-sft.yaml holds the task and the format.
+defaults: apertus2-chonk-vllm-adamw-rubric.yaml
+
+sft_export: chonk-sft/models/chonk-lc-16k-v0.1-ep1-iter_0008075
+
+# 8 trainer nodes, 4 vLLM nodes and 2 judge nodes.
+cluster:
+  num_nodes: 14
+
+policy:
+  model_name: ${oc.env:SCRATCH}/models/chonk-lc-16k-v0.1-ep1-iter_0008075

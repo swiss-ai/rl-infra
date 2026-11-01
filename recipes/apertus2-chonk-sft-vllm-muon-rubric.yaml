@@ -1,0 +1,17 @@
+# Rubric rewards on an SFT checkpoint with Muon. sft_export is the HF export under $SCRATCH that run.sh
+# stages to policy.model_name; envs/ultrafeedback-rubric-sft.yaml holds the task and the format.
+defaults: apertus2-chonk-vllm-muon.yaml
+
+sft_export: chonk-sft/models/chonk-lc-16k-v0.1-ep1-iter_0008075
+
+# 16 trainer nodes, 4 vLLM nodes and 2 judge nodes.
+cluster:
+  num_nodes: 22
+
+policy:
+  model_name: ${oc.env:SCRATCH}/models/chonk-lc-16k-v0.1-ep1-iter_0008075
+  megatron_cfg:
+    optimizer:
+      lr: 1.0e-6
+      gains_lr: 1.0e-6
+      matrix_lr: 4.0e-5

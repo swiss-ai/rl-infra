@@ -4,6 +4,7 @@
 # $OUT/slurm/<jobid>-check_env.out; the script prints the path and returns right away.
 #   bash backends/nemo-rl/apertus2/check_env_job.sh        (DRY_RUN=1 prints the sbatch command)
 #   JOB_TIME, PARTITION, ACCOUNT and MODEL (passed on to check_env.sh) override the defaults.
+#   CHECK_SCRIPT runs another script of this directory instead, e.g. check_judge.sh.
 set -euo pipefail
 
 export APERTUS2_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -20,7 +21,7 @@ esac
 read -r -a extra <<< "${SBATCH_EXTRA}"
 flags=(--nodes=1 --account="${ACCOUNT}" --partition="${PARTITION:-${DEFAULT_PARTITION}}" --time="${JOB_TIME:-00:30:00}"
        --job-name=check-env --output="${OUT}/slurm/%j-check_env.out" ${extra[@]+"${extra[@]}"})
-wrap="srun ${container_args} bash ${APERTUS2_DIR}/check_env.sh"
+wrap="srun ${container_args} bash ${APERTUS2_DIR}/${CHECK_SCRIPT:-check_env.sh}"
 
 if [[ "${DRY_RUN:-0}" == 1 ]]; then
     printf 'sbatch'; printf ' %q' "${flags[@]}"; printf ' --wrap %q\n' "${wrap}"

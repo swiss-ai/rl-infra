@@ -1,0 +1,245 @@
+From 777505e5aab8e7deee16b59e30002cca20a015bc Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Sun, 1 Nov 2026 04:27:12 +0900
+Subject: [PATCH] judge pool: log how full each replica is
+
+Nothing shows whether the judge's GPUs or the Gym servers in front of them limit a run, and vLLM's numbers never reach a log: NeMo-RL's server has no /metrics, and the metrics logger keeps four values for the policy. With env.judge_pool.stats_path set, a thread in the driver reads each replica's queue, its time spent queued and in prefill, and its prefix cache hits, and appends them to their own file. A failed read stops the file and leaves training alone.
+---
+ nemo_rl/environments/judge_pool.py            | 56 +++++++++++++++
+ .../models/generation/vllm/vllm_generation.py | 13 ++++
+ .../generation/vllm/vllm_worker_async.py      | 22 ++++++
+ tests/unit/environments/test_judge_pool.py    | 72 +++++++++++++++++++
+ 4 files changed, 163 insertions(+)
+ create mode 100644 tests/unit/environments/test_judge_pool.py
+
+diff --git a/nemo_rl/environments/judge_pool.py b/nemo_rl/environments/judge_pool.py
+index 8d5671ac8..47eae9648 100644
+--- a/nemo_rl/environments/judge_pool.py
++++ b/nemo_rl/environments/judge_pool.py
+@@ -21,14 +21,38 @@ OpenAI-compatible model.
+ 
+ The judge's ``generation`` block is a complete generation config. It inherits
+ nothing from ``policy.generation``, whose settings are specific to the policy model.
++
++With ``stats_path`` set, each replica's load goes to that file, one JSON line per
++replica every ``stats_interval_s``. It needs ``enable_vllm_metrics_logger`` in the
++judge's ``vllm_cfg``, because vLLM only keeps these numbers with it on.
+ """
+ 
++import json
++import threading
++import time
+ from copy import deepcopy
++from pathlib import Path
+ from typing import Any, Optional
+ 
++from ray.exceptions import RayError
++
+ # Keeps the pool alive: its Ray actors die with their handles.
+ _judge_pool: Optional[Any] = None
+ 
++# The first three are the replica's state now. The rest add up from the start of the
++# run, so the difference between two lines gives a rate or a mean per request.
++_STATS = (
++    "vllm:num_requests_running",
++    "vllm:num_requests_waiting",
++    "vllm:kv_cache_usage_perc",
++    "vllm:request_success",
++    "vllm:request_queue_time_seconds",
++    "vllm:request_prefill_time_seconds",
++    "vllm:prompt_tokens",
++    "vllm:prefix_cache_queries",
++    "vllm:prefix_cache_hits",
++)
++
+ 
+ def judge_pool_num_nodes(env_configs: dict[str, Any]) -> int:
+     """Return how many nodes ``env.judge_pool`` takes from the cluster."""
+@@ -36,6 +60,26 @@ def judge_pool_num_nodes(env_configs: dict[str, Any]) -> int:
+     return judge_config["num_nodes"] if judge_config else 0
+ 
+ 
++def _write_stats(pool: Any, path: str, interval_s: float) -> None:
++    """Append one JSON line per replica every ``interval_s`` until the pool is gone."""
++    Path(path).parent.mkdir(parents=True, exist_ok=True)
++    with open(path, "a", buffering=1) as stats_file:
++        while True:
++            now = round(time.time(), 1)
++            try:
++                replicas = pool.read_vllm_stats(_STATS)
++            except RayError as error:
++                print(f"⚠️ Judge stats stopped: {error}", flush=True)
++                return
++            for replica, stats in enumerate(replicas):
++                short_names = {
++                    name.removeprefix("vllm:"): value for name, value in stats.items()
++                }
++                line = {"time": now, "replica": replica, **short_names}
++                stats_file.write(json.dumps(line) + "\n")
++            time.sleep(interval_s)
++
++
+ def start_judge_pool(
+     env_configs: dict[str, Any], cluster_config: dict[str, Any]
+ ) -> None:
+@@ -44,6 +88,11 @@ def start_judge_pool(
+     judge_config = env_configs.get("judge_pool")
+     if not judge_config:
+         return
++    stats_path = judge_config.get("stats_path")
++    if stats_path:
++        assert judge_config["generation"]["vllm_cfg"].get(
++            "enable_vllm_metrics_logger"
++        ), "env.judge_pool.stats_path needs enable_vllm_metrics_logger in its vllm_cfg"
+ 
+     from nemo_rl.algorithms.utils import get_tokenizer
+     from nemo_rl.distributed.virtual_cluster import RayVirtualCluster
+@@ -86,3 +135,10 @@ def start_judge_pool(
+         f"{model_server['base_url']}",
+         flush=True,
+     )
++    if stats_path:
++        threading.Thread(
++            target=_write_stats,
++            args=(_judge_pool, stats_path, judge_config["stats_interval_s"]),
++            name="judge-stats",
++            daemon=True,
++        ).start()
+diff --git a/nemo_rl/models/generation/vllm/vllm_generation.py b/nemo_rl/models/generation/vllm/vllm_generation.py
+index 4ff91ea51..0af57495a 100644
+--- a/nemo_rl/models/generation/vllm/vllm_generation.py
++++ b/nemo_rl/models/generation/vllm/vllm_generation.py
+@@ -1559,6 +1559,19 @@ class VllmGeneration(GenerationInterface):
+         """Consume bounded latest-value snapshots for frequent telemetry polls."""
+         return self._collect_vllm_logger_metrics("drain_latest_vllm_logger_metrics")
+ 
++    def read_vllm_stats(self, names: tuple[str, ...]) -> list[dict[str, float]]:
++        """Read the current value of vLLM metrics from each replica, in replica order."""
++        return ray.get(
++            [
++                self.worker_group.run_single_worker_single_data(
++                    "read_vllm_stats",
++                    worker_idx=self.worker_group.get_dp_leader_worker_idx(dp_idx),
++                    names=names,
++                )
++                for dp_idx in range(self.worker_group.dp_size)
++            ]
++        )
++
+     def clear_vllm_logger_metrics(self) -> None:
+         if not self.cfg["vllm_cfg"].get("enable_vllm_metrics_logger", False):
+             return
+diff --git a/nemo_rl/models/generation/vllm/vllm_worker_async.py b/nemo_rl/models/generation/vllm/vllm_worker_async.py
+index e84987a41..28f32c452 100644
+--- a/nemo_rl/models/generation/vllm/vllm_worker_async.py
++++ b/nemo_rl/models/generation/vllm/vllm_worker_async.py
+@@ -431,6 +431,28 @@ class VllmAsyncGenerationWorkerImpl(
+             self.kv_cache_usage_perc = []
+             self.generation_tokens = []
+ 
++    def read_vllm_stats(self, names: tuple[str, ...]) -> dict[str, float]:
++        """Return vLLM's current value of each metric, summed over labels.
++
++        A histogram gives the sum of its observations, so a time reads as total seconds.
++        """
++        from vllm.v1.metrics.reader import (
++            Counter,
++            Gauge,
++            Histogram,
++            get_metrics_snapshot,
++        )
++
++        stats = dict.fromkeys(names, 0.0)
++        for m in get_metrics_snapshot():
++            if m.name not in stats:
++                continue
++            if isinstance(m, (Counter, Gauge)):
++                stats[m.name] += m.value
++            elif isinstance(m, Histogram):
++                stats[m.name] += m.sum
++        return stats
++
+     async def post_init_async(self):
+         self._engine_loop = asyncio.get_running_loop()
+         if self._sparse_refit_receiver is not None:
+diff --git a/tests/unit/environments/test_judge_pool.py b/tests/unit/environments/test_judge_pool.py
+new file mode 100644
+index 000000000..87ef6e292
+--- /dev/null
++++ b/tests/unit/environments/test_judge_pool.py
+@@ -0,0 +1,72 @@
++# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++import json
++
++import pytest
++from ray.exceptions import RayError
++
++from nemo_rl.environments.judge_pool import _STATS, _write_stats, start_judge_pool
++
++
++class FakePool:
++    """Two replicas that answer `reads` times and then die."""
++
++    def __init__(self, reads):
++        self.reads = reads
++        self.names = None
++
++    def read_vllm_stats(self, names):
++        if self.reads == 0:
++            raise RayError("pool is gone")
++        self.reads -= 1
++        self.names = names
++        return [
++            {"vllm:num_requests_running": 128.0, "vllm:num_requests_waiting": 7.0},
++            {"vllm:num_requests_running": 3.0, "vllm:num_requests_waiting": 0.0},
++        ]
++
++
++def test_write_stats_logs_every_replica_until_the_pool_is_gone(tmp_path):
++    path = tmp_path / "logs" / "judge_stats.jsonl"
++    pool = FakePool(reads=2)
++
++    _write_stats(pool, str(path), interval_s=0)
++
++    lines = [json.loads(line) for line in path.read_text().splitlines()]
++    assert pool.names == _STATS
++    assert [line["replica"] for line in lines] == [0, 1, 0, 1]
++    assert lines[0]["num_requests_running"] == 128.0
++    assert lines[0]["num_requests_waiting"] == 7.0
++    assert lines[1]["num_requests_running"] == 3.0
++    assert lines[0]["time"] <= lines[2]["time"]
++
++
++def test_write_stats_appends_to_an_existing_file(tmp_path):
++    path = tmp_path / "judge_stats.jsonl"
++    _write_stats(FakePool(reads=1), str(path), interval_s=0)
++    _write_stats(FakePool(reads=1), str(path), interval_s=0)
++
++    assert len(path.read_text().splitlines()) == 4
++
++
++def test_stats_path_without_the_metrics_logger_fails_at_startup():
++    env_configs = {
++        "judge_pool": {
++            "stats_path": "judge_stats.jsonl",
++            "generation": {"vllm_cfg": {"enable_vllm_metrics_logger": False}},
++        }
++    }
++
++    with pytest.raises(AssertionError, match="enable_vllm_metrics_logger"):
++        start_judge_pool(env_configs, cluster_config={})
+-- 
+2.43.0
+

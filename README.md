@@ -35,6 +35,35 @@ about 120 GRPO steps: the recipe saves the weights and stops after 11:30, so ano
 needs `checkpointing.checkpoint_must_save_by=DD:HH:MM:SS`, some time before the job ends, on the
 command. Re-running on an existing checkout also brings its NeMo-RL clone up to date.
 
+General chat on the UltraFeedback prompts, rewarded by an LLM judge on rubrics and validated with
+AlpacaEval, on 8 trainer, 4 vLLM and 1 judge node of one job:
+
+```bash
+python3.12 envs/prepare_ultrafeedback.py $SCRATCH/rubric-judge/ultrafeedback
+python3.12 envs/prepare_alpaca_eval.py $SCRATCH/rubric-judge/alpaca_eval
+bash envs/stage_judge_model.sh
+bash run.sh envs/ultrafeedback-rubric.yaml grpo.max_num_steps=3 grpo.val_at_start=false
+```
+
+The task names its entry `script`, the NeMo Gym one, so `run.sh` also sets up Gym, without touching
+the image: a checkout on `PYTHONPATH`, its own Python overlay, and server venvs built on scratch at
+job start. `env.judge_pool` serves the judge model through Ray next to the trainer and inference
+partitions, and the `rubric_judge` server in `apertus2/patches/gym` fills in the rubrics and calls it.
+The rubrics and their weights are in the task. Validation is AlpacaEval 2.0's prompts, GPT-4 Turbo
+references and judge prompt with the same judge model, reported as
+`validation/alpaca_eval_simple_agent/reward/mean`. Every rollout is saved to `<checkpoint_dir>/rollouts/`.
+The few-shot prompt is written into the data rows by the two `prepare_*` scripts, so changing
+`envs/ultrafeedback-few-shot.txt` means running them again.
+
+To see how loaded the judge is, each replica writes its state to `<checkpoint_dir>/judge_stats.jsonl`
+every few seconds. `python3.12 backends/nemo-rl/apertus2/judge_stats.py <file> [start] [end]` sums it
+up per replica, for a window in seconds from the start of the run. Requests waiting and `queue_s`
+well above 0 mean the judge's GPUs are full: check `max_num_batched_tokens` in its `vllm_kwargs`, then
+add judge nodes with `env.judge_pool.num_nodes` and a recipe of the matching size, as in
+`recipes/apertus2-chonk-vllm-adamw-rubric-2judge.yaml`. Replicas with room while batches still take much longer than their generation mean the
+limit is in front of them, in Gym's servers, so try `num_workers`. Replicas with very different load
+mean Gym is not spreading the calls evenly.
+
 ## How a NeMo-RL run is put together
 
 NeMo-RL ships as an NGC container image (`nvcr.io/nvidia/nemo-rl`) that already contains

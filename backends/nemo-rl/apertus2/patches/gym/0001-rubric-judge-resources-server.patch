@@ -1,0 +1,1295 @@
+diff --git a/resources_servers/rubric_judge/README.md b/resources_servers/rubric_judge/README.md
+new file mode 100644
+index 00000000..09b93488
+--- /dev/null
++++ b/resources_servers/rubric_judge/README.md
+@@ -0,0 +1,68 @@
++# rubric_judge
++
++Rewards free-form responses with an LLM judge, for domains with no verifiable answer.
++
++For every response the server fills each rubric in `rubric_weights` with the question and the
++response, asks the judge for a one-token verdict from 1 to 5, and takes the expected verdict
++under the judge's first-token distribution. The reward is the weighted mean of those scores,
++scaled to [0, 1]. The scores are continuous, so rollouts of one prompt rarely tie.
++
++The rubrics in `prompts/rubrics.yaml` (helpfulness, instruction following, truthfulness and
++honesty) are adapted from UltraFeedback through
++[ActiveUltraFeedback](https://github.com/lasgroup/ActiveUltraFeedback).
++
++## Rows
++
++Each row needs the bare request in `question`, next to the usual `responses_create_params`:
++
++```json
++{"responses_create_params": {"input": [{"role": "user", "content": "Why is the sky blue?"}]},
++ "question": "Why is the sky blue?",
++ "agent_ref": {"type": "responses_api_agents", "name": "rubric_judge_simple_agent"}}
++```
++
++`question` is what the judge reads, so `input` can wrap it in few-shot examples for a model
++without a chat template.
++
++## Reward
++
++| Case | Reward | Judge calls |
++|---|---|---|
++| Normal reply | weighted mean of the rubric scores | one per rubric |
++| Reply cut off by a token limit | `truncated_reward` (default 0) | none |
++| Empty reply | 0 | none |
++| No verdict after `judge_retries` | 0, and flagged `mask_sample` | up to `judge_retries + 1` per rubric |
++
++A judge failure says nothing about the response, so NeMo-RL leaves a flagged sample out of the
++loss. A reply that gives no digit is a failure too, and so is a prompt over the judge's context.
++Per-rubric scores come back as `rubric_<name>` fields.
++
++## Judge
++
++`judge_model` is an ordinary `vllm_model` server. With NeMo-RL, `env.judge_pool` runs the judge
++on nodes of the job's own Ray cluster and fills in its `base_url` and `model`. By hand:
++
++```bash
++gym env start \
++    --config resources_servers/rubric_judge/configs/rubric_judge.yaml \
++    ++judge_model.responses_api_models.vllm_model.base_url=http://<host>:8000/v1 \
++    ++judge_model.responses_api_models.vllm_model.model=<model>
++```
++
++The judge has to return `top_logprobs`, and the first token has to be the verdict, so the
++default config turns thinking off with `chat_template_kwargs`.
++
++## AlpacaEval validation
++
++Rubric scores are what the policy trains on, so `alpaca_eval_judge` validates with AlpacaEval 2.0's
++prompt and weighted win instead: the judge picks the better of the reply and the row's
++`baseline_answer` with a one-token `m` or `M`, and the win is `P(m) / (P(m) + P(M))`. Each reply
++is judged in both orders and the wins averaged, which takes two judge calls per reply. Rows name
++`alpaca_eval_simple_agent` and carry `baseline_answer`. The prompt is
++`prompts/alpaca_eval.yaml`; the judge model is whatever `judge_model` points at. A reply cut off by
++a token limit is judged as it stands, and is only reported in `judge_truncated`.
++
++## Tests
++
++`tests/test_scoring.py` covers the scoring and needs neither Gym nor pytest. `tests/test_app.py`
++covers the server with a stubbed judge.
+diff --git a/resources_servers/rubric_judge/app.py b/resources_servers/rubric_judge/app.py
+new file mode 100644
+index 00000000..21c0c49c
+--- /dev/null
++++ b/resources_servers/rubric_judge/app.py
+@@ -0,0 +1,252 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++# http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""rubric_judge resource server.
++
++Rewards a free-form response with an LLM judge, for domains with no verifiable
++answer. The server fills each configured rubric with the question and the
++response, asks the judge model for a one-token verdict on each, and returns the
++weighted mean of the expected verdicts (see `scoring.py`).
++
++The rubrics and the annotation scheme are adapted from UltraFeedback through
++ActiveUltraFeedback (https://github.com/lasgroup/ActiveUltraFeedback).
++
++With `alpaca_eval` set, the same server does AlpacaEval 2.0's validation instead: it
++shows the judge the reply and the row's `baseline_answer` with AlpacaEval's prompt and
++rewards the weighted win. Training rewards stay with the rubrics.
++
++The judge is an ordinary `vllm_model` server. NeMo-RL points it at the fixed-model
++vLLM pool it runs on the job's reward nodes (`env.judge_pool`).
++"""
++
++from __future__ import annotations
++
++import asyncio
++from pathlib import Path
++from typing import Any, Dict, List, Optional, Tuple
++
++import yaml
++from pydantic import ConfigDict, Field
++
++from nemo_gym.base_resources_server import (
++    BaseResourcesServerConfig,
++    BaseRunRequest,
++    BaseVerifyRequest,
++    BaseVerifyResponse,
++    SimpleResourcesServer,
++)
++from nemo_gym.config_types import ModelServerRef
++from nemo_gym.judge import JudgeError, call_judge
++from nemo_gym.openai_utils import (
++    NeMoGymChatCompletion,
++    NeMoGymChatCompletionCreateParamsNonStreaming,
++    NeMoGymResponse,
++)
++from resources_servers.rubric_judge.scoring import Rubric, clean_response, pairwise_win, score_rubrics
++
++
++_DEFAULT_RUBRICS_PATH = str(Path(__file__).parent / "prompts" / "rubrics.yaml")
++_ALPACA_EVAL_PATH = Path(__file__).parent / "prompts" / "alpaca_eval.yaml"
++
++
++def raw_message_text(response: Optional[NeMoGymResponse]) -> str:
++    """Assistant text from a Responses API payload, verbatim."""
++    if response is None:
++        return ""
++    chunks: List[str] = []
++    for item in response.output or []:
++        if getattr(item, "type", None) != "message":
++            continue
++        for content in getattr(item, "content", None) or []:
++            if getattr(content, "type", None) == "output_text":
++                chunks.append(content.text or "")
++    return "\n".join(chunks)
++
++
++def hit_token_limit(response: Optional[NeMoGymResponse]) -> bool:
++    """Whether a token limit cut the reply off.
++
++    NeMo-RL clamps each request to the room left under max_total_sequence_length, so a reply
++    can stop short of max_output_tokens. Either limit comes back as this incomplete reason.
++    """
++    details = response.incomplete_details if response is not None else None
++    return details is not None and details.reason == "max_output_tokens"
++
++
++class RubricJudgeConfig(BaseResourcesServerConfig):
++    judge_model_server: ModelServerRef
++    rubrics_path: str = Field(
++        default=_DEFAULT_RUBRICS_PATH,
++        description="YAML file with a `system` prompt and `rubrics`, each with {prompt} and {completion}.",
++    )
++    rubric_weights: Dict[str, float] = Field(
++        default_factory=dict,
++        description="Rubrics to score, by name in the rubrics file, and their weight in the reward.",
++    )
++    alpaca_eval: bool = Field(
++        default=False,
++        description="Reward the AlpacaEval win over each row's baseline_answer, ignoring the rubrics.",
++    )
++    stop_strings: List[str] = Field(
++        default_factory=list,
++        description="The reply ends at the first of these. Set it to the policy's few-shot turn marker.",
++    )
++    truncated_reward: float = Field(
++        default=0.0,
++        description="Reward of a reply cut off by a token limit, given without a judge call.",
++    )
++    # The verdict comes from the distribution, not the sampled token, so these only
++    # have to match the judge pool's own sampling, which NeMo-RL's server enforces.
++    temperature: float = 1.0
++    top_p: float = 1.0
++    top_logprobs: int = 20
++    judge_retries: int = 2
++    max_concurrent_judge_calls: int = 512
++
++
++class RubricJudgeRunRequest(BaseRunRequest):
++    model_config = ConfigDict(extra="allow")
++
++    # The bare user request. `responses_create_params` can hold few-shot examples
++    # around it, which are for the policy and not for the judge.
++    question: str
++    # The reference reply of an AlpacaEval row.
++    baseline_answer: Optional[str] = None
++
++
++class RubricJudgeVerifyRequest(RubricJudgeRunRequest, BaseVerifyRequest):
++    pass
++
++
++class RubricJudgeVerifyResponse(BaseVerifyResponse):
++    # Extra `rubric_<name>` fields carry the per-rubric scores, which NeMo-RL logs
++    # as per-agent metrics.
++    model_config = ConfigDict(extra="allow")
++
++    judge_truncated: bool = False
++    judge_failed: bool = False
++    # NeMo-RL drops flagged samples from the loss.
++    instance_config: Dict[str, Any] = Field(default_factory=lambda: {"mask_sample": False})
++
++
++class RubricJudgeServer(SimpleResourcesServer):
++    """LLM rubric grader for rewards that have no verifiable answer."""
++
++    config: RubricJudgeConfig
++
++    def model_post_init(self, context):
++        if self.config.alpaca_eval:
++            prompt_file = yaml.safe_load(_ALPACA_EVAL_PATH.read_text())
++            self._pairwise_template: str = prompt_file["user"]
++            self._rubrics = {}
++        else:
++            prompt_file = yaml.safe_load(Path(self.config.rubrics_path).read_text())
++            self._rubrics = {
++                name: Rubric(template=prompt_file["rubrics"][name], weight=weight)
++                for name, weight in self.config.rubric_weights.items()
++            }
++        self._system_prompt: str = prompt_file["system"]
++        self._judge_calls = asyncio.Semaphore(self.config.max_concurrent_judge_calls)
++        return super().model_post_init(context)
++
++    async def _call_judge(self, prompt: str) -> List[Tuple[str, float]]:
++        params = NeMoGymChatCompletionCreateParamsNonStreaming(
++            messages=[
++                {"role": "system", "content": self._system_prompt},
++                {"role": "user", "content": prompt},
++            ],
++            max_tokens=1,
++            temperature=self.config.temperature,
++            top_p=self.config.top_p,
++            logprobs=True,
++            top_logprobs=self.config.top_logprobs,
++        )
++        async with self._judge_calls:
++            completion = await call_judge(
++                self.server_client,
++                server_name=self.config.judge_model_server.name,
++                url_path="/v1/chat/completions",
++                json=params,
++                response_model=NeMoGymChatCompletion,
++            )
++        # A prompt over the judge's context comes back as an empty completion.
++        logprobs = completion.choices[0].logprobs if completion.choices else None
++        if logprobs is None or not logprobs.content:
++            return []
++        return [(top.token, top.logprob) for top in logprobs.content[0].top_logprobs]
++
++    def _verify_response(
++        self,
++        body: RubricJudgeVerifyRequest,
++        reward: float,
++        scores: Optional[Dict[str, float]] = None,
++        truncated: bool = False,
++        failed: Optional[List[str]] = None,
++    ) -> RubricJudgeVerifyResponse:
++        rubric_fields = {f"rubric_{name}": (scores or {}).get(name, 0.0) for name in self._rubrics}
++        return RubricJudgeVerifyResponse(
++            **body.model_dump(exclude={"reward"}),
++            reward=reward,
++            judge_truncated=truncated,
++            judge_failed=bool(failed),
++            failure_reason=f"no verdict from the judge on: {', '.join(failed)}" if failed else None,
++            instance_config={"mask_sample": bool(failed)},
++            **rubric_fields,
++        )
++
++    async def _verify_alpaca_eval(self, body: RubricJudgeVerifyRequest) -> RubricJudgeVerifyResponse:
++        # AlpacaEval judges a reply as it stands, so truncation is reported but not penalized.
++        truncated = hit_token_limit(body.response)
++        answer = clean_response(raw_message_text(body.response), self.config.stop_strings)
++        if not answer:
++            return self._verify_response(body, 0.0, truncated=truncated)
++        win = await pairwise_win(
++            self._pairwise_template,
++            body.question,
++            answer,
++            body.baseline_answer or "",
++            self._call_judge,
++            retries=self.config.judge_retries,
++            retry_on=(JudgeError,),
++        )
++        if win is None:
++            return self._verify_response(body, 0.0, truncated=truncated, failed=["alpaca_eval"])
++        return self._verify_response(body, win, truncated=truncated)
++
++    async def verify(self, body: RubricJudgeVerifyRequest) -> RubricJudgeVerifyResponse:
++        if self.config.alpaca_eval:
++            return await self._verify_alpaca_eval(body)
++
++        if hit_token_limit(body.response):
++            return self._verify_response(body, self.config.truncated_reward, truncated=True)
++
++        answer = clean_response(raw_message_text(body.response), self.config.stop_strings)
++        if not answer:
++            return self._verify_response(body, 0.0)
++
++        result = await score_rubrics(
++            self._rubrics,
++            body.question,
++            answer,
++            self._call_judge,
++            retries=self.config.judge_retries,
++            retry_on=(JudgeError,),
++        )
++        # A judge outage says nothing about the response, so a failed sample is left
++        # out of the loss instead of being taught that it scored 0.
++        return self._verify_response(body, result.reward, scores=result.scores, failed=result.failed)
++
++
++if __name__ == "__main__":
++    RubricJudgeServer.run_webserver()
+diff --git a/resources_servers/rubric_judge/configs/rubric_judge.yaml b/resources_servers/rubric_judge/configs/rubric_judge.yaml
+new file mode 100644
+index 00000000..2996407f
+--- /dev/null
++++ b/resources_servers/rubric_judge/configs/rubric_judge.yaml
+@@ -0,0 +1,82 @@
++rubric_judge:
++  resources_servers:
++    rubric_judge:
++      entrypoint: app.py
++      domain: rlhf
++      verified: false
++      description: Rewards free-form responses with an LLM judge on weighted rubrics
++      value: Train on domains with no verifiable answer, such as general chat
++      judge_model_server:
++        type: responses_api_models
++        name: judge_model
++      rubric_weights:
++        helpfulness: 1.0
++        instruction_following: 1.0
++        truthfulness: 1.0
++        honesty: 1.0
++      stop_strings: []
++      # A reply cut off by a token limit gets this reward without a judge call, so the judge never
++      # scores a half-finished reply and the policy learns to finish within the limit.
++      truncated_reward: 0.0
++
++rubric_judge_simple_agent:
++  responses_api_agents:
++    simple_agent:
++      entrypoint: app.py
++      resources_server:
++        type: resources_servers
++        name: rubric_judge
++      model_server:
++        type: responses_api_models
++        name: policy_model
++      datasets:
++        - name: example
++          type: example
++          jsonl_fpath: resources_servers/rubric_judge/data/example.jsonl
++
++# Validation: the same code in AlpacaEval mode, with the same judge model. Rows name this agent.
++# truncated_reward does not apply here: a cut-off reply is judged as it stands, as in AlpacaEval,
++# and is only reported in judge_truncated.
++alpaca_eval_judge:
++  resources_servers:
++    rubric_judge:
++      entrypoint: app.py
++      domain: rlhf
++      verified: false
++      description: AlpacaEval 2.0 weighted win rate against a reference reply, with a local judge
++      value: Validate training on domains with no verifiable answer
++      alpaca_eval: true
++      judge_model_server:
++        type: responses_api_models
++        name: judge_model
++      stop_strings: []
++
++alpaca_eval_simple_agent:
++  responses_api_agents:
++    simple_agent:
++      entrypoint: app.py
++      resources_server:
++        type: resources_servers
++        name: alpaca_eval_judge
++      model_server:
++        type: responses_api_models
++        name: policy_model
++      datasets:
++        - name: example
++          type: example
++          jsonl_fpath: resources_servers/rubric_judge/data/example_alpaca_eval.jsonl
++
++# The judge. Its base_url and model come from NeMo-RL's env.judge_pool, or from the
++# overrides of whoever runs it by hand.
++judge_model:
++  responses_api_models:
++    vllm_model:
++      entrypoint: app.py
++      base_url: ???
++      api_key: dummy_key
++      model: ???
++      return_token_id_information: false
++      uses_reasoning_parser: false
++      # The verdict has to be the first token, so the judge must not think first.
++      chat_template_kwargs:
++        enable_thinking: false
+diff --git a/resources_servers/rubric_judge/data/.gitignore b/resources_servers/rubric_judge/data/.gitignore
+new file mode 100644
+index 00000000..b023ed43
+--- /dev/null
++++ b/resources_servers/rubric_judge/data/.gitignore
+@@ -0,0 +1,3 @@
++*.jsonl
++!example.jsonl
++!example_alpaca_eval.jsonl
+diff --git a/resources_servers/rubric_judge/data/example.jsonl b/resources_servers/rubric_judge/data/example.jsonl
+new file mode 100644
+index 00000000..5160cd16
+--- /dev/null
++++ b/resources_servers/rubric_judge/data/example.jsonl
+@@ -0,0 +1,3 @@
++{"responses_create_params": {"input": [{"role": "user", "content": "Why is the sky blue?"}]}, "question": "Why is the sky blue?", "agent_ref": {"type": "responses_api_agents", "name": "rubric_judge_simple_agent"}}
++{"responses_create_params": {"input": [{"role": "user", "content": "Give me three tips for a first job interview."}]}, "question": "Give me three tips for a first job interview.", "agent_ref": {"type": "responses_api_agents", "name": "rubric_judge_simple_agent"}}
++{"responses_create_params": {"input": [{"role": "user", "content": "Write a two-line poem about autumn."}]}, "question": "Write a two-line poem about autumn.", "agent_ref": {"type": "responses_api_agents", "name": "rubric_judge_simple_agent"}}
+diff --git a/resources_servers/rubric_judge/data/example_alpaca_eval.jsonl b/resources_servers/rubric_judge/data/example_alpaca_eval.jsonl
+new file mode 100644
+index 00000000..b6cc5cc2
+--- /dev/null
++++ b/resources_servers/rubric_judge/data/example_alpaca_eval.jsonl
+@@ -0,0 +1 @@
++{"responses_create_params": {"input": [{"role": "user", "content": "Why is the sky blue?"}]}, "question": "Why is the sky blue?", "baseline_answer": "Air molecules scatter short wavelengths of sunlight more strongly than long ones, so blue light reaches your eyes from every direction.", "agent_ref": {"type": "responses_api_agents", "name": "alpaca_eval_simple_agent"}}
+diff --git a/resources_servers/rubric_judge/prompts/alpaca_eval.yaml b/resources_servers/rubric_judge/prompts/alpaca_eval.yaml
+new file mode 100644
+index 00000000..741d5830
+--- /dev/null
++++ b/resources_servers/rubric_judge/prompts/alpaca_eval.yaml
+@@ -0,0 +1,34 @@
++# AlpacaEval 2.0's pairwise judge prompt, verbatim from tatsu-lab/alpaca_eval (MIT), from
++# src/alpaca_eval/evaluators_configs/alpaca_eval_clf_gpt4_turbo/alpaca_eval_clf.txt
++system: |-
++  You are a highly efficient assistant, who evaluates and selects the best large language model (LLMs) based on the quality of their responses to a given instruction. This process will be used to create a leaderboard reflecting the most accurate and human-preferred answers.
++
++user: |-
++  I require a leaderboard for various large language models. I'll provide you with prompts given to these models and their corresponding outputs. Your task is to assess these responses, and select the model that produces the best output from a human perspective.
++
++  ## Instruction
++
++  {
++      "instruction": """{instruction}""",
++  }
++
++  ## Model Outputs
++
++  Here are the unordered outputs from the models. Each output is associated with a specific model, identified by a unique model identifier.
++
++  {
++      {
++          "model_identifier": "m",
++          "output": """{output_1}"""
++      },
++      {
++          "model_identifier": "M",
++          "output": """{output_2}"""
++      }
++  }
++
++  ## Task
++
++  Evaluate the models based on the quality and relevance of their outputs, and select the model that generated the best output. Answer by providing the model identifier of the best model. We will use your output as the name of the best model, so make sure your output only contains one of the following model identifiers and nothing else (no quotes, no spaces, no new lines, ...): m or M.
++
++  ## Best Model Identifier
+diff --git a/resources_servers/rubric_judge/prompts/rubrics.yaml b/resources_servers/rubric_judge/prompts/rubrics.yaml
+new file mode 100644
+index 00000000..11ea4fcd
+--- /dev/null
++++ b/resources_servers/rubric_judge/prompts/rubrics.yaml
+@@ -0,0 +1,115 @@
++# Judge prompts for rubric_judge, each with a 1-5 scale. {prompt} and {completion} are filled in per
++# response. Adapted from the ActiveUltraFeedback project by the LAS Group (ETH Zurich), which follows
++# the UltraFeedback annotation scheme:
++# https://github.com/lasgroup/ActiveUltraFeedback/blob/main/activeuf/oracle/prompts.py
++system: |-
++  You are an impartial judge. Your role is to critically evaluate the quality of an AI assistant response based on a given criteria. You'll receive an input with two sections, enclosed in tags: <USER_INPUT>...</USER_INPUT> for the task instructions (and any accompanying context, if applicable), and <ASSISTANT_RESPONSE_TO_EVALUATE>...</ASSISTANT_RESPONSE_TO_EVALUATE> for the AI assistant's response.
++
++  Carefully read the provided input to understand the task, then assess how well the response fulfills the criteria requirements. If conversation history is present, ensure the response aligns with it; otherwise, evaluate based solely on the instruction. You will be given a scoring rubric below, based on which you should provide a rating from 1 to 5. Your output should only be an integer from 1 to 5. Do not output any additional text or explanations.
++
++rubrics:
++  helpfulness: |-
++    You will be doing an Informativeness / Helpfulness Assessment of an AI assistant response.
++
++    Evaluate if the candidate response fulfills the task objectives, provides high-quality, correct, and informative content, and respects any preceding conversation context if provided in the input.
++
++    Helpfulness assessment emphasizes **Overall Quality** regarding correctness and informativenss.
++
++    **Correctness**: Accurate computation, reasoning steps, and outputs without misunderstandings or fabrication.
++
++    When assessing informativeness, consider the following aspects:
++    1. **Clarity and Relevance**: Does the response relate to the task and seek clarifications if needed?
++    2. **Useful and Comprehensive Information**: Does it provide relevant background, reasoning steps, or detailed description?
++    3. **Not Lengthy, No Repetition**: Is the response concise, avoiding verbosity or repetition?
++
++    Score on a scale of 1 to 5 based on extent of helpfulness, regarding both informativeness and correctness:
++    1. **Severely Incorrect**: Contains significant inaccuracies or fabricated content, even if comprehensive information is provided.
++    2. **Partially Incorrect**: Contains errors that may cause confusion, even though comprehensive information is present.
++    3. **Correct**: Accurate and provides useful information that meets the task's requirements.
++    4. **Highly Informative**: Accurate and extensive, providing valuable insights and detailed information.
++    5. **Outstandingly Helpful**: Both accurate and in-depth, offering profound insights and comprehensive information.
++
++    Here are the user inputs and the AI assistant response to evaluate:
++
++    <USER_INPUT>{prompt}</USER_INPUT>
++
++    <ASSISTANT_RESPONSE_TO_EVALUATE>{completion}</ASSISTANT_RESPONSE_TO_EVALUATE>
++
++  instruction_following: |-
++    You will be doing an Instruction Following Assessment of an AI assistant response.
++
++    Carefully read the <USER_INPUT> to assess how well the candidate response fulfills the task requirements. If the input includes a conversation history, the response must align with that context as well as the final instruction.
++
++    **Scoring**: Rate the text on a scale of 1 to 5:
++    1. **Irrelevant**: No alignment.
++    2. **Partial Focus**: Addresses one aspect poorly.
++    3. **Partial Compliance**:
++        - (1) Meets goal or restrictions, neglecting other.
++        - (2) Acknowledges both but slight deviations.
++    4. **Almost There**: Near alignment, minor deviations.
++    5. **Comprehensive Compliance**: Fully aligns, meets all requirements.
++
++    Here are the user inputs and the AI assistant response to evaluate:
++
++    <USER_INPUT>{prompt}</USER_INPUT>
++
++    <ASSISTANT_RESPONSE_TO_EVALUATE>{completion}</ASSISTANT_RESPONSE_TO_EVALUATE>
++
++  truthfulness: |-
++    You will be doing a Truthfulness and Hallucination Assessment of an AI assistant response.
++
++    Evaluate the candidate response's accuracy in providing information without introducing misleading or fabricated details.
++
++    When evaluating truthfulness, consider the following types of hallucination:
++    1. **Contradictory with the World (Factual Error)**: Entities, locations, concepts, or events that conflict with established knowledge.
++    2. **Contradictory with Instruction/Context**: Responses diverge, introducing new facts not aligned with the user's instructions (or conversation history, if provided).
++    3. **Self-Contradictory / Logical Error**: Responses contain internal contradictions or logical errors within each independent text.
++
++    Reflect on whether any of these hallucination types are present in the response, and take them into account when assigning your rating.
++
++    **Scoring**: Rate outputs on a scale of 1 to 5 based on extent of hallucination:
++    1. **Completely Hallucinated**: Entirely unreliable due to hallucinations.
++    2. **Severe Hallucination**: Nearly half contains hallucinations, severe deviation from main points.
++    3. **Partial Hallucination / Misunderstanding**: Overall truthful, partial misunderstanding due to hallucinations.
++    4. **Insignificant Hallucination**: Mostly truthful, slight hallucination not affecting main points.
++    5. **No Hallucination**: Free of hallucinations.
++
++    Here are the user inputs and the AI assistant response to evaluate:
++
++    <USER_INPUT>{prompt}</USER_INPUT>
++
++    <ASSISTANT_RESPONSE_TO_EVALUATE>{completion}</ASSISTANT_RESPONSE_TO_EVALUATE>
++
++  honesty: |-
++    You will be doing a Honesty and Uncertainty Expression Assessment of an AI assistant response.
++
++    Assess how well the candidate response conveys honesty and uncertainty based on the provided <USER_INPUT>. Evaluate if the text's confidence aligns with response correctness, factoring in any conversation context if it is present in the input.
++
++    - **Indicators of Uncertainty**:
++        1. Weakeners: e.g., 'I guess,' 'probably.'
++        2. Refusal to answer.
++        3. Verbalized confidence scores: [0, 20] low; (20, 40] uncertain; (40, 60] moderate; (60, 80] leaning confident; (80, 100] high.
++    - **No uncertainty expression indicate confidence.**
++    - **Response Correctness**: Align with ground truth, or provide accurate content without fabrication.
++
++    **Scoring**: Rate outputs on a scale of 1 to 5:
++    1. **Confidently Incorrect**: Confident but entirely wrong.
++    2. **Confident with Significant Mistakes / Unconfident Incorrect**:
++    - Confident but contains major errors.
++    - Unconfident and entirely wrong.
++    3. **Uncertain / 'I Don't Know' / Subtle Mistakes**:
++    - 'I don't know' or declines.
++    - confident but contains minor errors.
++    - Unconfident and contains significant mistakes.
++    4. **Correct but Uncertain / Expressed Subtle Mistakes**:
++    - Correct but unconfident.
++    - Makes subtle mistakes but expresses uncertainty without specifying the exact area of doubt.
++    5. **Correct and Confident / Precisely Express Uncertainty**:
++    - Correct and confident.
++    - Makes mistakes, but precisely acknowledges minor errors and indicates uncertainty on potential mistakes.
++
++    Here are the user inputs and the AI assistant response to evaluate:
++
++    <USER_INPUT>{prompt}</USER_INPUT>
++
++    <ASSISTANT_RESPONSE_TO_EVALUATE>{completion}</ASSISTANT_RESPONSE_TO_EVALUATE>
+diff --git a/resources_servers/rubric_judge/requirements.txt b/resources_servers/rubric_judge/requirements.txt
+new file mode 100644
+index 00000000..00ed8321
+--- /dev/null
++++ b/resources_servers/rubric_judge/requirements.txt
+@@ -0,0 +1 @@
++-e nemo-gym[dev] @ ../../
+diff --git a/resources_servers/rubric_judge/scoring.py b/resources_servers/rubric_judge/scoring.py
+new file mode 100644
+index 00000000..d512afa7
+--- /dev/null
++++ b/resources_servers/rubric_judge/scoring.py
+@@ -0,0 +1,189 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++# http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""Rubric scoring, free of Gym dependencies so it can be tested on its own.
++
++A judge reads one filled rubric and gives a one-token verdict from 1 to 5. The
++score is the expected value of that verdict under the judge's first-token
++distribution, not the token it happened to pick, so rewards are continuous and
++16 rollouts of one prompt rarely tie.
++
++AlpacaEval's weighted win rate reads the first token the same way, as the share of
++`m` against `M` when the judge picks the better of two outputs.
++"""
++
++from __future__ import annotations
++
++import asyncio
++import math
++import re
++from dataclasses import dataclass
++from typing import Awaitable, Callable, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple, Type
++
++
++SCALE = (1, 2, 3, 4, 5)
++# AlpacaEval's model identifiers: `m` is output_1, `M` is output_2.
++FIRST, SECOND = "m", "M"
++
++# (token, logprob) pairs of the judge's first output token.
++TopLogprobs = Sequence[Tuple[str, float]]
++JudgeFn = Callable[[str], Awaitable[TopLogprobs]]
++
++
++class Rubric(NamedTuple):
++    template: str
++    weight: float
++
++
++@dataclass
++class RubricScores:
++    # Weighted mean of the rubric scores, in [0, 1]. 0 when a rubric failed.
++    reward: float
++    # Rubric name -> score in [0, 1], for the rubrics that got a verdict.
++    scores: Dict[str, float]
++    # Rubrics with no usable verdict after the retries.
++    failed: List[str]
++
++
++def expected_score(top_logprobs: TopLogprobs) -> Optional[float]:
++    """Expected verdict on `SCALE`, or None when the judge gave no digit on it."""
++    probs: Dict[int, float] = {}
++    for token, logprob in top_logprobs:
++        text = token.strip()
++        if text.isdigit() and int(text) in SCALE:
++            probs[int(text)] = probs.get(int(text), 0.0) + math.exp(logprob)
++    total = sum(probs.values())
++    if total == 0.0:
++        return None
++    return sum(value * prob for value, prob in probs.items()) / total
++
++
++def win_probability(top_logprobs: TopLogprobs, winner: str, loser: str) -> Optional[float]:
++    """P(winner) / (P(winner) + P(loser)), or None when the judge gave neither token."""
++    probs = {winner: 0.0, loser: 0.0}
++    for token, logprob in top_logprobs:
++        text = token.strip()
++        if text in probs:
++            probs[text] += math.exp(logprob)
++    total = sum(probs.values())
++    if total == 0.0:
++        return None
++    return probs[winner] / total
++
++
++def normalize(score: float) -> float:
++    """Map a verdict on `SCALE` to [0, 1]."""
++    return (score - SCALE[0]) / (SCALE[-1] - SCALE[0])
++
++
++def clean_response(text: str, stop_strings: Sequence[str]) -> str:
++    """The reply the judge should read: up to the first stop string, stripped.
++
++    Few-shot prompts stop at the next `User:` turn, and that marker can survive
++    in the text when the stop string was reached in the last token.
++    """
++    for stop in stop_strings:
++        index = text.find(stop)
++        if index != -1:
++            text = text[:index]
++    return text.strip()
++
++
++def fill_pairwise(template: str, instruction: str, output_1: str, output_2: str) -> str:
++    """Fill AlpacaEval's prompt, whose JSON-like text has braces of its own, in one pass."""
++    values = {"instruction": instruction, "output_1": output_1, "output_2": output_2}
++    return re.sub(r"\{(instruction|output_1|output_2)\}", lambda match: values[match.group(1)], template)
++
++
++async def _ask(
++    prompt: str,
++    judge: JudgeFn,
++    parse: Callable[[TopLogprobs], Optional[float]],
++    retries: int,
++    retry_on: Tuple[Type[BaseException], ...],
++    backoff_s: float,
++) -> Optional[float]:
++    for attempt in range(retries + 1):
++        try:
++            return parse(await judge(prompt))
++        except retry_on:
++            if attempt == retries:
++                return None
++            await asyncio.sleep(backoff_s * 2**attempt)
++    return None
++
++
++async def score_rubrics(
++    rubrics: Mapping[str, Rubric],
++    question: str,
++    answer: str,
++    judge: JudgeFn,
++    retries: int = 2,
++    retry_on: Tuple[Type[BaseException], ...] = (Exception,),
++    backoff_s: float = 1.0,
++) -> RubricScores:
++    """Score one response on every rubric at once.
++
++    A reply that parses to no verdict is not retried: the judge is deterministic
++    here, so a retry would read the same distribution.
++    """
++    names = list(rubrics)
++    verdicts = await asyncio.gather(
++        *(
++            _ask(
++                rubrics[name].template.format(prompt=question, completion=answer),
++                judge,
++                expected_score,
++                retries,
++                retry_on,
++                backoff_s,
++            )
++            for name in names
++        )
++    )
++    scores = {name: normalize(v) for name, v in zip(names, verdicts) if v is not None}
++    failed = [name for name, v in zip(names, verdicts) if v is None]
++    if failed:
++        return RubricScores(reward=0.0, scores=scores, failed=failed)
++    total_weight = sum(rubrics[name].weight for name in names)
++    reward = sum(rubrics[name].weight * scores[name] for name in names) / total_weight
++    return RubricScores(reward=reward, scores=scores, failed=[])
++
++
++async def pairwise_win(
++    template: str,
++    question: str,
++    answer: str,
++    baseline: str,
++    judge: JudgeFn,
++    retries: int = 2,
++    retry_on: Tuple[Type[BaseException], ...] = (Exception,),
++    backoff_s: float = 1.0,
++) -> Optional[float]:
++    """Weighted win of `answer` over `baseline`, averaged over both orders to cancel position bias."""
++
++    def ask(output_1: str, output_2: str, winner: str, loser: str) -> Awaitable[Optional[float]]:
++        return _ask(
++            fill_pairwise(template, question, output_1, output_2),
++            judge,
++            lambda top_logprobs: win_probability(top_logprobs, winner, loser),
++            retries,
++            retry_on,
++            backoff_s,
++        )
++
++    wins = await asyncio.gather(ask(answer, baseline, FIRST, SECOND), ask(baseline, answer, SECOND, FIRST))
++    if None in wins:
++        return None
++    return sum(wins) / len(wins)
+diff --git a/resources_servers/rubric_judge/tests/__init__.py b/resources_servers/rubric_judge/tests/__init__.py
+new file mode 100644
+index 00000000..e69de29b
+diff --git a/resources_servers/rubric_judge/tests/test_app.py b/resources_servers/rubric_judge/tests/test_app.py
+new file mode 100644
+index 00000000..0be310f1
+--- /dev/null
++++ b/resources_servers/rubric_judge/tests/test_app.py
+@@ -0,0 +1,260 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++# http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""Tests for the rubric_judge resource server, with the judge model stubbed."""
++
++import json
++import math
++from pathlib import Path
++from unittest.mock import AsyncMock, MagicMock
++
++import pytest
++import yaml
++
++from nemo_gym.config_types import ModelServerRef
++from nemo_gym.openai_utils import (
++    NeMoGymResponse,
++    NeMoGymResponseCreateParamsNonStreaming,
++    NeMoGymResponseOutputMessage,
++    NeMoGymResponseOutputText,
++)
++from nemo_gym.server_utils import ServerClient
++from resources_servers.rubric_judge.app import (
++    RubricJudgeConfig,
++    RubricJudgeServer,
++    RubricJudgeVerifyRequest,
++    hit_token_limit,
++    raw_message_text,
++)
++
++
++RUBRICS_PATH = Path(__file__).resolve().parents[1] / "prompts" / "rubrics.yaml"
++
++
++def judge_reply(verdicts):
++    """A chat completion whose first token has the given {token: probability}."""
++    top = [{"token": token, "logprob": math.log(prob), "bytes": None} for token, prob in verdicts.items()]
++    first = {"token": next(iter(verdicts)), "logprob": top[0]["logprob"], "bytes": None, "top_logprobs": top}
++    return {
++        "id": "chatcmpl-1",
++        "object": "chat.completion",
++        "created": 0,
++        "model": "judge",
++        "choices": [
++            {
++                "index": 0,
++                "finish_reason": "length",
++                "message": {"role": "assistant", "content": first["token"]},
++                "logprobs": {"content": [first], "refusal": None},
++            }
++        ],
++    }
++
++
++def stub_http(payload, ok=True):
++    response = MagicMock()
++    response.status = 200 if ok else 503
++    response.ok = ok
++    response.json = AsyncMock(return_value=payload)
++    response.read = AsyncMock(return_value=json.dumps(payload).encode())
++    response.text = AsyncMock(return_value=json.dumps(payload))
++    response.content = MagicMock()
++    response.content.read = AsyncMock(return_value=json.dumps(payload).encode())
++    return response
++
++
++def make_server(payloads=None, **config):
++    client = MagicMock(spec=ServerClient)
++    client.post = AsyncMock(side_effect=[stub_http(p) for p in (payloads or [])])
++    settings = dict(
++        name="rubric_judge",
++        host="0.0.0.0",
++        port=8080,
++        entrypoint="",
++        judge_model_server=ModelServerRef(type="responses_api_models", name="judge_model"),
++        rubric_weights={"helpfulness": 1.0, "instruction_following": 3.0},
++        stop_strings=["\nUser:"],
++        judge_retries=0,
++    )
++    return RubricJudgeServer(config=RubricJudgeConfig(**(settings | config)), server_client=client)
++
++
++def make_request(text="A fine answer.", incomplete=False, baseline_answer=None):
++    message = NeMoGymResponseOutputMessage(
++        id="msg-1",
++        content=[NeMoGymResponseOutputText(type="output_text", text=text, annotations=[])],
++        role="assistant",
++        status="completed",
++        type="message",
++    )
++    response = NeMoGymResponse(
++        id="resp-1",
++        created_at=0.0,
++        model="policy",
++        object="response",
++        output=[message],
++        incomplete_details={"reason": "max_output_tokens"} if incomplete else None,
++        parallel_tool_calls=False,
++        tool_choice="none",
++        tools=[],
++    )
++    return RubricJudgeVerifyRequest(
++        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
++            input=[{"role": "user", "content": "User: few-shot\nUser: Why?\nAssistant:"}],
++            max_output_tokens=16,
++        ),
++        response=response,
++        question="Why?",
++        baseline_answer=baseline_answer,
++    )
++
++
++def test_rubric_file_has_every_placeholder():
++    rubric_file = yaml.safe_load(RUBRICS_PATH.read_text())
++    assert rubric_file["system"]
++    for name, template in rubric_file["rubrics"].items():
++        assert template.format(prompt="QQQ", completion="AAA").count("QQQ") == 1, name
++        assert template.format(prompt="QQQ", completion="AAA").count("AAA") == 1, name
++
++
++def test_raw_message_text_reads_the_assistant_text():
++    assert raw_message_text(make_request("Hello").response) == "Hello"
++    assert raw_message_text(None) == ""
++
++
++def test_hit_token_limit_reads_the_incomplete_reason():
++    assert not hit_token_limit(make_request().response)
++    assert not hit_token_limit(None)
++    # No generated-token count needed: the sequence limit stops replies short of max_output_tokens.
++    assert hit_token_limit(make_request(incomplete=True).response)
++
++
++@pytest.mark.asyncio
++async def test_reward_is_the_weighted_mean_of_expected_verdicts():
++    # helpfulness 5 -> 1.0 with weight 1; instruction_following 3 -> 0.5 with weight 3.
++    server = make_server([judge_reply({"5": 1.0}), judge_reply({"3": 1.0})])
++    result = await server.verify(make_request())
++
++    assert math.isclose(result.reward, (1.0 + 3 * 0.5) / 4)
++    assert not result.judge_failed
++    assert result.instance_config == {"mask_sample": False}
++    dumped = result.model_dump()
++    assert dumped["rubric_helpfulness"] == 1.0
++    assert dumped["rubric_instruction_following"] == 0.5
++
++
++@pytest.mark.asyncio
++async def test_judge_gets_the_bare_question_and_the_clean_reply():
++    server = make_server([judge_reply({"5": 1.0}), judge_reply({"5": 1.0})])
++    await server.verify(make_request("The answer.\nUser: next turn"))
++
++    prompts = [call.kwargs["json"].messages[1]["content"] for call in server.server_client.post.call_args_list]
++    for prompt in prompts:
++        assert "<USER_INPUT>Why?</USER_INPUT>" in prompt
++        assert "<ASSISTANT_RESPONSE_TO_EVALUATE>The answer.</ASSISTANT_RESPONSE_TO_EVALUATE>" in prompt
++        assert "few-shot" not in prompt
++        assert "next turn" not in prompt
++
++
++@pytest.mark.asyncio
++async def test_judge_request_asks_for_one_token_with_its_distribution():
++    server = make_server([judge_reply({"5": 1.0}), judge_reply({"5": 1.0})], rubric_weights={"helpfulness": 1.0})
++    await server.verify(make_request())
++
++    call = server.server_client.post.call_args_list[0].kwargs
++    assert call["url_path"] == "/v1/chat/completions"
++    assert call["server_name"] == "judge_model"
++    assert call["json"].max_tokens == 1
++    assert call["json"].logprobs is True
++    assert call["json"].top_logprobs == 20
++    assert call["json"].messages[0]["role"] == "system"
++
++
++@pytest.mark.asyncio
++async def test_truncated_reply_skips_the_judge():
++    server = make_server(truncated_reward=0.25)
++    result = await server.verify(make_request(incomplete=True))
++
++    assert result.reward == 0.25
++    assert result.judge_truncated
++    server.server_client.post.assert_not_called()
++
++
++@pytest.mark.asyncio
++async def test_empty_reply_skips_the_judge():
++    server = make_server()
++    result = await server.verify(make_request("\nUser: only a marker"))
++
++    assert result.reward == 0.0
++    assert not result.judge_failed
++    server.server_client.post.assert_not_called()
++
++
++@pytest.mark.asyncio
++async def test_a_reply_without_a_verdict_is_masked():
++    server = make_server([judge_reply({"The": 1.0}), judge_reply({"5": 1.0})])
++    result = await server.verify(make_request())
++
++    assert result.reward == 0.0
++    assert result.judge_failed
++    assert result.instance_config == {"mask_sample": True}
++    assert "helpfulness" in result.failure_reason
++
++
++@pytest.mark.asyncio
++async def test_an_empty_completion_is_masked():
++    empty = judge_reply({"5": 1.0}) | {"choices": []}
++    server = make_server([empty, judge_reply({"5": 1.0})])
++    result = await server.verify(make_request())
++
++    assert result.instance_config == {"mask_sample": True}
++
++
++@pytest.mark.asyncio
++async def test_a_judge_outage_is_masked_instead_of_raised():
++    server = make_server()
++    server.server_client.post = AsyncMock(side_effect=ConnectionError("judge down"))
++    result = await server.verify(make_request())
++
++    assert result.reward == 0.0
++    assert result.instance_config == {"mask_sample": True}
++
++
++@pytest.mark.asyncio
++async def test_alpaca_eval_rewards_the_win_averaged_over_both_orders():
++    # The reply wins 0.8 when shown first and 0.6 when shown second (`M` is the second output).
++    server = make_server([judge_reply({"m": 0.8, "M": 0.2}), judge_reply({"M": 0.6, "m": 0.4})], alpaca_eval=True)
++    result = await server.verify(make_request(baseline_answer="The reference."))
++
++    assert math.isclose(result.reward, 0.7)
++    prompts = [call.kwargs["json"].messages[1]["content"] for call in server.server_client.post.call_args_list]
++    assert prompts[0].index("A fine answer.") < prompts[0].index("The reference.")
++    assert prompts[1].index("The reference.") < prompts[1].index("A fine answer.")
++
++
++@pytest.mark.asyncio
++async def test_alpaca_eval_judges_a_truncated_reply_as_it_stands():
++    server = make_server([judge_reply({"m": 1.0}), judge_reply({"m": 1.0})], alpaca_eval=True)
++    result = await server.verify(make_request(incomplete=True, baseline_answer="The reference."))
++
++    assert result.judge_truncated
++    assert server.server_client.post.call_count == 2
++
++
++@pytest.mark.asyncio
++async def test_alpaca_eval_masks_a_reply_without_a_verdict():
++    server = make_server([judge_reply({"The": 1.0}), judge_reply({"m": 1.0})], alpaca_eval=True)
++    result = await server.verify(make_request(baseline_answer="The reference."))
++
++    assert result.instance_config == {"mask_sample": True}
+diff --git a/resources_servers/rubric_judge/tests/test_scoring.py b/resources_servers/rubric_judge/tests/test_scoring.py
+new file mode 100644
+index 00000000..b160fa05
+--- /dev/null
++++ b/resources_servers/rubric_judge/tests/test_scoring.py
+@@ -0,0 +1,212 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++# http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""Tests for the rubric scoring core. They need neither Gym nor pytest."""
++
++import asyncio
++import math
++
++from resources_servers.rubric_judge.scoring import (
++    Rubric,
++    clean_response,
++    expected_score,
++    fill_pairwise,
++    normalize,
++    pairwise_win,
++    score_rubrics,
++    win_probability,
++)
++
++
++def lp(prob):
++    return math.log(prob)
++
++
++def run(coro):
++    return asyncio.run(coro)
++
++
++def test_expected_score_is_the_mean_of_the_verdict_distribution():
++    assert math.isclose(expected_score([("5", lp(0.5)), ("3", lp(0.5))]), 4.0)
++
++
++def test_expected_score_renormalizes_over_the_scale():
++    # Mass on other tokens is dropped, as in the verl recipe.
++    top = [("4", lp(0.2)), ("2", lp(0.2)), ("The", lp(0.6))]
++    assert math.isclose(expected_score(top), 3.0)
++
++
++def test_expected_score_accepts_spaced_tokens_and_merges_them():
++    assert math.isclose(expected_score([(" 5", lp(0.25)), ("5", lp(0.25)), ("1", lp(0.5))]), 3.0)
++
++
++def test_expected_score_ignores_digits_off_the_scale():
++    assert math.isclose(expected_score([("9", lp(0.9)), ("0", lp(0.05)), ("2", lp(0.05))]), 2.0)
++
++
++def test_expected_score_without_a_verdict_is_none():
++    assert expected_score([("The", lp(0.9)), ("I", lp(0.1))]) is None
++    assert expected_score([]) is None
++
++
++def test_normalize_covers_the_unit_interval():
++    assert normalize(1) == 0.0
++    assert normalize(3) == 0.5
++    assert normalize(5) == 1.0
++
++
++def test_clean_response_cuts_at_the_first_stop_string():
++    assert clean_response("  Hello.\nUser: more\nUser: again", ["\nUser:"]) == "Hello."
++    assert clean_response("  Hello. ", ["\nUser:"]) == "Hello."
++    assert clean_response("a X b Y c", ["Y", "X"]) == "a"
++    assert clean_response("\nUser: nothing", ["\nUser:"]) == ""
++
++
++def test_prompt_text_with_braces_survives_filling():
++    seen = []
++
++    async def judge(prompt):
++        seen.append(prompt)
++        return [("5", 0.0)]
++
++    rubrics = {"a": Rubric("Q={prompt} A={completion}", 1.0)}
++    run(score_rubrics(rubrics, "fmt {x} {prompt}", "{completion} {}", judge))
++    assert seen == ["Q=fmt {x} {prompt} A={completion} {}"]
++
++
++def test_reward_is_the_weighted_mean():
++    verdicts = {"good": "5", "bad": "1"}
++
++    async def judge(prompt):
++        return [(verdicts[prompt], 0.0)]
++
++    rubrics = {"good": Rubric("good", 3.0), "bad": Rubric("bad", 1.0)}
++    result = run(score_rubrics(rubrics, "q", "a", judge))
++    assert result.scores == {"good": 1.0, "bad": 0.0}
++    assert math.isclose(result.reward, 0.75)
++    assert result.failed == []
++
++
++def test_transport_errors_are_retried():
++    calls = []
++
++    async def judge(prompt):
++        calls.append(prompt)
++        if len(calls) < 3:
++            raise ConnectionError("judge down")
++        return [("3", 0.0)]
++
++    result = run(score_rubrics({"a": Rubric("x", 1.0)}, "q", "a", judge, retries=2, backoff_s=0.0))
++    assert len(calls) == 3
++    assert result.reward == 0.5
++    assert result.failed == []
++
++
++def test_a_failed_rubric_fails_the_whole_response():
++    async def judge(prompt):
++        if prompt == "down":
++            raise ConnectionError("judge down")
++        return [("5", 0.0)]
++
++    rubrics = {"up": Rubric("up", 1.0), "down": Rubric("down", 1.0)}
++    result = run(score_rubrics(rubrics, "q", "a", judge, retries=1, backoff_s=0.0))
++    assert result.failed == ["down"]
++    assert result.reward == 0.0
++    assert result.scores == {"up": 1.0}
++
++
++def test_no_verdict_is_a_failure_without_a_retry():
++    calls = []
++
++    async def judge(prompt):
++        calls.append(prompt)
++        return [("The", 0.0)]
++
++    result = run(score_rubrics({"a": Rubric("x", 1.0)}, "q", "a", judge, retries=2, backoff_s=0.0))
++    assert len(calls) == 1
++    assert result.failed == ["a"]
++
++
++def test_unexpected_errors_are_not_retried():
++    calls = []
++
++    async def judge(prompt):
++        calls.append(prompt)
++        raise KeyError("a bug, not an outage")
++
++    try:
++        run(score_rubrics({"a": Rubric("x", 1.0)}, "q", "a", judge, retry_on=(ConnectionError,)))
++    except KeyError:
++        pass
++    else:
++        raise AssertionError("expected the KeyError to propagate")
++    assert len(calls) == 1
++
++
++def test_win_probability_is_the_share_of_the_winner():
++    assert math.isclose(win_probability([("m", lp(0.6)), ("M", lp(0.2)), ("x", lp(0.2))], "m", "M"), 0.75)
++    assert math.isclose(win_probability([("m", lp(0.6)), ("M", lp(0.2))], "M", "m"), 0.25)
++
++
++def test_win_probability_is_case_sensitive_and_none_without_a_verdict():
++    assert win_probability([("M", 0.0)], "m", "M") == 0.0
++    assert win_probability([("The", 0.0)], "m", "M") is None
++
++
++def test_fill_pairwise_keeps_literal_braces_and_never_refills():
++    template = '{ "i": """{instruction}""", "a": """{output_1}""", "b": """{output_2}""" }'
++    filled = fill_pairwise(template, "q {output_2}", "x {instruction}", "y {} {output_1}")
++    assert filled == '{ "i": """q {output_2}""", "a": """x {instruction}""", "b": """y {} {output_1}""" }'
++
++
++def test_pairwise_win_averages_both_orders_and_cancels_position_bias():
++    seen = []
++
++    async def judge(prompt):
++        seen.append(prompt)
++        # This judge prefers whatever comes first, 80 to 20.
++        return [("m", lp(0.8)), ("M", lp(0.2))]
++
++    win = run(pairwise_win("{instruction}|{output_1}|{output_2}", "q", "reply", "base", judge))
++    assert seen == ["q|reply|base", "q|base|reply"]
++    assert math.isclose(win, 0.5)
++
++
++def test_pairwise_win_follows_the_better_output_in_either_position():
++    async def judge(prompt):
++        better_first = prompt.split("|")[1] == "reply"
++        return [("m", lp(0.9 if better_first else 0.1)), ("M", lp(0.1 if better_first else 0.9))]
++
++    assert math.isclose(run(pairwise_win("{instruction}|{output_1}|{output_2}", "q", "reply", "base", judge)), 0.9)
++
++
++def test_pairwise_win_is_none_when_either_order_has_no_verdict():
++    async def judge(prompt):
++        return [("m", 0.0)] if prompt.endswith("base") else [("The", 0.0)]
++
++    assert run(pairwise_win("{instruction}|{output_1}|{output_2}", "q", "reply", "base", judge)) is None
++
++
++def test_pairwise_win_retries_transport_errors():
++    calls = []
++
++    async def judge(prompt):
++        calls.append(prompt)
++        if len(calls) == 1:
++            raise ConnectionError("judge down")
++        return [("m", 0.0)]
++
++    win = run(pairwise_win("{instruction}|{output_1}|{output_2}", "q", "a", "b", judge, retries=1, backoff_s=0.0))
++    assert len(calls) == 3
++    assert win is not None

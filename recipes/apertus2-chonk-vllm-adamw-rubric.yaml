@@ -1,0 +1,6 @@
+defaults: apertus2-chonk-vllm-adamw.yaml
+
+# 8 trainer nodes, 4 vLLM nodes and 1 judge node (env.judge_pool in the task), all in one job:
+# NeMo-RL takes the judge nodes out of this number.
+cluster:
+  num_nodes: 13
