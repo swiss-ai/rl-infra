@@ -24,7 +24,6 @@ OUTPUT_BYTES = 8 * 1024**2
 TMP_BYTES = 64 * 1024**2
 MAX_PROCESSES = 1024
 MAX_OPEN_FILES = 256
-MAX_REQUEST_BYTES = 256 * 1024**2
 MAX_SECONDS = 300
 # Allows for start-up and for unit tests that end early.
 GRACE_SECONDS = 5
@@ -202,6 +201,7 @@ class Handler(BaseHTTPRequestHandler):
 
     token = ""
     env_dir = ""
+    max_request_bytes = 0
     slots = threading.BoundedSemaphore(1)
 
     def log_message(self, format, *args):
@@ -221,7 +221,7 @@ class Handler(BaseHTTPRequestHandler):
             self._reply(403, {"error": "bad token"})
             return
         length = int(self.headers.get("Content-Length", 0))
-        if self.path != "/run" or length > MAX_REQUEST_BYTES:
+        if self.path != "/run" or length > self.max_request_bytes:
             self._reply(400, {"error": "expected POST /run within the size limit"})
             return
         job = json.loads(self.rfile.read(length))
@@ -234,11 +234,13 @@ def main():
     parser.add_argument("--env-dir", required=True)
     parser.add_argument("--endpoint-file", required=True)
     parser.add_argument("--workers", type=int, required=True)
+    parser.add_argument("--max-request-bytes", type=int, required=True)
     args = parser.parse_args()
 
     self_check(args.env_dir)
     Handler.token = secrets.token_urlsafe(32)
     Handler.env_dir = args.env_dir
+    Handler.max_request_bytes = args.max_request_bytes
     Handler.slots = threading.BoundedSemaphore(args.workers)
     server = Server(("0.0.0.0", 0), Handler)
     host = socket.gethostbyname(socket.gethostname())

@@ -2,7 +2,7 @@
 # Start the code sandbox on one node of its own, as a job of its own, and print its job ID. The
 # server writes $SCRATCH/code-sandbox/endpoint.json once it has checked that sandboxes are isolated,
 # and Gym's code_gen server reads the address and token there. Stop it with scancel.
-#   JOB_TIME=06:00:00 bash start.sh
+#   JOB_TIME=06:00:00 SANDBOX_WORKERS=128 SANDBOX_MAX_REQUEST_BYTES=268435456 bash start.sh
 set -euo pipefail
 
 SANDBOX_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -19,4 +19,5 @@ sbatch --parsable --nodes=1 ${SBATCH_EXTRA} --account="${ACCOUNT}" \
     --partition="${PARTITION:-${RUN_PARTITION:-${DEFAULT_PARTITION}}}" --time="${JOB_TIME:-05:00:00}" \
     --job-name=code-sandbox --output="${OUT}/logs/%j.out" \
     --wrap "exec python3.12 ${SANDBOX_DIR}/sandbox_server.py --env-dir ${OUT}/env \
-        --endpoint-file ${OUT}/endpoint.json --workers ${SANDBOX_WORKERS:-128}"
+        --endpoint-file ${OUT}/endpoint.json --workers ${SANDBOX_WORKERS:-128} \
+        --max-request-bytes ${SANDBOX_MAX_REQUEST_BYTES:-268435456}"

@@ -1,0 +1,281 @@
+From 8f92d29eddd4069e70ba1b7e41143ca5c8a30a9e Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Mon, 2 Nov 2026 08:24:05 +0900
+Subject: [PATCH] Apertus 2 format: a thinking token budget
+
+policy.generation.thinking_token_budget caps a think frame, so that a reply always has room within
+max_new_tokens. vLLM closes the frame at the budget. Its V1 runner, which Chonk uses, searches each
+request's whole output in Python on every step, so a patch resumes that search where it ended.
+---
+ nemo_rl/data/apertus2_format.py               |  3 ++
+ nemo_rl/models/generation/interfaces.py       |  3 ++
+ nemo_rl/models/generation/vllm/patches.py     | 52 +++++++++++++++++++
+ nemo_rl/models/generation/vllm/vllm_worker.py |  9 ++++
+ .../generation/vllm/vllm_worker_async.py      | 15 +++++-
+ tests/unit/data/test_apertus2_format.py       | 16 ++++++
+ .../models/generation/test_vllm_patches.py    | 22 ++++++++
+ 7 files changed, 119 insertions(+), 1 deletion(-)
+
+diff --git a/nemo_rl/data/apertus2_format.py b/nemo_rl/data/apertus2_format.py
+index 22956f489..fdfff58a9 100644
+--- a/nemo_rl/data/apertus2_format.py
++++ b/nemo_rl/data/apertus2_format.py
+@@ -26,6 +26,9 @@ from typing import Any
+ APERTUS2_OUTPUT_FORMAT = "apertus2"
+ # A claim is a bare answer; a longer one is the model talking in the claim frame.
+ LONG_CLAIM_CHARS = 40
++# How a think frame opens and closes, which vLLM needs to enforce a thinking budget.
++APERTUS2_THINK_START = "<|out|>think<|hdr|>"
++APERTUS2_THINK_END = "<|/out|>"
+ 
+ 
+ @dataclass
+diff --git a/nemo_rl/models/generation/interfaces.py b/nemo_rl/models/generation/interfaces.py
+index a9c478518..84a29ab51 100644
+--- a/nemo_rl/models/generation/interfaces.py
++++ b/nemo_rl/models/generation/interfaces.py
+@@ -237,6 +237,9 @@ class GenerationConfig(TypedDict):
+     # Apertus 2 on the chat endpoint: file with the system frame's JSON object. Gym
+     # requests carry only chat messages, so the frame comes from here.
+     system_prompt_file: NotRequired[str | None]
++    # Apertus 2: tokens a think frame may take before vLLM closes it, so that a reply
++    # always has room within max_new_tokens. None leaves thinking unlimited.
++    thinking_token_budget: NotRequired[int | None]
+     colocated: NotRequired[ColocationConfig]
+     port_range_low: NotRequired[int]
+     port_range_high: NotRequired[int]
+diff --git a/nemo_rl/models/generation/vllm/patches.py b/nemo_rl/models/generation/vllm/patches.py
+index 8d66cb4f2..c7b7ab556 100644
+--- a/nemo_rl/models/generation/vllm/patches.py
++++ b/nemo_rl/models/generation/vllm/patches.py
+@@ -500,6 +500,57 @@ def _patch_vllm_shm_broadcast_bind_retry(logger) -> None:
+         )
+ 
+ 
++def _patch_vllm_thinking_budget_scan(logger) -> None:
++    """Stop vLLM's V1 thinking budget from rescanning a request's output each step.
++
++    While a request thinks, ``_update_think_state`` searches all its output for the
++    end marker on every step, in Python, which costs about 0.7 ms per request at 6,000
++    tokens: as much as a whole engine step on long rollouts. Output already searched
++    cannot gain a marker, so the search resumes where the last one ended.
++    """
++    try:
++        file_to_patch = _get_vllm_file("v1/sample/thinking_budget_state.py")
++    except RuntimeError:
++        logger.warning("Could not locate thinking_budget_state.py for the scan patch.")
++        return
++
++    old_snippet = (
++        "            if end_thinking >= 0:\n"
++        "                end_thinking += scan_offset\n"
++        '            state["end_thinking"] = end_thinking\n'
++    )
++    new_snippet = (
++        "            if end_thinking >= 0:\n"
++        "                end_thinking += scan_offset\n"
++        '            elif state["start_thinking"] >= 0:  # searched output has no end\n'
++        '                state["scan_offset"] = max(\n'
++        "                    scan_offset,\n"
++        '                    len(state.get("output_tok_ids", []))\n'
++        "                    - len(self.think_end_token_ids)\n"
++        "                    + 1,\n"
++        "                )\n"
++        '            state["end_thinking"] = end_thinking\n'
++    )
++
++    with _locked_file_patch(file_to_patch) as (content, write_back):
++        if "# searched output has no end" in content:
++            logger.info("vLLM thinking budget scan patch already applied.")
++            return
++
++        if old_snippet not in content:
++            logger.warning(
++                "Could not apply the thinking budget scan patch: expected block not "
++                "found in %s. The vLLM version may have changed.",
++                file_to_patch,
++            )
++            return
++
++        content = content.replace(old_snippet, new_snippet, 1)
++        write_back(content)
++
++    logger.info("Successfully patched vLLM's thinking budget scan.")
++
++
+ def _patch_vllm_radio_layerscale_loader(logger) -> None:
+     """Load explicit RADIO LayerScale weights and initialize folded weights.
+ 
+@@ -1164,6 +1215,7 @@ def _apply_vllm_patches(
+     _patch_vllm_tool_parser_namespace_tool(patch_logger)
+     _patch_vllm_ray_executor_v2_tcpstore_port(patch_logger)
+     _patch_vllm_shm_broadcast_bind_retry(patch_logger)
++    _patch_vllm_thinking_budget_scan(patch_logger)
+     _patch_vllm_radio_layerscale_loader(patch_logger)
+     _patch_vllm_glm_decoder_sequence_parallel_moe(patch_logger)
+     _patch_vllm_minimax_m3_topk_buffer_layout(patch_logger)
+diff --git a/nemo_rl/models/generation/vllm/vllm_worker.py b/nemo_rl/models/generation/vllm/vllm_worker.py
+index 52e0a0f0d..4c6f1a41e 100644
+--- a/nemo_rl/models/generation/vllm/vllm_worker.py
++++ b/nemo_rl/models/generation/vllm/vllm_worker.py
+@@ -464,6 +464,14 @@ class BaseVllmGenerationWorker:
+         self.allowed_token_ids = (
+             allowed_token_ids(self.model_name) if self.is_apertus2 else None
+         )
++        self.thinking_token_budget: Optional[int] = self.cfg.get(
++            "thinking_token_budget"
++        )
++        if self.thinking_token_budget is not None and not self.is_apertus2:
++            raise ValueError(
++                "policy.generation.thinking_token_budget needs output_format: "
++                f"{APERTUS2_OUTPUT_FORMAT}, which defines where thinking starts and ends."
++            )
+         self.apertus2_system_prompt: Optional[str] = None
+         if self.is_apertus2 and self.cfg["vllm_cfg"].get("expose_http_server"):
+             with open(self.cfg["system_prompt_file"], encoding="utf-8") as prompt_file:
+@@ -836,6 +844,7 @@ class BaseVllmGenerationWorker:
+             bad_words=self.cfg.get("bad_words"),
+             ignore_eos=self.cfg.get("ignore_eos", False),
+             allowed_token_ids=self.allowed_token_ids,
++            thinking_token_budget=self.thinking_token_budget,
+         )
+ 
+     def start_gpu_profiling(self) -> None:
+diff --git a/nemo_rl/models/generation/vllm/vllm_worker_async.py b/nemo_rl/models/generation/vllm/vllm_worker_async.py
+index 7db2c12ae..73e063da8 100644
+--- a/nemo_rl/models/generation/vllm/vllm_worker_async.py
++++ b/nemo_rl/models/generation/vllm/vllm_worker_async.py
+@@ -28,7 +28,12 @@ import torch
+ import uvicorn
+ from fastapi import FastAPI
+ 
+-from nemo_rl.data.apertus2_format import encode_chat_prompt, extend_chat_prompt
++from nemo_rl.data.apertus2_format import (
++    APERTUS2_THINK_END,
++    APERTUS2_THINK_START,
++    encode_chat_prompt,
++    extend_chat_prompt,
++)
+ from nemo_rl.data_plane.adapters.tq_mooncake_checkpoint import run_checkpoint_command
+ from nemo_rl.distributed.batched_data_dict import BatchedDataDict
+ from nemo_rl.distributed.virtual_cluster import (
+@@ -275,6 +280,7 @@ class VllmAsyncGenerationWorkerImpl(
+ 
+     def _create_engine(self, llm_kwargs: dict[str, Any]) -> None:
+         from vllm.config import CompilationConfig
++        from vllm.config.reasoning import ReasoningConfig
+         from vllm.engine.arg_utils import AsyncEngineArgs
+         from vllm.v1.engine.async_llm import AsyncLLM
+         from vllm.v1.metrics.loggers import PrometheusStatLogger
+@@ -300,6 +306,12 @@ class VllmAsyncGenerationWorkerImpl(
+                 )
+             llm_kwargs["compilation_config"] = CompilationConfig(**compilation_config)
+ 
++        if self.thinking_token_budget is not None:
++            llm_kwargs["reasoning_config"] = ReasoningConfig(
++                reasoning_start_str=APERTUS2_THINK_START,
++                reasoning_end_str=APERTUS2_THINK_END,
++            )
++
+         self.llm_async_engine_args = AsyncEngineArgs(**llm_kwargs)
+         self.stat_loggers = (
+             [PrometheusStatLogger]
+@@ -1254,6 +1266,7 @@ class VllmAsyncGenerationWorkerImpl(
+             )
+             if worker_self.is_apertus2:
+                 request.allowed_token_ids = worker_self.allowed_token_ids
++                request.thinking_token_budget = worker_self.thinking_token_budget
+ 
+             try:
+                 generator = await openai_serving_chat.create_chat_completion(
+diff --git a/tests/unit/data/test_apertus2_format.py b/tests/unit/data/test_apertus2_format.py
+index 4e5796a9d..df3211091 100644
+--- a/tests/unit/data/test_apertus2_format.py
++++ b/tests/unit/data/test_apertus2_format.py
+@@ -41,6 +41,8 @@ from nemo_rl.models.generation.vllm.utils import (  # noqa: E402
+     apply_apertus2_output_to_chat_response_choices,
+ )
+ from nemo_rl.data.apertus2_format import (  # noqa: E402
++    APERTUS2_THINK_END,
++    APERTUS2_THINK_START,
+     LONG_CLAIM_CHARS,
+     Apertus2Call,
+     Apertus2Output,
+@@ -56,6 +58,7 @@ from nemo_rl.data.apertus2_format import (  # noqa: E402
+ TOKENIZER = os.environ.get("NRL_APERTUS2_TOKENIZER")
+ SYSTEM_PROMPT = '{"thinking":"medium","tools":[]}'
+ HEADER_END = 9
++OUTPUT_START = 10
+ OUTPUT_END = 11
+ WAIT = 12
+ 
+@@ -480,6 +483,19 @@ def _engine_output(token_ids):
+     return SimpleNamespace(outputs=[SimpleNamespace(index=0, token_ids=token_ids)])
+ 
+ 
++def test_think_markers_tokenize_to_the_think_frame():
++    """vLLM finds the budget's markers by token IDs, from these strings."""
++    transformers = pytest.importorskip("transformers")
++    tokenizer = transformers.AutoTokenizer.from_pretrained(TOKENIZER)
++
++    start = tokenizer.encode(APERTUS2_THINK_START, add_special_tokens=False)
++    end = tokenizer.encode(APERTUS2_THINK_END, add_special_tokens=False)
++
++    assert len(start) == 3
++    assert start[0] == OUTPUT_START and start[2] == HEADER_END
++    assert end == [OUTPUT_END]
++
++
+ def test_chat_response_gets_the_reply_and_the_thinking(encoding):
+     tokens = encoding.encode_items(
+         [Think(payload="Add."), Claim(payload="42"), Reply(payload="It is 42."), Wait()]
+diff --git a/tests/unit/models/generation/test_vllm_patches.py b/tests/unit/models/generation/test_vllm_patches.py
+index 86d746786..15cf45928 100644
+--- a/tests/unit/models/generation/test_vllm_patches.py
++++ b/tests/unit/models/generation/test_vllm_patches.py
+@@ -68,6 +68,9 @@ _GLM_DSA_SOURCE = "model_executor/models/deepseek_v2.py"
+ _GLM_DSA_PATCH_FN = "_patch_vllm_glm_decoder_sequence_parallel_moe"
+ _GLM_DSA_MARKER = 'getattr(config, "model_type", None) != "glm_moe_dsa"'
+ _MINIMAX_M3_PATCH_FN = "_patch_vllm_minimax_m3_topk_buffer_layout"
++_THINKING_SCAN_SOURCE = "v1/sample/thinking_budget_state.py"
++_THINKING_SCAN_PATCH_FN = "_patch_vllm_thinking_budget_scan"
++_THINKING_SCAN_MARKER = "# searched output has no end"
+ _MINIMAX_M3_SOURCES = {
+     "models/minimax_m3/common/indexer.py": (
+         "indexer_old_snippet",
+@@ -414,6 +417,24 @@ def test_namespace_tool_patch_anchor_still_matches_installed_vllm(
+     ast.parse(content)  # the edit must leave valid Python
+ 
+ 
++@pytest.mark.vllm
++def test_thinking_scan_patch_anchor_still_matches_installed_vllm(
++    tmp_path, monkeypatch
++):
++    """Without the patch a thinking budget slows generation, which nothing reports."""
++    copied = write_unpatched_copy(
++        _THINKING_SCAN_SOURCE, _THINKING_SCAN_PATCH_FN, tmp_path / "budget.py"
++    )
++    monkeypatch.setattr(patches, "_get_vllm_file", lambda _relative: str(copied))
++    patches._patch_vllm_thinking_budget_scan(logging.getLogger(__name__))
++    content = copied.read_text()
++    assert _THINKING_SCAN_MARKER in content
++    ast.parse(content)  # the edit must leave valid Python
++
++    patches._patch_vllm_thinking_budget_scan(logging.getLogger(__name__))
++    assert copied.read_text() == content
++
++
+ @pytest.mark.vllm
+ def test_namespace_tool_patch_is_idempotent(patched_tool_parser_source, monkeypatch):
+     """Every worker on a node runs the patch against the same file."""
+@@ -762,6 +783,7 @@ def _stub_non_fp32_vllm_patches(monkeypatch, captured_extra_env_vars):
+         "_patch_vllm_tool_parser_namespace_tool",
+         "_patch_vllm_ray_executor_v2_tcpstore_port",
+         "_patch_vllm_shm_broadcast_bind_retry",
++        "_patch_vllm_thinking_budget_scan",
+         "_patch_vllm_radio_layerscale_loader",
+         "_patch_vllm_glm_decoder_sequence_parallel_moe",
+         "_patch_vllm_minimax_m3_topk_buffer_layout",
+-- 
+2.43.0
+

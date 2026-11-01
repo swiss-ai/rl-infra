@@ -30,6 +30,7 @@ from sandbox_server import (
 )
 
 MARKER = "sandbox-test-marker"
+MAX_REQUEST_BYTES = 256 * 1024**2
 failures = []
 
 
@@ -175,7 +176,8 @@ def service(env_dir):
         endpoint_file = f"{directory}/endpoint.json"
         server = subprocess.Popen(
             [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "sandbox_server.py"),
-             "--env-dir", env_dir, "--endpoint-file", endpoint_file, "--workers", "128"],
+             "--env-dir", env_dir, "--endpoint-file", endpoint_file, "--workers", "128",
+             "--max-request-bytes", str(MAX_REQUEST_BYTES)],
         )
         try:
             for _ in range(120):

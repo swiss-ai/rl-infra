@@ -15,6 +15,14 @@ JOB_TIME=06:00:00 bash start.sh                                 # one node, as a
 bash ../../../run.sh ../../../envs/code-gen-sft.yaml            # reads $SCRATCH/code-sandbox/endpoint.json
 ```
 
+`setup-data.sh` downloads the dataset and writes the two files the task reads. It has no default row
+size, because a cap changes what the run sees: pass `MAX_TRAIN_ROW_BYTES` and `MAX_VALIDATION_ROW_BYTES`,
+and it prints how many rows each one left out. A row stops the run if it is over
+`SANDBOX_MAX_REQUEST_BYTES` (256 MiB in `start.sh`), so keep the caps below it.
+
+At most `SANDBOX_WORKERS` submissions (128 in `start.sh`) run at once, each in a sandbox made for it and
+removed after it. Others wait in line, so a burst costs time and nothing else.
+
 Give the sandbox more time than the run, and `scancel` it afterwards. The server refuses to start
 unless a test sandbox is cut off, and `code_gen` fails at start-up if the endpoint file is missing.
 
