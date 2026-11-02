@@ -47,7 +47,10 @@ from that ledger (`RolloutReassembler`); the agent's own output carries no token
        GYM_BRANCH=apertus2-osb-capture \
        GYM_PATCHES="$(ls $PWD/backends/nemo-rl/apertus2/patches/gym/*.patch | tr '\n' ' ')" \
            bash backends/nemo-rl/apertus2/setup-gym.sh
-       # back to the plain branch later:  bash backends/nemo-rl/apertus2/setup-gym.sh
+       # Optional, later: switch the Gym checkout back to the unpatched apertus2-osb branch
+       # (both branches stay; only the checked-out one changes). Not needed for other runs,
+       # the patches are inert without token_capture. Do not switch while a job is running.
+       #   bash backends/nemo-rl/apertus2/setup-gym.sh
 
 2. **TransferQueue** (Single-Controller), not yet checked in the Apertus 2 image:
 
