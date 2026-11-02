@@ -28,7 +28,7 @@ def probe(target: str) -> None:
     try:
         s.connect(addr)
         t_conn = time.monotonic() - t0
-        s.sendall(f"ping from sandbox {socket.gethostname()}\n".encode())
+        s.sendall(f"ping from {socket.gethostname()}\n".encode())
         try:
             reply = s.recv(256)
         except OSError as e:

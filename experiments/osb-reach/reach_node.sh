@@ -22,6 +22,7 @@ for a in "${ADDRS[@]}"; do TARGETS+=("${a}:${PORT}"); done
 TARGETS+=("$(hostname -f):${PORT}")
 # Self-test from the node itself, so a dead listener is not mistaken for a blocked network.
 "${PY}" "${HERE}/probe.py" "${ADDRS[0]}:${PORT}" | tail -1 | sed 's/^/   node self-test: /'
+echo "   (the CONNECTION line it causes in the listener log is this self-test, source = the node itself)"
 # Control: internet (expected to work).
 TARGETS+=(pypi.org:443 ${EXTRA_TARGETS:-})
 
