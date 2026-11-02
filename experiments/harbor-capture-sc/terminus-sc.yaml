@@ -1,0 +1,179 @@
+# Task file: Harbor micro-tasks through Gym's harbor_agent (route 1), every task container a pod on
+# the OpenSandbox cluster, trained with NeMo-RL's Single-Controller path and token capture at the
+# model endpoint. Merged over ../token-capture-sc/qwen3-4b-1n-sc.yaml by run.sh in this directory.
+#
+# Agent: Terminus-2 (Gym's Terminus2NemoGym wrapper). Its loop runs in the Gym process on the
+# training node and drives tmux in the pod, so only node -> OpenSandbox traffic is needed. This
+# variant checks the capture path itself: harbor_agent hands Terminus-2 the rollout-prefixed model
+# URL (Gym patch 0001), NeMo-RL records every call at the model endpoint and rebuilds the rows from
+# that ledger. opencode-sc.yaml swaps in an agent that runs inside the pod.
+#
+# Data and Harbor settings follow envs/harbor-osb.yaml (alias swe_lego, Rob's micro-tasks under
+# $HARBOR_ROOT); the policy part follows ../token-capture-test/mini-swe-osb.yaml (Qwen, not Chonk,
+# so no pass-through chat template); the Single-Controller part follows
+# ../token-capture-sc/mini-swe-osb-sc.yaml.
+
+grpo:
+  num_prompts_per_step: 2
+  num_generations_per_prompt: 2        # 4 rollouts = 4 sandboxes in flight
+  max_num_steps: 1
+  max_num_epochs: 1
+  use_leave_one_out_baseline: true
+  normalize_rewards: true
+  overlong_filtering: true
+  # the Gym entrypoints refuse a non-null value
+  max_val_samples: null
+  val_batch_size: null
+  val_num_generations_per_prompt: 1
+  val_period: 0
+  val_at_start: false
+  val_at_end: false
+  # Single-Controller: the entrypoint raises unless the legacy async block is null
+  async_grpo: null
+  # the base KL penalty (0.01) needs reference logprobs; Single-Controller checks the pair
+  skip_reference_policy_logprobs_calculation: false
+  # not supported together with token capture (setup raises)
+  invalid_tool_call_advantage: null
+  malformed_thinking_advantage: null
+
+checkpointing:
+  enabled: false
+
+loss_fn:
+  # inert at max_lookahead_versions 0 (all ratios 1), set as in the upstream examples
+  use_importance_sampling_correction: true
+
+policy:
+  # = prompts x generations
+  train_global_batch_size: 4
+  max_total_sequence_length: 16384
+  sequence_packing:
+    enabled: true
+    train_mb_tokens: 16384
+    logprob_mb_tokens: 16384
+  generation:
+    # per agent turn
+    max_new_tokens: 2048
+    stop_strings: null
+    # Gym's vLLM server asserts that every request carries the on-policy sampling parameters
+    temperature: 1.0
+    top_p: 1.0
+    top_k: null
+    vllm_cfg:
+      max_model_len: ${policy.max_total_sequence_length}
+      async_engine: true
+      # Gym's model server talks to the policy over an OpenAI-compatible HTTP endpoint
+      expose_http_server: true
+
+data:
+  max_input_seq_length: null
+  shuffle: false
+  num_workers: 0
+  use_multiple_dataloader: false
+  train:
+    dataset_name: NemoGymDataset
+    data_path: ${oc.env:HARBOR_ROOT}/train.jsonl
+  validation:
+    dataset_name: NemoGymDataset
+    data_path: ${oc.env:HARBOR_ROOT}/validation.jsonl
+  default:
+    dataset_name: NemoGymDataset
+    env_name: nemo_gym
+    prompt_file: null
+    system_prompt_file: null
+    processor: nemo_gym_data_processor
+  _override_: true
+
+# TransferQueue data plane, mandatory for Single-Controller
+data_plane:
+  enabled: true
+  impl: transfer_queue
+  backend: simple
+  claim_meta_poll_interval_s: 0.5
+  simple:
+    # TransferQueue wants at least 2 per node
+    num_storage_units: 2
+
+async_rl:
+  sampler:
+    name: in_order
+    # 0 = synchronous: generation never runs ahead of the trainer
+    max_lookahead_versions: 0
+  recompute_kv_cache_after_weight_updates: true
+  min_groups_for_streaming_train: ${grpo.num_prompts_per_step}
+  max_inflight_prompts: ${grpo.num_prompts_per_step}
+  max_buffered_rollouts: ${grpo.num_prompts_per_step}
+  rollout_failure:
+    # a test: fail on the first broken rollout instead of retrying it elsewhere
+    max_infra_attempts_per_prompt: 1
+    max_data_attempts_per_prompt: 1
+    nemo_gym:
+      # whole prompt group: agent (harbor_agent_max_timeout 1800) + verifier + sandbox start
+      rollout_timeout_s: 2700
+  stall_watchdog:
+    # must exceed rollout_timeout_s
+    stall_timeout_s: 3000
+    stall_action: abort
+
+# NeMo-RL turns off Gym's token echo, turns on Gym's token_id_capture for all agents
+# (external staging, ledger under <log_dir>/gym_token_capture) and rebuilds the rows from it.
+token_capture:
+  enabled: true
+
+reward_penalties:
+  # skipped on the capture path anyway; off to make that explicit
+  penalize_duplicated_reasoning: false
+  penalize_empty_final_answer: false
+  penalize_unwanted_tokens: false
+  penalize_malformed_think_tag: false
+
+env:
+  should_use_nemo_gym: true
+  should_log_nemo_gym_responses: true
+  should_mask_flagged_samples: true
+  nemo_gym:
+    port_range_low: 5000
+    port_range_high: 5999
+    is_trajectory_collection: false
+    use_absolute_ip: true
+    mask_degenerate_rollouts: true
+    # see envs/harbor-osb.yaml: the wrapper server type does not exist at this Gym pin
+    harbor_agent_environment_server: null
+    config_paths:
+    - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+    # defines `sandbox`, which the harbor config references as ${sandbox}
+    - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+    - responses_api_agents/harbor_agent/configs/harbor_agent_opensandbox_training.yaml
+    sandbox:
+      opensandbox:
+        connection:
+          # the pooled aiohttp client breaks inside Ray workers
+          transport_backend: httpx
+    harbor_agent:
+      responses_api_agents:
+        harbor_agent:
+          # one Harbor trial (and one sandbox) per in-flight rollout
+          concurrency: ${mul:${grpo.num_prompts_per_step}, ${grpo.num_generations_per_prompt}}
+          harbor_datasets:
+            # the alias is the left half of every row's instance_id
+            swe_lego:
+              local_dataset_path: ${oc.env:HARBOR_TASKS_DIR}
+          harbor_agent_kwargs:
+            max_turns: 20
+            model_info:
+              max_input_tokens: ${policy.max_total_sequence_length}
+              max_output_tokens: ${policy.max_total_sequence_length}
+          harbor_environment_kwargs:
+            sandbox_metadata:
+              harbor-dataset: micro
+            sandbox_provider_options:
+              # the cluster rejects every create without it (ValidatingAdmissionPolicy)
+              secure_access: true
+          harbor_agent_max_timeout: 1800
+          harbor_verifier_max_timeout: 1200
+          harbor_jobs_dir: ${oc.env:HARBOR_ROOT}/jobs
+  _override_: true
+
+logger:
+  tensorboard_enabled: true
+  wandb_enabled: false

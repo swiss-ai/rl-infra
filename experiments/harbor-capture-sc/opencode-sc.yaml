@@ -1,0 +1,27 @@
+# Task overlay: terminus-sc.yaml with OpenCode instead of Terminus-2 (run.sh: AGENT=opencode).
+#
+# OpenCode is a Harbor *installed* agent: Harbor installs it into every task pod at setup
+# (apt-get, nvm, `npm i -g opencode-ai`; the pods have internet) and runs `opencode run` there.
+# Its model calls therefore start inside the pod and must reach the Gym model server (policy_model)
+# on the training node. OpenSandbox pods cannot reach CSCS-internal hosts, so this only works once
+# HARBOR_MODEL_BASE_URL names an address the pods can reach that forwards to policy_model (proxy,
+# tunnel). harbor_agent appends the rollout's capture prefix and /v1 to it (Gym patch 0001).
+#
+# Gym patch 0002 provides the agent class (Harbor's own OpenCode agent at this pin knows only
+# hosted providers) and stops masking its rollouts for having no ATIF trajectory: the tokens come
+# from the capture ledger, as with every other agent under token_capture.
+
+env:
+  nemo_gym:
+    harbor_agent:
+      responses_api_agents:
+        harbor_agent:
+          harbor_agent_name: null
+          harbor_agent_import_path: "responses_api_agents.harbor_agent.custom_agents.opencode_nemo_gym:OpenCodeNemoGym"
+          # what the in-pod OpenCode calls; required, run.sh refuses to start without it
+          harbor_model_base_url: ${oc.env:HARBOR_MODEL_BASE_URL}
+          # Terminus-2's kwargs (max_turns, model_info, ...) are merged in as well; Harbor's agent base
+          # class ignores unknown kwargs, and a nested _override_ is not honoured by NeMo-RL's loader.
+          harbor_agent_kwargs:
+            # opencode-ai npm version; unset installs the latest at every sandbox start
+            version: ${oc.env:OPENCODE_VERSION,null}

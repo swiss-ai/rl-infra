@@ -10,6 +10,14 @@
 #   44c77151b  harbor_agent: OpenSandbox config for RL training
 #   85f6def4a  bug fixes
 # The result is a local branch apertus2-osb in the clone's Gym checkout (never pushed).
+#
+# Optional: GYM_BRANCH (default apertus2-osb) names the local branch, GYM_PATCHES (space-separated
+# patch files, default none) are applied with `git am` on top of the four commits when that branch
+# is created, e.g. for experiments/harbor-capture-sc:
+#   GYM_BRANCH=apertus2-osb-capture \
+#   GYM_PATCHES="$PWD/backends/nemo-rl/apertus2/patches/gym/0001-*.patch" \
+#   bash backends/nemo-rl/apertus2/setup-gym.sh
+# The checkout is shared by every run of this NeMo-RL clone; switch back with GYM_BRANCH=apertus2-osb.
 set -euo pipefail
 APERTUS2_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "${APERTUS2_DIR}/../../.." && pwd)"
@@ -20,6 +28,8 @@ GYM_URL="${GYM_URL:-https://github.com/swiss-ai/nemo-gym.git}"
 GYM_PIN="${GYM_PIN:-267305e2a}"
 GYM_OSB_BRANCH="${GYM_OSB_BRANCH:-swissai/harbor_agent_osb_v0.7.0}"
 GYM_OSB_COMMITS="${GYM_OSB_COMMITS:-810196ff6 0fe241c66 44c77151b 85f6def4a}"
+GYM_BRANCH="${GYM_BRANCH:-apertus2-osb}"
+GYM_PATCHES="${GYM_PATCHES:-}"
 GYM_DIR="${NEMO_RL_DIR}/3rdparty/Gym-workspace/Gym"
 GIT=(git -c user.name="$(git -C "${ROOT}" config user.name || echo rl-infra)" -c user.email="$(git -C "${ROOT}" config user.email || echo rl-infra@localhost)" -c commit.gpgsign=false)
 
@@ -31,15 +41,20 @@ if [[ ! -d "${GYM_DIR}/.git" ]]; then
     mkdir -p "$(dirname "${GYM_DIR}")"
     git clone --filter=blob:none "${GYM_URL}" "${GYM_DIR}"
 fi
-if git -C "${GYM_DIR}" rev-parse --verify -q apertus2-osb >/dev/null; then
-    echo "== Gym branch apertus2-osb exists ($(git -C "${GYM_DIR}" rev-parse --short apertus2-osb))"
+if git -C "${GYM_DIR}" rev-parse --verify -q "${GYM_BRANCH}" >/dev/null; then
+    echo "== Gym branch ${GYM_BRANCH} exists ($(git -C "${GYM_DIR}" rev-parse --short "${GYM_BRANCH}"))"
 else
     git -C "${GYM_DIR}" fetch origin "${GYM_OSB_BRANCH}"
-    git -C "${GYM_DIR}" switch -c apertus2-osb "${GYM_PIN}"
+    git -C "${GYM_DIR}" switch -c "${GYM_BRANCH}" "${GYM_PIN}"
     # shellcheck disable=SC2086
     "${GIT[@]}" -C "${GYM_DIR}" cherry-pick ${GYM_OSB_COMMITS}
+    for patch in ${GYM_PATCHES}; do
+        [[ -f "${patch}" ]] || { echo "ERROR: Gym patch ${patch} not found" >&2; exit 1; }
+        echo "== applying $(basename "${patch}")"
+        "${GIT[@]}" -C "${GYM_DIR}" am --3way "${patch}"
+    done
 fi
-git -C "${GYM_DIR}" switch -q apertus2-osb
+git -C "${GYM_DIR}" switch -q "${GYM_BRANCH}"
 git -C "${GYM_DIR}" remote set-url --push origin no_push
 # Gym needs Python 3.13 since 2026-08-04 (#2194), but David's image is Python 3.12, and Gym builds every
 # server venv with the driver's Python (Ray needs the same version on both sides). The code runs on 3.12
