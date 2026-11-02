@@ -52,9 +52,23 @@ r() { yq r "${merged}" "$1"; }
 
 echo "== preflight: $(basename "${CONFIG}") ($(( ${#chain[@]} )) files: $(for f in "${chain[@]}"; do basename "$f"; done | tr '\n' ' '))"
 gen_nodes=$(r policy.generation.colocated.resources.num_nodes)
+gen_gpus_per_node=$(r policy.generation.colocated.resources.gpus_per_node)
 colocated=$(r policy.generation.colocated.enabled)
+gpus_per_node=$(r cluster.gpus_per_node); gpus_per_node=${gpus_per_node:-4}
 train_nodes=${NODES}
-[[ "${colocated}" == false ]] && train_nodes=$(( NODES - ${gen_nodes:-0} ))
+train_gpus=$(( NODES * gpus_per_node )); gen_gpus=${train_gpus}
+if [[ "${colocated}" == false ]]; then
+  if (( NODES == 1 )); then
+    # NeMo-RL (grpo.py setup): on one node, generation takes resources.gpus_per_node GPUs of that
+    # node and training the rest; resources.num_nodes must then be 1 or null.
+    gen_nodes=1
+    gen_gpus=${gen_gpus_per_node:-0}
+    train_gpus=$(( gpus_per_node - gen_gpus ))
+  else
+    train_nodes=$(( NODES - ${gen_nodes:-0} ))
+    train_gpus=$(( train_nodes * gpus_per_node )); gen_gpus=$(( ${gen_nodes:-0} * gpus_per_node ))
+  fi
+fi
 megatron=$(r policy.megatron_cfg.enabled)
 prompts=$(r grpo.num_prompts_per_step); gens=$(r grpo.num_generations_per_prompt)
 gbs=$(r policy.train_global_batch_size); maxlen=$(r policy.max_total_sequence_length)
@@ -68,7 +82,7 @@ gen_pp=$(g pipeline_model_parallel_size); gen_pp=${gen_pp:-$(r policy.megatron_c
 gen_ep=$(g expert_model_parallel_size); gen_ep=${gen_ep:-$(r policy.megatron_cfg.expert_model_parallel_size)}
 gen_dispatcher=$(g moe_token_dispatcher_type); gen_dispatcher=${gen_dispatcher:-$(r policy.megatron_cfg.moe_token_dispatcher_type)}
 gen_deepep=$(g moe_enable_deepep); gen_deepep=${gen_deepep:-$(r policy.megatron_cfg.moe_enable_deepep)}
-echo "  nodes: ${NODES} = ${train_nodes} train + ${gen_nodes:-0} generation (colocated: ${colocated})"
+echo "  nodes: ${NODES} = ${train_nodes} train + ${gen_nodes:-0} generation (colocated: ${colocated}; GPUs ${train_gpus} train, ${gen_gpus} generation)"
 if [[ "${backend}" == megatron ]]; then
   echo "  generation: megatron TP${gen_tp} PP${gen_pp} EP${gen_ep}, dispatcher ${gen_dispatcher} (deepep ${gen_deepep}), buffer $(g buffer_size_gb) GB, max requests $(g max_requests), cuda graphs $(g cuda_graph_impl)/$(g inference_cuda_graph_scope), kv cache $(g kv_cache_management_mode), logprobs $(g logprobs_mode), refit $(r policy.generation.refit_transport)"
 else
@@ -87,12 +101,11 @@ if [[ "${megatron}" == true ]]; then
 fi
 
 isnum() { [[ "$1" =~ ^[0-9]+$ ]]; }
-(( train_nodes > 0 )) || err "no trainer nodes left (${NODES} nodes, ${gen_nodes} for generation)"
+(( train_nodes > 0 && train_gpus > 0 )) || err "no trainer GPUs left (${NODES} nodes, ${gen_nodes} node(s) / ${gen_gpus} GPUs for generation)"
 if [[ "${megatron}" == true ]]; then
   tp=$(r policy.megatron_cfg.tensor_model_parallel_size); pp=$(r policy.megatron_cfg.pipeline_model_parallel_size)
   ep=$(r policy.megatron_cfg.expert_model_parallel_size)
   if isnum "${tp}" && isnum "${pp}" && isnum "${ep}"; then
-    train_gpus=$(( train_nodes * 4 ))
     (( train_gpus % (tp * pp) == 0 && (train_gpus / (tp * pp)) % ep == 0 )) \
       || err "trainer EP${ep} does not divide the data-parallel size of ${train_gpus} GPUs at TP${tp} PP${pp}"
   fi
@@ -155,8 +168,7 @@ if [[ "${async}" == true ]]; then
 fi
 if [[ "${backend}" == megatron ]]; then
   [[ "${megatron}" == true ]] || err "megatron generation needs the Megatron trainer (policy.megatron_cfg.enabled)"
-  if [[ "${colocated}" == false ]] && isnum "${gen_nodes}" && isnum "${gen_tp}" && isnum "${gen_pp}" && isnum "${gen_ep}"; then
-    gen_gpus=$(( gen_nodes * 4 ))
+  if [[ "${colocated}" == false ]] && isnum "${gen_gpus}" && isnum "${gen_tp}" && isnum "${gen_pp}" && isnum "${gen_ep}"; then
     (( gen_gpus % (gen_tp * gen_pp) == 0 && (gen_gpus / (gen_tp * gen_pp)) % gen_ep == 0 )) \
       || err "generation EP${gen_ep} does not divide the data-parallel size of ${gen_gpus} GPUs at TP${gen_tp} PP${gen_pp}"
   fi

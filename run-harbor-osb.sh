@@ -16,6 +16,8 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 TASK="$(realpath "${TASK:-${ROOT}/envs/harbor-osb.yaml}")"
 RECIPE="$(realpath "${RECIPE:-${ROOT}/recipes/apertus2-chonk-vllm-adamw.yaml}")"
 NODES="$(yq r "${RECIPE}" cluster.num_nodes)"
+# yq reads the recipe file alone, not its defaults: an inherited num_nodes comes back empty.
+[[ "${NODES}" =~ ^[0-9]+$ ]] || { echo "ERROR: ${RECIPE} must set cluster.num_nodes itself (got '${NODES}')" >&2; exit 1; }
 RUN="${RUN:-harbor-osb-$(date +%Y%m%d-%H%M%S)}"
 export ACCOUNT="${ACCOUNT:-infra01}" PARTITION="${PARTITION:-normal}" JOB_TIME="${JOB_TIME:-02:00:00}"
 [[ -z "${QOS:-}" ]] || export SBATCH_QOS="${QOS}"
