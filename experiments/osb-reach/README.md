@@ -33,5 +33,8 @@ Targets: every global IPv4 address of the node and its FQDN on the listener port
 
 Output: printed and saved to `$SCRATCH/osb-reach/<run id>/` (`reach.log`, `listen.log`).
 Env: `ACCOUNT` (infra01), `PARTITION` (debug), `REACH_PORT`, `EXTRA_TARGETS`, `OPENSANDBOX_DOMAIN`,
-`REACH_IMAGE` (python:3.12-slim). If the job is killed before the sandbox is deleted, reap it as in
+`REACH_IMAGE` (python:3.12-slim), `NEMO_GYM_VENV_DIR` (`$HARBOR_ROOT/venvs`, as the Harbor runs),
+`REACH_PYTHON`. The sandbox client needs the OpenSandbox SDK and `tenacity`, which the image's
+system Python lacks; `reach_node.sh` uses Gym's `harbor_agent` server venv
+(`$NEMO_GYM_VENV_DIR/responses_api_agents/harbor_agent/.venv`), built by any earlier Harbor run. If the job is killed before the sandbox is deleted, reap it as in
 `docs/harbor-osb-chonk-run.md` (Cleanup) with the run id printed at the start.

@@ -26,7 +26,18 @@ TARGETS+=("$(hostname -f):${PORT}")
 TARGETS+=(pypi.org:443 ${EXTRA_TARGETS:-})
 
 echo "== sandbox probes: ${TARGETS[*]}"
-"${PY}" "${HERE}/reach.py" "${TARGETS[@]}"
+# The image's system Python lacks the OpenSandbox SDK and tenacity; the runs create sandboxes from
+# Gym's harbor_agent server venv (built by the first Harbor run under NEMO_GYM_VENV_DIR), so use that.
+if [[ -z "${REACH_PYTHON:-}" ]]; then
+    for p in "${NEMO_GYM_VENV_DIR}/responses_api_agents/harbor_agent/.venv/bin/python" \
+             "${NEMO_GYM_VENV_DIR}"/*/*/.venv/bin/python; do
+        [[ -x "${p}" ]] && "${p}" -c "import opensandbox, tenacity, omegaconf, nemo_gym" 2>/dev/null \
+            && { REACH_PYTHON="${p}"; break; }
+    done
+fi
+[[ -n "${REACH_PYTHON:-}" ]] || { echo "ERROR: no Gym venv with opensandbox+tenacity under ${NEMO_GYM_VENV_DIR}; set REACH_PYTHON" >&2; kill "${LPID}"; exit 1; }
+echo "== sandbox client python: ${REACH_PYTHON}"
+"${REACH_PYTHON}" "${HERE}/reach.py" "${TARGETS[@]}"
 RC=$?
 sleep 2
 kill "${LPID}" 2>/dev/null
