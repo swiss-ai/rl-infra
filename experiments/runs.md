@@ -66,16 +66,16 @@ JOB_TIME=1-00:00:00 bash backends/nemo-rl/apertus2/launch.sh experiments/grpo-ch
 
 ## Base checkpoint, rubric
 
-Job 1193455, 14 nodes:
+Job 1190668, resumed as job 1193455, 14 nodes:
 
 ```bash
-RUN=rubric-adamw-lr1e-6 RECIPE=recipes/apertus2-chonk-vllm-adamw-rubric-2judge.yaml JOB_TIME=10:00:00 bash run.sh envs/ultrafeedback-rubric.yaml \
+RUN=rubric-adamw-lr1e-6 RECIPE=recipes/apertus2-chonk-vllm-adamw-rubric-2judge.yaml JOB_TIME=16:00:00 bash run.sh envs/ultrafeedback-rubric.yaml \
     policy.megatron_cfg.optimizer.lr=1.0e-6 \
     env.judge_pool.num_nodes=2 \
     grpo.max_num_steps=431 \
     checkpointing.save_optimizer=true \
     checkpointing.save_period=220 \
-    checkpointing.checkpoint_must_save_by=00:09:40:00
+    checkpointing.checkpoint_must_save_by=00:15:40:00
 ```
 
 Job 1190666, 14 nodes:
