@@ -17,6 +17,20 @@ Qwen3-4B-Instruct-2507 on one node (recipe `../token-capture-sc/qwen3-4b-1n-sc.y
 | `../../backends/nemo-rl/apertus2/patches/gym/0001-*.patch` | `harbor_agent` builds the agent's model URL with `base_url_for_run` (rollout capture prefix); new `harbor_model_base_url` |
 | `../../backends/nemo-rl/apertus2/patches/gym/0002-*.patch` | `OpenCodeNemoGym` agent; no masking of empty-output rollouts under capture |
 
+## Environment variables of `run.sh`
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `AGENT` | `terminus` | `terminus`: Terminus-2, loop on the node, commands in the pod (task `terminus-sc.yaml`). `opencode`: OpenCode installed and run in the pod (adds overlay `opencode-sc.yaml`). Anything else is refused. |
+| `HARBOR_MODEL_BASE_URL` | none | `AGENT=opencode` only, required: the Gym model server as reachable from the pods, without `/v1`. `harbor_agent` appends the capture prefix and `/v1`. |
+| `OPENCODE_VERSION` | latest | `AGENT=opencode` only: `opencode-ai` npm version installed in each pod. |
+| `HARBOR_ROOT` | `$SCRATCH/osb/harbor_micro` | micro-task tree (`tasks/`, `train.jsonl`, `validation.jsonl`) |
+| `RUN` | `harbor-sc-<AGENT>-<date>` | run name (logs, sandbox labels) |
+| `JOB_TIME` | `01:00:00` | Slurm time limit |
+| `PARTITION`, `ACCOUNT`, ... | from `run-harbor-osb.sh` / `site.env` | as for `run-harbor-osb.sh` |
+
+Extra arguments to `run.sh` are passed on as config overrides, as with `run-harbor-osb.sh`.
+
 How the tokens travel: NeMo-RL turns Gym's `token_id_capture` on for all agents and switches the
 token echo off. `harbor_agent` gives the Harbor agent
 `<model server>/ng-rollout/<rollout id>/training-token-capture/v1` as its model URL, so every model
