@@ -22,8 +22,8 @@ for a in "${ADDRS[@]}"; do TARGETS+=("${a}:${PORT}"); done
 TARGETS+=("$(hostname -f):${PORT}")
 # Self-test from the node itself, so a dead listener is not mistaken for a blocked network.
 "${PY}" "${HERE}/probe.py" "${ADDRS[0]}:${PORT}" | tail -1 | sed 's/^/   node self-test: /'
-# Controls: internet (expected to work), and the address of job 5236016 (nothing listening).
-TARGETS+=(pypi.org:443 phillipmueller.ch:443 ${EXTRA_TARGETS:-})
+# Control: internet (expected to work).
+TARGETS+=(pypi.org:443 ${EXTRA_TARGETS:-})
 
 echo "== sandbox probes: ${TARGETS[*]}"
 "${PY}" "${HERE}/reach.py" "${TARGETS[@]}"

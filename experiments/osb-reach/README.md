@@ -20,7 +20,7 @@ What it does (one debug node, under 5 min):
    variables, public egress address; then a TCP connect to each target.
 
 Targets: every global IPv4 address of the node and its FQDN on the listener port; `pypi.org:443`
-(internet control, expected to work); `phillipmueller.ch:443` (the address of job 5236016);
+(internet control, expected to work);
 `EXTRA_TARGETS="host:port ..."` adds more, e.g. a login node where you run `nc -lk <port>` yourself.
 
 | Probe result | Meaning |
