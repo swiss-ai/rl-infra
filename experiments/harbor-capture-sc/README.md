@@ -6,8 +6,36 @@ of by a per-agent wrapper? And what does it take to let an agent that runs *insi
 OpenSandbox pod reach the model?
 
 Qwen3-4B-Instruct-2507 on one node (recipe `../token-capture-sc/qwen3-4b-1n-sc.yaml`: Megatron on
-2 GPUs, vLLM on 2), Rob's Harbor micro-tasks, 2 prompts x 2 generations, 1 step, through
-`examples/run_grpo_single_controller.py` with `token_capture.enabled: true`.
+2 GPUs, vLLM on 2), Rob's Harbor micro-tasks, 8 prompts x 4 generations (32 sandboxes in
+flight), 3 steps, through `examples/run_grpo_single_controller.py` with `token_capture.enabled: true`.
+
+**Shape (2026-11-02).** Job 5235854 ran the first version (2 x 2, 1 step) end to end, but drew
+only micro-fib-091 and micro-json-054, all 4 rewards 1.0, so every advantage and `grad_norm` was 0
+(analysis: `research/reports/2026-11-02-job-5235854-harbor-sc-capture.md` in the workspace). Now:
+
+| Setting | Value | Why |
+|---|---|---|
+| `grpo.num_prompts_per_step` x `num_generations_per_prompt`, `max_num_steps` | 8 x 4, 3 | 4 samples per group to disagree on; 24 prompts |
+| `policy.train_global_batch_size` | 32 (literal) | Single-Controller requires prompts x generations; preflight does arithmetic on it |
+| `data.shuffle` | false | `train.jsonl` is already random (generator, seed 0); its first 24 rows cover all 8 families (step 1: 7, step 2: 6, step 3: 5) |
+| `async_rl.min_groups_for_streaming_train`, `max_inflight_prompts`, `max_buffered_rollouts` | 8 each (= prompts) | one chunk per step, one step in flight, the in_order buffer at lookahead 0 |
+| `rollout_failure.max_infra_attempts_per_prompt` / `max_data_attempts_per_prompt` | 2 / 2 | one retry of a group after a timeout or transport error; drop budgets stay 0 (no shrunken steps) |
+| `rollout_failure.nemo_gym.rollout_timeout_s`, `stall_watchdog.stall_timeout_s` | 1800, 2100 | sandbox start + task agent timeout 900 + verifier 120, with margin |
+| harbor_agent `concurrency` | 32 (derived) | one trial per in-flight rollout |
+| `JOB_TIME` (run.sh) | 02:00:00 | ~5 min start-up + ~5-10 min per step expected; 3 rollout timeouts in the worst case |
+
+The pump does not stop at `max_num_steps`: after step 3 it admits one more batch (32 trials) that is
+cut off at shutdown; `envs/reap_after.sh` deletes those sandboxes. No config knob prevents it.
+Trainer memory per GPU (Megatron TP1, DP2, 96 GB): ~8 GB bf16 weights + ~8 GB bf16 grad buffer
+(`grad_reduce_in_fp32: false`) + at most ~24 GB of the 48 GB fp32 master/Adam state (distributed
+optimizer) + one packed 16384-token micro-batch with full recompute (~3 GB layer inputs, ~10-20 GB
+logits/log-prob peak at vocab 152k) = ~50-65 GB. The batch size only adds micro-batches (32 x ~2-16k
+tokens = ~2-16 per GPU), not peak memory. Add ~8 GB if the reference weights stay on the GPU.
+
+The previous smoke test (4 sandboxes, ~7 min) is still one command:
+
+    bash experiments/harbor-capture-sc/run.sh grpo.num_prompts_per_step=2 \
+        grpo.num_generations_per_prompt=2 grpo.max_num_steps=1 policy.train_global_batch_size=4
 
 | File | What |
 |---|---|
@@ -26,7 +54,7 @@ Qwen3-4B-Instruct-2507 on one node (recipe `../token-capture-sc/qwen3-4b-1n-sc.y
 | `OPENCODE_VERSION` | latest | `AGENT=opencode` only: `opencode-ai` npm version installed in each pod. |
 | `HARBOR_ROOT` | `$SCRATCH/osb/harbor_micro` | micro-task tree (`tasks/`, `train.jsonl`, `validation.jsonl`) |
 | `RUN` | `harbor-sc-<AGENT>-<date>` | run name (logs, sandbox labels) |
-| `JOB_TIME` | `01:00:00` | Slurm time limit |
+| `JOB_TIME` | `02:00:00` | Slurm time limit |
 | `PARTITION`, `ACCOUNT`, ... | from `run-harbor-osb.sh` / `site.env` | as for `run-harbor-osb.sh` |
 
 Extra arguments to `run.sh` are passed on as config overrides, as with `run-harbor-osb.sh`.
@@ -66,16 +94,27 @@ from that ledger (`RolloutReassembler`); the agent's own output carries no token
 
     bash experiments/harbor-capture-sc/run.sh
 
-Checks the capture path with `harbor_agent` on our stack. Expected: `SC run complete`; under
-`gym_token_capture/` one ledger per rollout with several calls; no `mask_sample` on rollouts whose
-verifier ran.
+Checks the capture path with `harbor_agent` on our stack and that a gradient flows. Expected:
+`train step 3/3` and `SC run complete`; under `gym_token_capture/` one ledger per rollout with
+several calls; no `mask_sample` on rollouts whose verifier ran; and in at least one step
+`grad_norm > 0`, non-zero `advantages/min|max`, and a `reward` mean strictly between 0 and 1,
+from groups whose 4 rewards differ.
 
     LOG=$SCRATCH/nemo-rl/slurm/<jobid>-logs/ray-driver.log
-    grep -n "SC run complete\|ng-rollout\|token_capture\|mask_sample\|Error running Harbor job\|Traceback" $LOG
+    grep -n "SC run complete\|train step\|ng-rollout\|token_capture\|mask_sample\|Error running Harbor job\|Traceback" $LOG
+    grep -o "grad_norm=[^ ]*\|'reward': [^,]*\|'advantages/[a-z]*': [^,]*" $LOG
+    # per-trial rewards, grouped by task (4 trials of a task = one group)
+    for f in $HARBOR_ROOT/jobs/<date>/swe_lego/Qwen3-4B-Instruct-2507/*/*/verifier/reward.txt; do
+        t=${f%/verifier/*}; echo "${t##*/} $(cat $f)"; done | sed 's/__[^ ]*//' | sort | uniq -c
+
+The step metrics are also in TensorBoard under `$SCRATCH/nemo-rl/logs/<RUN>/`.
+If every group is still uniform (all 1 or all 0), raise the group size, e.g.
+`grpo.num_generations_per_prompt=8 policy.train_global_batch_size=64` (64 sandboxes).
 
 | Log | Meaning |
 |---|---|
 | `SC run complete`, a training step in TensorBoard | captured tokens reached the trainer through `harbor_agent` |
+| `grad_norm=0.0` in every step, `advantages/*` 0 | rewards uniform within every group; no pipeline fault (see above) |
 | model calls to `/v1/chat/completions` without `/ng-rollout/` | Gym patch 0001 is not in the checkout (step 1) |
 | rebuild / lineage error, rollouts all masked | capture ran but the call chain could not be proven; see the ledgers |
 | `import transfer_queue` fails, setup raises on a config key | Single-Controller stack problem before any rollout |

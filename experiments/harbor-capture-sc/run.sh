@@ -7,7 +7,7 @@
 #   HARBOR_MODEL_BASE_URL  opencode only: model-server URL as reachable from the pods (required)
 #   OPENCODE_VERSION       opencode only: opencode-ai npm version (default: latest)
 #   HARBOR_ROOT            micro-task tree, train.jsonl, validation.jsonl (default $SCRATCH/osb/harbor_micro)
-#   RUN, PARTITION, JOB_TIME (default 01:00:00), everything run-harbor-osb.sh reads.
+#   RUN, PARTITION, JOB_TIME (default 02:00:00), everything run-harbor-osb.sh reads.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -44,6 +44,8 @@ export HARBOR_ROOT="${HARBOR_ROOT:-${SCRATCH}/osb/harbor_micro}"
 export TASK="${HERE}/terminus-sc.yaml" RECIPE="${ROOT}/experiments/token-capture-sc/qwen3-4b-1n-sc.yaml"
 export SCRIPT=examples/run_grpo_single_controller.py
 export RUN="${RUN:-harbor-sc-${AGENT}-$(date +%Y%m%d-%H%M%S)}"
-export JOB_TIME="${JOB_TIME:-01:00:00}"
+# 8 x 4 x 3 steps: ~5 min start-up + ~5-10 min per step expected; 3 x rollout_timeout_s (30 min)
+# plus start-up in the worst case
+export JOB_TIME="${JOB_TIME:-02:00:00}"
 export NEMO_GYM_WORKLOAD="${NEMO_GYM_WORKLOAD:-harbor-capture-sc}"
 exec bash "${ROOT}/run-harbor-osb.sh" "$@"
