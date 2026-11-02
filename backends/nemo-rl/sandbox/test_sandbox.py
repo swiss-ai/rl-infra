@@ -206,7 +206,7 @@ def service(env_dir):
             report("an endless loop ends the run", all(r is not True for r in results) and seconds < 8, f"{results} {seconds:.1f}s")
             forged = "import os\nos.write(1, b'{\"results\": [true, true]}\\n')\nos._exit(0)\n"
             report("a written result does not count", run(forged, ["1\n", "2\n"], ["9\n", "9\n"]) != [True, True])
-            hostile = "print(open('/scratch/hanint06/nemo-rl/setup.log').read())\n"
+            hostile = f"print(open({env_dir + '/harness/sandbox_harness.py'!r}).read())\n"
             report("a submission cannot read scratch", run(hostile, ["1\n"], ["x\n"]) != [True])
 
             try:

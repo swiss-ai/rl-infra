@@ -1,15 +1,15 @@
 #!/bin/bash
 # Submits the conversion of one Megatron SFT checkpoint to HF (one node, about 5 minutes):
-#   bash convert.sh 8075
-# It runs hanint05's job, which takes every path from the environment, on the clean clones from
+#   RUN=<run's checkpoints> JOB=<export sbatch script> IMAGE=<image> bash convert.sh 8075
+# It runs the SFT export job, which takes every path from the environment, on the clean clones from
 # setup.sh, so the commits match the conversion that passed parity. The export lands in models/.
 set -euo pipefail
 
 iter="$(printf 'iter_%07d' "${1:?usage: convert.sh <iteration>}")"
 ROOT="${ROOT:-/scratch/${USER}/chonk-sft}"
-RUN="${RUN:-/scratch/hanint05/runs/apertus-2-sft/results/ckpts/sft/chonk-lc-16k-v0.1-ep1}"
-JOB="${JOB:-/scratch/hanint05/hf-exports/bridge/convert_bridge_kisti.sbatch}"
-IMAGE="${IMAGE:-/scratch/hanint02/images/nemo-rl-apertus2-cfcfede4-ucclfix.sqsh}"
+RUN="${RUN:?Set RUN to the directory of the SFT checkpoints.}"
+JOB="${JOB:?Set JOB to the sbatch script of the HF export.}"
+IMAGE="${IMAGE:?Set IMAGE to the NeMo-RL image.}"
 
 [[ -f "${RUN}/${iter}/common.pt" ]] || { echo "ERROR: no checkpoint at ${RUN}/${iter}" >&2; exit 1; }
 output="${ROOT}/models/chonk-lc-16k-v0.1-ep1-${iter}"

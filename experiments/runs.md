@@ -1,0 +1,238 @@
+# Run commands
+
+The exact command of each run reported so far, from the driver command Slurm saved, without the run's own output
+paths and logging settings. All of them work from this repository, because setup applies every patch. Sampling is
+random, so a rerun gives close numbers, not the same ones. Later runs use later patches, and earlier runs differ
+only by code that is off for them. Before a run on another machine, see `README.md` for models, data and images.
+
+## Base checkpoint, DAPO
+
+`hangang-dapo`, `hangang-dapo-lr2e-6`, `hangang-dapo-fp8-skip-trunc0` and `hangang-dapo-muon-fp8-skip-trunc0` ran with
+vLLM memory at 0.8, the value then. To match them, add `policy.generation.vllm_cfg.gpu_memory_utilization=0.8`.
+
+Job 1173197, 16 nodes:
+
+```bash
+JOB_TIME=1-00:00:00 bash backends/nemo-rl/apertus2/launch.sh experiments/grpo-chonk/chonk-dapo-16n-megatron-128x16-16k-async-pp2-dedup.yaml 16 hangang-dapo
+```
+
+Job 1173598, 16 nodes:
+
+```bash
+JOB_TIME=1-00:00:00 bash backends/nemo-rl/apertus2/launch.sh experiments/grpo-chonk/chonk-dapo-16n-megatron-128x16-16k-async-pp2-dedup.yaml 16 hangang-dapo-lr2e-6 \
+    policy.megatron_cfg.optimizer.lr=2.0e-6
+```
+
+Job 1180617, 16 nodes:
+
+```bash
+JOB_TIME=1-00:00:00 bash backends/nemo-rl/apertus2/launch.sh experiments/grpo-chonk/chonk-dapo-16n-megatron-128x16-16k-async-pp2-dedup-fp8-skip-trunc0.yaml 16 hangang-dapo-fp8-skip-trunc0
+```
+
+Job 1186409, 16 nodes:
+
+```bash
+JOB_TIME=1-00:00:00 bash backends/nemo-rl/apertus2/launch.sh experiments/grpo-chonk/chonk-dapo-16n-megatron-128x16-16k-async-pp2-dedup-fp8-skip-trunc0.yaml 16 hangang-dapo-fp8-skip-trunc0-lr2e-6 \
+    policy.megatron_cfg.optimizer.lr=2.0e-6
+```
+
+Job 1185235, 16 nodes:
+
+```bash
+JOB_TIME=1-00:00:00 bash backends/nemo-rl/apertus2/launch.sh experiments/grpo-chonk/chonk-dapo-16n-megatron-128x16-16k-async-pp2-dedup-fp8-skip-trunc0.yaml 16 hangang-dapo-fp8-skip-trunc0-lr4e-6 \
+    policy.megatron_cfg.optimizer.lr=4.0e-6
+```
+
+Job 1184046, 16 nodes:
+
+```bash
+JOB_TIME=1-00:00:00 bash backends/nemo-rl/apertus2/launch.sh experiments/grpo-chonk/chonk-dapo-16n-megatron-128x16-16k-async-pp2-dedup-fp8-skip-trunc0.yaml 16 hangang-dapo-fp8-skip-trunc0-mem088
+```
+
+Job 1180620, 24 nodes:
+
+```bash
+JOB_TIME=1-00:00:00 bash backends/nemo-rl/apertus2/launch.sh experiments/grpo-chonk/chonk-dapo-24n-megatron-128x16-16k-async-pp4-dedup-md-fp8-skip-trunc0.yaml 24 hangang-dapo-muon-fp8-skip-trunc0
+```
+
+Job 1184044, 24 nodes:
+
+```bash
+JOB_TIME=1-00:00:00 bash backends/nemo-rl/apertus2/launch.sh experiments/grpo-chonk/chonk-dapo-24n-megatron-128x16-16k-async-pp4-dedup-md-fp8-skip-trunc0.yaml 24 hangang-dapo-muon-fp8-skip-trunc0-lr1e-6-gains1e-6-matrix4e-5 \
+    policy.megatron_cfg.optimizer.lr=1.0e-6 \
+    policy.megatron_cfg.optimizer.gains_lr=1.0e-6 \
+    policy.megatron_cfg.optimizer.matrix_lr=4.0e-5
+```
+
+## Base checkpoint, rubric
+
+Job 1193455, 14 nodes:
+
+```bash
+RUN=rubric-adamw-lr1e-6 RECIPE=recipes/apertus2-chonk-vllm-adamw-rubric-2judge.yaml JOB_TIME=10:00:00 bash run.sh envs/ultrafeedback-rubric.yaml \
+    policy.megatron_cfg.optimizer.lr=1.0e-6 \
+    env.judge_pool.num_nodes=2 \
+    grpo.max_num_steps=431 \
+    checkpointing.save_optimizer=true \
+    checkpointing.save_period=220 \
+    checkpointing.checkpoint_must_save_by=00:09:40:00
+```
+
+Job 1190666, 14 nodes:
+
+```bash
+RUN=rubric-adamw-lr2e-6 RECIPE=recipes/apertus2-chonk-vllm-adamw-rubric-2judge.yaml JOB_TIME=16:00:00 bash run.sh envs/ultrafeedback-rubric.yaml \
+    policy.megatron_cfg.optimizer.lr=2.0e-6 \
+    env.judge_pool.num_nodes=2 \
+    grpo.max_num_steps=431 \
+    checkpointing.save_optimizer=true \
+    checkpointing.save_period=220 \
+    checkpointing.checkpoint_must_save_by=00:15:40:00
+```
+
+Job 1190667, 22 nodes:
+
+```bash
+RUN=rubric-muon-lr1e-6-gains1e-6-matrix4e-5 RECIPE=recipes/apertus2-chonk-vllm-muon-rubric-2judge.yaml JOB_TIME=16:00:00 bash run.sh envs/ultrafeedback-rubric.yaml \
+    policy.megatron_cfg.optimizer.lr=1.0e-6 \
+    policy.megatron_cfg.optimizer.gains_lr=1.0e-6 \
+    policy.megatron_cfg.optimizer.matrix_lr=4.0e-5 \
+    env.judge_pool.num_nodes=2 \
+    grpo.max_num_steps=431 \
+    checkpointing.save_optimizer=true \
+    checkpointing.save_period=220 \
+    checkpointing.checkpoint_must_save_by=00:15:40:00
+```
+
+## SFT, DAPO
+
+Job 1190614, 16 nodes:
+
+```bash
+RUN=sft-dapo-adamw-lr1e-6 RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-dapo.yaml JOB_TIME=1-00:00:00 bash run.sh envs/dapo-math-sft.yaml
+```
+
+Job 1190615, 16 nodes:
+
+```bash
+RUN=sft-dapo-adamw-lr2e-6 RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-dapo.yaml JOB_TIME=1-00:00:00 bash run.sh envs/dapo-math-sft.yaml \
+    policy.megatron_cfg.optimizer.lr=2.0e-6
+```
+
+Job 1190617, 24 nodes:
+
+```bash
+RUN=sft-dapo-muon-lr1e-6-gains1e-6-matrix4e-5 RECIPE=recipes/apertus2-chonk-sft-vllm-muon-dapo.yaml JOB_TIME=1-00:00:00 bash run.sh envs/dapo-math-sft.yaml
+```
+
+## SFT, rubric
+
+Job 1192745, 14 nodes:
+
+```bash
+RUN=sft-rubric-full-adamw-lr1e-6 RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-rubric.yaml JOB_TIME=16:00:00 bash run.sh envs/ultrafeedback-rubric-sft.yaml \
+    grpo.max_num_steps=431 \
+    checkpointing.save_period=220 \
+    checkpointing.save_optimizer=true \
+    checkpointing.checkpoint_must_save_by=00:15:40:00
+```
+
+Job 1192750, 14 nodes:
+
+```bash
+RUN=sft-rubric-full-adamw-lr2e-6 RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-rubric.yaml JOB_TIME=16:00:00 bash run.sh envs/ultrafeedback-rubric-sft.yaml \
+    grpo.max_num_steps=431 \
+    checkpointing.save_period=220 \
+    checkpointing.save_optimizer=true \
+    checkpointing.checkpoint_must_save_by=00:15:40:00 \
+    policy.megatron_cfg.optimizer.lr=2.0e-6
+```
+
+Job 1192752, 22 nodes:
+
+```bash
+RUN=sft-rubric-full-muon-lr1e-6-gains1e-6-matrix4e-5 RECIPE=recipes/apertus2-chonk-sft-vllm-muon-rubric.yaml JOB_TIME=16:00:00 bash run.sh envs/ultrafeedback-rubric-sft.yaml \
+    grpo.max_num_steps=431 \
+    checkpointing.save_period=220 \
+    checkpointing.save_optimizer=true \
+    checkpointing.checkpoint_must_save_by=00:15:40:00
+```
+
+## SFT, tool calling
+
+Job 1194398, 12 nodes:
+
+```bash
+RUN=sft-tools-nocap-adamw-lr2e-6 RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-tools.yaml JOB_TIME=06:00:00 bash run.sh envs/workplace-assistant-sft.yaml \
+    grpo.max_num_steps=39 \
+    grpo.val_period=10 \
+    grpo.val_at_start=true \
+    grpo.val_at_end=true \
+    env.should_log_nemo_gym_responses=true \
+    checkpointing.enabled=false \
+    policy.megatron_cfg.optimizer.lr=2.0e-6
+```
+
+## SFT, coding
+
+Job 1194832, 12 nodes:
+
+```bash
+RUN=sft-code-debug-1 RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-tools.yaml JOB_TIME=01:30:00 bash run.sh envs/code-gen-sft.yaml \
+    grpo.num_prompts_per_step=32 \
+    grpo.max_num_steps=3 \
+    grpo.val_period=0 \
+    grpo.val_at_end=false \
+    checkpointing.enabled=false
+```
+
+Job 1195452, 16 nodes:
+
+```bash
+RUN=sft-code-40-budget12k RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-code.yaml JOB_TIME=05:00:00 bash run.sh envs/code-gen-sft.yaml \
+    grpo.num_prompts_per_step=32 \
+    grpo.max_num_steps=40 \
+    checkpointing.enabled=false
+```
+
+Job 1195564, 12 nodes:
+
+```bash
+RUN=sft-code-8k-lr2e-6 RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-tools.yaml JOB_TIME=04:00:00 bash run.sh envs/code-gen-sft.yaml \
+    grpo.num_prompts_per_step=32 \
+    grpo.max_num_steps=40 \
+    grpo.val_period=10 \
+    checkpointing.enabled=false \
+    policy.generation.max_new_tokens=8192 \
+    policy.generation.thinking_token_budget=6144 \
+    policy.megatron_cfg.optimizer.lr=2.0e-6
+```
+
+Job 1195703, 16 nodes:
+
+```bash
+RUN=sft-code-full-128x16-lr2e-6 RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-code.yaml JOB_TIME=1-06:00:00 bash run.sh envs/code-gen-sft.yaml \
+    grpo.max_num_steps=184 \
+    grpo.val_period=20 \
+    policy.generation.max_new_tokens=8192 \
+    policy.generation.thinking_token_budget=6144 \
+    checkpointing.save_period=50 \
+    checkpointing.checkpoint_must_save_by=01:05:30:00 \
+    policy.megatron_cfg.optimizer.lr=2.0e-6 \
+    env.nemo_gym.code_gen.resources_servers.code_gen.sandbox_endpoint_file=${SCRATCH}/code-sandbox/endpoint-overnight.json
+```
+
+Job 1195570, 12 nodes:
+
+```bash
+RUN=sft-mbpp-lr2e-6 RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-tools.yaml JOB_TIME=03:00:00 bash run.sh envs/code-gen-sft.yaml \
+    grpo.num_prompts_per_step=32 \
+    grpo.max_num_steps=40 \
+    grpo.val_period=10 \
+    checkpointing.enabled=false \
+    policy.generation.max_new_tokens=4096 \
+    policy.generation.thinking_token_budget=3072 \
+    policy.megatron_cfg.optimizer.lr=2.0e-6 \
+    data.train.data_path=${SCRATCH}/code-gen-mbpp/train.jsonl \
+    data.validation.data_path=${SCRATCH}/code-gen-mbpp/validation.jsonl
+```

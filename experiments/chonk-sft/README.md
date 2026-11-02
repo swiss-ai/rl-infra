@@ -13,9 +13,9 @@ restores whatever the scratch purge removed.
 ```bash
 cd ~/projects/rl-infra/experiments/chonk-sft && bash setup.sh
 
-# Serve hanint05's iter_0004845 export on one node; it is ready in about 10 minutes.
+# Serve an HF export on one node; it is ready in about 10 minutes.
 cd /scratch/$USER/chonk-sft
-sbatch ~/projects/rl-infra/experiments/chonk-sft/serve.sbatch
+sbatch --export=ALL,MODEL=<export>,IMAGE=<image> ~/projects/rl-infra/experiments/chonk-sft/serve.sbatch
 tail -f logs/chonk-serve-<jobid>.out                  # wait for READY
 
 # From the login node, which can reach the compute nodes:
@@ -32,9 +32,9 @@ venv/bin/python ~/projects/rl-infra/experiments/chonk-sft/chat.py \
 A newer checkpoint has to be converted to HF first, which takes one node for about 5 minutes:
 
 ```bash
-bash ~/projects/rl-infra/experiments/chonk-sft/convert.sh 8075
+RUN=<run's checkpoints> JOB=<export sbatch script> IMAGE=<image> bash ~/projects/rl-infra/experiments/chonk-sft/convert.sh 8075
 cd /scratch/$USER/chonk-sft
-sbatch --export=ALL,MODEL=$PWD/models/chonk-lc-16k-v0.1-ep1-iter_0008075 \
+sbatch --export=ALL,MODEL=$PWD/models/chonk-lc-16k-v0.1-ep1-iter_0008075,IMAGE=<image> \
     ~/projects/rl-infra/experiments/chonk-sft/serve.sbatch
 ```
 
@@ -104,7 +104,7 @@ Build typed messages, then encode them with the library:
 ```python
 from apertus_common import Conversation, SystemPrompt, User, load_encoding
 
-encoding = load_encoding("/scratch/hanint06/chonk-sft/tokenizer")
+encoding = load_encoding("<tokenizer directory>")
 history = Conversation(system=SystemPrompt.build(), items=[User(payload="What is 2+2?")])
 prompt = encoding.encode_conversation(history)
 ```
@@ -192,7 +192,7 @@ Some consequences for testing, all from the sample:
 ## Test results
 
 From 2026-10-31, on `iter_0004845` and `iter_0008075`, which are 25% and 42% through the first epoch.
-Results are in `/scratch/hanint06/chonk-sft/results`.
+Results are in `results` under `/scratch/$USER/chonk-sft`.
 
 **AIME 2024**, `iter_0008075`: 29.6% (71 of 240 samples, 8 per problem) at temperature 1 with up to
 16,000 tokens, graded on `claim`; the standard error across the 30 problems is about 6 points. 19

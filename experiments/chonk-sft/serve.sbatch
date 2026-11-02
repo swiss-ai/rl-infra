@@ -15,13 +15,14 @@
 # Once the model is up, in about 10 minutes, the URL is in ${ROOT}/endpoint, where chat.py finds it.
 # Without --enforce-eager one step takes about 22 ms instead of 650 ms. CUDA graph capture needs a
 # Mamba cache block per sequence, and vLLM's default of 1024 sequences is more than fit at memory 0.88.
-# Submit from ${ROOT}, with --export=ALL,MODEL=<export> to serve another export:
-#   cd /scratch/$USER/chonk-sft && sbatch ~/projects/rl-infra/experiments/chonk-sft/serve.sbatch
+# Submit from ${ROOT}:
+#   cd /scratch/$USER/chonk-sft
+#   sbatch --export=ALL,MODEL=<export>,IMAGE=<image> ~/projects/rl-infra/experiments/chonk-sft/serve.sbatch
 
 set -euo pipefail
 ROOT=${ROOT:-/scratch/$USER/chonk-sft}
-MODEL=${MODEL:-/scratch/hanint05/hf-exports/bridge/chonk-lc-16k-v0.1-ep1-iter_0004845}
-IMAGE=${IMAGE:-/scratch/hanint02/images/nemo-rl-apertus2-cfcfede4-ucclfix.sqsh}
+MODEL=${MODEL:?Set MODEL to an HF export of Chonk.}
+IMAGE=${IMAGE:?Set IMAGE to the NeMo-RL image.}
 PORT=${PORT:-8011}
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-16384}
 LOG=$ROOT/logs/vllm-$SLURM_JOB_ID.log

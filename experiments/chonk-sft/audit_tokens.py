@@ -3,7 +3,7 @@
 
 Each sampled conversation is split into frames at its control tokens, rebuilt as typed messages and
 encoded again, which must give back the stored tokens exactly. Run it with the venv from setup.sh:
-    venv/bin/python audit_tokens.py tokenizer /scratch/hanint05/data/v0_1_chonk_sft_tokenized report.json
+    venv/bin/python audit_tokens.py tokenizer <tokenized data directory> report.json
 """
 import argparse
 import collections
