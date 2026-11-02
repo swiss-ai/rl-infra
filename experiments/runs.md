@@ -5,6 +5,120 @@ paths and logging settings. All of them work from this repository, because setup
 random, so a rerun gives close numbers, not the same ones. Later runs use later patches, and earlier runs differ
 only by code that is off for them. Before a run on another machine, see `README.md` for models, data and images.
 
+## Base checkpoint, GSM8K
+
+Job 1173382, 12 nodes:
+
+```bash
+RUN=gsm8k-adamw-opt1 RECIPE=recipes/apertus2-chonk-vllm-adamw.yaml JOB_TIME=05:00:00 bash run.sh envs/gsm8k.yaml \
+    policy.train_global_batch_size=2048
+```
+
+Job 1173403, 12 nodes:
+
+```bash
+RUN=gsm8k-adamw-opt2 RECIPE=recipes/apertus2-chonk-vllm-adamw.yaml JOB_TIME=05:00:00 bash run.sh envs/gsm8k.yaml \
+    policy.train_global_batch_size=1024
+```
+
+Job 1173380, 12 nodes:
+
+```bash
+RUN=gsm8k-adamw-opt4 RECIPE=recipes/apertus2-chonk-vllm-adamw.yaml JOB_TIME=05:00:00 bash run.sh envs/gsm8k.yaml
+```
+
+Job 1180612, 12 nodes:
+
+```bash
+RUN=gsm8k-adamw-lr2e-6-opt1 RECIPE=recipes/apertus2-chonk-vllm-adamw.yaml JOB_TIME=05:00:00 bash run.sh envs/gsm8k.yaml \
+    policy.megatron_cfg.optimizer.lr=2.0e-6 \
+    policy.train_global_batch_size=2048 \
+    checkpointing.enabled=false
+```
+
+Job 1180613, 12 nodes:
+
+```bash
+RUN=gsm8k-adamw-lr2e-6-opt2 RECIPE=recipes/apertus2-chonk-vllm-adamw.yaml JOB_TIME=05:00:00 bash run.sh envs/gsm8k.yaml \
+    policy.megatron_cfg.optimizer.lr=2.0e-6 \
+    policy.train_global_batch_size=1024 \
+    checkpointing.enabled=false
+```
+
+Job 1180614, 12 nodes:
+
+```bash
+RUN=gsm8k-adamw-lr2e-6-opt4 RECIPE=recipes/apertus2-chonk-vllm-adamw.yaml JOB_TIME=05:00:00 bash run.sh envs/gsm8k.yaml \
+    policy.megatron_cfg.optimizer.lr=2.0e-6 \
+    policy.train_global_batch_size=512 \
+    checkpointing.enabled=false
+```
+
+Job 1180783, 12 nodes:
+
+```bash
+RUN=gsm8k-adamw-lr4e-6-opt1 RECIPE=recipes/apertus2-chonk-vllm-adamw.yaml JOB_TIME=05:00:00 bash run.sh envs/gsm8k.yaml \
+    policy.megatron_cfg.optimizer.lr=4.0e-6 \
+    policy.train_global_batch_size=2048 \
+    checkpointing.enabled=false
+```
+
+Job 1180789, 12 nodes:
+
+```bash
+RUN=gsm8k-adamw-lr4e-6-opt2 RECIPE=recipes/apertus2-chonk-vllm-adamw.yaml JOB_TIME=05:00:00 bash run.sh envs/gsm8k.yaml \
+    policy.megatron_cfg.optimizer.lr=4.0e-6 \
+    policy.train_global_batch_size=1024 \
+    checkpointing.enabled=false
+```
+
+Job 1180793, 12 nodes:
+
+```bash
+RUN=gsm8k-adamw-lr4e-6-opt4 RECIPE=recipes/apertus2-chonk-vllm-adamw.yaml JOB_TIME=05:00:00 bash run.sh envs/gsm8k.yaml \
+    policy.megatron_cfg.optimizer.lr=4.0e-6 \
+    policy.train_global_batch_size=512 \
+    checkpointing.enabled=false
+```
+
+Job 1178777, 20 nodes:
+
+```bash
+RUN=gsm8k-muon-lr1e-6-matrix1e-5 RECIPE=recipes/apertus2-chonk-vllm-muon.yaml JOB_TIME=05:00:00 bash run.sh envs/gsm8k.yaml \
+    policy.megatron_cfg.optimizer.lr=1.0e-6 \
+    policy.megatron_cfg.optimizer.matrix_lr=1.0e-5 \
+    checkpointing.enabled=false
+```
+
+Job 1178778, 20 nodes:
+
+```bash
+RUN=gsm8k-muon-lr1e-6-gains1e-6-matrix1e-5 RECIPE=recipes/apertus2-chonk-vllm-muon.yaml JOB_TIME=05:00:00 bash run.sh envs/gsm8k.yaml \
+    policy.megatron_cfg.optimizer.lr=1.0e-6 \
+    policy.megatron_cfg.optimizer.gains_lr=1.0e-6 \
+    policy.megatron_cfg.optimizer.matrix_lr=1.0e-5 \
+    checkpointing.enabled=false
+```
+
+Job 1180618, 20 nodes:
+
+```bash
+RUN=gsm8k-muon-lr1e-6-matrix2e-5 RECIPE=recipes/apertus2-chonk-vllm-muon.yaml JOB_TIME=05:00:00 bash run.sh envs/gsm8k.yaml \
+    policy.megatron_cfg.optimizer.lr=1.0e-6 \
+    policy.megatron_cfg.optimizer.matrix_lr=2.0e-5 \
+    checkpointing.enabled=false
+```
+
+Job 1183563, 20 nodes:
+
+```bash
+RUN=gsm8k-muon-lr1e-6-gains1e-6-matrix4e-5 RECIPE=recipes/apertus2-chonk-vllm-muon.yaml JOB_TIME=05:00:00 bash run.sh envs/gsm8k.yaml \
+    policy.megatron_cfg.optimizer.lr=1.0e-6 \
+    policy.megatron_cfg.optimizer.gains_lr=1.0e-6 \
+    policy.megatron_cfg.optimizer.matrix_lr=4.0e-5 \
+    checkpointing.enabled=false
+```
+
 ## Base checkpoint, DAPO
 
 `hangang-dapo`, `hangang-dapo-lr2e-6`, `hangang-dapo-fp8-skip-trunc0` and `hangang-dapo-muon-fp8-skip-trunc0` ran with
@@ -208,16 +322,16 @@ RUN=sft-code-8k-lr2e-6 RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-tools.yaml J
     policy.megatron_cfg.optimizer.lr=2.0e-6
 ```
 
-Job 1195703, 16 nodes:
+Job 1195905, 16 nodes:
 
 ```bash
-RUN=sft-code-full-128x16-lr2e-6 RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-code.yaml JOB_TIME=1-06:00:00 bash run.sh envs/code-gen-sft.yaml \
+RUN=sft-code-full-128x16-wandb RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-code.yaml JOB_TIME=1-05:00:00 bash run.sh envs/code-gen-sft.yaml \
     grpo.max_num_steps=184 \
     grpo.val_period=20 \
     policy.generation.max_new_tokens=8192 \
     policy.generation.thinking_token_budget=6144 \
     checkpointing.save_period=50 \
-    checkpointing.checkpoint_must_save_by=01:05:30:00 \
+    checkpointing.checkpoint_must_save_by=01:04:30:00 \
     policy.megatron_cfg.optimizer.lr=2.0e-6 \
     env.nemo_gym.code_gen.resources_servers.code_gen.sandbox_endpoint_file=${SCRATCH}/code-sandbox/endpoint-overnight.json
 ```
