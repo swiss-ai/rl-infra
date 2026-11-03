@@ -1,7 +1,8 @@
 #!/bin/bash
 # Runs on the compute node inside the training image (started by run.sh through srun). REACH_TESTS
 # selects: tcp (sandbox -> every address of this node, TCP listener), ws (node -> pod HTTP/WebSocket
-# through the OpenSandbox proxy), tunnel (chisel reverse tunnel per sandbox, pod 127.0.0.1:8000 -> node).
+# through the OpenSandbox proxy), tunnel (chisel reverse tunnel per sandbox, pod 127.0.0.1:8000 -> node),
+# gymtunnel (the same through Gym's model_tunnel.py, patch 0003).
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PY=/usr/bin/python3.12
@@ -61,5 +62,11 @@ fi
 if [[ "${TESTS}" == *" tunnel "* ]]; then
     echo "== per-sandbox reverse tunnel (chisel): pod 127.0.0.1:8000 -> node"
     "${REACH_PYTHON}" "${HERE}/tunnel.py" || RC=$?
+fi
+
+# Gym's own tunnel code (patch 0003, ModelTunnel) through AsyncSandbox, as NemoGymSandboxEnvironment runs it.
+if [[ "${TESTS}" == *" gymtunnel "* ]]; then
+    echo "== Gym model_tunnel (patch 0003): ${TUNNELS:-32} sandboxes, OLD_START=${OLD_START:-0}"
+    "${REACH_PYTHON}" "${HERE}/gym_tunnel.py" || RC=$?
 fi
 exit "${RC}"

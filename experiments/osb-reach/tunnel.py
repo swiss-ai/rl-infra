@@ -31,10 +31,10 @@ HERE = pathlib.Path(__file__).parent
 IMAGE = os.environ.get("REACH_IMAGE", "python:3.12-slim")
 CHISEL_DIR = pathlib.Path(os.environ["CHISEL_DIR"])
 CHISEL_VERSION = os.environ.get("CHISEL_VERSION", "1.12.0")
-TUNNELS = int(os.environ.get("TUNNELS", "4"))
+TUNNELS = int(os.environ.get("TUNNELS") or "4")
 TUNNEL_PORT = int(os.environ.get("TUNNEL_PORT", "8765"))
-STREAM_S = int(os.environ.get("STREAM_S", "60"))
-IDLE_S = int(os.environ.get("IDLE_S", "120"))
+STREAM_S = int(os.environ.get("STREAM_S") or "60")
+IDLE_S = int(os.environ.get("IDLE_S") or "120")
 POD_END = 8000  # what HARBOR_MODEL_BASE_URL would point at: http://127.0.0.1:8000
 ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
 

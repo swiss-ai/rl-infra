@@ -1,0 +1,240 @@
+From c895367d39da913a690efdad2968e8e72e3f6414 Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Tue, 3 Nov 2026 13:42:08 +0000
+Subject: [PATCH] fix(harbor_agent): model tunnel waits until the sandbox-side
+ server listens
+
+Job 5245999: all 32 tunnels failed with the client getting 'websocket: close
+1011' from the OpenSandbox proxy, i.e. nothing listened on the server port in
+the pod. The server was started fire-and-forget ('(setsid nohup ... &)') and
+the exec returned at once; the osb-reach test that worked waited 2 s after the
+start. The start command now returns only once chisel logs 'Listening on'
+(15 s budget), so the server has left the exec's process group, and a server
+that dies at start fails here with its log. A client that does not connect
+reports the sandbox-side log and the number of chisel server processes
+(scanned in /proc, slim images have no ps).
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ .../nemo_gym_sandbox/model_tunnel.py          | 52 ++++++++--
+ .../harbor_agent/tests/test_model_tunnel.py   | 99 +++++++++++++++++++
+ 2 files changed, 143 insertions(+), 8 deletions(-)
+
+diff --git a/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/model_tunnel.py b/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/model_tunnel.py
+index cc1c441e5..ad2f1e5ee 100644
+--- a/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/model_tunnel.py
++++ b/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/model_tunnel.py
+@@ -85,6 +85,36 @@ class ModelTunnelConfig:
+         return Path(self.chisel_dir) / f"chisel_{self.chisel_version}_linux_{arch}"
+ 
+ 
++def server_start_script(cfg: ModelTunnelConfig, wait_s: float = 15.0) -> str:
++    """sh: start the chisel server detached and return only once it listens (or fail with its log).
++
++    The command must not return before the server has left the exec's process group: the sandbox's
++    exec service may signal that group when the command ends, and a fire-and-forget ``(setsid ... &)``
++    races with that. Waiting for chisel's "Listening on" line also turns a server that dies at start
++    (bad binary, port taken) into an error here instead of a client timeout later.
++    """
++    b = shlex.quote(cfg.pod_binary)
++    log = shlex.quote(cfg.pod_binary + ".log")
++    tries = max(1, int(wait_s / 0.2))
++    return (
++        f"chmod +x {b} || exit 1; (setsid nohup {b} server --host 0.0.0.0 --port {cfg.server_port} --reverse "
++        f"> {log} 2>&1 &); "
++        f"i=0; while [ $i -lt {tries} ]; do "
++        f"grep -q 'Listening on' {log} 2>/dev/null && exit 0; i=$((i+1)); sleep 0.2; done; "
++        f"echo 'chisel server not listening after {wait_s:g}s:'; cat {log}; exit 1"
++    )
++
++
++def pod_diagnostics_script(cfg: ModelTunnelConfig) -> str:
++    """sh: the server log tail and how many chisel server processes run (no ps in slim images)."""
++    log = shlex.quote(cfg.pod_binary + ".log")
++    return (
++        f"tail -n 20 {log}; n=0; for c in /proc/[0-9]*/cmdline; do "
++        "tr '\\0' ' ' < \"$c\" 2>/dev/null | grep -q '[c]hisel server' && n=$((n+1)); done; "
++        'echo "chisel server processes: $n"'
++    )
++
++
+ def health_check_script(pod_port: int, path: str, attempts: int = 40) -> str:
+     """bash: GET ``path`` on 127.0.0.1:``pod_port`` (retried while the reverse listener comes up),
+     print the status line, exit 0 on any answer."""
+@@ -157,14 +187,12 @@ class ModelTunnel:
+         # One credential per sandbox: the endpoint is reachable by every holder of the provider API key.
+         # Passed as AUTH (chisel reads it from the environment), so it stays out of argv on both sides.
+         auth = f"nemo-gym:{secrets.token_hex(16)}"
+-        b = shlex.quote(cfg.pod_binary)
+-        start = (
+-            f"chmod +x {b} && (setsid nohup {b} server --host 0.0.0.0 --port {cfg.server_port} --reverse "
+-            f"> {b}.log 2>&1 &)"
+-        )
+-        res = await self._exec(start, env={"AUTH": auth}, timeout_s=60)
++        res = await self._exec(server_start_script(cfg), env={"AUTH": auth}, timeout_s=60)
+         if res.return_code != 0:
+-            raise RuntimeError(f"model_tunnel: chisel server start failed: {res.stdout!r} {res.stderr!r}")
++            raise RuntimeError(
++                f"model_tunnel{self._label}: chisel server in the sandbox did not come up: "
++                f"rc={res.return_code} {res.stdout!r} {res.stderr!r}"
++            )
+ 
+         endpoint = await self._sandbox.endpoint(cfg.server_port)
+         args = [str(node_bin), "client", "--max-retry-count", str(cfg.max_retry_count), "--max-retry-interval", "10s"]
+@@ -194,7 +222,7 @@ class ModelTunnel:
+         if not self._connected.is_set():
+             raise RuntimeError(
+                 f"model_tunnel{self._label}: chisel client did not connect within {cfg.connect_timeout_s}s; "
+-                f"client output: {self.client_log_tail[-10:]}"
++                f"client output: {self.client_log_tail[-10:]}; sandbox side: {await self._pod_log()!r}"
+             )
+         self._logger.debug(
+             "model_tunnel%s: connected, sandbox 127.0.0.1:%s -> %s", self._label, cfg.pod_port, cfg.target
+@@ -213,6 +241,14 @@ class ModelTunnel:
+             return f"GET {cfg.health_path}: {status_line}"
+         return "no health check"
+ 
++    async def _pod_log(self) -> str:
++        """Best effort: the sandbox-side chisel log and whether it still runs, for error messages."""
++        try:
++            res = await self._exec(pod_diagnostics_script(self._config), timeout_s=20)
++            return (res.stdout or "").strip()
++        except Exception as exc:  # noqa: BLE001 - diagnostics only
++            return f"<unavailable: {exc!r}>"
++
+     async def _read_client_output(self) -> None:
+         assert self._proc is not None and self._proc.stdout is not None
+         async for raw in self._proc.stdout:
+diff --git a/responses_api_agents/harbor_agent/tests/test_model_tunnel.py b/responses_api_agents/harbor_agent/tests/test_model_tunnel.py
+index b2877294c..ab6342f0a 100644
+--- a/responses_api_agents/harbor_agent/tests/test_model_tunnel.py
++++ b/responses_api_agents/harbor_agent/tests/test_model_tunnel.py
+@@ -16,8 +16,11 @@ import json
+ import logging
+ import os
+ import platform
++import re
+ import shutil
++import signal
+ import subprocess
++import time
+ import threading
+ from pathlib import Path
+ from typing import Optional
+@@ -31,6 +34,8 @@ from responses_api_agents.harbor_agent.custom_envs.nemo_gym_sandbox.model_tunnel
+     ModelTunnel,
+     ModelTunnelConfig,
+     health_check_script,
++    pod_diagnostics_script,
++    server_start_script,
+ )
+ 
+ 
+@@ -199,6 +204,41 @@ class TestOpenClose:
+             await ModelTunnel(FakeSandbox(pod_arch="s390x"), _config(chisel_dir), logging.getLogger("t")).open()
+ 
+ 
++class TestServerStartFailure:
++    @pytest.mark.asyncio
++    async def test_failed_server_start_fails_open_before_the_client(self, chisel_dir, tmp_path):
++        record = tmp_path / "c.json"
++        _fake_chisel(chisel_dir / f"chisel_1.12.0_linux_{NODE_ARCH}", record)
++
++        class DeadServer(FakeSandbox):
++            async def exec(self, command, *, env=None, timeout_s=None):
++                if "server" in command and "--reverse" in command:
++                    self.exec_calls.append({"command": command, "env": env})
++                    out = "chisel server not listening after 15s:\nboom"
++                    return SandboxExecResult(stdout=out, stderr=None, return_code=1)
++                return await super().exec(command, env=env, timeout_s=timeout_s)
++
++        tunnel = ModelTunnel(DeadServer(), _config(chisel_dir), logging.getLogger("t"))
++        with pytest.raises(RuntimeError, match="did not come up") as exc:
++            await tunnel.open()
++        assert "boom" in str(exc.value)
++        assert not record.exists()  # the node-side client was never started
++
++    @pytest.mark.asyncio
++    async def test_client_timeout_reports_the_sandbox_side(self, chisel_dir, tmp_path):
++        _fake_chisel(chisel_dir / f"chisel_1.12.0_linux_{NODE_ARCH}", tmp_path / "c.json", connect=False)
++
++        class WithLog(FakeSandbox):
++            async def exec(self, command, *, env=None, timeout_s=None):
++                if command.startswith("tail -n 20"):
++                    out = "server: Listening\nchisel server processes: 0"
++                    return SandboxExecResult(stdout=out, stderr=None, return_code=0)
++                return await super().exec(command, env=env, timeout_s=timeout_s)
++
++        with pytest.raises(RuntimeError, match="chisel server processes: 0"):
++            await ModelTunnel(WithLog(), _config(chisel_dir), logging.getLogger("t")).open()
++
++
+ class _Health(http.server.BaseHTTPRequestHandler):
+     def do_GET(self):  # noqa: N802
+         self.send_response(200 if self.path == "/health" else 404)
+@@ -237,3 +277,62 @@ class TestHealthCheckScript:
+             timeout=30,
+         )
+         assert res.returncode == 1 and "no answer" in res.stdout
++
++
++def _fake_server(path: Path, body: str) -> ModelTunnelConfig:
++    path.write_text("#!/bin/bash\n" + body)
++    return ModelTunnelConfig(chisel_dir=str(path.parent), pod_binary=str(path))
++
++
++def _running(pod_binary: Path) -> list[int]:
++    pids = []
++    for cmdline in Path("/proc").glob("[0-9]*/cmdline"):
++        try:
++            if f"{pod_binary} server".encode() in cmdline.read_bytes().replace(b"\0", b" "):
++                pids.append(int(cmdline.parent.name))
++        except OSError:
++            pass
++    return pids
++
++
++class TestPodScripts:
++    """The sandbox-side shell scripts run for real (sh, as the sandbox exec service runs them)."""
++
++    def test_server_start_returns_once_listening_and_survives_a_group_kill(self, tmp_path):
++        # chisel prints "Listening on" after a moment; the exec service may SIGKILL the command's
++        # process group as soon as the command returns (job 5245999: no server behind the proxy).
++        binary = tmp_path / ".nemo-gym-chisel"  # its cmdline must keep "<binary> server": no exec
++        cfg = _fake_server(binary, 'sleep 0.5; echo "server: Listening on http://0.0.0.0:$5"; sleep 30\n')
++        proc = subprocess.Popen(
++            ["sh", "-c", server_start_script(cfg)], start_new_session=True, stdout=subprocess.PIPE, text=True
++        )
++        try:
++            out, _ = proc.communicate(timeout=20)
++            assert proc.returncode == 0, out
++            try:
++                os.killpg(proc.pid, signal.SIGKILL)
++            except ProcessLookupError:
++                pass
++            time.sleep(0.3)
++            assert _running(binary), "server died with the exec's process group"
++            diag = subprocess.run(["sh", "-c", pod_diagnostics_script(cfg)], capture_output=True, text=True)
++            assert "Listening on http://0.0.0.0:8765" in diag.stdout
++            # >= 1: on a dev machine unrelated shells may mention "chisel server" in their command line
++            assert re.search(r"chisel server processes: [1-9]", diag.stdout), diag.stdout
++        finally:
++            for pid in _running(binary):
++                os.kill(pid, signal.SIGKILL)
++
++    def test_server_that_dies_fails_the_start_with_its_log(self, tmp_path):
++        binary = tmp_path / "chisel-srv"
++        cfg = _fake_server(binary, 'echo "server: listen tcp 0.0.0.0:$5: bind: address already in use"; exit 1\n')
++        res = subprocess.run(
++            ["sh", "-c", server_start_script(cfg, wait_s=1)], capture_output=True, text=True, timeout=20
++        )
++        assert res.returncode == 1
++        assert "not listening after 1s" in res.stdout and "address already in use" in res.stdout
++
++    def test_server_start_fails_without_binary(self, tmp_path):
++        cfg = ModelTunnelConfig(chisel_dir=str(tmp_path), pod_binary=str(tmp_path / "missing"))
++        res = subprocess.run(["sh", "-c", server_start_script(cfg, wait_s=1)], capture_output=True, timeout=20)
++        assert res.returncode == 1
+-- 
+2.55.0
+

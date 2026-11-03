@@ -45,8 +45,9 @@ esac
 [[ -z "${OPENCODE_VERSION:-}" ]] || export OPENCODE_VERSION
 
 if [[ "${TUNNEL:-0}" == 1 ]]; then
-    [[ -f "${GYM_DIR}/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/model_tunnel.py" ]] || {
-        echo "ERROR: TUNNEL=1 needs Gym patch 0003 in ${GYM_DIR}; re-run setup-gym.sh as above" >&2
+    grep -q server_start_script \
+        "${GYM_DIR}/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/model_tunnel.py" 2>/dev/null || {
+        echo "ERROR: TUNNEL=1 needs Gym patches 0003+0004 in ${GYM_DIR}; re-run setup-gym.sh as above" >&2
         exit 1
     }
     export CHISEL_VERSION="${CHISEL_VERSION:-1.12.0}" CHISEL_DIR="${CHISEL_DIR:-${SCRATCH}/chisel}"

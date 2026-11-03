@@ -46,6 +46,7 @@ The previous smoke test (4 sandboxes, ~7 min) is still one command:
 | `../../backends/nemo-rl/apertus2/patches/gym/0001-*.patch` | `harbor_agent` builds the agent's model URL with `base_url_for_run` (rollout capture prefix); new `harbor_model_base_url` |
 | `../../backends/nemo-rl/apertus2/patches/gym/0002-*.patch` | `OpenCodeNemoGym` agent; no masking of empty-output rollouts under capture |
 | `../../backends/nemo-rl/apertus2/patches/gym/0003-*.patch` | `harbor_environment_kwargs.model_tunnel`: chisel tunnel per sandbox, opened in `NemoGymSandboxEnvironment.start()` |
+| `../../backends/nemo-rl/apertus2/patches/gym/0004-*.patch` | tunnel fix after job 5245999: server start waits for `Listening on`; pod-side log in errors |
 | `../../backends/nemo-rl/apertus2/fetch-chisel.sh` | chisel 1.12.0 (amd64 + arm64, pinned sha256) into `CHISEL_DIR` |
 
 ## Environment variables of `run.sh`
