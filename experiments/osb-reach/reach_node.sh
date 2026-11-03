@@ -1,13 +1,29 @@
 #!/bin/bash
-# Runs on the compute node inside the training image (started by run.sh through srun): starts the TCP
-# listener, lets a sandbox connect to every address of this node (plus EXTRA_TARGETS), then shows what
-# the listener saw.
+# Runs on the compute node inside the training image (started by run.sh through srun). REACH_TESTS
+# selects: tcp (sandbox -> every address of this node, TCP listener), ws (node -> pod HTTP/WebSocket
+# through the OpenSandbox proxy), tunnel (chisel reverse tunnel per sandbox, pod 127.0.0.1:8000 -> node).
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PY=/usr/bin/python3.12
 PORT="${REACH_PORT:-$((5000 + RANDOM % 1000))}"
+TESTS=" ${REACH_TESTS:-tcp ws tunnel} "
+RC=0
 
-echo "== node $(hostname), listener port ${PORT}"
+# The image's system Python lacks the OpenSandbox SDK and tenacity; the runs create sandboxes from
+# Gym's harbor_agent server venv (built by the first Harbor run under NEMO_GYM_VENV_DIR), so use that.
+if [[ -z "${REACH_PYTHON:-}" ]]; then
+    for p in "${NEMO_GYM_VENV_DIR}/responses_api_agents/harbor_agent/.venv/bin/python" \
+             "${NEMO_GYM_VENV_DIR}"/*/*/.venv/bin/python; do
+        [[ -x "${p}" ]] && "${p}" -c "import opensandbox, tenacity, omegaconf, nemo_gym" 2>/dev/null \
+            && { REACH_PYTHON="${p}"; break; }
+    done
+fi
+[[ -n "${REACH_PYTHON:-}" ]] || { echo "ERROR: no Gym venv with opensandbox+tenacity under ${NEMO_GYM_VENV_DIR}; set REACH_PYTHON" >&2; exit 1; }
+echo "== node $(hostname) ($(uname -m)), tests:${TESTS}, sandbox client python: ${REACH_PYTHON}"
+
+if [[ "${TESTS}" == *" tcp "* ]]; then
+echo "== pod -> node TCP, listener port ${PORT}"
+
 ip -o -4 addr show 2>/dev/null | awk '{print "   " $2, $4}' || hostname -I
 "${PY}" "${HERE}/listen.py" "${PORT}" > listen.log 2>&1 &
 LPID=$!
@@ -27,28 +43,23 @@ echo "   (the CONNECTION line it causes in the listener log is this self-test, s
 TARGETS+=(pypi.org:443 ${EXTRA_TARGETS:-})
 
 echo "== sandbox probes: ${TARGETS[*]}"
-# The image's system Python lacks the OpenSandbox SDK and tenacity; the runs create sandboxes from
-# Gym's harbor_agent server venv (built by the first Harbor run under NEMO_GYM_VENV_DIR), so use that.
-if [[ -z "${REACH_PYTHON:-}" ]]; then
-    for p in "${NEMO_GYM_VENV_DIR}/responses_api_agents/harbor_agent/.venv/bin/python" \
-             "${NEMO_GYM_VENV_DIR}"/*/*/.venv/bin/python; do
-        [[ -x "${p}" ]] && "${p}" -c "import opensandbox, tenacity, omegaconf, nemo_gym" 2>/dev/null \
-            && { REACH_PYTHON="${p}"; break; }
-    done
-fi
-[[ -n "${REACH_PYTHON:-}" ]] || { echo "ERROR: no Gym venv with opensandbox+tenacity under ${NEMO_GYM_VENV_DIR}; set REACH_PYTHON" >&2; kill "${LPID}"; exit 1; }
-echo "== sandbox client python: ${REACH_PYTHON}"
-"${REACH_PYTHON}" "${HERE}/reach.py" "${TARGETS[@]}"
-RC=$?
+"${REACH_PYTHON}" "${HERE}/reach.py" "${TARGETS[@]}" || RC=$?
 sleep 2
 kill "${LPID}" 2>/dev/null
 echo "== listener log (a CONNECTION line from the sandbox = pods can reach this node)"
 cat listen.log
+fi
 
 # Reverse direction, the transport of a per-sandbox tunnel: node -> pod through the OpenSandbox server
-# proxy, plain HTTP and WebSocket (ws.py / ws_server.py). REACH_WS=0 skips it.
-if [[ "${REACH_WS:-1}" == 1 ]]; then
+# proxy, plain HTTP and WebSocket (ws.py / ws_server.py).
+if [[ "${TESTS}" == *" ws "* ]]; then
     echo "== node -> pod through the OpenSandbox proxy (HTTP + WebSocket)"
     "${REACH_PYTHON}" "${HERE}/ws.py" || RC=$?
+fi
+
+# The tunnel itself: node opens it, pod uses it (tunnel.py / tunnel_probe.py / model_stub.py, chisel).
+if [[ "${TESTS}" == *" tunnel "* ]]; then
+    echo "== per-sandbox reverse tunnel (chisel): pod 127.0.0.1:8000 -> node"
+    "${REACH_PYTHON}" "${HERE}/tunnel.py" || RC=$?
 fi
 exit "${RC}"

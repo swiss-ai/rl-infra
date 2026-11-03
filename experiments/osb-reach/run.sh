@@ -1,9 +1,11 @@
 #!/bin/bash
-# Can an OpenSandbox pod open a TCP connection to a CSCS compute node? Starts a listener on one compute
-# node and one sandbox (created as in the Harbor runs) that connects to it. See README.md.
-#   bash experiments/osb-reach/run.sh
-# Env: ACCOUNT (infra01), PARTITION (debug), REACH_PORT (random 5000-5999), EXTRA_TARGETS ("host:port ..."),
-#      OPENSANDBOX_DOMAIN, OPENSANDBOX_API_KEY (else ~/.opensandbox_token).
+# Network between OpenSandbox pods and a CSCS compute node, on one debug node. See README.md.
+#   bash experiments/osb-reach/run.sh                         # REACH_TESTS=tunnel (default)
+#   REACH_TESTS="tcp ws tunnel" bash experiments/osb-reach/run.sh
+# tests: tcp = pod -> node TCP; ws = node -> pod HTTP/WebSocket via the OpenSandbox proxy;
+#        tunnel = chisel reverse tunnel per sandbox, pod 127.0.0.1:8000 -> node.
+# Env: ACCOUNT (infra01), PARTITION (debug), JOB_TIME (00:20:00), REACH_PORT, EXTRA_TARGETS ("host:port ..."),
+#      TUNNELS (4), STREAM_S (60), IDLE_S (120), OPENSANDBOX_DOMAIN, OPENSANDBOX_API_KEY (else ~/.opensandbox_token).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -21,14 +23,34 @@ export OPENSANDBOX_DOMAIN="${OPENSANDBOX_DOMAIN:-https://opensandbox-gvisor.brei
 export NEMO_GYM_RUN_ID="osb-reach-$(date +%Y%m%d-%H%M%S)" NEMO_GYM_WORKLOAD=osb-reach
 export GYM_DIR=/opt/nemo-rl/3rdparty/Gym-workspace/Gym
 export REACH_PORT="${REACH_PORT:-}" EXTRA_TARGETS="${EXTRA_TARGETS:-}" REACH_PYTHON="${REACH_PYTHON:-}" \
-    REACH_WS="${REACH_WS:-1}" WS_PORT="${WS_PORT:-8765}" HOLD_S="${HOLD_S:-60}"
+    REACH_TESTS="${REACH_TESTS:-tunnel}" WS_PORT="${WS_PORT:-8765}" HOLD_S="${HOLD_S:-60}" \
+    TUNNELS="${TUNNELS:-4}" STREAM_S="${STREAM_S:-60}" IDLE_S="${IDLE_S:-120}"
 # Gym server venvs of the Harbor runs (run-harbor-osb.sh default); reach_node.sh takes the
 # harbor_agent one, which has the OpenSandbox SDK.
 export NEMO_GYM_VENV_DIR="${NEMO_GYM_VENV_DIR:-${HARBOR_ROOT:-${SCRATCH}/osb/harbor_micro}/venvs}"
 
 OUT="${SCRATCH}/osb-reach/${NEMO_GYM_RUN_ID}"
+
+# chisel (github.com/jpillora/chisel) for the tunnel test, fetched here on the login node and checked
+# against the release's published sha256: arm64 for the node (client), amd64/arm64 for the pod (server).
+export CHISEL_VERSION=1.12.0 CHISEL_DIR="${SCRATCH}/osb-reach/bin"
+declare -A CHISEL_SHA256=(
+    [amd64]=f3f180f1d93aa72cce4e6386f98cc06569a0146fbd65eb4423cf83e6434bcfe6
+    [arm64]=2ec6152cd2c74fe0146d4d79e4e7aa174521368c56e433d55e023a92ea404ec3
+)
+if [[ " ${REACH_TESTS} " == *" tunnel "* ]]; then
+    mkdir -p "${CHISEL_DIR}"
+    for arch in amd64 arm64; do
+        f="${CHISEL_DIR}/chisel_${CHISEL_VERSION}_linux_${arch}"
+        [[ -x "${f}" ]] && continue
+        curl -fsSL -o "${f}.gz" "https://github.com/jpillora/chisel/releases/download/v${CHISEL_VERSION}/chisel_${CHISEL_VERSION}_linux_${arch}.gz"
+        echo "${CHISEL_SHA256[$arch]}  ${f}.gz" | sha256sum -c --quiet - || { echo "ERROR: chisel ${arch} checksum mismatch" >&2; rm -f "${f}.gz"; exit 1; }
+        gunzip -f "${f}.gz" && chmod +x "${f}"
+    done
+    echo "== chisel ${CHISEL_VERSION} in ${CHISEL_DIR}"
+fi
 mkdir -p "${OUT}"
 echo "== ${NEMO_GYM_RUN_ID}: output in ${OUT}"
 cd "${OUT}"
-srun -A "${ACCOUNT:-infra01}" -p "${PARTITION:-debug}" -N1 -n1 -t 00:15:00 -J osb-reach \
+srun -A "${ACCOUNT:-infra01}" -p "${PARTITION:-debug}" -N1 -n1 -t "${JOB_TIME:-00:20:00}" -J osb-reach \
     --environment="${EDF_NAME}" bash "${HERE}/reach_node.sh" 2>&1 | tee reach.log

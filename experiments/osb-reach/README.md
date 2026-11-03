@@ -5,7 +5,12 @@ start in the pod and must reach the Gym model server on the training node. Job 5
 `harbor-capture-sc` with a dead `HARBOR_MODEL_BASE_URL`) gave no answer: OpenCode printed nothing
 for 900 s. This test asks the network question directly, without an agent.
 
-    cd ~/rl-infra && bash experiments/osb-reach/run.sh
+    cd ~/rl-infra && bash experiments/osb-reach/run.sh                        # tunnel test only (default)
+    cd ~/rl-infra && REACH_TESTS="tcp ws tunnel" bash experiments/osb-reach/run.sh
+
+`REACH_TESTS` picks the parts: `tcp` (pod -> node, below), `ws` (node -> pod through the proxy),
+`tunnel` (chisel reverse tunnel). Results so far: tcp fails (jobs 5238624, 5238974, 5244154: silent
+drop), ws works (job 5244154).
 
 What it does (one debug node, under 5 min):
 
@@ -55,4 +60,34 @@ alibaba/OpenSandbox). `ws.py` checks that on Breithorn, after the TCP probe in t
 
 `RESULT: node -> pod HTTP and WebSocket through the proxy WORK` means the tunnel transport exists.
 A failing WebSocket with a working GET points at the front proxy (Traefik) not passing upgrades, or
-an older server. `REACH_WS=0` skips this part.
+an older server.
+
+## The tunnel: node opens it, pod uses it (`tunnel.py`, `REACH_TESTS=tunnel`)
+
+The connection direction and the request direction differ. The node opens the WebSocket into the pod
+(the only direction that works); inside it, chisel's reverse forward makes the pod-side server listen
+on `127.0.0.1:8000`, and every connection there is carried back to the node, whose client dials the
+target. The in-pod agent is the HTTP client, as it will be with `policy_model`.
+
+    agent / tunnel_probe.py (pod) -> 127.0.0.1:8000 -> chisel server --reverse (pod, :8765)
+        <= WebSocket, opened by the node: wss://<osb>/v1/sandboxes/<id>/proxy/8765 =>
+    chisel client (node) -> model_stub.py 127.0.0.1:<port> (node; stands in for policy_model)
+
+1. `run.sh` (login node) downloads chisel `CHISEL_VERSION` (1.12.0, github.com/jpillora/chisel) for
+   linux amd64 and arm64 into `$SCRATCH/osb-reach/bin`, checked against pinned sha256 (from the
+   release's `checksums.txt`).
+2. `tunnel.py` (node) starts `model_stub.py` (stdlib HTTP: JSON answer, POST echo, chunked stream),
+   then `TUNNELS` (4) in parallel, each: create a sandbox as the Harbor runs; `uname -m`; upload the
+   matching chisel and `tunnel_probe.py` with `provider.upload_file` (the pod needs no internet);
+   start `chisel server --reverse --auth tunnel:<random>` on `TUNNEL_PORT` (8765); start
+   `chisel client --auth ... --header <endpoint() headers> --tls-skip-verify <proxy url>
+   R:127.0.0.1:8000:127.0.0.1:<stub>` on the node; wait for `Connected`; run the probe in the pod;
+   print probe output and both chisel logs; stop the client; delete the sandbox.
+3. `tunnel_probe.py` (pod, stdlib) uses only `127.0.0.1:8000`: first request (shows the node
+   hostname that answered and a `/ng-rollout/<id>/...` path), 20 sequential, 16 concurrent, 1 MiB
+   POST echo, a `STREAM_S` (60) s chunked stream (max gap between 1 s chunks), `IDLE_S` (120) s
+   without traffic and one more request. `PROBE OK` / `PROBE FAIL: <checks>`.
+
+`RESULT: n/n reverse tunnels pod 127.0.0.1:8000 -> node WORK` is the go for wiring it into the Harbor
+runs. Test shortcuts: `--tls-skip-verify` (as `ws.py`); the API key and secure-access token are in
+the client's argv on the node. Rollout-length holds: `IDLE_S=1500 JOB_TIME=00:45:00`.
