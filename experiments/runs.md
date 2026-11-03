@@ -239,6 +239,19 @@ Job 1190617, 24 nodes:
 RUN=sft-dapo-muon-lr1e-6-gains1e-6-matrix4e-5 RECIPE=recipes/apertus2-chonk-sft-vllm-muon-dapo.yaml JOB_TIME=1-00:00:00 bash run.sh envs/dapo-math-sft.yaml
 ```
 
+## SFT, DAPO and GSM8K
+
+Job 1202985, 16 nodes. Each step takes 90 prompts from DAPO and 38 from GSM8K, and validation reports AIME 2024
+and the GSM8K test set apart:
+
+```bash
+RUN=sft-mix-dapo-gsm8k-lr2e-6 JOB_TIME=1-05:00:00 bash run.sh envs/dapo-gsm8k-sft.yaml \
+    grpo.max_num_steps=196 \
+    grpo.val_period=20 \
+    checkpointing.checkpoint_must_save_by=01:04:30:00 \
+    policy.megatron_cfg.optimizer.lr=2.0e-6
+```
+
 ## SFT, rubric
 
 Job 1192745, 14 nodes:
