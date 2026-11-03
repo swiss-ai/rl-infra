@@ -66,8 +66,8 @@ mkdir -p "${NEMO_GYM_VENV_DIR}"
 
 CFG="${OUT}/configs/${RUN}.yaml"
 printf 'defaults:\n  - %s\n  - %s\n' "${RECIPE}" "${TASK}" > "${CFG}"
-# OVERLAY: optional task overlay merged last, e.g. envs/harbor-osb-proxy-sft.yaml
-[[ -z "${OVERLAY:-}" ]] || printf '  - %s\n' "$(realpath "${OVERLAY}")" >> "${CFG}"
+# OVERLAY: optional task overlays (space-separated) merged last in order, e.g. envs/harbor-osb-proxy-sft.yaml
+for overlay in ${OVERLAY:-}; do printf '  - %s\n' "$(realpath "${overlay}")" >> "${CFG}"; done
 echo "== ${RUN}: ${NODES} nodes, partition ${PARTITION}, OpenSandbox ${OPENSANDBOX_DOMAIN}, tasks ${HARBOR_TASKS_DIR}"
 # envs/reap_after.sh deletes the run's sandboxes when the driver exits (a run leaves its last batch behind).
 SCRIPT="${SCRIPT:-examples/nemo_gym/run_grpo_nemo_gym.py}" DRIVER_WRAPPER="bash ${ROOT}/envs/reap_after.sh" \

@@ -31,24 +31,9 @@ export NEMO_GYM_VENV_DIR="${NEMO_GYM_VENV_DIR:-${HARBOR_ROOT:-${SCRATCH}/osb/har
 
 OUT="${SCRATCH}/osb-reach/${NEMO_GYM_RUN_ID}"
 
-# chisel (github.com/jpillora/chisel) for the tunnel test, fetched here on the login node and checked
-# against the release's published sha256: arm64 for the node (client), amd64/arm64 for the pod (server).
-export CHISEL_VERSION=1.12.0 CHISEL_DIR="${SCRATCH}/osb-reach/bin"
-declare -A CHISEL_SHA256=(
-    [amd64]=f3f180f1d93aa72cce4e6386f98cc06569a0146fbd65eb4423cf83e6434bcfe6
-    [arm64]=2ec6152cd2c74fe0146d4d79e4e7aa174521368c56e433d55e023a92ea404ec3
-)
-if [[ " ${REACH_TESTS} " == *" tunnel "* ]]; then
-    mkdir -p "${CHISEL_DIR}"
-    for arch in amd64 arm64; do
-        f="${CHISEL_DIR}/chisel_${CHISEL_VERSION}_linux_${arch}"
-        [[ -x "${f}" ]] && continue
-        curl -fsSL -o "${f}.gz" "https://github.com/jpillora/chisel/releases/download/v${CHISEL_VERSION}/chisel_${CHISEL_VERSION}_linux_${arch}.gz"
-        echo "${CHISEL_SHA256[$arch]}  ${f}.gz" | sha256sum -c --quiet - || { echo "ERROR: chisel ${arch} checksum mismatch" >&2; rm -f "${f}.gz"; exit 1; }
-        gunzip -f "${f}.gz" && chmod +x "${f}"
-    done
-    echo "== chisel ${CHISEL_VERSION} in ${CHISEL_DIR}"
-fi
+# chisel for the tunnel test (login node, pinned sha256): arm64 for the node, amd64/arm64 for the pod.
+export CHISEL_VERSION="${CHISEL_VERSION:-1.12.0}" CHISEL_DIR="${CHISEL_DIR:-${SCRATCH}/chisel}"
+[[ " ${REACH_TESTS} " != *" tunnel "* ]] || bash "${APERTUS2_DIR}/fetch-chisel.sh"
 mkdir -p "${OUT}"
 echo "== ${NEMO_GYM_RUN_ID}: output in ${OUT}"
 cd "${OUT}"

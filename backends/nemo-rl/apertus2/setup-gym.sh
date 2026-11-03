@@ -12,10 +12,11 @@
 # The result is a local branch apertus2-osb in the clone's Gym checkout (never pushed).
 #
 # Optional: GYM_BRANCH (default apertus2-osb) names the local branch, GYM_PATCHES (space-separated
-# patch files, default none) are applied with `git am` on top of the four commits when that branch
-# is created, e.g. for experiments/harbor-capture-sc:
+# patch files, default none) are applied with `git am` on top of the four commits; on an existing
+# branch only those whose subject is not in the branch yet (so a new patch can be added by re-running
+# with the full list), e.g. for experiments/harbor-capture-sc:
 #   GYM_BRANCH=apertus2-osb-capture \
-#   GYM_PATCHES="$PWD/backends/nemo-rl/apertus2/patches/gym/0001-*.patch" \
+#   GYM_PATCHES="$(ls $PWD/backends/nemo-rl/apertus2/patches/gym/*.patch)" \
 #   bash backends/nemo-rl/apertus2/setup-gym.sh
 # The checkout is shared by every run of this NeMo-RL clone; switch back with GYM_BRANCH=apertus2-osb.
 set -euo pipefail
@@ -43,18 +44,25 @@ if [[ ! -d "${GYM_DIR}/.git" ]]; then
 fi
 if git -C "${GYM_DIR}" rev-parse --verify -q "${GYM_BRANCH}" >/dev/null; then
     echo "== Gym branch ${GYM_BRANCH} exists ($(git -C "${GYM_DIR}" rev-parse --short "${GYM_BRANCH}"))"
+    git -C "${GYM_DIR}" switch -q "${GYM_BRANCH}"
 else
     git -C "${GYM_DIR}" fetch origin "${GYM_OSB_BRANCH}"
     git -C "${GYM_DIR}" switch -c "${GYM_BRANCH}" "${GYM_PIN}"
     # shellcheck disable=SC2086
     "${GIT[@]}" -C "${GYM_DIR}" cherry-pick ${GYM_OSB_COMMITS}
-    for patch in ${GYM_PATCHES}; do
-        [[ -f "${patch}" ]] || { echo "ERROR: Gym patch ${patch} not found" >&2; exit 1; }
-        echo "== applying $(basename "${patch}")"
-        "${GIT[@]}" -C "${GYM_DIR}" am --3way "${patch}"
-    done
 fi
-git -C "${GYM_DIR}" switch -q "${GYM_BRANCH}"
+# Patches whose subject the branch already has since the pin are skipped.
+APPLIED="$(git -C "${GYM_DIR}" log --format=%s "${GYM_PIN}..HEAD")"
+for patch in ${GYM_PATCHES}; do
+    [[ -f "${patch}" ]] || { echo "ERROR: Gym patch ${patch} not found" >&2; exit 1; }
+    subject="$(git mailinfo /dev/null /dev/null < "${patch}" | sed -n 's/^Subject: //p')"
+    if grep -qxF -- "${subject}" <<< "${APPLIED}"; then
+        echo "== $(basename "${patch}") already applied"
+        continue
+    fi
+    echo "== applying $(basename "${patch}")"
+    "${GIT[@]}" -C "${GYM_DIR}" am --3way "${patch}"
+done
 git -C "${GYM_DIR}" remote set-url --push origin no_push
 # Gym needs Python 3.13 since 2026-08-04 (#2194), but David's image is Python 3.12, and Gym builds every
 # server venv with the driver's Python (Ray needs the same version on both sides). The code runs on 3.12

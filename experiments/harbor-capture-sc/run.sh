@@ -6,6 +6,10 @@
 #   AGENT                  terminus (default) or opencode
 #   HARBOR_MODEL_BASE_URL  opencode only: model-server URL as reachable from the pods (required)
 #   OPENCODE_VERSION       opencode only: opencode-ai npm version (default: latest)
+#   TUNNEL                 1: per-sandbox reverse tunnel sandbox 127.0.0.1:8000 -> policy_model (Gym patch
+#                          0003, tunnel-sc.yaml); every trial checks GET /health through it before starting.
+#                          With terminus the agent still calls the model from the node (step A: the tunnel
+#                          runs alongside). CHISEL_DIR (default $SCRATCH/chisel) is filled on first use.
 #   HARBOR_ROOT            micro-task tree, train.jsonl, validation.jsonl (default $SCRATCH/osb/harbor_micro)
 #   RUN, PARTITION, JOB_TIME (default 02:00:00), everything run-harbor-osb.sh reads.
 set -euo pipefail
@@ -40,10 +44,20 @@ case "${AGENT}" in
 esac
 [[ -z "${OPENCODE_VERSION:-}" ]] || export OPENCODE_VERSION
 
+if [[ "${TUNNEL:-0}" == 1 ]]; then
+    [[ -f "${GYM_DIR}/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/model_tunnel.py" ]] || {
+        echo "ERROR: TUNNEL=1 needs Gym patch 0003 in ${GYM_DIR}; re-run setup-gym.sh as above" >&2
+        exit 1
+    }
+    export CHISEL_VERSION="${CHISEL_VERSION:-1.12.0}" CHISEL_DIR="${CHISEL_DIR:-${SCRATCH}/chisel}"
+    bash "${APERTUS2_DIR}/fetch-chisel.sh"
+    export OVERLAY="${OVERLAY:+${OVERLAY} }${HERE}/tunnel-sc.yaml"
+fi
+
 export HARBOR_ROOT="${HARBOR_ROOT:-${SCRATCH}/osb/harbor_micro}"
 export TASK="${HERE}/terminus-sc.yaml" RECIPE="${ROOT}/experiments/token-capture-sc/qwen3-4b-1n-sc.yaml"
 export SCRIPT=examples/run_grpo_single_controller.py
-export RUN="${RUN:-harbor-sc-${AGENT}-$(date +%Y%m%d-%H%M%S)}"
+export RUN="${RUN:-harbor-sc-${AGENT}$([[ "${TUNNEL:-0}" == 1 ]] && echo -tunnel)-$(date +%Y%m%d-%H%M%S)}"
 # 8 x 4 x 3 steps: ~5 min start-up + ~5-10 min per step expected; 3 x rollout_timeout_s (30 min)
 # plus start-up in the worst case
 export JOB_TIME="${JOB_TIME:-02:00:00}"

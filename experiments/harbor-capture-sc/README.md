@@ -41,9 +41,12 @@ The previous smoke test (4 sandboxes, ~7 min) is still one command:
 |---|---|
 | `terminus-sc.yaml` | task: micro-tasks via `harbor_agent` + Terminus-2, Single-Controller blocks, token capture |
 | `opencode-sc.yaml` | overlay: OpenCode (installed in the pod) instead of Terminus-2 |
+| `tunnel-sc.yaml` | overlay (`TUNNEL=1`): per-sandbox reverse tunnel, sandbox `127.0.0.1:8000` -> `policy_model` |
 | `run.sh` | `AGENT=terminus` (default) or `AGENT=opencode`; calls `run-harbor-osb.sh` |
 | `../../backends/nemo-rl/apertus2/patches/gym/0001-*.patch` | `harbor_agent` builds the agent's model URL with `base_url_for_run` (rollout capture prefix); new `harbor_model_base_url` |
 | `../../backends/nemo-rl/apertus2/patches/gym/0002-*.patch` | `OpenCodeNemoGym` agent; no masking of empty-output rollouts under capture |
+| `../../backends/nemo-rl/apertus2/patches/gym/0003-*.patch` | `harbor_environment_kwargs.model_tunnel`: chisel tunnel per sandbox, opened in `NemoGymSandboxEnvironment.start()` |
+| `../../backends/nemo-rl/apertus2/fetch-chisel.sh` | chisel 1.12.0 (amd64 + arm64, pinned sha256) into `CHISEL_DIR` |
 
 ## Environment variables of `run.sh`
 
@@ -52,6 +55,7 @@ The previous smoke test (4 sandboxes, ~7 min) is still one command:
 | `AGENT` | `terminus` | `terminus`: Terminus-2, loop on the node, commands in the pod (task `terminus-sc.yaml`). `opencode`: OpenCode installed and run in the pod (adds overlay `opencode-sc.yaml`). Anything else is refused. |
 | `HARBOR_MODEL_BASE_URL` | none | `AGENT=opencode` only, required: the Gym model server as reachable from the pods, without `/v1`. `harbor_agent` appends the capture prefix and `/v1`. |
 | `OPENCODE_VERSION` | latest | `AGENT=opencode` only: `opencode-ai` npm version installed in each pod. |
+| `TUNNEL` | `0` | `1`: add `tunnel-sc.yaml` (needs patch 0003); fetches chisel into `CHISEL_DIR` (`$SCRATCH/chisel`) on the login node first. Run name gets `-tunnel`. |
 | `HARBOR_ROOT` | `$SCRATCH/osb/harbor_micro` | micro-task tree (`tasks/`, `train.jsonl`, `validation.jsonl`) |
 | `RUN` | `harbor-sc-<AGENT>-<date>` | run name (logs, sandbox labels) |
 | `JOB_TIME` | `02:00:00` | Slurm time limit |
@@ -68,8 +72,9 @@ from that ledger (`RolloutReassembler`); the agent's own output carries no token
 
 ## Before the first run
 
-1. **Gym with the patches.** The checkout is shared by all runs of this NeMo-RL clone; both
-   patches are no-ops without `token_capture` (the URL is unchanged, masking as before).
+1. **Gym with the patches.** The checkout is shared by all runs of this NeMo-RL clone; 0001 and
+   0002 are no-ops without `token_capture` (the URL is unchanged, masking as before), 0003 without
+   `model_tunnel`. Re-running adds patches the existing branch does not have yet.
 
        cd ~/rl-infra
        GYM_BRANCH=apertus2-osb-capture \
@@ -118,6 +123,34 @@ If every group is still uniform (all 1 or all 0), raise the group size, e.g.
 | model calls to `/v1/chat/completions` without `/ng-rollout/` | Gym patch 0001 is not in the checkout (step 1) |
 | rebuild / lineage error, rollouts all masked | capture ran but the call chain could not be proven; see the ledgers |
 | `import transfer_queue` fails, setup raises on a config key | Single-Controller stack problem before any rollout |
+
+## Tunnel alongside Terminus-2 (`TUNNEL=1`)
+
+    TUNNEL=1 bash experiments/harbor-capture-sc/run.sh
+
+Same training as step A, plus a reverse tunnel per sandbox (Gym patch 0003): after creating the
+sandbox, `NemoGymSandboxEnvironment` uploads chisel (amd64, 11 MiB), starts
+`chisel server --reverse` in the pod and `chisel client` in the Harbor Ray task on the node (through
+the OpenSandbox proxy, `provider.endpoint(8765)`), then GETs `policy_model`'s `/health` from inside
+the pod through `127.0.0.1:8000`. A failure there fails the trial in environment setup (infra
+failure, retried up to `max_infra_attempts_per_prompt`). Terminus-2 still calls the model from the
+node, so the training itself does not depend on the tunnel; the run tests the tunnel's lifecycle at
+32 concurrent sandboxes against the real `policy_model`. Before the first run, re-run step 1 of
+"Before the first run" (it adds patch 0003 to the existing branch).
+
+Expected: the same training result as step A; one `model_tunnel ... up in <s>` line per trial in its
+`trial.log`; no trial that failed in environment setup with a `model_tunnel` error (Harbor records it
+in the trial's `result.json`, which also holds the OpenSandbox key, so only list the files):
+
+    J=$HARBOR_ROOT/jobs/<date>/swe_lego/Qwen3-4B-Instruct-2507
+    grep -h "model_tunnel.* up in" $J/*/*/trial.log | wc -l          # one per trial (incl. retries)
+    grep -ho "up in [0-9.]*s" $J/*/*/trial.log | sort -k3 -n | tail -3  # slowest tunnel opens
+    grep -l "model_tunnel" $J/*/*/result.json | wc -l                 # 0: no trial failed on the tunnel
+    grep -n "model_tunnel\|Error running Harbor job" $LOG
+
+Tunnel shortcuts still open: `tls_skip_verify: true`; the OpenSandbox API key and the sandbox's
+secure-access token are in the chisel client's argv on the node (chisel takes headers only as
+flags; its own per-sandbox password goes through `AUTH`).
 
 ## Step B: OpenCode (needs a model endpoint the pods can reach)
 

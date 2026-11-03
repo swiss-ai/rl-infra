@@ -1,0 +1,28 @@
+# Task overlay (run.sh: TUNNEL=1): a per-sandbox reverse tunnel, sandbox 127.0.0.1:8000 -> policy_model.
+#
+# OpenSandbox pods cannot open connections to the compute nodes (osb-reach jobs 5238624, 5238974,
+# 5244154), but the node reaches every pod through the OpenSandbox server proxy, WebSocket included
+# (job 5244154). Gym patch 0003 uses that: NemoGymSandboxEnvironment uploads chisel into each sandbox,
+# starts `chisel server --reverse` there and `chisel client` in the Harbor process on the node, and
+# before the trial starts checks GET /health on policy_model from inside the sandbox through the
+# tunnel; a trial whose tunnel fails fails in environment setup (an infra failure, retried).
+# harbor_agent fills model_tunnel.target with policy_model's host:port per run.
+#
+# Step A (with AGENT=terminus): Terminus-2 still calls the model from the node; the tunnel runs
+# alongside to test its lifecycle at training concurrency. In-pod agents would point at
+# http://127.0.0.1:8000 (step B).
+
+env:
+  nemo_gym:
+    harbor_agent:
+      responses_api_agents:
+        harbor_agent:
+          harbor_environment_kwargs:
+            model_tunnel:
+              chisel_dir: ${oc.env:CHISEL_DIR}
+              chisel_version: ${oc.env:CHISEL_VERSION,1.12.0}
+              pod_port: 8000
+              server_port: 8765
+              health_path: /health
+              # as in osb-reach; the Go client's CA trust for the OpenSandbox domain is not checked yet
+              tls_skip_verify: true

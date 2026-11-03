@@ -74,7 +74,7 @@ target. The in-pod agent is the HTTP client, as it will be with `policy_model`.
     chisel client (node) -> model_stub.py 127.0.0.1:<port> (node; stands in for policy_model)
 
 1. `run.sh` (login node) downloads chisel `CHISEL_VERSION` (1.12.0, github.com/jpillora/chisel) for
-   linux amd64 and arm64 into `$SCRATCH/osb-reach/bin`, checked against pinned sha256 (from the
+   linux amd64 and arm64 into `$SCRATCH/chisel` (`backends/nemo-rl/apertus2/fetch-chisel.sh`), checked against pinned sha256 (from the
    release's `checksums.txt`).
 2. `tunnel.py` (node) starts `model_stub.py` (stdlib HTTP: JSON answer, POST echo, chunked stream),
    then `TUNNELS` (4) in parallel, each: create a sandbox as the Harbor runs; `uname -m`; upload the
