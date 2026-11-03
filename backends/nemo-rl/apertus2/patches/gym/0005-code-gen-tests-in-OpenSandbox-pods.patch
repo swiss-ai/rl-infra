@@ -1,0 +1,464 @@
+diff --git a/resources_servers/code_gen/app.py b/resources_servers/code_gen/app.py
+index a3acc5ad..bf3edf52 100644
+--- a/resources_servers/code_gen/app.py
++++ b/resources_servers/code_gen/app.py
+@@ -17,12 +17,15 @@ import base64
+ import json
+ import zlib
+ from asyncio import Semaphore
++from contextlib import asynccontextmanager
+ from pathlib import Path
+ from time import time
+ from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+ 
++from fastapi import FastAPI
+ from lcb_integration.compute_code_generation_metrics import check_correctness_remote
+ from lcb_integration.extraction_utils import LMStyle, extract_code
++from opensandbox_pods import OpenSandboxConfig, PodPool
+ from pydantic import BaseModel
+ 
+ from nemo_gym.base_resources_server import (
+@@ -52,8 +55,10 @@ class CompCodingResourcesServerConfig(BaseResourcesServerConfig):
+     # JSON file with the url and token of a sandbox service, which runs the unit tests. Without one
+     # they run on any node of the Ray cluster, with no sandbox.
+     sandbox_endpoint_file: Optional[str] = None
++    # A pool of OpenSandbox pods, which run the unit tests instead of the sandbox service.
++    opensandbox: Optional[OpenSandboxConfig] = None
+     # "all_tests": 1 if every test passes. "fraction": the share of tests passed, which needs a
+-    # runner that goes on after a failure, such as the sandbox service.
++    # runner that goes on after a failure, such as the sandbox service or the pods.
+     reward_mode: Literal["all_tests", "fraction"] = "all_tests"
+ 
+ 
+@@ -97,10 +102,34 @@ class CompCodingResourcesServer(SimpleResourcesServer):
+     def model_post_init(self, context):
+         self._semaphore: Semaphore = Semaphore(value=self.config.num_processes)
+         self._sandbox: Optional[Dict[str, str]] = None
+-        if self.config.sandbox_endpoint_file:
++        self._pods: Optional[PodPool] = None
++        if self.config.opensandbox:
++            self._pods = PodPool(self.config.opensandbox)
++        elif self.config.sandbox_endpoint_file:
+             self._sandbox = json.loads(Path(self.config.sandbox_endpoint_file).read_text())
+         elif self.config.reward_mode == "fraction":
+-            raise ValueError("reward_mode fraction needs sandbox_endpoint_file: the local runner stops at a failure.")
++            raise ValueError(
++                "reward_mode fraction needs sandbox_endpoint_file or opensandbox: the local runner stops at a failure."
++            )
++
++    def setup_webserver(self) -> FastAPI:
++        app = super().setup_webserver()
++        if not self._pods:
++            return app
++
++        main_lifespan = app.router.lifespan_context
++
++        @asynccontextmanager
++        async def lifespan_wrapper(app):
++            async with main_lifespan(app) as maybe_state:
++                await self._pods.start()
++                try:
++                    yield maybe_state
++                finally:
++                    await self._pods.close()
++
++        app.router.lifespan_context = lifespan_wrapper
++        return app
+ 
+     @staticmethod
+     def _has_reasoning_format_violation(response) -> bool:
+@@ -242,7 +271,11 @@ class CompCodingResourcesServer(SimpleResourcesServer):
+             # We can directly measure here since we are inside the semaphore.
+             start_time = time()
+ 
+-            if self._sandbox:
++            if self._pods:
++                result, metadata = await self._pods.run(
++                    {**tests.model_dump(), "code": code, "timeout": self.config.unit_test_timeout_secs}
++                )
++            elif self._sandbox:
+                 result, metadata = await self._run_in_sandbox(tests, code)
+             else:
+                 task_args = (
+diff --git a/resources_servers/code_gen/configs/code_gen.yaml b/resources_servers/code_gen/configs/code_gen.yaml
+index 1c01ec8a..8871c74b 100644
+--- a/resources_servers/code_gen/configs/code_gen.yaml
++++ b/resources_servers/code_gen/configs/code_gen.yaml
+@@ -11,6 +11,7 @@ code_gen:
+       unit_test_timeout_secs: 10
+       debug: false
+       sandbox_endpoint_file: null
++      opensandbox: null
+       reward_mode: all_tests
+ code_gen_simple_agent:
+   responses_api_agents:
+diff --git a/resources_servers/code_gen/opensandbox_pods.py b/resources_servers/code_gen/opensandbox_pods.py
+new file mode 100644
+index 00000000..7f414878
+--- /dev/null
++++ b/resources_servers/code_gen/opensandbox_pods.py
+@@ -0,0 +1,364 @@
++# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""Runs unit tests in a pool of pods on an OpenSandbox cluster, over its HTTP API.
++
++A run makes a few thousand submissions per step, so the pods stay up for the whole run and each runs
++one submission at a time. A submission runs as nobody, under the sandbox service's limits, and whatever
++it leaves behind is removed before the next one. A pod that stops answering is replaced and the
++submission runs again, which is safe because unit tests change nothing outside the pod.
++
++The cluster's gVisor runtime has no way to cut a pod's network, so model code can reach the internet.
++"""
++
++import asyncio
++import gzip
++import json
++import os
++import time
++import uuid
++from dataclasses import dataclass
++from datetime import datetime, timedelta, timezone
++from pathlib import Path
++from typing import Any, Dict, List, Optional, Tuple, Union
++
++from aiohttp import ClientError, ClientTimeout
++from pydantic import BaseModel
++
++from nemo_gym.server_utils import request
++
++
++# Allows for start-up and for unit tests that end early.
++GRACE_SECONDS = 5
++FAILED_RESULT = -1
++
++EXECD_PORT = 44772
++READY_TRIES = 120
++RENEWALS_PER_LIFETIME = 3
++CREATE_SECONDS = 900
++SETUP_SECONDS = 300
++HTTP_MARGIN_SECONDS = 60
++RETRY_DELAY_SECONDS = 30
++HARNESS_DIR = "/sandbox/harness"
++JOB_FILE = "/sandbox/job.json.gz"
++WORK_DIR = "/tmp/work"
++AS_NOBODY = "setpriv --reuid=65534 --regid=65534 --clear-groups --inh-caps=-all"
++# Printed after a submission: without it the connection failed, and the result says nothing.
++DONE_MARKER = "##submission-done##"
++
++
++class OpenSandboxConfig(BaseModel):
++    domain: str
++    # Read when the server starts, so that the key stays out of configs and logs.
++    api_key_file: str
++    # Holds sandbox_harness.py and testing_util.py.
++    harness_dir: str
++    # One submission runs at a time in each pod.
++    num_pods: int
++    image: str = "python:3.12-slim"
++    # The runner needs NumPy, and the cluster refuses a network policy, so the pod can fetch it.
++    setup_command: str = "pip install --quiet --no-cache-dir numpy==2.1.0"
++    # The server renews its pods while it runs, because it is killed at the end of a run and cannot
++    # delete them then. They expire this long after the server stops.
++    pod_seconds: int = 900
++    cpu: str = "1"
++    memory: str = "4Gi"
++    # Limits on a submission: the sandbox service's, so that it gets the same result on either.
++    process_memory_bytes: int = 4 * 1024**3
++    output_bytes: int = 8 * 1024**2
++    max_processes: int = 1024
++    max_open_files: int = 256
++    max_submission_seconds: int = 300
++    max_attempts: int = 3
++    # Tries to make a pod, with RETRY_DELAY_SECONDS between them.
++    create_attempts: int = 10
++    # Submissions that failed on every attempt, in a row, before the run stops: that many mean the
++    # cluster is at fault, and scoring them all as wrong would train on noise.
++    max_failures_in_a_row: int = 32
++
++
++class PodError(RuntimeError):
++    """A pod or the cluster failed, which says nothing about the submission."""
++
++
++RETRYABLE = (PodError, ClientError, asyncio.TimeoutError)
++
++
++@dataclass
++class Pod:
++    id: str
++    url: str
++    headers: Dict[str, str]
++
++
++def _submission_command(config: OpenSandboxConfig, seconds: int) -> str:
++    limits = (
++        f"prlimit --as={config.process_memory_bytes} --fsize={config.output_bytes} "
++        f"--nproc={config.max_processes} --nofile={config.max_open_files} --core=0 --"
++    )
++    environment = f"env -i PATH=/usr/local/bin:/usr/bin:/bin HOME={WORK_DIR} PYTHONPATH={HARNESS_DIR} OPENBLAS_NUM_THREADS=1"
++    return (
++        f"mkdir -m 700 {WORK_DIR}; chown 65534:65534 {WORK_DIR}; cd {WORK_DIR}; "
++        f"gunzip -c {JOB_FILE} | {AS_NOBODY} {environment} timeout -s KILL {seconds} {limits} "
++        f"python3 {HARNESS_DIR}/sandbox_harness.py 2>/dev/null; "
++        f"{AS_NOBODY} sh -c 'kill -9 -1' 2>/dev/null; cd /; "
++        f"find /tmp /var/tmp /dev/shm -mindepth 1 -user 65534 -delete 2>/dev/null; "
++        f"echo '{DONE_MARKER}'"
++    )
++
++
++def _compress(job: Dict[str, Any]) -> bytes:
++    return gzip.compress(json.dumps(job).encode(), compresslevel=1)
++
++
++def _stdout(stream: str) -> str:
++    output = []
++    for line in stream.splitlines():
++        line = line.strip().removeprefix("data:").strip()
++        if line.startswith("{"):
++            event = json.loads(line)
++            if event.get("type") == "stdout":
++                output.append(event.get("text", ""))
++    return "".join(output)
++
++
++def _multipart(path: str, content: bytes, boundary: str) -> bytes:
++    metadata = json.dumps({"path": path, "mode": 600}).encode()
++    return b"\r\n".join(
++        [
++            f"--{boundary}".encode(),
++            b'Content-Disposition: form-data; name="metadata"; filename="metadata"',
++            b"Content-Type: application/json",
++            b"",
++            metadata,
++            f"--{boundary}".encode(),
++            b'Content-Disposition: form-data; name="file"; filename="file"',
++            b"Content-Type: application/octet-stream",
++            b"",
++            content,
++            f"--{boundary}--".encode(),
++            b"",
++        ]
++    )
++
++
++class PodPool:
++    def __init__(self, config: OpenSandboxConfig):
++        self.config = config
++        self._api = f"{config.domain.rstrip('/')}/v1"
++        self._headers = {"OPEN-SANDBOX-API-KEY": Path(config.api_key_file).read_text().strip()}
++        self._free: asyncio.Queue = asyncio.Queue()
++        self._created: set = set()
++        self._renewals: Optional[asyncio.Task] = None
++        self._failures_in_a_row = 0
++        self.run_id = os.environ.get("SLURM_JOB_ID") or uuid.uuid4().hex[:8]
++
++    async def start(self) -> None:
++        started = time.time()
++        pods = await asyncio.gather(*(self._create_with_retries() for _ in range(self.config.num_pods)))
++        for pod in pods:
++            self._free.put_nowait(pod)
++        self._renewals = asyncio.create_task(self._keep_alive())
++        print(f"OpenSandbox: {len(pods)} pods up in {time.time() - started:.0f}s, run label {self.run_id}", flush=True)
++
++    async def close(self) -> None:
++        if self._renewals:
++            self._renewals.cancel()
++        await asyncio.gather(*(self._delete(pod_id) for pod_id in list(self._created)))
++
++    async def _keep_alive(self) -> None:
++        while True:
++            await asyncio.sleep(self.config.pod_seconds / RENEWALS_PER_LIFETIME)
++            expires = datetime.now(timezone.utc) + timedelta(seconds=self.config.pod_seconds)
++            await asyncio.gather(*(self._renew(pod_id, expires) for pod_id in list(self._created)))
++
++    async def _renew(self, pod_id: str, expires: datetime) -> None:
++        # A pod that does expire is replaced when a submission next fails on it.
++        try:
++            response = await request(
++                method="POST",
++                url=f"{self._api}/sandboxes/{pod_id}/renew-expiration",
++                headers=dict(self._headers),
++                json={"expiresAt": expires.strftime("%Y-%m-%dT%H:%M:%SZ")},
++                timeout=ClientTimeout(total=HTTP_MARGIN_SECONDS),
++                _max_connection_retries=1,
++            )
++            await response.read()
++            if response.status >= 300:
++                print(f"OpenSandbox: could not renew pod {pod_id}: HTTP {response.status}", flush=True)
++        except RETRYABLE as error:
++            print(f"OpenSandbox: could not renew pod {pod_id}: {error!r}", flush=True)
++
++    async def run(self, job: Dict[str, Any]) -> Tuple[List[Union[int, bool]], Optional[Dict[str, Any]]]:
++        """Run one submission's unit tests.
++
++        Args:
++            job: The code, inputs, outputs, fn_name and per-test timeout.
++
++        Returns:
++            One result per test, True where it passed, and details of the first failure.
++        """
++        pod = await self._free.get()
++        try:
++            for attempt in range(1, self.config.max_attempts + 1):
++                try:
++                    report = await self._run_on(pod, job)
++                except RETRYABLE as error:
++                    print(f"OpenSandbox: pod {pod.id} failed, attempt {attempt}: {error!r}", flush=True)
++                    await self._delete(pod.id)
++                    pod = await self._create_with_retries()
++                else:
++                    self._failures_in_a_row = 0
++                    return report
++        finally:
++            self._free.put_nowait(pod)
++        # A submission can kill its pod by running it out of memory, and then it fails like any other.
++        self._failures_in_a_row += 1
++        if self._failures_in_a_row >= self.config.max_failures_in_a_row:
++            raise PodError(f"{self._failures_in_a_row} submissions in a row failed on every attempt")
++        return [FAILED_RESULT] * len(job["inputs"]), {"error": "the pod failed on every attempt"}
++
++    async def _run_on(self, pod: Pod, job: Dict[str, Any]) -> Tuple[List[Union[int, bool]], Optional[Dict[str, Any]]]:
++        num_tests = len(job["inputs"])
++        seconds = min((job["timeout"] + 1) * num_tests + GRACE_SECONDS, self.config.max_submission_seconds)
++        # Test data crosses the internet, and compressing a large job would hold up the server.
++        compressed = await asyncio.to_thread(_compress, job)
++        await self._upload(pod, JOB_FILE, compressed)
++        output = await self._exec(pod, _submission_command(self.config, seconds), seconds + HTTP_MARGIN_SECONDS)
++        if not output.endswith(DONE_MARKER):
++            raise PodError("the command did not finish")
++        failed = [FAILED_RESULT] * num_tests, {"error": "no result"}
++        try:
++            report = json.loads(output.removesuffix(DONE_MARKER))
++            results = report["results"]
++        except (ValueError, KeyError, TypeError):
++            return failed
++        if not isinstance(results, list) or len(results) != num_tests:
++            return failed
++        return results, report.get("metadata")
++
++    async def _exec(self, pod: Pod, command: str, seconds: int) -> str:
++        # Only the pod's own headers: code runs in there, so it must never see the API key.
++        response = await request(
++            method="POST",
++            url=f"{pod.url}/command",
++            headers=dict(pod.headers),
++            json={"command": command},
++            timeout=ClientTimeout(total=seconds),
++            _max_connection_retries=1,
++        )
++        if response.status >= 300:
++            raise PodError(f"command: HTTP {response.status}")
++        return _stdout(await response.text())
++
++    async def _upload(self, pod: Pod, path: str, content: bytes) -> None:
++        boundary = uuid.uuid4().hex
++        response = await request(
++            method="POST",
++            url=f"{pod.url}/files/upload",
++            headers={**pod.headers, "Content-Type": f"multipart/form-data; boundary={boundary}"},
++            data=_multipart(path, content, boundary),
++            timeout=ClientTimeout(total=SETUP_SECONDS),
++            _max_connection_retries=1,
++        )
++        if response.status >= 300:
++            raise PodError(f"upload: HTTP {response.status}")
++        await response.read()
++
++    async def _create_with_retries(self) -> Pod:
++        for attempt in range(1, self.config.create_attempts + 1):
++            try:
++                return await self._create()
++            except RETRYABLE as error:
++                print(f"OpenSandbox: could not make a pod, attempt {attempt}: {error!r}", flush=True)
++                if attempt == self.config.create_attempts:
++                    raise
++                await asyncio.sleep(RETRY_DELAY_SECONDS)
++
++    async def _create(self) -> Pod:
++        config = self.config
++        response = await request(
++            method="POST",
++            url=f"{self._api}/sandboxes",
++            headers=dict(self._headers),
++            json={
++                "image": {"uri": config.image},
++                "timeout": config.pod_seconds,
++                "secureAccess": True,
++                "platform": {"os": "linux", "arch": "amd64"},
++                "resourceLimits": {"cpu": config.cpu, "memory": config.memory},
++                "entrypoint": ["tail", "-f", "/dev/null"],
++                "metadata": {
++                    "nemo-gym.nvidia.com/user": os.environ.get("USER", "unknown"),
++                    "nemo-gym.nvidia.com/workload": "code-gen",
++                    "nemo-gym.nvidia.com/run": self.run_id,
++                },
++            },
++            timeout=ClientTimeout(total=CREATE_SECONDS),
++            _max_connection_retries=1,
++        )
++        if response.status >= 300:
++            raise PodError(f"create: HTTP {response.status}: {(await response.text())[:300]}")
++        pod_id = (await response.json())["id"]
++        self._created.add(pod_id)
++        try:
++            pod = await self._connect(pod_id)
++            await self._prepare(pod)
++        except RETRYABLE:
++            await self._delete(pod_id)
++            raise
++        return pod
++
++    async def _connect(self, pod_id: str) -> Pod:
++        response = await request(
++            method="GET",
++            url=f"{self._api}/sandboxes/{pod_id}/endpoints/{EXECD_PORT}",
++            headers=dict(self._headers),
++            timeout=ClientTimeout(total=HTTP_MARGIN_SECONDS),
++            _max_connection_retries=1,
++        )
++        if response.status >= 300:
++            raise PodError(f"endpoint: HTTP {response.status}")
++        endpoint = await response.json()
++        pod = Pod(pod_id, f"https://{endpoint['endpoint']}", endpoint.get("headers") or {})
++        for _ in range(READY_TRIES):
++            try:
++                if "ok" in await self._exec(pod, "echo ok", HTTP_MARGIN_SECONDS):
++                    return pod
++            except RETRYABLE:
++                pass
++            await asyncio.sleep(1)
++        raise PodError(f"pod {pod_id} never answered")
++
++    async def _prepare(self, pod: Pod) -> None:
++        check = f"{self.config.setup_command} >/dev/null 2>&1; mkdir -p {HARNESS_DIR}; python3 -c 'import numpy' && echo ready"
++        if "ready" not in await self._exec(pod, check, SETUP_SECONDS):
++            raise PodError("the pod's setup failed")
++        for name in ("sandbox_harness.py", "testing_util.py"):
++            await self._upload(pod, f"{HARNESS_DIR}/{name}", (Path(self.config.harness_dir) / name).read_bytes())
++        # The upload's mode keeps the job private; the runner must stay readable.
++        await self._exec(pod, f"chmod 644 {HARNESS_DIR}/*.py; chmod 755 /sandbox {HARNESS_DIR}", HTTP_MARGIN_SECONDS)
++
++    async def _delete(self, pod_id: str) -> None:
++        self._created.discard(pod_id)
++        try:
++            response = await request(
++                method="DELETE",
++                url=f"{self._api}/sandboxes/{pod_id}",
++                headers=dict(self._headers),
++                timeout=ClientTimeout(total=HTTP_MARGIN_SECONDS),
++                _max_connection_retries=1,
++            )
++            await response.read()
++        except RETRYABLE as error:
++            print(f"OpenSandbox: could not delete pod {pod_id}, it will expire: {error!r}", flush=True)

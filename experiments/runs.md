@@ -384,3 +384,50 @@ RUN=sft-mbpp-lr2e-6 RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-tools.yaml JOB_
     data.train.data_path=${SCRATCH}/code-gen-mbpp/train.jsonl \
     data.validation.data_path=${SCRATCH}/code-gen-mbpp/validation.jsonl
 ```
+
+Sandboxes on OpenSandbox pods at CSCS instead of our own node (Gym patch 0005). The key stays in a file of one's
+own, `~/.opensandbox_token` here. Both jobs ran from a private copy of the clone with that code, before it was a patch.
+
+Job 1202265, 16 nodes, 40 steps to compare with the first 40 of job 1195905. Every job above and this one ran with
+`reward_mode: fraction`, which `envs/code-gen-sft.yaml` set then; to rerun them add `${CODE_GEN}.reward_mode=fraction`:
+
+```bash
+CODE_GEN=env.nemo_gym.code_gen.resources_servers.code_gen
+RUN=sft-code-osb-128x16 JOB_TIME=07:00:00 bash run.sh envs/code-gen-sft.yaml \
+    grpo.max_num_steps=40 \
+    grpo.val_period=20 \
+    checkpointing.enabled=false \
+    policy.generation.max_new_tokens=8192 \
+    policy.generation.thinking_token_budget=6144 \
+    policy.megatron_cfg.optimizer.lr=2.0e-6 \
+    ${CODE_GEN}.sandbox_endpoint_file=null \
+    ++${CODE_GEN}.opensandbox.domain=https://opensandbox-gvisor.breithorn.svc.cscs.ch \
+    ++${CODE_GEN}.opensandbox.api_key_file=$HOME/.opensandbox_token \
+    ++${CODE_GEN}.opensandbox.harness_dir=${SCRATCH}/code-sandbox/env/harness \
+    ++${CODE_GEN}.opensandbox.num_pods=64
+```
+
+Job 1202946, 16 nodes, Gym's setup: `reward_mode: all_tests` and LiveCodeBench validation 10 times. Training data is
+the same file as above, without the 308 rows over 4 MB. Job 1202858 measured one such validation at 20 minutes:
+
+```bash
+CODE_GEN=env.nemo_gym.code_gen.resources_servers.code_gen
+RUN=sft-code-gym-osb-128x16 JOB_TIME=1-05:00:00 bash run.sh envs/code-gen-sft.yaml \
+    grpo.max_num_steps=184 \
+    grpo.val_period=20 \
+    grpo.val_num_generations_per_prompt=10 \
+    checkpointing.save_period=50 \
+    checkpointing.checkpoint_must_save_by=01:04:30:00 \
+    policy.generation.max_new_tokens=8192 \
+    policy.generation.thinking_token_budget=6144 \
+    policy.megatron_cfg.optimizer.lr=2.0e-6 \
+    ${CODE_GEN}.sandbox_endpoint_file=null \
+    ++${CODE_GEN}.opensandbox.domain=https://opensandbox-gvisor.breithorn.svc.cscs.ch \
+    ++${CODE_GEN}.opensandbox.api_key_file=$HOME/.opensandbox_token \
+    ++${CODE_GEN}.opensandbox.harness_dir=${SCRATCH}/code-sandbox/env/harness \
+    ++${CODE_GEN}.opensandbox.num_pods=64
+```
+
+It stopped at step 20: the step-20 validation, 10 times over, ran the head node out of host memory while training's
+memory was on it too, and Slurm killed a trainer rank. `envs/code-gen-osb-sft.yaml` has this job's settings with
+validation once per prompt, as in job 1202265.

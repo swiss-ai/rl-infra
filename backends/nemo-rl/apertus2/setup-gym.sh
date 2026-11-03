@@ -29,7 +29,7 @@ git -C "${GYM_DIR}" remote set-url --push origin no_push
 stamp="$(cat "${APERTUS2_DIR}"/patches/gym/*.patch | git hash-object --stdin)"
 if [[ "$(cat "${GYM_DIR}/.git/rl-infra-patches" 2>/dev/null)" != "${stamp}" ]]; then
     git -C "${GYM_DIR}" checkout --quiet --force "${GYM_COMMIT}"
-    git -C "${GYM_DIR}" clean -fdxq resources_servers/rubric_judge
+    git -C "${GYM_DIR}" clean -fdxq resources_servers/rubric_judge resources_servers/code_gen/opensandbox_pods.py
     for p in "${APERTUS2_DIR}"/patches/gym/*.patch; do
         git -C "${GYM_DIR}" apply "${p}"
         echo "== Gym: applied $(basename "${p}")"
