@@ -5,8 +5,7 @@
 #   MAX_TRAIN_ROW_BYTES=... MAX_VALIDATION_ROW_BYTES=... bash backends/nemo-rl/sandbox/setup-data.sh
 #   JOB_TIME=06:00:00 bash backends/nemo-rl/sandbox/start.sh
 #   bash run.sh envs/code-gen-sft.yaml
-# Training rewards the share of tests passed, so that a group of failures still tells attempts apart.
-# Each result also has all_tests_passed, the standard score, which is the one to compare with others.
+# The reward is 1 only if every test passes, Gym's standard score, so a time-out on any test scores 0.
 defaults: ../recipes/apertus2-chonk-sft-vllm-adamw-code.yaml
 script: examples/nemo_gym/run_grpo_nemo_gym.py
 
@@ -97,7 +96,7 @@ env:
           # As many as the sandbox node serves at once.
           num_processes: 128
           sandbox_endpoint_file: ${oc.env:SCRATCH}/code-sandbox/endpoint.json
-          reward_mode: fraction
+          reward_mode: all_tests
   _override_: true
 
 logger:
