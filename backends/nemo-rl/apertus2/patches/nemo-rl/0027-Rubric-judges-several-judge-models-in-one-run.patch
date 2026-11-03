@@ -1,0 +1,388 @@
+From 20b457a008486a6944c0f185889bba2e96dbb035 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Tue, 3 Nov 2026 07:23:12 +0900
+Subject: [PATCH] Rubric judges: several judge models in one run
+
+env.extra_judge_pools starts more judge pools next to env.judge_pool, each on nodes of its own and
+filling in the Gym model server it names. data.train.gym_agent_choices draws one Gym agent for each
+prompt when it is read, so all rollouts of a prompt go to one judge and no score is averaged across
+judges. The draw has a generator of its own, so the seeded global one stays as it was.
+---
+ nemo_rl/data/__init__.py                   |  2 +
+ nemo_rl/data/datasets/raw_dataset.py       |  1 +
+ nemo_rl/data/interfaces.py                 |  2 +
+ nemo_rl/data/processors.py                 |  9 +++
+ nemo_rl/environments/judge_pool.py         | 77 ++++++++++++++------
+ tests/unit/data/test_data_processor.py     | 36 ++++++++++
+ tests/unit/environments/test_judge_pool.py | 82 +++++++++++++++++++++-
+ 7 files changed, 185 insertions(+), 24 deletions(-)
+
+diff --git a/nemo_rl/data/__init__.py b/nemo_rl/data/__init__.py
+index 113fa926c..b5221d4d0 100644
+--- a/nemo_rl/data/__init__.py
++++ b/nemo_rl/data/__init__.py
+@@ -40,6 +40,8 @@ class ResponseDatasetConfig(TypedDict):
+     video_temporal_patch_size: NotRequired[int]
+     video_maintain_aspect_ratio: NotRequired[bool]
+     min_generation_tokens: NotRequired[int]
++    # NeMo Gym agents to draw from for each prompt, in place of the row's own agent.
++    gym_agent_choices: NotRequired[list[str]]
+ 
+ 
+ class PreferenceDatasetConfig(TypedDict):
+diff --git a/nemo_rl/data/datasets/raw_dataset.py b/nemo_rl/data/datasets/raw_dataset.py
+index a4d195a9f..150152aee 100644
+--- a/nemo_rl/data/datasets/raw_dataset.py
++++ b/nemo_rl/data/datasets/raw_dataset.py
+@@ -80,4 +80,5 @@ class RawDataset:
+                 "video_maintain_aspect_ratio"
+             ),
+             min_generation_tokens=self.data_config.get("min_generation_tokens"),
++            gym_agent_choices=self.data_config.get("gym_agent_choices"),
+         )
+diff --git a/nemo_rl/data/interfaces.py b/nemo_rl/data/interfaces.py
+index ed7a57163..56b9c9011 100644
+--- a/nemo_rl/data/interfaces.py
++++ b/nemo_rl/data/interfaces.py
+@@ -95,6 +95,8 @@ class TaskDataSpec:
+     video_temporal_patch_size: Optional[int] = None
+     video_maintain_aspect_ratio: Optional[bool] = None
+     min_generation_tokens: Optional[int] = None
++    # NeMo Gym agents to draw from for each prompt, in place of the row's own agent.
++    gym_agent_choices: Optional[list[str]] = None
+ 
+     def __post_init__(self) -> None:
+         def load_prompt_file(
+diff --git a/nemo_rl/data/processors.py b/nemo_rl/data/processors.py
+index 3573b72ec..52d143eb6 100644
+--- a/nemo_rl/data/processors.py
++++ b/nemo_rl/data/processors.py
+@@ -16,6 +16,7 @@
+ 
+ import json
+ import logging
++import random
+ from copy import deepcopy
+ from typing import Any, Dict, cast
+ 
+@@ -35,6 +36,9 @@ from nemo_rl.data.llm_message_utils import get_formatted_message_log
+ 
+ TokenizerType = PreTrainedTokenizerBase
+ 
++# A generator of its own, so the draw leaves the seeded global one alone.
++_GYM_AGENT_DRAW = random.Random()
++
+ 
+ def helpsteer3_data_processor(
+     datum_dict: dict[str, Any],
+@@ -992,6 +996,11 @@ def nemo_gym_data_processor(
+     the complete rollout has been collected.
+     """
+     extra_env_info = json.loads(datum_dict["extra_env_info"])
++    if task_data_spec is not None and task_data_spec.gym_agent_choices:
++        # All rollouts of a prompt come from this one read, so they share the draw.
++        extra_env_info["agent_ref"]["name"] = _GYM_AGENT_DRAW.choice(
++            task_data_spec.gym_agent_choices
++        )
+     if task_data_spec is not None and task_data_spec.video_sampling_style is not None:
+         if not (
+             hasattr(tokenizer, "apply_chat_template")
+diff --git a/nemo_rl/environments/judge_pool.py b/nemo_rl/environments/judge_pool.py
+index 47eae9648..55da4dc71 100644
+--- a/nemo_rl/environments/judge_pool.py
++++ b/nemo_rl/environments/judge_pool.py
+@@ -11,7 +11,7 @@
+ # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+-"""A fixed-model vLLM pool for LLM judges, inside the job's Ray cluster.
++"""Fixed-model vLLM pools for LLM judges, inside the job's Ray cluster.
+ 
+ ``env.judge_pool`` takes nodes out of ``cluster.num_nodes`` next to the trainer and
+ inference partitions and serves a judge model on them with the same
+@@ -19,6 +19,10 @@ inference partitions and serves a judge model on them with the same
+ into the NeMo Gym server that ``gym_model_server`` names, so Gym sees an ordinary
+ OpenAI-compatible model.
+ 
++``env.extra_judge_pools`` adds more judge models to a run, by name, each in the form
++of ``env.judge_pool`` and with a Gym model server of its own. A run still has one
++validator: which judge reads a reply is up to the Gym agent that the data row names.
++
+ The judge's ``generation`` block is a complete generation config. It inherits
+ nothing from ``policy.generation``, whose settings are specific to the policy model.
+ 
+@@ -32,12 +36,12 @@ import threading
+ import time
+ from copy import deepcopy
+ from pathlib import Path
+-from typing import Any, Optional
++from typing import Any
+ 
+ from ray.exceptions import RayError
+ 
+-# Keeps the pool alive: its Ray actors die with their handles.
+-_judge_pool: Optional[Any] = None
++# Keeps the pools alive: their Ray actors die with their handles.
++_judge_pools: list[Any] = []
+ 
+ # The first three are the replica's state now. The rest add up from the start of the
+ # run, so the difference between two lines gives a rate or a mean per request.
+@@ -54,10 +58,21 @@ _STATS = (
+ )
+ 
+ 
++def _pool_configs(env_configs: dict[str, Any]) -> dict[str, dict[str, Any]]:
++    """Return every judge pool of the run by name, with ``env.judge_pool`` as ``judge``."""
++    pools = {}
++    if env_configs.get("judge_pool"):
++        pools["judge"] = env_configs["judge_pool"]
++    for name, judge_config in (env_configs.get("extra_judge_pools") or {}).items():
++        pools[f"judge_{name}"] = judge_config
++    return pools
++
++
+ def judge_pool_num_nodes(env_configs: dict[str, Any]) -> int:
+-    """Return how many nodes ``env.judge_pool`` takes from the cluster."""
+-    judge_config = env_configs.get("judge_pool")
+-    return judge_config["num_nodes"] if judge_config else 0
++    """Return how many nodes the judge pools take from the cluster."""
++    return sum(
++        judge_config["num_nodes"] for judge_config in _pool_configs(env_configs).values()
++    )
+ 
+ 
+ def _write_stats(pool: Any, path: str, interval_s: float) -> None:
+@@ -83,16 +98,32 @@ def _write_stats(pool: Any, path: str, interval_s: float) -> None:
+ def start_judge_pool(
+     env_configs: dict[str, Any], cluster_config: dict[str, Any]
+ ) -> None:
+-    """Start the pool and point its Gym model server at it. No-op without a pool."""
+-    global _judge_pool
+-    judge_config = env_configs.get("judge_pool")
+-    if not judge_config:
+-        return
++    """Start the pools and point their Gym model servers at them. No-op without a pool."""
++    pools = _pool_configs(env_configs)
++    server_names = [_gym_model_server(config) for config in pools.values()]
++    # The later pool would replace the earlier one's URLs, and its judge would do nothing.
++    assert len(set(server_names)) == len(
++        server_names
++    ), f"Each judge pool needs a gym_model_server of its own, got {server_names}"
++    for name, judge_config in pools.items():
++        _start_pool(name, judge_config, env_configs, cluster_config)
++
++
++def _gym_model_server(judge_config: dict[str, Any]) -> str:
++    return judge_config.get("gym_model_server", "judge_model")
++
++
++def _start_pool(
++    name: str,
++    judge_config: dict[str, Any],
++    env_configs: dict[str, Any],
++    cluster_config: dict[str, Any],
++) -> None:
+     stats_path = judge_config.get("stats_path")
+     if stats_path:
+         assert judge_config["generation"]["vllm_cfg"].get(
+             "enable_vllm_metrics_logger"
+-        ), "env.judge_pool.stats_path needs enable_vllm_metrics_logger in its vllm_cfg"
++        ), f"stats_path of pool {name} needs enable_vllm_metrics_logger in its vllm_cfg"
+ 
+     from nemo_rl.algorithms.utils import get_tokenizer
+     from nemo_rl.distributed.virtual_cluster import RayVirtualCluster
+@@ -108,7 +139,7 @@ def start_judge_pool(
+ 
+     gpus_per_node = cluster_config["gpus_per_node"]
+     judge_cluster = RayVirtualCluster(
+-        name="grpo_judge_cluster",
++        name=f"grpo_{name}_cluster",
+         bundle_ct_per_node_list=[gpus_per_node] * judge_config["num_nodes"],
+         use_gpus=True,
+         num_gpus_per_node=gpus_per_node,
+@@ -116,29 +147,29 @@ def start_judge_pool(
+         port_range_low=cluster_config.get("master_port_range_low"),
+         port_range_high=cluster_config.get("master_port_range_high"),
+     )
+-    _judge_pool = VllmGeneration(
+-        cluster=judge_cluster, config=generation_config, name_prefix="vllm_judge"
++    pool = VllmGeneration(
++        cluster=judge_cluster, config=generation_config, name_prefix=f"vllm_{name}"
+     )
+-    _judge_pool.finish_generation()
++    pool.finish_generation()
++    _judge_pools.append(pool)
+ 
+-    server_name = judge_config.get("gym_model_server", "judge_model")
+     model_server = (
+         env_configs["nemo_gym"]
+-        .setdefault(server_name, {})
++        .setdefault(_gym_model_server(judge_config), {})
+         .setdefault("responses_api_models", {})
+         .setdefault("vllm_model", {})
+     )
+-    model_server["base_url"] = list(_judge_pool.dp_openai_server_base_urls)
++    model_server["base_url"] = list(pool.dp_openai_server_base_urls)
+     model_server["model"] = generation_config["model_name"]
+     print(
+-        f"  ✓ Judge pool ready on {judge_config['num_nodes']} node(s): "
++        f"  ✓ Judge pool {name} ready on {judge_config['num_nodes']} node(s): "
+         f"{model_server['base_url']}",
+         flush=True,
+     )
+     if stats_path:
+         threading.Thread(
+             target=_write_stats,
+-            args=(_judge_pool, stats_path, judge_config["stats_interval_s"]),
+-            name="judge-stats",
++            args=(pool, stats_path, judge_config["stats_interval_s"]),
++            name=f"{name}-stats",
+             daemon=True,
+         ).start()
+diff --git a/tests/unit/data/test_data_processor.py b/tests/unit/data/test_data_processor.py
+index 865e70637..8f27319d0 100644
+--- a/tests/unit/data/test_data_processor.py
++++ b/tests/unit/data/test_data_processor.py
+@@ -93,6 +93,42 @@ def test_nemo_gym_data_processor_without_task_data_spec():
+     assert result["length"] == 0
+ 
+ 
++def test_nemo_gym_data_processor_draws_the_agent_on_each_read():
++    choices = ["judge_a", "judge_b"]
++    row = {
++        "extra_env_info": json.dumps({"agent_ref": {"name": "row_agent"}}),
++        "task_name": "nemo_gym",
++    }
++
++    names = {
++        nemo_gym_data_processor(
++            datum_dict=row,
++            task_data_spec=TaskDataSpec(gym_agent_choices=choices),
++            tokenizer=None,
++            max_seq_length=None,
++            idx=0,
++        )["extra_env_info"]["agent_ref"]["name"]
++        for _ in range(64)
++    }
++
++    assert names == set(choices)
++
++
++def test_nemo_gym_data_processor_keeps_the_row_agent_without_choices():
++    result = nemo_gym_data_processor(
++        datum_dict={
++            "extra_env_info": json.dumps({"agent_ref": {"name": "row_agent"}}),
++            "task_name": "nemo_gym",
++        },
++        task_data_spec=TaskDataSpec(),
++        tokenizer=None,
++        max_seq_length=None,
++        idx=0,
++    )
++
++    assert result["extra_env_info"]["agent_ref"]["name"] == "row_agent"
++
++
+ def test_math_data_processor():
+     raw_dataset = Dataset.from_list(
+         [
+diff --git a/tests/unit/environments/test_judge_pool.py b/tests/unit/environments/test_judge_pool.py
+index 87ef6e292..7294ac782 100644
+--- a/tests/unit/environments/test_judge_pool.py
++++ b/tests/unit/environments/test_judge_pool.py
+@@ -16,7 +16,13 @@ import json
+ import pytest
+ from ray.exceptions import RayError
+ 
+-from nemo_rl.environments.judge_pool import _STATS, _write_stats, start_judge_pool
++from nemo_rl.environments import judge_pool
++from nemo_rl.environments.judge_pool import (
++    _STATS,
++    _write_stats,
++    judge_pool_num_nodes,
++    start_judge_pool,
++)
+ 
+ 
+ class FakePool:
+@@ -70,3 +76,77 @@ def test_stats_path_without_the_metrics_logger_fails_at_startup():
+ 
+     with pytest.raises(AssertionError, match="enable_vllm_metrics_logger"):
+         start_judge_pool(env_configs, cluster_config={})
++
++
++def test_num_nodes_adds_up_every_pool():
++    env_configs = {
++        "judge_pool": {"num_nodes": 2},
++        "extra_judge_pools": {"gemma": {"num_nodes": 1}, "third": {"num_nodes": 3}},
++    }
++
++    assert judge_pool_num_nodes(env_configs) == 6
++
++
++def test_no_pool_takes_no_nodes():
++    assert judge_pool_num_nodes({}) == 0
++
++
++def test_two_pools_on_one_gym_server_fail_at_startup():
++    env_configs = {
++        "judge_pool": {"gym_model_server": "judge_model"},
++        "extra_judge_pools": {"gemma": {}},
++    }
++
++    with pytest.raises(AssertionError, match="gym_model_server of its own"):
++        start_judge_pool(env_configs, cluster_config={})
++
++
++class FakeVllmGeneration:
++    def __init__(self, cluster, config, name_prefix):
++        self.dp_openai_server_base_urls = [f"http://{name_prefix}:8000/v1"]
++
++    def finish_generation(self):
++        pass
++
++
++def test_each_pool_fills_in_its_own_gym_server(monkeypatch):
++    monkeypatch.setattr(judge_pool, "_judge_pools", [])
++    monkeypatch.setattr("nemo_rl.algorithms.utils.get_tokenizer", lambda config: None)
++    monkeypatch.setattr(
++        "nemo_rl.distributed.virtual_cluster.RayVirtualCluster",
++        lambda **kwargs: kwargs["name"],
++    )
++    monkeypatch.setattr(
++        "nemo_rl.models.generation.configure_generation_config",
++        lambda config, tokenizer, is_eval: config,
++    )
++    monkeypatch.setattr(
++        "nemo_rl.models.generation.vllm.VllmGeneration", FakeVllmGeneration
++    )
++    env_configs = {
++        "judge_pool": {
++            "num_nodes": 1,
++            "generation": {"model_name": "qwen", "vllm_cfg": {}},
++        },
++        "extra_judge_pools": {
++            "gemma": {
++                "num_nodes": 1,
++                "gym_model_server": "judge_model_gemma",
++                "generation": {"model_name": "gemma", "vllm_cfg": {}},
++            }
++        },
++        "nemo_gym": {},
++    }
++
++    start_judge_pool(env_configs, cluster_config={"gpus_per_node": 4})
++
++    servers = env_configs["nemo_gym"]
++    assert servers["judge_model"]["responses_api_models"]["vllm_model"] == {
++        "base_url": ["http://vllm_judge:8000/v1"],
++        "model": "qwen",
++    }
++    assert servers["judge_model_gemma"]["responses_api_models"]["vllm_model"] == {
++        "base_url": ["http://vllm_judge_gemma:8000/v1"],
++        "model": "gemma",
++    }
++    assert len(judge_pool._judge_pools) == 2
+-- 
+2.43.0
+

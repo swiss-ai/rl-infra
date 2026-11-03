@@ -1,0 +1,9 @@
+# Rubric rewards on an SFT checkpoint with three judge models, Qwen, Gemma and Nemotron Super, the last one
+# split across 2 nodes: 8 trainer nodes, 4 vLLM nodes and 4 judge nodes. run.sh reads sft_export and the
+# job's size from this file, not from the recipe below.
+defaults: apertus2-chonk-sft-vllm-adamw-rubric.yaml
+
+sft_export: chonk-sft/models/chonk-lc-16k-v0.1-ep1-iter_0008075
+
+cluster:
+  num_nodes: 16

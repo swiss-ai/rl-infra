@@ -64,6 +64,49 @@ add judge nodes with `env.judge_pool.num_nodes` and a recipe of the matching siz
 limit is in front of them, in Gym's servers, so try `num_workers`. Replicas with very different load
 mean Gym is not spreading the calls evenly.
 
+### Several judge models in one run
+
+A run can use several judge models, each on nodes of its own through `env.extra_judge_pools`.
+`data.train.gym_agent_choices` draws one judge's agent for each prompt when it is read, so all rollouts
+of a prompt go to one judge and no score is averaged across judges. Advantages are normalized per
+prompt, so a lenient judge only moves its own prompts. Validation stays on `env.judge_pool`, so
+AlpacaEval stays comparable with one-judge runs. Each pool writes its own stats file and each agent logs
+its own metrics, so read the reward per agent.
+
+`envs/ultrafeedback-rubric-sft-3judges.yaml` runs three judges on the SFT checkpoint, 16 nodes in all:
+Qwen and Gemma 4 on one node each, and Nemotron 3 Super as one replica across two.
+`envs/ultrafeedback-rubric-sft-2judges.yaml` leaves Nemotron out, on 14 nodes. After the data steps at
+the top of `envs/ultrafeedback-rubric-sft.yaml`:
+
+```bash
+bash envs/stage_judge_model.sh
+HF_REPO=google/gemma-4-26B-A4B-it CHECK_SCRIPT=download_model.sh bash backends/nemo-rl/apertus2/check_env_job.sh
+HF_REPO=nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8 CHECK_SCRIPT=download_model.sh bash backends/nemo-rl/apertus2/check_env_job.sh
+bash run.sh envs/ultrafeedback-rubric-sft-3judges.yaml grpo.max_num_steps=3
+```
+
+The commands of the full runs are in `experiments/runs.md`. Nemotron's first start builds its kernels
+into scratch, which `check_judge.sh` does in about 13 minutes on 64 CPUs, after `setup-gym.sh`:
+
+```bash
+JOB_TIME=01:00:00 JUDGE_MODEL=$SCRATCH/models/NVIDIA-Nemotron-3-Super-120B-A12B-FP8 JUDGE_GPUS=0,1 \
+    JUDGE_VLLM_ARGS="--tensor-parallel-size 2 --dtype auto --kv-cache-dtype fp8 --enable-chunked-prefill --mamba-ssm-cache-dtype float32 --enable-prefix-caching --trust-remote-code" \
+    PYDEPS_GYM=1 PYDEPS=$SCRATCH/nemo-rl-apertus2/pydeps-gym CHECK_SCRIPT=check_judge.sh \
+    bash backends/nemo-rl/apertus2/check_env_job.sh
+```
+
+The 4 rubrics and their weights are in `rubric_weights`, once per judge (`rubric_judge`,
+`rubric_judge_gemma`, `rubric_judge_nemotron`), so change every block. Each reply takes one judge call
+per rubric.
+
+For another judge, add a pool to `env.extra_judge_pools`, copy the three Gym entries at the end of the
+task file, and add its agent to `data.train.gym_agent_choices`. Set `cluster.num_nodes` and
+`sft_export` in a recipe of its own: `run.sh` reads both from that file alone, not through `defaults`.
+Scores come from the judge's first token, so a judge that thinks first gets a noise score with no
+error. Turn thinking off with `chat_template_kwargs: {enable_thinking: false}`, and run
+`check_judge.sh`, which fails when under 95% of that token's probability is on a verdict. A replica
+across nodes needs the three settings in the Nemotron block, or vLLM hangs at start-up.
+
 ## How a NeMo-RL run is put together
 
 NeMo-RL ships as an NGC container image (`nvcr.io/nvidia/nemo-rl`) that already contains

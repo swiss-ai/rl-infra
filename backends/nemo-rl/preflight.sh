@@ -55,9 +55,13 @@ gen_nodes=$(r policy.generation.colocated.resources.num_nodes)
 colocated=$(r policy.generation.colocated.enabled)
 train_nodes=${NODES}
 [[ "${colocated}" == false ]] && train_nodes=$(( NODES - ${gen_nodes:-0} ))
-# LLM judges on nodes of their own (env.judge_pool): NeMo-RL takes them out of the same total.
+# LLM judges on nodes of their own (env.judge_pool, env.extra_judge_pools): NeMo-RL takes them out
+# of the same total.
 judge_nodes=$(r env.judge_pool.num_nodes)
 [[ "${judge_nodes}" =~ ^[0-9]+$ ]] || judge_nodes=0
+for extra_nodes in $(r 'env.extra_judge_pools.*.num_nodes'); do
+  judge_nodes=$(( judge_nodes + extra_nodes ))
+done
 train_nodes=$(( train_nodes - judge_nodes ))
 megatron=$(r policy.megatron_cfg.enabled)
 prompts=$(r grpo.num_prompts_per_step); gens=$(r grpo.num_generations_per_prompt)
