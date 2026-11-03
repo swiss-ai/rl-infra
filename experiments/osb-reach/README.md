@@ -38,3 +38,21 @@ Env: `ACCOUNT` (infra01), `PARTITION` (debug), `REACH_PORT`, `EXTRA_TARGETS`, `O
 system Python lacks; `reach_node.sh` uses Gym's `harbor_agent` server venv
 (`$NEMO_GYM_VENV_DIR/responses_api_agents/harbor_agent/.venv`), built by any earlier Harbor run. If the job is killed before the sandbox is deleted, reap it as in
 `docs/harbor-osb-chonk-run.md` (Cleanup) with the run id printed at the start.
+
+## Reverse direction: node -> pod through the OpenSandbox proxy (`ws.py`)
+
+Pods cannot reach the nodes (jobs 5238624, 5238974: silent drop), so in-pod agents need a tunnel the
+node opens *into* each sandbox (planned: chisel/wstunnel reverse forward, pod `127.0.0.1:8000` ->
+`policy_model`). Its transport is the OpenSandbox server route `/sandboxes/{id}/proxy/{port}/...`,
+which upstream proxies for HTTP and WebSocket (`server/opensandbox_server/api/proxy.py` in
+alibaba/OpenSandbox). `ws.py` checks that on Breithorn, after the TCP probe in the same job:
+
+1. creates a second sandbox, starts `ws_server.py` (stdlib HTTP + WebSocket echo) on `WS_PORT` (8765);
+2. resolves the port's proxy URL and auth headers with Gym's `provider.endpoint()` (API key, and the
+   secure-access token since `secure_access` is on);
+3. plain GET; WebSocket upgrade; 20 echoes with round-trip times; a 1 MiB message; one message every
+   20 s for `HOLD_S` (60) seconds, as a quiet tunnel would.
+
+`RESULT: node -> pod HTTP and WebSocket through the proxy WORK` means the tunnel transport exists.
+A failing WebSocket with a working GET points at the front proxy (Traefik) not passing upgrades, or
+an older server. `REACH_WS=0` skips this part.

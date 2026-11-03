@@ -44,4 +44,11 @@ sleep 2
 kill "${LPID}" 2>/dev/null
 echo "== listener log (a CONNECTION line from the sandbox = pods can reach this node)"
 cat listen.log
+
+# Reverse direction, the transport of a per-sandbox tunnel: node -> pod through the OpenSandbox server
+# proxy, plain HTTP and WebSocket (ws.py / ws_server.py). REACH_WS=0 skips it.
+if [[ "${REACH_WS:-1}" == 1 ]]; then
+    echo "== node -> pod through the OpenSandbox proxy (HTTP + WebSocket)"
+    "${REACH_PYTHON}" "${HERE}/ws.py" || RC=$?
+fi
 exit "${RC}"

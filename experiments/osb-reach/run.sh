@@ -20,7 +20,8 @@ export OPENSANDBOX_API_KEY
 export OPENSANDBOX_DOMAIN="${OPENSANDBOX_DOMAIN:-https://opensandbox-gvisor.breithorn.svc.cscs.ch}"
 export NEMO_GYM_RUN_ID="osb-reach-$(date +%Y%m%d-%H%M%S)" NEMO_GYM_WORKLOAD=osb-reach
 export GYM_DIR=/opt/nemo-rl/3rdparty/Gym-workspace/Gym
-export REACH_PORT="${REACH_PORT:-}" EXTRA_TARGETS="${EXTRA_TARGETS:-}" REACH_PYTHON="${REACH_PYTHON:-}"
+export REACH_PORT="${REACH_PORT:-}" EXTRA_TARGETS="${EXTRA_TARGETS:-}" REACH_PYTHON="${REACH_PYTHON:-}" \
+    REACH_WS="${REACH_WS:-1}" WS_PORT="${WS_PORT:-8765}" HOLD_S="${HOLD_S:-60}"
 # Gym server venvs of the Harbor runs (run-harbor-osb.sh default); reach_node.sh takes the
 # harbor_agent one, which has the OpenSandbox SDK.
 export NEMO_GYM_VENV_DIR="${NEMO_GYM_VENV_DIR:-${HARBOR_ROOT:-${SCRATCH}/osb/harbor_micro}/venvs}"
