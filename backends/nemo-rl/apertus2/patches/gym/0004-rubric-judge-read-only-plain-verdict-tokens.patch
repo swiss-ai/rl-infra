@@ -1,0 +1,38 @@
+--- a/resources_servers/rubric_judge/scoring.py
++++ b/resources_servers/rubric_judge/scoring.py
+@@ -33,6 +33,8 @@
+ 
+ 
+ SCALE = (1, 2, 3, 4, 5)
++# Plain tokens only: `str.isdigit` also accepts tokens such as `⑤`, which `int` rejects.
++VERDICTS = {str(value): value for value in SCALE}
+ # AlpacaEval's model identifiers: `m` is output_1, `M` is output_2.
+ FIRST, SECOND = "m", "M"
+ 
+@@ -60,9 +62,9 @@
+     """Expected verdict on `SCALE`, or None when the judge gave no digit on it."""
+     probs: Dict[int, float] = {}
+     for token, logprob in top_logprobs:
+-        text = token.strip()
+-        if text.isdigit() and int(text) in SCALE:
+-            probs[int(text)] = probs.get(int(text), 0.0) + math.exp(logprob)
++        value = VERDICTS.get(token.strip())
++        if value is not None:
++            probs[value] = probs.get(value, 0.0) + math.exp(logprob)
+     total = sum(probs.values())
+     if total == 0.0:
+         return None
+--- a/resources_servers/rubric_judge/tests/test_scoring.py
++++ b/resources_servers/rubric_judge/tests/test_scoring.py
+@@ -55,6 +55,11 @@
+     assert math.isclose(expected_score([("9", lp(0.9)), ("0", lp(0.05)), ("2", lp(0.05))]), 2.0)
+ 
+ 
++def test_expected_score_ignores_digit_like_tokens():
++    assert math.isclose(expected_score([("⑤", lp(0.5)), ("²", lp(0.25)), ("2", lp(0.25))]), 2.0)
++    assert expected_score([("⑤", lp(0.9))]) is None
++
++
+ def test_expected_score_without_a_verdict_is_none():
+     assert expected_score([("The", lp(0.9)), ("I", lp(0.1))]) is None
+     assert expected_score([]) is None

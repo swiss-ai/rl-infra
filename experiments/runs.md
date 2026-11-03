@@ -285,6 +285,27 @@ RUN=sft-rubric-full-muon-lr1e-6-gains1e-6-matrix4e-5 RECIPE=recipes/apertus2-cho
     checkpointing.checkpoint_must_save_by=00:15:40:00
 ```
 
+## SFT, rubric, three judges
+
+Job 1203039, 16 nodes:
+
+```bash
+RUN=sft-rubric-3judges-40step JOB_TIME=02:30:00 bash run.sh envs/ultrafeedback-rubric-sft-3judges.yaml \
+    grpo.max_num_steps=40 \
+    checkpointing.enabled=false
+```
+
+Job 1203152, 16 nodes:
+
+```bash
+RUN=sft-rubric-full-3judges-adamw-lr2e-6 JOB_TIME=16:00:00 bash run.sh envs/ultrafeedback-rubric-sft-3judges.yaml \
+    grpo.max_num_steps=431 \
+    policy.megatron_cfg.optimizer.lr=2.0e-6 \
+    checkpointing.save_period=220 \
+    checkpointing.save_optimizer=true \
+    checkpointing.checkpoint_must_save_by=00:15:40:00
+```
+
 ## SFT, tool calling
 
 Job 1194398, 12 nodes:
