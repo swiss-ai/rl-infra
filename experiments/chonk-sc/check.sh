@@ -82,8 +82,11 @@ else
         total=$((total + $?))
         if command -v yq >/dev/null; then
             echo "   preflight.sh (as launch.sh runs it before sbatch):"
-            NEMO_RL_DIR="${NEMO_RL_DIR}" JOB_TIME="${JOB_TIME:-03:00:00}" \
-                bash "${ROOT}/backends/nemo-rl/preflight.sh" "${cfg}" "${NODES}" "$@" | sed 's/^/   | /'
+            # as launch.sh: the driver's cluster.* overrides first, the run launcher's JOB_TIME default
+            [[ "${run}" == a ]] && jt=01:30:00 || jt=02:30:00
+            NEMO_RL_DIR="${NEMO_RL_DIR}" JOB_TIME="${JOB_TIME:-${jt}}" \
+                bash "${ROOT}/backends/nemo-rl/preflight.sh" "${cfg}" "${NODES}" \
+                cluster.num_nodes="${NODES}" cluster.gpus_per_node=4 "$@" | sed 's/^/   | /'
             (( PIPESTATUS[0] == 0 )) || total=$((total + 1))
         else
             echo "   note  yq not found: preflight.sh skipped (launch.sh runs it at submission)"
