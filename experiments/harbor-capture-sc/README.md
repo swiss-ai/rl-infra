@@ -49,6 +49,7 @@ The previous smoke test (4 sandboxes, ~7 min) is still one command:
 | `../../backends/nemo-rl/apertus2/patches/gym/0003-*.patch` | `harbor_environment_kwargs.model_tunnel`: chisel tunnel per sandbox, opened in `NemoGymSandboxEnvironment.start()` |
 | `../../backends/nemo-rl/apertus2/patches/gym/0004-*.patch` | tunnel fix after job 5245999: server start waits for `Listening on`; pod-side log in errors |
 | `../../backends/nemo-rl/apertus2/patches/gym/0005-*.patch` | `MiniSweAgentNemoGym` agent: per-run `api_base`, rollout sampling params, no litellm cost lookup, `max_turns` call limit |
+| `../../backends/nemo-rl/apertus2/patches/gym/0006-*.patch` | fix after job 5253837: mini-swe-agent sends messages with `role`/`content` only (its `extra` field got 422 on every second call) |
 | `../../backends/nemo-rl/apertus2/fetch-chisel.sh` | chisel 1.12.0 (amd64 + arm64, pinned sha256) into `CHISEL_DIR` |
 
 ## Environment variables of `run.sh`
@@ -185,6 +186,11 @@ OpenSandbox key):
     tail -n 30 $T/agent/setup/stdout.txt           # INSTALL_SUCCESS
     tail -n 30 $T/agent/mini-swe-agent.txt         # the run; litellm errors show up here
     grep -c '"role": "assistant"' $T/agent/mini-swe-agent.trajectory.json   # model calls (<= 20)
+
+Job 5253837 (2026-11-04, without 0006): every trial stopped after one model call, `RetryError` from
+422 `extra_forbidden` on the second call (mini's `extra` message field); 0006 fixes it. Check after
+the rerun: `exit_status` in `mini-swe-agent.trajectory.json` is `Submitted`/`LimitsExceeded`, not
+`RetryError`, and more than one assistant message per trial.
 
 Likely first failures: agent setup over 360 s (apt-get under gVisor at 32 parallel); a litellm
 parameter the server rejects (shows in `mini-swe-agent.txt` as an `APIError`, not retried).

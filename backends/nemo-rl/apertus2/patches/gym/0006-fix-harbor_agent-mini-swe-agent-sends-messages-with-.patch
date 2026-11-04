@@ -1,0 +1,90 @@
+From 113bb48fc7d6378ae93a24da27ff2f0c3c9f1862 Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Wed, 4 Nov 2026 11:45:21 +0000
+Subject: [PATCH] fix(harbor_agent): mini-swe-agent sends messages with role
+ and content only
+
+mini-swe-agent stores every assistant reply with an `extra` field (the raw
+litellm response) and sends its history as is. Gym's model server rejects
+unknown message fields (extra_forbidden), so every second call of a run got
+422; mini retried it ten times and ended with RetryError after one model
+call (job 5253837: 96/96 trials).
+
+NemoGymModel.query now strips each message to role and content. The bash
+test sends a realistic history and checks what reaches litellm.
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ .../mini_swe_agent_pod/nemo_gym_mini.py         |  7 ++++++-
+ .../test_mini_swe_agent_nemo_gym.py             | 17 +++++++++++++++--
+ 2 files changed, 21 insertions(+), 3 deletions(-)
+
+diff --git a/responses_api_agents/harbor_agent/custom_agents/mini_swe_agent_pod/nemo_gym_mini.py b/responses_api_agents/harbor_agent/custom_agents/mini_swe_agent_pod/nemo_gym_mini.py
+index 3d876cbc9..c2abafa73 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/mini_swe_agent_pod/nemo_gym_mini.py
++++ b/responses_api_agents/harbor_agent/custom_agents/mini_swe_agent_pod/nemo_gym_mini.py
+@@ -23,6 +23,10 @@ MiniSweAgentNemoGym writes this file into the sandbox and passes its settings as
+ - ``max_calls`` > 0 ends the run with mini's ``LimitsExceeded`` (a normal end, the verifier still runs)
+   before that many model calls are exceeded; mini's own step limit lives in the agent config.
+ 
++Messages are sent with ``role`` and ``content`` only: mini stores each assistant reply with an
++``extra`` field (the raw response), and Gym's model server rejects unknown message fields with 422
++(``extra_forbidden``), which failed every second call (job 5253837).
++
+ The cost lookup is disabled: the Gym model server's model is not in litellm's price list, and
+ mini-swe-agent re-raises every cost-calculation error, which would fail every call.
+ """
+@@ -50,4 +54,5 @@ class NemoGymModel(LitellmModel):
+     def query(self, messages, **kwargs):
+         if 0 < self.max_calls <= self.n_calls:
+             raise LimitsExceeded(f"Model call limit reached ({self.max_calls}).")
+-        return super().query(messages, **kwargs)
++        sent = [{"role": m["role"], "content": m["content"]} for m in messages]
++        return super().query(sent, **kwargs)
+diff --git a/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py
+index d9296a6fa..bf2bc0911 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py
+@@ -107,7 +107,11 @@ _STUBS = {
+                 cost = litellm.cost_calculator.completion_cost(None)  # mini re-raises errors here
+                 self.n_calls += 1
+                 self.cost += cost
+-                return {"content": f"call {self.n_calls}", "kwargs": self.model_kwargs}
++                return {
++                    "content": f"call {self.n_calls}",
++                    "kwargs": self.model_kwargs,
++                    "sent": messages,
++                }
+         """
+     ),
+ }
+@@ -123,9 +127,14 @@ _FAKE_MINI = textwrap.dedent(
+     m = Model(model_name=args[args.index("-m") + 1], model_kwargs={{"temperature": 0.0, "drop_params": True}})
+     out = []
+     from minisweagent.agents.default import LimitsExceeded
++    # mini's history: assistant replies carry `extra` (the raw response), as in DefaultAgent.add_message
++    history = [{{"role": "system", "content": "sys"}}, {{"role": "user", "content": "task"}}]
+     for _ in range(3):
+         try:
+-            out.append(m.query([]))
++            reply = m.query(list(history))
++            out.append(reply)
++            history += [{{"role": "assistant", "content": reply["content"], "extra": {{"response": {{}}}}}},
++                        {{"role": "user", "content": "observation"}}]
+         except LimitsExceeded as e:
+             out.append({{"limit": str(e)}})
+     print(json.dumps({{"task": args[args.index("-t") + 1], "out": out, "cost": m.cost}}))
+@@ -171,6 +180,10 @@ def test_run_command_in_bash_loads_the_model_class(tmp_path: Path) -> None:
+         "api_key": "EMPTY",
+     }
+     assert second["content"] == "call 2"
++    # the second call carries mini's assistant reply; only role/content may reach the model server,
++    # which rejects unknown message fields with 422 (job 5253837: every second call failed)
++    assert second["sent"][2] == {"role": "assistant", "content": "call 1"}
++    assert all(set(msg) == {"role", "content"} for msg in second["sent"])
+     assert third == {"limit": "Model call limit reached (2)."}
+     assert result["cost"] == 0.0
+     assert (logs / "agent" / "mini-swe-agent.txt").read_text() == res.stdout
+-- 
+2.55.0
+
