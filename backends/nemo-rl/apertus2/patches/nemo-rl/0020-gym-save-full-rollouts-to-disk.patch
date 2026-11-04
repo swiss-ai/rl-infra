@@ -1,0 +1,148 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Sat, 31 Oct 2026 19:00:00 +0900
+Subject: [PATCH] gym: save full rollouts to disk
+
+The only way to keep complete Gym results was log_nemo_gym_full_result_tables,
+which needs W&B and uploads them, and the local dumps hold no text on the Gym
+path. env.rollout_dir writes each full result as JSONL: train_weights<N>.jsonl
+for the weights that generated it, and validation_step<N>.jsonl. Without
+env.rollout_dir nothing is written.
+---
+diff --git a/nemo_rl/algorithms/async_utils/trajectory_collector.py b/nemo_rl/algorithms/async_utils/trajectory_collector.py
+index a7255c5..27168a6 100644
+--- a/nemo_rl/algorithms/async_utils/trajectory_collector.py
++++ b/nemo_rl/algorithms/async_utils/trajectory_collector.py
+@@ -1521,6 +1521,7 @@ class AsyncTrajectoryCollector:
+             # Import here to keep the NeMo-Gym dependency local to its backend.
+             from nemo_rl.experience.rollouts import (
+                 get_nemo_gym_thinking_tags,
++                nemo_gym_rollout_dump_path,
+                 run_async_nemo_gym_rollout,
+                 should_mask_flagged_samples,
+             )
+@@ -1558,6 +1559,11 @@ class AsyncTrajectoryCollector:
+                 ),
+                 deduplicate_multimodal_data=self._deduplicate_multimodal_data,
+                 debug_payload_metrics=self._debug_payload_metrics,
++                # Named for the weights that generated them.
++                rollout_dump_path=nemo_gym_rollout_dump_path(
++                    self.master_config.env,
++                    f"train_weights{self.current_weight_version}.jsonl",
++                ),
+             ):
+                 task_index = rollout_result.task_index
+                 if task_index is None:
+diff --git a/nemo_rl/algorithms/grpo.py b/nemo_rl/algorithms/grpo.py
+index dbb42bd..18e0677 100644
+--- a/nemo_rl/algorithms/grpo.py
++++ b/nemo_rl/algorithms/grpo.py
+@@ -109,6 +109,7 @@ from nemo_rl.experience.rollouts import (
+     attach_initial_nemo_gym_image_payloads,
+     backfill_missing_routed_experts,
+     get_nemo_gym_thinking_tags,
++    nemo_gym_rollout_dump_path,
+     run_async_multi_turn_rollout,
+     run_multi_turn_rollout,
+     run_nemo_gym_rollout_sync,
+@@ -4364,6 +4365,9 @@ def validate(
+                         master_config.grpo.deduplicate_multimodal_data
+                     ),
+                     debug_payload_metrics=master_config.grpo.debug_payload_metrics,
++                    rollout_dump_path=nemo_gym_rollout_dump_path(
++                        master_config.env, f"validation_step{step}.jsonl"
++                    ),
+                 )
+                 val_batch = nemo_gym_rollout_result.final_batch
+                 gen_metrics = nemo_gym_rollout_result.rollout_metrics
+diff --git a/nemo_rl/experience/rollouts.py b/nemo_rl/experience/rollouts.py
+index 263fb22..38a518d 100644
+--- a/nemo_rl/experience/rollouts.py
++++ b/nemo_rl/experience/rollouts.py
+@@ -18,7 +18,9 @@
+ import asyncio
+ import copy
+ import json
++import os
+ import statistics
++import threading
+ import uuid
+ import warnings
+ from collections import defaultdict
+@@ -298,6 +300,24 @@ def _add_r3_fallback_metrics(
+     )
+ 
+ 
++_ROLLOUT_DUMP_LOCK = threading.Lock()
++
++
++def nemo_gym_rollout_dump_path(env_config: dict[str, Any], filename: str) -> Optional[str]:
++    """Return where to save a batch's full Gym results: ``env.rollout_dir``, or nowhere."""
++    rollout_dir = env_config.get("rollout_dir")
++    return os.path.join(rollout_dir, filename) if rollout_dir else None
++
++
++def _save_nemo_gym_rollouts(path: str, results: list[dict]) -> None:
++    """Append the full Gym results of one prompt group to ``path`` as JSONL."""
++    lines = "".join(json.dumps(result["full_result"]) + "\n" for result in results)
++    with _ROLLOUT_DUMP_LOCK:
++        os.makedirs(os.path.dirname(path), exist_ok=True)
++        with open(path, "a") as f:
++            f.write(lines)
++
++
+ def _mask_sample_flags(extras: Iterable[dict[str, Any] | None]) -> torch.Tensor:
+     """Return True for samples the environment asks GRPO to mask from loss."""
+     return torch.tensor(
+@@ -2638,6 +2658,7 @@ async def run_async_nemo_gym_rollout(
+     deduplicate_multimodal_data: bool = False,
+     debug_payload_metrics: bool = False,
+     identity_num_generations: Optional[int] = None,
++    rollout_dump_path: Optional[str] = None,
+ ) -> AsyncGenerator[NemoGymRolloutResult, None]:
+     """Stream complete NeMo-Gym prompt groups in group-completion order.
+ 
+@@ -2855,6 +2876,7 @@ async def run_async_nemo_gym_rollout(
+                         reward_penalty_config=reward_penalty_config,
+                         thinking_tags=thinking_tags,
+                         mask_env_flagged_samples=mask_env_flagged_samples,
++                        rollout_dump_path=rollout_dump_path,
+                     )
+                     if accumulator.is_complete:
+                         final_rollout_result = rollout_result
+@@ -2899,6 +2921,7 @@ def run_nemo_gym_rollout_sync(
+     mask_env_flagged_samples: bool = True,
+     deduplicate_multimodal_data: bool = False,
+     debug_payload_metrics: bool = False,
++    rollout_dump_path: Optional[str] = None,
+ ) -> NemoGymRolloutResult:
+     """Run and return one complete NeMo-Gym batch synchronously.
+ 
+@@ -2970,6 +2993,7 @@ def run_nemo_gym_rollout_sync(
+             mask_env_flagged_samples=mask_env_flagged_samples,
+             returns_entire_batch=True,
+             sampling_params=sampling_params,
++            rollout_dump_path=rollout_dump_path,
+             deduplicate_multimodal_data=deduplicate_multimodal_data,
+             debug_payload_metrics=debug_payload_metrics,
+         ):
+@@ -2994,6 +3018,7 @@ def _postprocess_single_nemo_gym_group(
+     reward_penalty_config: dict[str, Any] | BaseModel | None = None,
+     thinking_tags: list[str] | tuple[str, ...] | None = None,
+     mask_env_flagged_samples: bool = True,
++    rollout_dump_path: Optional[str] = None,
+ ) -> NemoGymRolloutResult:
+     """Postprocess one complete prompt group from the NeMo-Gym stream."""
+     # Length-based reward shaping for low-effort prompts
+@@ -3003,6 +3028,8 @@ def _postprocess_single_nemo_gym_group(
+         reward_penalty_config, tokenizer, thinking_tags=thinking_tags
+     )
+     penalty_counts = apply_reward_penalties(results, resolved_reward_penalty_config)
++    if rollout_dump_path is not None:
++        _save_nemo_gym_rollouts(rollout_dump_path, results)
+ 
+     # Prepare for the rollout metrics calculation below. Not strictly necessary here, but good to have parity with `run_async_multi_turn_rollout`
+     with timer.time(f"{timer_prefix}/prepare_for_metrics_calculation"):
+-- 
+2.43.0
+

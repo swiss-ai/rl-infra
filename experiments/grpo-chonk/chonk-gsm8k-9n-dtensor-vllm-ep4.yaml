@@ -35,6 +35,7 @@ policy:
   generation:
     max_new_tokens: 256
     stop_strings: ["Question:"]
+    stop_token_ids: [2, 0]
     colocated:
       enabled: false
       resources:
@@ -43,7 +44,7 @@ policy:
     vllm_cfg:
       tensor_parallel_size: 1
       expert_parallel_size: 4
-      gpu_memory_utilization: 0.8
+      gpu_memory_utilization: 0.88
       enforce_eager: true
       load_format: dummy
       async_engine: true

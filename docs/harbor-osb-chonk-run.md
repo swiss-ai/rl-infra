@@ -180,12 +180,12 @@ Problems we met in this step (all fixed by hand, none in the scripts yet):
 bash backends/nemo-rl/apertus2/setup-gym.sh
 ```
 
-This clones `swiss-ai/nemo-gym` into the NeMo-RL clone's `3rdparty/Gym-workspace/Gym`, creates the local branch
-`apertus2-osb` at the blueprint's Gym pin `267305e2a` and cherry-picks Kostas Pitas' four commits from
-`swissai/harbor_agent_osb_v0.7.0` (`810196ff6`, `0fe241c66`, `44c77151b`, `85f6def4a`). Reason: the fork pins a Gym
-(2026-09-15) that is newer than the OpenSandbox provider (2026-06-22) and the Harbor agent (2026-03), so it has
-neither the provider nor the training config. The four commits applied without conflicts when we tried it. The
-branch is local; nothing is pushed.
+This clones `swiss-ai/nemo-gym` into the NeMo-RL clone's `3rdparty/Gym-workspace/Gym`, checks out the
+blueprint's Gym pin `267305e2a` and applies every patch in `backends/nemo-rl/apertus2/patches/gym/` to the working
+tree. Kostas Pitas' four commits from `swissai/harbor_agent_osb_v0.7.0` (`810196ff6`, `0fe241c66`, `44c77151b`,
+`85f6def4a`) are patches 0006-0009 there, exported as rebuilt on the pin (`85f6def4a` does not apply to the pin as
+its own diff). Reason: the fork pins a Gym (2026-09-15) that is newer than the OpenSandbox provider (2026-06-22) and
+the Harbor agent (2026-03), so it has neither the provider nor the training config. Nothing is pushed.
 
 ### 4. Check the environment on a GPU node (about 3 minutes, 1 node)
 

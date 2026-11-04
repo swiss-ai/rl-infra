@@ -15,7 +15,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "${HERE}/../.." && pwd)"
 APERTUS2_DIR="${ROOT}/backends/nemo-rl/apertus2"
-source "${APERTUS2_DIR}/env"
+source "${ROOT}/sites/load.sh" && rl_infra_load "${APERTUS2_DIR}/env"
 source "${HERE}/common.sh"
 
 # Fail before the queue wait if the clone lacks #2517 or lost f196's refit code (check.sh (b)).

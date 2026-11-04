@@ -22,9 +22,16 @@ RECIPE=recipes/apertus2-chonk-megatron-muon.yaml   bash run.sh envs/gsm8k.yaml  
 vLLM runs one inference replica per node. A Megatron inference replica spans two nodes,
 because one node runs out of memory, so the same four nodes hold two replicas instead of
 four. Muon needs 16 trainer nodes and 2048-token micro-batches; with 4096-token ones the
-trainer runs out of memory around step 21. All recipes save only the final weights, without
-optimizer state: saves that included it often hung until the 10-minute NCCL timeout killed
-the run.
+trainer runs out of memory around step 21. All recipes save the final weights with optimizer
+state. Such saves used to hang often, until the 10-minute NCCL timeout killed the run; the
+Megatron patches now free host memory around saves and loads, and no save hung in the tests
+on HANGANG. They have not been retested on Alps.
+
+`trainer-small-rx-buffers.yaml` is an option, off by default: add it to a run's `defaults` to
+shrink libfabric's receive buffers on the trainers. In a 16-node AdamW run it freed about
+3.5 GB per trainer process at the same speed, but only two steps were tested. Smaller buffers
+can trigger flow control under heavy traffic, so watch for `Flow control` warnings in the log
+and for slower steps.
 
 The config names in this directory come from the experiments that led to the recipes.
 `stage_model.sh` copies the checkpoint from capstor to your scratch and adds the Hugging

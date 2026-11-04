@@ -83,27 +83,29 @@ check_nemo_rl_clone() {
     return "${fails}"
 }
 
-# check_gym_capture: the shared Gym checkout of this clone has what run B needs: branch
-# apertus2-osb-capture with rl-infra Gym patch 0001 (harbor_agent hands the agent the
-# rollout-prefixed model URL, base_url_for_run; without it capture records nothing and every row
-# is rejected, job 5236016) and 0002 (_should_mask: under capture empty output is not masked,
-# failed trials still are). Same marker as ../harbor-capture-sc/run.sh. Returns the number of failures.
+# check_gym_capture: the shared Gym checkout of this clone has what run B needs: setup-gym.sh
+# applied the current patches/gym set (its stamp, a hash of all patches, matches), with rl-infra
+# Gym patch 0010 (harbor_agent hands the agent the rollout-prefixed model URL, base_url_for_run;
+# without it capture records nothing and every row is rejected, job 5236016) and 0011
+# (_should_mask: under capture empty output is not masked, failed trials still are). Same marker
+# as ../harbor-capture-sc/run.sh. Returns the number of failures.
 check_gym_capture() {
-    local g="${NEMO_RL_DIR}/3rdparty/Gym-workspace/Gym" fails=0 br
+    local g="${NEMO_RL_DIR}/3rdparty/Gym-workspace/Gym" fails=0 stamp
     local app="${g}/responses_api_agents/harbor_agent/app.py"
     ok()  { echo "  ok    $*"; }
     bad() { echo "  FAIL  $*"; fails=$((fails + 1)); }
     [[ -f "${g}/nemo_gym/__init__.py" ]] || { bad "no Gym checkout in ${g}"; return 1; }
-    br="$(git -C "${g}" branch --show-current 2>/dev/null)"
-    echo "  Gym ${g}: ${br:-detached} @ $(git -C "${g}" rev-parse --short HEAD 2>/dev/null)"
-    [[ "${br}" == apertus2-osb-capture ]] && ok "Gym branch apertus2-osb-capture" \
-        || bad "Gym branch is '${br}', not apertus2-osb-capture"
+    echo "  Gym ${g} @ $(git -C "${g}" rev-parse --short HEAD 2>/dev/null)"
+    stamp="$(cat "${APERTUS2_DIR}"/patches/gym/*.patch | git hash-object --stdin)"
+    [[ "$(cat "${g}/.git/rl-infra-patches" 2>/dev/null)" == "${stamp}" ]] \
+        && ok "Gym patches: the current patches/gym set is applied" \
+        || bad "Gym patches: the checkout does not carry the current patches/gym set (setup-gym.sh not re-run)"
     grep -q harbor_model_base_url "${app}" 2>/dev/null && grep -q "base_url_for_run(" "${app}" \
-        && ok "Gym patch 0001: harbor_agent routes model calls through the rollout URL" \
-        || bad "Gym patch 0001 missing (harbor_model_base_url / base_url_for_run in harbor_agent/app.py)"
+        && ok "Gym patch 0010: harbor_agent routes model calls through the rollout URL" \
+        || bad "Gym patch 0010 missing (harbor_model_base_url / base_url_for_run in harbor_agent/app.py)"
     grep -q "def _should_mask" "${app}" 2>/dev/null \
-        && ok "Gym patch 0002: capture-aware _should_mask" \
-        || bad "Gym patch 0002 missing (_should_mask in harbor_agent/app.py)"
+        && ok "Gym patch 0011: capture-aware _should_mask" \
+        || bad "Gym patch 0011 missing (_should_mask in harbor_agent/app.py)"
     [[ -d "${g}/nemo_gym/token_id_capture" ]] && ok "nemo_gym/token_id_capture present" \
         || bad "nemo_gym/token_id_capture missing from the Gym checkout"
     for f in nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
@@ -111,8 +113,7 @@ check_gym_capture() {
         [[ -f "${g}/${f}" ]] && ok "${f} present" || bad "${f} missing (OpenSandbox commits, setup-gym.sh)"
     done
     if (( fails )); then
-        echo "  fix: GYM_BRANCH=apertus2-osb-capture GYM_PATCHES=\"$(ls "${APERTUS2_DIR}"/patches/gym/*.patch | tr '\n' ' ')\" \\"
-        echo "         bash ${APERTUS2_DIR}/setup-gym.sh"
+        echo "  fix: bash ${APERTUS2_DIR}/setup-gym.sh"
     fi
     return "${fails}"
 }

@@ -1,0 +1,19 @@
+# Stock NeMo-RL stack (nvcr.io/nvidia/nemo-rl): defaults for backends/nemo-rl, loaded last by
+# sites/load.sh, so a stack env loaded before it (e.g. apertus2/env) or site.env wins.
+
+# Job outputs (Slurm/Ray logs, checkpoints, metrics) and caches.
+: "${OUT:=${SCRATCH}/nemo-rl}"
+
+# NeMo-RL source clone, mounted over /opt/nemo-rl in the container (setup.sh creates it).
+: "${NEMO_RL_DIR:=${PROJECTS_DIR}/nemo-rl}"
+: "${PIN_FILE:=$(dirname "${BASH_SOURCE[0]}")/pin}"
+
+# Container image: a persistent master copy and the working copy jobs read. Scratch is
+# purged, so the launcher re-stages the working copy from the master when it is missing.
+: "${IMAGE_MASTER:=${NEMO_RL_IMAGE_MASTER:-}}"
+: "${IMAGE_WORK:=${SCRATCH}/container-images/nemo-rl-v0.7.0.sqsh}"
+
+# Container spec (image, mounts, environment) in EDF form; on Alps setup.sh installs it as
+# ~/.edf/<EDF_NAME>.toml, on pyxis sites launch.sh turns it into srun flags.
+: "${CONTAINER_SPEC:=$(dirname "${BASH_SOURCE[0]}")/edf.toml.template}"
+: "${EDF_NAME:=nemo-rl}"

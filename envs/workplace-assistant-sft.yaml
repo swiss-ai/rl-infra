@@ -1,0 +1,100 @@
+# Task file: tool calls on an SFT checkpoint, on Gym's workplace assistant: 27 simulated tools with no
+# real code run. A rollout ends at the model's answer or at the sequence limit, with no limit on its
+# turns. NeMo-RL's chat server encodes the request's tools
+# into the system frame, returns call frames as tool calls, and extends the exact tokens of the last turn
+# with each result. A bad call reaches the agent as written and its error goes back to the model. The
+# data is in $SCRATCH/tool-test/workplace_assistant, from nvidia/Nemotron-RL-agent-workplace_assistant.
+#   bash run.sh envs/workplace-assistant-sft.yaml
+defaults: ../recipes/apertus2-chonk-sft-vllm-adamw-tools.yaml
+script: examples/nemo_gym/run_grpo_nemo_gym.py
+
+grpo:
+  num_prompts_per_step: 32
+  num_generations_per_prompt: 16
+  max_num_steps: 3
+  val_period: 0
+  val_at_start: false
+  val_at_end: false
+  # The Gym entrypoint refuses any other value and validates on the whole validation file.
+  max_val_samples: null
+  val_batch_size: null
+  val_num_generations_per_prompt: 1
+  # The DAPO layout's math settings: the Gym entrypoint refuses reward shaping, and the rubric runs on
+  # Gym do not skip groups.
+  reward_shaping:
+    enabled: false
+  skip_zero_advantage_groups: false
+
+policy:
+  train_global_batch_size: 512
+  generation:
+    # Per model turn. policy.max_total_sequence_length limits the whole rollout, prompt included.
+    max_new_tokens: 2048
+    output_format: apertus2
+    system_prompt_file: ${oc.env:RL_INFRA_DIR}/envs/apertus2-system.json
+    stop_token_ids: [12]
+    stop_strings: null
+    vllm_cfg:
+      max_model_len: ${policy.max_total_sequence_length}
+      async_engine: true
+      expose_http_server: true
+      # The checkpoint's tokenizer has no chat template, and the HTTP server does not use
+      # policy.tokenizer.chat_template on its own.
+      http_server_serving_chat_kwargs:
+        chat_template: ${policy.tokenizer.chat_template}
+    vllm_kwargs:
+      # Chonk's hybrid Mamba layers need it.
+      enable_chunked_prefill: true
+
+data:
+  max_input_seq_length: null
+  shuffle: true
+  num_workers: 0
+  # The data block below replaces the recipe's, and grpo.setup() indexes this key.
+  use_multiple_dataloader: false
+  train:
+    dataset_name: NemoGymDataset
+    data_path: ${oc.env:SCRATCH}/tool-test/workplace_assistant/train.jsonl
+  validation:
+    dataset_name: NemoGymDataset
+    data_path: ${oc.env:SCRATCH}/tool-test/workplace_assistant/validation.jsonl
+  default:
+    dataset_name: NemoGymDataset
+    env_name: nemo_gym
+    prompt_file: null
+    system_prompt_file: null
+    processor: nemo_gym_data_processor
+  _override_: true
+
+env:
+  should_use_nemo_gym: true
+  # False writes train_data_step*.jsonl, with the token IDs and the loss mask of each rollout.
+  should_log_nemo_gym_responses: false
+  # Full results of every rollout, next to the weights. Never in W&B.
+  rollout_dir: ${checkpointing.checkpoint_dir}/rollouts
+  nemo_gym:
+    skip_venv_if_present: true
+    port_range_low: 5000
+    port_range_high: 5999
+    is_trajectory_collection: false
+    # Gym's servers live on several Ray nodes and must advertise the node IP.
+    use_absolute_ip: true
+    config_paths:
+    - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+    - resources_servers/workplace_assistant/configs/workplace_assistant.yaml
+    policy_model:
+      responses_api_models:
+        vllm_model:
+          # NeMo-RL clears its own stop settings for Gym, so they travel with each request.
+          extra_body:
+            stop: []
+            stop_token_ids: [12]
+    workplace_assistant_simple_agent:
+      responses_api_agents:
+        simple_agent:
+          # In effect no limit, because the sequence limit ends a rollout first. Gym's config refuses null.
+          max_steps: 1000000
+  _override_: true
+
+logger:
+  tensorboard_enabled: true

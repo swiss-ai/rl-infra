@@ -94,19 +94,19 @@ the client's argv on the node. Rollout-length holds: `IDLE_S=1500 JOB_TIME=00:45
 
 ## Gym's tunnel code at training concurrency (`gym_tunnel.py`, `REACH_TESTS=gymtunnel`, default)
 
-Job 5245999 (training with `TUNNEL=1`, Gym patch 0003) failed 32/32 tunnels: the node's chisel client
+Job 5245999 (training with `TUNNEL=1`, Gym patch 0012) failed 32/32 tunnels: the node's chisel client
 got `websocket: close 1011` from the OpenSandbox proxy, i.e. nothing listened on the server port in the
-pod. Patch 0003 started the server fire-and-forget (`(setsid nohup ... &)`, exec returns at once);
-`tunnel.py` above, which worked, waited 2 s after the start. Patch 0004 makes the start command return
+pod. Patch 0012 started the server fire-and-forget (`(setsid nohup ... &)`, exec returns at once);
+`tunnel.py` above, which worked, waited 2 s after the start. Patch 0013 makes the start command return
 only once chisel logs `Listening on` and reports the pod-side log on failure.
 
 `gym_tunnel.py` runs Gym's own `ModelTunnel` exactly as `NemoGymSandboxEnvironment` does
 (`AsyncSandbox` with Gym's `opensandbox.yaml`, `background_exec`, one provider per sandbox, transport
 httpx), `TUNNELS` (32) sandboxes in parallel, `model_stub.py` as the target; per sandbox: open (upload,
 server start, client, `GET /health` through the tunnel), a short `tunnel_probe.py`, close, stop.
-Needs patches 0003+0004 in the NeMo-RL clone's Gym (`setup-gym.sh`, see `harbor-capture-sc/README.md`).
+Needs patches 0012+0013 in the NeMo-RL clone's Gym (`setup-gym.sh`, see `harbor-capture-sc/README.md`).
 
-    bash experiments/osb-reach/run.sh                 # patch 0004 start: expect RESULT: 32/32
-    OLD_START=1 bash experiments/osb-reach/run.sh     # 0003's fire-and-forget start, for comparison
+    bash experiments/osb-reach/run.sh                 # patch 0013 start: expect RESULT: 32/32
+    OLD_START=1 bash experiments/osb-reach/run.sh     # 0012's fire-and-forget start, for comparison
 
 If `OLD_START=1` fails and the default passes, the race with the exec service was the cause of 5245999.

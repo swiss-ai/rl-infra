@@ -1,0 +1,18 @@
+defaults: chonk-dapo-16n-megatron-128x16-16k-async-pp2-dedup.yaml
+
+grpo:
+  val_period: 40
+  skip_zero_advantage_groups: true
+  async_grpo:
+    max_trajectory_age_steps: 2
+  reward_shaping:
+    enabled: true
+    stop_properly_penalty_coef: 0.0
+    overlong_buffer_length: null
+    overlong_buffer_penalty: null
+    max_response_length: null
+
+policy:
+  generation:
+    vllm_cfg:
+      gpu_memory_utilization: 0.88

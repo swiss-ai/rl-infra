@@ -1,0 +1,138 @@
+From c2a17b63cee06658fef2c7b4637eab97cc35ccbd Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Wed, 28 Oct 2026 11:12:39 +0100
+Subject: [PATCH 10/14] grpo: drop sequences with non-finite generation
+ logprobs from the loss
+
+vLLM can return NaN logprobs for part of a response and then samples
+token 0 up to the length limit. Such a sequence was not sampled from the
+policy: mask it out of the loss and the logprob-error statistics, report
+num_nonfinite_generation_seqs, and keep the loss diagnostics finite.
+---
+ nemo_rl/algorithms/grpo.py                | 20 +++++++++++++++++++-
+ nemo_rl/algorithms/loss/loss_functions.py | 21 ++++++++++++++-------
+ 2 files changed, 33 insertions(+), 8 deletions(-)
+
+diff --git a/nemo_rl/algorithms/grpo.py b/nemo_rl/algorithms/grpo.py
+index e155183e4..339504c09 100644
+--- a/nemo_rl/algorithms/grpo.py
++++ b/nemo_rl/algorithms/grpo.py
+@@ -2725,6 +2725,7 @@ def _placeholder_seq_logprob_error_metrics() -> dict[str, float]:
+         "min_seq_mult_prob_error_after_mask": 0.0,
+         "num_masked_seqs_by_logprob_error": 0,
+         "masked_correct_pct": 0.0,
++        "num_nonfinite_generation_seqs": 0,
+     }
+ 
+ 
+@@ -2795,13 +2796,29 @@ def compute_and_apply_seq_logprob_error_masking(
+     Returns:
+         Dict with keys: max_seq_mult_prob_error, mean_seq_mult_prob_error,
+         min_seq_mult_prob_error, max/mean/min_seq_mult_prob_error_after_mask,
+-        num_masked_seqs, masked_correct_pct
++        num_masked_seqs, masked_correct_pct, num_nonfinite_generation_seqs
+     """
+     # Compute sequence-level logprob error metrics (always)
+     token_mask = train_data["token_mask"][:, 1:]
+     sample_mask = train_data["sample_mask"]
+     prev_logprobs = train_data["prev_logprobs"][:, 1:]
+     generation_logprobs = train_data["generation_logprobs"][:, 1:]
++
++    # vLLM can return NaN logprobs for part of a response (it then samples token 0 up
++    # to the length limit). Such a sequence was not sampled from the policy, so it is
++    # dropped from the loss whatever the threshold, and from the statistics below.
++    nonfinite_seqs = (
++        (~torch.isfinite(generation_logprobs)) & (token_mask > 0)
++    ).any(dim=-1) & (sample_mask > 0)
++    num_nonfinite_generation_seqs = int(nonfinite_seqs.sum().item())
++    if num_nonfinite_generation_seqs > 0:
++        sample_mask = sample_mask * (~nonfinite_seqs).to(sample_mask.dtype)
++        train_data["sample_mask"] = sample_mask
++        print(
++            f"  Masked {num_nonfinite_generation_seqs} sequences with non-finite generation logprobs",
++            flush=True,
++        )
++
+     lp_error = torch.abs(generation_logprobs - prev_logprobs)
+ 
+     # Use combined mask exactly as in loss function
+@@ -2900,6 +2917,7 @@ def compute_and_apply_seq_logprob_error_masking(
+         "min_seq_mult_prob_error_after_mask": min_seq_mult_prob_error_after_mask,
+         "num_masked_seqs": num_masked_seqs,
+         "masked_correct_pct": masked_correct_pct,
++        "num_nonfinite_generation_seqs": num_nonfinite_generation_seqs,
+     }
+ 
+ 
+diff --git a/nemo_rl/algorithms/loss/loss_functions.py b/nemo_rl/algorithms/loss/loss_functions.py
+index 1eecd5c39..282154753 100755
+--- a/nemo_rl/algorithms/loss/loss_functions.py
++++ b/nemo_rl/algorithms/loss/loss_functions.py
+@@ -493,9 +493,15 @@ class ClippedPGLossFn(LossFunction):
+         if self.force_on_policy_ratio:
+             prev_logprobs = curr_logprobs.detach()
+ 
++        # Sequences vLLM sampled with non-finite logprobs have sample_mask 0, but
++        # NaN * 0 is still NaN, so the diagnostics below use the train logprob there.
++        finite_generation_logprobs = torch.where(
++            torch.isfinite(generation_logprobs), generation_logprobs, prev_logprobs
++        )
++
+         # token_mult_prob_error
+         # See more details and other metrics in docs/guides/grpo.md#metrics
+-        lp_error = torch.abs(generation_logprobs - prev_logprobs)  # noqa: F841  (precommit ignore for now)
++        lp_error = torch.abs(finite_generation_logprobs - prev_logprobs)  # noqa: F841  (precommit ignore for now)
+         # average over all tokens in the microbatch
+         mult_prob_error = masked_mean(
+             torch.exp(lp_error * mask),
+@@ -506,7 +512,7 @@ class ClippedPGLossFn(LossFunction):
+         # gen-kl: kl(P_gen || P_train)
+         # where log_ratio = prev_logprobs - generation_logprobs
+         gen_kl_error = calculate_kl(
+-            logprobs=generation_logprobs,
++            logprobs=finite_generation_logprobs,
+             logprobs_reference=prev_logprobs,
+             kl_type=self.reference_policy_kl_type,
+             input_clamp_value=None,
+@@ -522,7 +528,7 @@ class ClippedPGLossFn(LossFunction):
+         # where log_ratio = generation_logprobs - prev_logprobs
+         policy_kl_error = calculate_kl(
+             logprobs=prev_logprobs,
+-            logprobs_reference=generation_logprobs,
++            logprobs_reference=finite_generation_logprobs,
+             kl_type=self.reference_policy_kl_type,
+             input_clamp_value=None,
+             output_clamp_value=None,
+@@ -537,7 +543,8 @@ class ClippedPGLossFn(LossFunction):
+         # M = 0.5 * (P_train + P_gen)
+         # JSD = 0.5 * KL(P_train || M) + 0.5 * KL(P_gen || M)
+         log_mixture = torch.log(
+-            0.5 * torch.exp(prev_logprobs) + 0.5 * torch.exp(generation_logprobs)
++            0.5 * torch.exp(prev_logprobs)
++            + 0.5 * torch.exp(finite_generation_logprobs)
+         )
+         # KL(P_train || M)
+         kl_prev_to_mixture = (
+@@ -546,8 +553,8 @@ class ClippedPGLossFn(LossFunction):
+ 
+         # KL(P_gen || M)
+         kl_gen_to_mixture = (
+-            torch.exp(generation_logprobs - log_mixture)
+-            - (generation_logprobs - log_mixture)
++            torch.exp(finite_generation_logprobs - log_mixture)
++            - (finite_generation_logprobs - log_mixture)
+             - 1
+         )
+ 
+@@ -803,7 +810,7 @@ class ClippedPGLossFn(LossFunction):
+         # See more details and other metrics in docs/guides/grpo.md#metrics
+         with torch.no_grad():
+             seq_entropy_approx = -masked_mean(
+-                torch.exp(curr_logprobs - generation_logprobs) * curr_logprobs,
++                torch.exp(curr_logprobs - finite_generation_logprobs) * curr_logprobs,
+                 mask,
+                 global_normalization_factor=global_valid_toks,
+             )
+-- 
+2.43.0
+

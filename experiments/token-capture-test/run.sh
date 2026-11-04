@@ -10,8 +10,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "${HERE}/../.." && pwd)"
 APERTUS2_DIR="${ROOT}/backends/nemo-rl/apertus2"
-source "${APERTUS2_DIR}/env"
-source "${ROOT}/site.env"
+source "${ROOT}/sites/load.sh" && rl_infra_load "${APERTUS2_DIR}/env"
 
 export HARBOR_ROOT="${HARBOR_ROOT:-${SCRATCH}/osb/mini_swe}"
 # run-harbor-osb.sh insists on a Harbor task tree; this agent reads its tasks from the rows.

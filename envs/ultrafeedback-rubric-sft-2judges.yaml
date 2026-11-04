@@ -1,0 +1,233 @@
+# Task file: envs/ultrafeedback-rubric-sft.yaml with two judge models, Qwen and Gemma 4, on one node each.
+# Each prompt draws one judge at random when it is read (data.train.gym_agent_choices), so all its
+# rollouts go to one judge and nothing is averaged across judges. Advantages are normalized per prompt,
+# so a lenient judge does not reach other prompts. Validation stays on Qwen, so AlpacaEval stays
+# comparable with the one-judge runs. Each agent logs its own metrics. For a third judge, add a pool to
+# extra_judge_pools, copy the three Gym entries at the end of this file, and add its agent to the choices.
+#   HF_REPO=google/gemma-4-26B-A4B-it CHECK_SCRIPT=download_model.sh bash backends/nemo-rl/apertus2/check_env_job.sh
+#   bash run.sh envs/ultrafeedback-rubric-sft-2judges.yaml
+defaults: ../recipes/apertus2-chonk-sft-vllm-adamw-rubric.yaml
+script: examples/nemo_gym/run_grpo_nemo_gym.py
+
+grpo:
+  num_prompts_per_step: 128
+  num_generations_per_prompt: 16
+  max_num_steps: 100
+  val_period: 20
+  val_at_start: true
+  val_at_end: true
+  # The Gym entrypoint refuses any other value and validates on the whole validation file.
+  max_val_samples: null
+  val_batch_size: null
+  val_num_generations_per_prompt: 1
+
+policy:
+  train_global_batch_size: 512
+  max_total_sequence_length: 2048
+  generation:
+    # As in the GSM8K runs: a reply gets whatever the prompt leaves of the sequence limit.
+    max_new_tokens: 2048
+    output_format: apertus2
+    system_prompt_file: ${oc.env:RL_INFRA_DIR}/envs/apertus2-system.json
+    stop_token_ids: [12]
+    stop_strings: null
+    vllm_cfg:
+      max_model_len: ${policy.max_total_sequence_length}
+      async_engine: true
+      expose_http_server: true
+      # The checkpoint's tokenizer has no chat template, and the HTTP server does not use
+      # policy.tokenizer.chat_template on its own.
+      http_server_serving_chat_kwargs:
+        chat_template: ${policy.tokenizer.chat_template}
+    vllm_kwargs:
+      # Chonk's hybrid Mamba layers need it.
+      enable_chunked_prefill: true
+
+data:
+  max_input_seq_length: null
+  shuffle: true
+  num_workers: 0
+  # The data block below replaces the recipe's, and grpo.setup() indexes this key.
+  use_multiple_dataloader: false
+  train:
+    dataset_name: NemoGymDataset
+    data_path: ${oc.env:SCRATCH}/rubric-judge/ultrafeedback-bare/train.jsonl
+    gym_agent_choices:
+      - rubric_judge_simple_agent
+      - rubric_judge_gemma_simple_agent
+  validation:
+    dataset_name: NemoGymDataset
+    data_path: ${oc.env:SCRATCH}/rubric-judge/alpaca_eval-bare/validation.jsonl
+  default:
+    dataset_name: NemoGymDataset
+    env_name: nemo_gym
+    prompt_file: null
+    system_prompt_file: null
+    processor: nemo_gym_data_processor
+  _override_: true
+
+env:
+  should_use_nemo_gym: true
+  should_log_nemo_gym_responses: true
+  # Leaves samples the judge could not score out of the loss.
+  should_mask_flagged_samples: true
+  # Full results of every rollout, next to the weights. Never in W&B.
+  rollout_dir: ${checkpointing.checkpoint_dir}/rollouts
+  judge_pool:
+    num_nodes: 1
+    # How full each replica is, for tuning the judge: see judge_stats.py.
+    stats_path: ${checkpointing.checkpoint_dir}/judge_stats.jsonl
+    stats_interval_s: 2.0
+    # A complete generation config: it inherits nothing from policy.generation. One vLLM per GPU.
+    generation:
+      backend: vllm
+      model_name: ${oc.env:SCRATCH}/models/Qwen3.8-27B-FP8
+      max_new_tokens: 1
+      # NeMo-RL's server rejects requests that differ from these, and the rubric server sends them.
+      temperature: 1.0
+      top_p: 1.0
+      top_k: null
+      val_temperature: 1.0
+      val_top_p: 1.0
+      val_top_k: null
+      stop_token_ids: null
+      stop_strings: null
+      colocated:
+        enabled: false
+      vllm_cfg:
+        async_engine: true
+        expose_http_server: true
+        precision: bfloat16
+        kv_cache_dtype: auto
+        logprobs_mode: processed_logprobs
+        tensor_parallel_size: 1
+        pipeline_parallel_size: 1
+        expert_parallel_size: 1
+        gpu_memory_utilization: 0.88
+        max_model_len: 8192
+        enforce_eager: false
+        use_deep_gemm: false
+        num_last_layers_in_bf16: 0
+        num_first_layers_in_bf16: 0
+        enable_vllm_metrics_logger: true
+        vllm_metrics_logger_interval: 2.0
+        refit_with_reload_api: false
+        # Reuses little here: on this hybrid model vLLM caches in blocks of 784 tokens, more than the
+        # rubric text a call repeats (6% of prompt tokens in job 1190280).
+        enable_prefix_caching: true
+      vllm_kwargs:
+        max_num_seqs: 128
+        # Prompt tokens a replica reads per step, as for the policy. A judge does little else, and
+        # vLLM's default of 2048 fits only a few calls.
+        max_num_batched_tokens: 16384
+  # Same form as judge_pool. Each pool fills in the Gym model server it names.
+  extra_judge_pools:
+    gemma:
+      num_nodes: 1
+      gym_model_server: judge_model_gemma
+      stats_path: ${checkpointing.checkpoint_dir}/judge_stats_gemma.jsonl
+      stats_interval_s: 2.0
+      generation:
+        backend: vllm
+        model_name: ${oc.env:SCRATCH}/models/gemma-4-26B-A4B-it
+        max_new_tokens: 1
+        temperature: 1.0
+        top_p: 1.0
+        top_k: null
+        val_temperature: 1.0
+        val_top_p: 1.0
+        val_top_k: null
+        stop_token_ids: null
+        stop_strings: null
+        colocated:
+          enabled: false
+        vllm_cfg: ${env.judge_pool.generation.vllm_cfg}
+        vllm_kwargs: ${env.judge_pool.generation.vllm_kwargs}
+  nemo_gym:
+    skip_venv_if_present: true
+    port_range_low: 5000
+    port_range_high: 5999
+    is_trajectory_collection: false
+    # Gym's servers live on several Ray nodes and must advertise the node IP.
+    use_absolute_ip: true
+    config_paths:
+    - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+    - resources_servers/rubric_judge/configs/rubric_judge.yaml
+    policy_model:
+      responses_api_models:
+        vllm_model:
+          # NeMo-RL clears its own stop settings for Gym, so they travel with each request.
+          extra_body:
+            stop: []
+            stop_token_ids: [12]
+    judge_model:
+      responses_api_models:
+        vllm_model:
+          # NeMo-RL's server answers with `token_id:20` by default; the verdict is read as text.
+          extra_body:
+            return_tokens_as_token_ids: false
+    rubric_judge:
+      resources_servers:
+        rubric_judge:
+          stop_strings: []
+          rubric_weights:
+            helpfulness: 1.0
+            instruction_following: 1.0
+            truthfulness: 1.0
+            honesty: 1.0
+          # A reply cut off by the sequence limit gets this reward without a judge call, so the
+          # policy learns to finish in time. AlpacaEval validation judges such a reply as it stands.
+          truncated_reward: 0.0
+    alpaca_eval_judge:
+      resources_servers:
+        rubric_judge:
+          stop_strings: []
+    # NeMo-RL fills in base_url and model from env.extra_judge_pools.gemma.
+    judge_model_gemma:
+      responses_api_models:
+        vllm_model:
+          entrypoint: app.py
+          api_key: dummy_key
+          return_token_id_information: false
+          uses_reasoning_parser: false
+          # The verdict has to be the first token, so the judge must not think first.
+          chat_template_kwargs:
+            enable_thinking: false
+          extra_body:
+            return_tokens_as_token_ids: false
+    rubric_judge_gemma:
+      resources_servers:
+        rubric_judge:
+          entrypoint: app.py
+          domain: rlhf
+          verified: false
+          description: Rewards free-form responses with an LLM judge on weighted rubrics
+          value: Train on domains with no verifiable answer, such as general chat
+          judge_model_server:
+            type: responses_api_models
+            name: judge_model_gemma
+          stop_strings: []
+          rubric_weights:
+            helpfulness: 1.0
+            instruction_following: 1.0
+            truthfulness: 1.0
+            honesty: 1.0
+          truncated_reward: 0.0
+    rubric_judge_gemma_simple_agent:
+      responses_api_agents:
+        simple_agent:
+          entrypoint: app.py
+          resources_server:
+            type: resources_servers
+            name: rubric_judge_gemma
+          model_server:
+            type: responses_api_models
+            name: policy_model
+          datasets:
+            - name: example
+              type: example
+              jsonl_fpath: resources_servers/rubric_judge/data/example.jsonl
+  _override_: true
+
+logger:
+  tensorboard_enabled: true

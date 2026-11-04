@@ -1,5 +1,5 @@
 #!/bin/bash
-# Fetch chisel (github.com/jpillora/chisel, MIT) for the per-sandbox model tunnel (Gym patch 0003) into
+# Fetch chisel (github.com/jpillora/chisel, MIT) for the per-sandbox model tunnel (Gym patch 0012) into
 # CHISEL_DIR, checked against the release's published sha256 (pinned here). Run on a login node (needs
 # internet); idempotent. Both architectures: arm64 for the GH200 nodes (client), amd64 for the
 # OpenSandbox pods on Breithorn (server, uploaded into every sandbox).

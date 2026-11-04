@@ -1,0 +1,17 @@
+# Tool calls on an SFT checkpoint with AdamW. A rollout of several turns needs the long sequences of
+# the DAPO layout, so this recipe keeps those and serves on 4 vLLM nodes; envs/workplace-assistant-sft.yaml
+# holds the task and the format.
+defaults: apertus2-chonk-vllm-adamw-dapo.yaml
+
+sft_export: chonk-sft/models/chonk-lc-16k-v0.1-ep1-iter_0008075
+
+# 8 trainer nodes and 4 vLLM nodes.
+cluster:
+  num_nodes: 12
+
+policy:
+  model_name: ${oc.env:SCRATCH}/models/chonk-lc-16k-v0.1-ep1-iter_0008075
+  generation:
+    colocated:
+      resources:
+        num_nodes: 4

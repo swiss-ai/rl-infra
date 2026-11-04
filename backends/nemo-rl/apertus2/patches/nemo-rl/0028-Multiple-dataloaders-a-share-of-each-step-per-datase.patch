@@ -1,0 +1,438 @@
+From 3113d44a1e5cd4e9ea4f3bf0200cdb46a9e5cb20 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Tue, 3 Nov 2026 21:09:26 +0900
+Subject: [PATCH] Multiple dataloaders: a share of each step per dataset, with
+ async GRPO
+
+data.num_prompts_per_dataloader takes a size per task name, and the sizes must add up to
+grpo.num_prompts_per_step. Each dataset starts its next pass on its own when it runs out.
+
+Async GRPO now accepts multiple dataloaders. The wrapper builds its iterators at the first pull, so that it
+can be sent to the collector actor, its length is the pass of the longest dataset, and checkpoints keep
+each dataset's position in train_dataloader_<task>.pt.
+
+With more than one task, validation logs accuracy_<task> and training logs reward_<task>. A null
+grpo.max_val_samples validates on every row.
+---
+ docs/guides/grpo.md                         | 10 +++
+ examples/run_grpo.py                        |  6 --
+ nemo_rl/algorithms/grpo.py                  | 99 ++++++++++++++++++---
+ nemo_rl/data/__init__.py                    |  4 +-
+ nemo_rl/data/dataloader.py                  | 33 +++++--
+ tests/unit/algorithms/test_grpo.py          | 12 +++
+ tests/unit/data/test_multiple_dataloader.py | 37 ++++++++
+ 7 files changed, 175 insertions(+), 26 deletions(-)
+
+diff --git a/docs/guides/grpo.md b/docs/guides/grpo.md
+index 4d7d992ac..7bedab6c6 100755
+--- a/docs/guides/grpo.md
++++ b/docs/guides/grpo.md
+@@ -200,6 +200,16 @@ uv run examples/run_grpo.py \
+     data.custom_dataloader=examples.custom_dataloader.custom_dataloader.example_custom_dataloader
+ ```
+ 
++To give each dataset its own share of a step, set `data.num_prompts_per_dataloader` to a size per task name. The sizes must add up to `grpo.num_prompts_per_step`, and each dataset starts a new pass on its own when it runs out. This also works with async GRPO, where `grpo.max_num_epochs` counts passes of the dataset that needs the most steps:
++
++```yaml
++data:
++  use_multiple_dataloader: true
++  num_prompts_per_dataloader:
++    DAPOMath17K: 90
++    gsm8k: 38
++```
++
+ For example, consider using `example_custom_dataloader`, which samples data from each dataloader sequentially.
+ 
+ Given two datasets:
+diff --git a/examples/run_grpo.py b/examples/run_grpo.py
+index ca84cfdc3..b37f465ab 100644
+--- a/examples/run_grpo.py
++++ b/examples/run_grpo.py
+@@ -178,12 +178,6 @@ def main() -> None:
+                         "reward_scaling is not supported with async GRPO"
+                     )
+ 
+-                # Async GRPO does not support multiple dataloaders
+-                if config.data["use_multiple_dataloader"]:
+-                    raise NotImplementedError(
+-                        "use_multiple_dataloader is not supported with async GRPO"
+-                    )
+-
+                 from nemo_rl.algorithms.grpo import async_grpo_train
+ 
+                 print("🚀 Running async GRPO training")
+diff --git a/nemo_rl/algorithms/grpo.py b/nemo_rl/algorithms/grpo.py
+index a52bf3965..6e0453855 100644
+--- a/nemo_rl/algorithms/grpo.py
++++ b/nemo_rl/algorithms/grpo.py
+@@ -16,6 +16,7 @@ import json
+ import os
+ import time
+ import warnings
++from collections.abc import Mapping
+ from concurrent.futures import Future, ThreadPoolExecutor
+ from contextlib import nullcontext
+ from dataclasses import dataclass, fields
+@@ -668,10 +669,19 @@ def setup(
+         dataloader_batch_size = data_config["num_prompts_per_dataloader"]
+     else:
+         dataloader_batch_size = num_prompts_per_step
++    # Set when each dataset has its own share of a step
++    task_batch_sizes = (
++        dict(dataloader_batch_size)
++        if isinstance(dataloader_batch_size, Mapping)
++        else None
++    )
+ 
+     # Validate batch_multiplier
+     batch_multiplier = grpo_config.batch_multiplier
+     if grpo_config.use_dynamic_sampling:
++        assert task_batch_sizes is None, (
++            "use_dynamic_sampling needs one num_prompts_per_dataloader for all dataloaders"
++        )
+         num_prompts_per_step = int(num_prompts_per_step * batch_multiplier)
+         dataloader_batch_size = int(dataloader_batch_size * batch_multiplier)
+     else:
+@@ -687,7 +697,16 @@ def setup(
+         )
+ 
+     # Validate number of prompts per step
+-    if data_config["use_multiple_dataloader"]:
++    if task_batch_sizes is not None:
++        assert set(task_batch_sizes) == set(dataset), (
++            f"num_prompts_per_dataloader names {sorted(task_batch_sizes)}, "
++            f"but the training datasets are {sorted(dataset)}"
++        )
++        assert sum(task_batch_sizes.values()) == num_prompts_per_step, (
++            f"num_prompts_per_dataloader {task_batch_sizes} must add up to "
++            f"num_prompts_per_step, {num_prompts_per_step}"
++        )
++    elif data_config["use_multiple_dataloader"]:
+         assert num_prompts_per_step % dataloader_batch_size == 0, (
+             "Expected num_prompts_per_step to be a multiple of num_prompts_per_dataloader, "
+             f"but got {num_prompts_per_step} and {dataloader_batch_size}. "
+@@ -696,10 +715,10 @@ def setup(
+         )
+ 
+     # Load train dataset
+-    def init_train_dataloader(dataset, suffix: str = ""):
++    def init_train_dataloader(dataset, batch_size: int, suffix: str = ""):
+         dataloader = StatefulDataLoader(
+             dataset,
+-            batch_size=dataloader_batch_size,
++            batch_size=batch_size,
+             shuffle=data_config["shuffle"],
+             collate_fn=rl_collate_fn,
+             drop_last=True,
+@@ -713,11 +732,17 @@ def setup(
+         # Initialize dataloaders
+         dataloaders = {}
+         for task_name, task_dataset in dataset.items():
++            task_batch_size = (
++                task_batch_sizes[task_name]
++                if task_batch_sizes is not None
++                else dataloader_batch_size
++            )
+             dataloaders[task_name] = init_train_dataloader(
+-                task_dataset, f"_{task_name}"
++                task_dataset, task_batch_size, f"_{task_name}"
+             )
+             print(
+-                f"  ✓ Training dataloader {task_name} loaded with {len(task_dataset)} samples",
++                f"  ✓ Training dataloader {task_name} loaded with {len(task_dataset)} samples, "
++                f"{task_batch_size} prompts per step",
+                 flush=True,
+             )
+ 
+@@ -732,7 +757,7 @@ def setup(
+             dataloaders=dataloaders,
+         )
+     else:
+-        dataloader = init_train_dataloader(dataset)
++        dataloader = init_train_dataloader(dataset, dataloader_batch_size)
+         train_sample_count = len(dataloader)
+         print(
+             f"  ✓ Training dataloader loaded with {train_sample_count} samples",
+@@ -4261,6 +4286,25 @@ def grpo_train(
+         shutdown_environments(task_to_env, val_task_to_env)
+ 
+ 
++def _mean_by_task(
++    task_names: list[str], values: list[float], metric_name: str
++) -> dict[str, float]:
++    """Average values per task as ``{metric_name}_{task}``.
++
++    Empty for a single task, where the overall metric already says it all.
++    """
++    tasks = sorted(set(task_names))
++    if len(tasks) < 2:
++        return {}
++    return {
++        f"{metric_name}_{task}": sum(
++            value for name, value in zip(task_names, values) if name == task
++        )
++        / task_names.count(task)
++        for task in tasks
++    }
++
++
+ def validate(
+     policy_generation: GenerationInterface,
+     val_dataloader: Optional[StatefulDataLoader],
+@@ -4307,12 +4351,17 @@ def validate(
+         )
+ 
+         total_rewards = []
++        total_task_names = []
+         total_lengths = []
+         all_message_logs = []  # Collect all message logs
+         all_frame_metrics = []  # Per-sample Apertus 2 frame counts, if any
+ 
++        # None validates on everything in the validation datasets
++        max_val_samples = master_config.grpo.max_val_samples
+         max_batches = (
+-            master_config.grpo.max_val_samples // master_config.grpo.val_batch_size
++            len(val_dataloader)
++            if max_val_samples is None
++            else max_val_samples // master_config.grpo.val_batch_size
+         )
+         for batch_idx, val_batch in enumerate(val_dataloader):
+             if batch_idx >= max_batches:
+@@ -4401,6 +4450,8 @@ def validate(
+                 )
+ 
+             total_rewards.extend(val_batch["total_reward"].tolist())
++            if "task_name" in val_batch:
++                total_task_names.extend(val_batch["task_name"])
+             total_lengths.append(gen_metrics["mean_gen_tokens_per_sample"])
+             if "frame_metrics" in val_batch:
+                 all_frame_metrics.extend(val_batch["frame_metrics"])
+@@ -4449,6 +4500,8 @@ def validate(
+         }
+         if pass_k is not None:
+             val_metrics["pass_k"] = pass_k
++        accuracy_by_task = _mean_by_task(total_task_names, total_rewards, "accuracy")
++        val_metrics.update(accuracy_by_task)
+         for name in all_frame_metrics[0] if all_frame_metrics else ():
+             val_metrics[f"frames/{name}"] = sum(
+                 metrics[name] for metrics in all_frame_metrics
+@@ -4476,6 +4529,8 @@ def validate(
+     # Print summary of validation results
+     print("\n📊 Validation Results:")
+     print(f"    • Accuracy: {accuracy:.4f}")
++    for name, value in accuracy_by_task.items():
++        print(f"    • {name}: {value:.4f}")
+     print(f"    • Average response length: {avg_length:.1f} tokens")
+     print(f"    • Samples processed: {len(total_rewards)}", flush=True)
+ 
+@@ -4490,6 +4545,8 @@ def validate(
+             "content": all_message_logs,
+             "rewards": total_rewards,
+         }
++        if accuracy_by_task:
++            val_log_data["task_name"] = total_task_names
+         if all_frame_metrics:
+             val_log_data["frame_metrics"] = all_frame_metrics
+         logger.log_batched_dict_as_jsonl(val_log_data, f"val_data_step{step}.jsonl")
+@@ -5361,6 +5418,15 @@ def async_grpo_train(
+                     print(
+                         f"  📊 Rewards stats: min={rewards.min():.4f}, max={rewards.max():.4f}, mean={rewards.mean():.4f}, std={rewards.std():.4f}"
+                     )
++                    if master_config.data["use_multiple_dataloader"]:
++                        task_names = repeated_batch["task_name"]
++                        rollout_metrics.update(
++                            _mean_by_task(task_names, rewards.tolist(), "reward")
++                        )
++                        rows_by_task = {
++                            task: task_names.count(task) for task in set(task_names)
++                        }
++                        print(f"  📊 Rows by dataset: {dict(sorted(rows_by_task.items()))}")
+ 
+                 # Prepare training data (same as sync version)
+                 with (
+@@ -5994,10 +6060,21 @@ def async_grpo_train(
+                         )
+                         dataloader_snapshot = collector_checkpoint["dataloader"]
+                         rollouts_state = collector_checkpoint["rollouts"]
+-                        torch.save(
+-                            dataloader_snapshot["dataloader_state"],
+-                            os.path.join(checkpoint_path, "train_dataloader.pt"),
+-                        )
++                        dataloader_state = dataloader_snapshot["dataloader_state"]
++                        if master_config.data["use_multiple_dataloader"]:
++                            for task_name, task_state in dataloader_state.items():
++                                torch.save(
++                                    task_state,
++                                    os.path.join(
++                                        checkpoint_path,
++                                        f"train_dataloader_{task_name}.pt",
++                                    ),
++                                )
++                        else:
++                            torch.save(
++                                dataloader_state,
++                                os.path.join(checkpoint_path, "train_dataloader.pt"),
++                            )
+                         _save_async_replay_buffer_checkpoint(
+                             replay_buffer,
+                             checkpoint_path,
+diff --git a/nemo_rl/data/__init__.py b/nemo_rl/data/__init__.py
+index 113fa926c..b77f18e9a 100644
+--- a/nemo_rl/data/__init__.py
++++ b/nemo_rl/data/__init__.py
+@@ -83,7 +83,9 @@ class DataConfig(TypedDict):
+     # multiple dataloader configs
+     # currently only supported for GRPO
+     use_multiple_dataloader: NotRequired[bool]
+-    num_prompts_per_dataloader: NotRequired[int]
++    # one size for every dataloader, or a size per task name that adds up to
++    # grpo.num_prompts_per_step
++    num_prompts_per_dataloader: NotRequired[int | dict[str, int]]
+     custom_dataloader: NotRequired[str]
+     # dataset configs
+     train: (
+diff --git a/nemo_rl/data/dataloader.py b/nemo_rl/data/dataloader.py
+index ddef3fdf1..af945ff3f 100644
+--- a/nemo_rl/data/dataloader.py
++++ b/nemo_rl/data/dataloader.py
+@@ -53,7 +53,8 @@ class MultipleDataloaderWrapper:
+     This wrapper is used to sample data from multiple dataloaders using a custom dataloader function.
+ 
+     When a single dataloader is exhausted, the data iterator must be reset in the custom dataloader function (as demonstrated in `examples/custom_dataloader/custom_dataloader.py`).
+-    This design ensures that the MultipleDataloaderWrapper operates as an infinite iterator, where __next__() will not raise StopIteration and __len__() is not supported.
++    This design ensures that the MultipleDataloaderWrapper operates as an infinite iterator, where __next__() will not raise StopIteration.
++    __len__() is the number of batches the longest dataloader needs for one pass.
+     """
+ 
+     def __init__(
+@@ -66,13 +67,12 @@ class MultipleDataloaderWrapper:
+         self.data_config = data_config
+         self.dataloaders = dataloaders
+ 
+-        # init data iterators
+-        self.data_iterators = {
+-            task_name: iter(dataloader) for task_name, dataloader in dataloaders.items()
+-        }
+-
+-        # custom dataloader function to decide how to sample the data from the dataloaders
+-        self.custom_dataloader_func = self._load_custom_dataloader_func()
++        # A wrong custom_dataloader path should fail here, not in the async collector
++        self._load_custom_dataloader_func()
++        # Both set at the first pull: async GRPO sends this wrapper to a Ray actor,
++        # and a live iterator cannot be pickled
++        self.data_iterators: dict[str, Iterator] | None = None
++        self.custom_dataloader_func = None
+         # records to pass additional information to the custom dataloader function
+         self.records = {}
+ 
+@@ -90,7 +90,17 @@ class MultipleDataloaderWrapper:
+     def __iter__(self):
+         return self
+ 
++    def __len__(self) -> int:
++        return max(len(dataloader) for dataloader in self.dataloaders.values())
++
+     def __next__(self):
++        if self.data_iterators is None:
++            self.custom_dataloader_func = self._load_custom_dataloader_func()
++            self.data_iterators = {
++                task_name: iter(dataloader)
++                for task_name, dataloader in self.dataloaders.items()
++            }
++
+         # sample data from the dataloaders
+         result, self.data_iterators = self.custom_dataloader_func(
+             self.data_iterators, self.dataloaders, **self.records
+@@ -112,3 +122,10 @@ class MultipleDataloaderWrapper:
+         Records are used to pass additional information to the custom dataloader function to decide how to sample the data from the dataloaders.
+         """
+         self.records.update(records)
++
++    def state_dict(self) -> dict[str, dict[str, Any]]:
++        """Return the state of each dataloader, keyed by task name."""
++        return {
++            task_name: dataloader.state_dict()
++            for task_name, dataloader in self.dataloaders.items()
++        }
+diff --git a/tests/unit/algorithms/test_grpo.py b/tests/unit/algorithms/test_grpo.py
+index f13652600..0ff141202 100644
+--- a/tests/unit/algorithms/test_grpo.py
++++ b/tests/unit/algorithms/test_grpo.py
+@@ -47,6 +47,7 @@ from nemo_rl.algorithms.grpo import (
+     _initial_grpo_save_state,
+     _initial_policy_generation_stale,
+     _maybe_restore_async_replay_buffer_checkpoint,
++    _mean_by_task,
+     _needs_hf_refit_handshake,
+     _raise_if_reward_penalties_enabled_without_nemo_gym,
+     _resolve_logprob_skip_flags,
+@@ -6645,3 +6646,14 @@ def test_grpo_train_sync_logs_data_plane_metrics_before_committing_the_step(
+         if f"data_plane/{scope}/breakdown" in c.args
+     ], "the per-op breakdown table was not logged"
+     client.close()
++
++
++def test_mean_by_task_averages_each_task():
++    assert _mean_by_task(["a", "b", "a"], [1.0, 0.5, 0.0], "accuracy") == {
++        "accuracy_a": 0.5,
++        "accuracy_b": 0.5,
++    }
++
++
++def test_mean_by_task_is_empty_for_a_single_task():
++    assert _mean_by_task(["a", "a"], [1.0, 0.0], "accuracy") == {}
+diff --git a/tests/unit/data/test_multiple_dataloader.py b/tests/unit/data/test_multiple_dataloader.py
+index cd276cf6c..15394cc4b 100644
+--- a/tests/unit/data/test_multiple_dataloader.py
++++ b/tests/unit/data/test_multiple_dataloader.py
+@@ -12,6 +12,7 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
++import cloudpickle
+ import pytest
+ from torchdata.stateful_dataloader import StatefulDataLoader
+ 
+@@ -111,3 +112,39 @@ def test_multiple_dataloader_with_records(dataloaders):
+         iter_count += 1
+         if iter_count == 3:
+             break
++
++
++def _wrap(dataloaders: dict[str, StatefulDataLoader]) -> MultipleDataloaderWrapper:
++    return MultipleDataloaderWrapper(
++        expected_num_prompts=4,
++        data_config={
++            "custom_dataloader": "examples.custom_dataloader.custom_dataloader.example_custom_dataloader"
++        },
++        dataloaders=dataloaders,
++    )
++
++
++def test_multiple_dataloader_length_is_the_longest_dataloader(dataloaders):
++    assert len(_wrap(dataloaders)) == 2
++
++
++def test_multiple_dataloader_survives_pickling_before_the_first_pull(dataloaders):
++    # Async GRPO sends the wrapper to the trajectory collector, a Ray actor.
++    wrapped_dataloader = cloudpickle.loads(cloudpickle.dumps(_wrap(dataloaders)))
++
++    data = next(wrapped_dataloader)
++
++    content = sorted([message[0]["content"] for message in data["message_log"]])
++    assert content == ["0", "1", "2", "3"]
++
++
++def test_multiple_dataloader_state_resumes_each_dataloader(dataloaders):
++    wrapped_dataloader = _wrap(dataloaders)
++    next(wrapped_dataloader)
++
++    state = wrapped_dataloader.state_dict()
++
++    assert set(state) == {"dataloader1", "dataloader2"}
++    dataloaders["dataloader2"].load_state_dict(state["dataloader2"])
++    batch = next(iter(dataloaders["dataloader2"]))
++    assert [message[0]["content"] for message in batch["message_log"]] == ["4", "5"]
+-- 
+2.43.0
+

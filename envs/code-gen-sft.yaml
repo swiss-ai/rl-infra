@@ -1,0 +1,103 @@
+# Task file: competitive coding on an SFT checkpoint, on Gym's code_gen: one reply with a Python code
+# block, which runs against the problem's unit tests. Model-written code runs only in the sandbox
+# service, on a node of its own, so start that first:
+#   GYM_DIR=... bash backends/nemo-rl/sandbox/setup.sh
+#   MAX_TRAIN_ROW_BYTES=... MAX_VALIDATION_ROW_BYTES=... bash backends/nemo-rl/sandbox/setup-data.sh
+#   JOB_TIME=06:00:00 bash backends/nemo-rl/sandbox/start.sh
+#   bash run.sh envs/code-gen-sft.yaml
+# The reward is 1 only if every test passes, Gym's standard score, so a time-out on any test scores 0.
+defaults: ../recipes/apertus2-chonk-sft-vllm-adamw-code.yaml
+script: examples/nemo_gym/run_grpo_nemo_gym.py
+
+grpo:
+  num_prompts_per_step: 128
+  num_generations_per_prompt: 16
+  max_num_steps: 100
+  val_period: 20
+  val_at_start: true
+  val_at_end: true
+  # The Gym entrypoint refuses any other value and validates on the whole validation file.
+  max_val_samples: null
+  val_batch_size: null
+  val_num_generations_per_prompt: 1
+  # The DAPO layout's math settings: the Gym entrypoint refuses reward shaping, and the rubric runs on
+  # Gym do not skip groups.
+  reward_shaping:
+    enabled: false
+  skip_zero_advantage_groups: false
+
+policy:
+  train_global_batch_size: 512
+  generation:
+    max_new_tokens: 16384
+    # 3/4 of max_new_tokens: vLLM closes a think frame here, so that a reply always has room.
+    thinking_token_budget: 12288
+    output_format: apertus2
+    system_prompt_file: ${oc.env:RL_INFRA_DIR}/envs/apertus2-system.json
+    stop_token_ids: [12]
+    stop_strings: null
+    vllm_cfg:
+      max_model_len: ${policy.max_total_sequence_length}
+      async_engine: true
+      expose_http_server: true
+      # The checkpoint's tokenizer has no chat template, and the HTTP server does not use
+      # policy.tokenizer.chat_template on its own.
+      http_server_serving_chat_kwargs:
+        chat_template: ${policy.tokenizer.chat_template}
+    vllm_kwargs:
+      # Chonk's hybrid Mamba layers need it.
+      enable_chunked_prefill: true
+
+data:
+  max_input_seq_length: null
+  shuffle: true
+  num_workers: 0
+  # The data block below replaces the recipe's, and grpo.setup() indexes this key.
+  use_multiple_dataloader: false
+  train:
+    dataset_name: NemoGymDataset
+    data_path: ${oc.env:SCRATCH}/code-gen/train.jsonl
+  validation:
+    dataset_name: NemoGymDataset
+    data_path: ${oc.env:SCRATCH}/code-gen/validation.jsonl
+  default:
+    dataset_name: NemoGymDataset
+    env_name: nemo_gym
+    prompt_file: null
+    system_prompt_file: null
+    processor: nemo_gym_data_processor
+  _override_: true
+
+env:
+  should_use_nemo_gym: true
+  should_log_nemo_gym_responses: true
+  # Full results of every rollout, next to the weights. Never in W&B.
+  rollout_dir: ${checkpointing.checkpoint_dir}/rollouts
+  nemo_gym:
+    skip_venv_if_present: true
+    port_range_low: 5000
+    port_range_high: 5999
+    is_trajectory_collection: false
+    # Gym's servers live on several Ray nodes and must advertise the node IP.
+    use_absolute_ip: true
+    config_paths:
+    - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+    - resources_servers/code_gen/configs/code_gen.yaml
+    policy_model:
+      responses_api_models:
+        vllm_model:
+          # NeMo-RL clears its own stop settings for Gym, so they travel with each request.
+          extra_body:
+            stop: []
+            stop_token_ids: [12]
+    code_gen:
+      resources_servers:
+        code_gen:
+          # As many as the sandbox node serves at once.
+          num_processes: 128
+          sandbox_endpoint_file: ${oc.env:SCRATCH}/code-sandbox/endpoint.json
+          reward_mode: all_tests
+  _override_: true
+
+logger:
+  tensorboard_enabled: true

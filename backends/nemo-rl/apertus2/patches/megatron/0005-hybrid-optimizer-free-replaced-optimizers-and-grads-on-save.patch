@@ -1,0 +1,70 @@
+--- a/megatron/core/optimizer/__init__.py
++++ b/megatron/core/optimizer/__init__.py
+@@ -1,5 +1,6 @@
+ # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+ import copy
++import gc
+ import logging
+ import warnings
+ from dataclasses import astuple
+@@ -708,6 +709,17 @@ def check_config_overrides_consistency(
+     return True
+ 
+ 
++def _collect_replaced_optimizers(config: OptimizerConfig) -> None:
++    """Free the HybridDeviceOptimizers that DistributedOptimizer replaced.
++
++    Their hooks keep them in reference cycles, so each still holds a host copy of its params
++    until a full garbage collection, which can come after a checkpoint load has allocated
++    the optimizer state on top of it.
++    """
++    if config.optimizer_cpu_offload:
++        gc.collect()
++
++
+ def get_megatron_optimizer(
+     config: OptimizerConfig,
+     model_chunks: List[MegatronModule],
+@@ -802,6 +814,7 @@ def get_megatron_optimizer(
+             )
+             model_chunk_offset += 1
+ 
++        _collect_replaced_optimizers(config)
+         if len(optimizers) == 1:
+             return optimizers[0]
+ 
+@@ -892,4 +905,5 @@ def get_megatron_optimizer(
+             state_dict=param_to_param_group, checkpoint_id=dump_param_to_param_group_map
+         )
+ 
++    _collect_replaced_optimizers(config)
+     return ChainedOptimizer(optimizers)
+--- a/megatron/core/optimizer/cpu_offloading/hybrid_optimizer.py
++++ b/megatron/core/optimizer/cpu_offloading/hybrid_optimizer.py
+@@ -491,3 +491,14 @@ class HybridDeviceOptimizer(torch.optim.Optimizer):
+         if self.gpu_optimizer is not None:
+             return self.cpu_optimizers + [self.gpu_optimizer]
+         return self.cpu_optimizers
++
++    def release_cpu_grads(self):
++        """
++        Free the CPU grads, which the next step allocates again. They are pinned, so their
++        memory only returns to the OS once the pinned allocator's cache is emptied.
++        """
++        for optimizer in self.cpu_optimizers:
++            for param in _param_generator(optimizer):
++                param.grad = None
++        self.cpu_copy_map_grad.clear()
++        torch._C._host_emptyCache()
+--- a/megatron/core/optimizer/distrib_optimizer.py
++++ b/megatron/core/optimizer/distrib_optimizer.py
+@@ -1395,6 +1395,9 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
+ 
+         Regular state dict parameters are saved on DP rank 0 and loaded on all ranks.
+         """
++        # Nothing reads the CPU grads until the next step, and a save needs the host memory.
++        if not is_loading and isinstance(self.optimizer, HybridDeviceOptimizer):
++            self.optimizer.release_cpu_grads()
+         if sharding_type is not None:
+             log_single_rank(
+                 logger,

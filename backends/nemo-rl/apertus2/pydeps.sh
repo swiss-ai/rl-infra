@@ -21,12 +21,30 @@ PKGS=(
     asttokens==3.0.2
     executing==2.3.0
 )
+# NeMo Gym tasks (PYDEPS_GYM, set by run.sh with an overlay of their own, so these never reach the
+# overlay other jobs run from): the openai Gym pins (the image's 2.7.2 lacks what Gym and vLLM's
+# server import), and devtools, yappi and pydot with devtools' two dependencies, missing from the image.
+if [[ -n "${PYDEPS_GYM:-}" ]]; then
+    PKGS+=(openai==2.44.0 devtools==0.13.0 yappi==1.7.6 pydot==4.0.1 asttokens==3.0.2 executing==2.3.0)
+fi
+# Tasks in the Apertus 2 message format (PYDEPS_APERTUS2, set by run.sh with an overlay of their own,
+# so this never reaches the overlay other jobs run from) install apertus-common from the checkout
+# setup.sh made. It asks for Python 3.13 and tokenizers 0.23.2, but runs on the image's 3.12 and
+# 0.23.1, and encodes the SFT data exactly there.
+PKGS_PY313=()
+if [[ -n "${PYDEPS_APERTUS2:-}" ]]; then
+    PKGS_PY313=("${PYDEPS_APERTUS2}")
+fi
+STAMP="${PKGS[*]}${PKGS_PY313[*]:+ ${PKGS_PY313[*]}}"
 
-if [[ "$(cat "${PYDEPS}/.complete" 2>/dev/null)" != "${PKGS[*]}" ]]; then
+if [[ "$(cat "${PYDEPS}/.complete" 2>/dev/null)" != "${STAMP}" ]]; then
     mkdir -p "$(dirname "${PYDEPS}")"
     tmp="${PYDEPS}.tmp.$$"
     uv pip install --python /usr/bin/python3.12 --no-deps --target "${tmp}" "${PKGS[@]}"
-    printf '%s' "${PKGS[*]}" > "${tmp}/.complete"
+    if (( ${#PKGS_PY313[@]} )); then
+        uv pip install --python /usr/bin/python3.12 --python-version 3.13 --no-deps --target "${tmp}" "${PKGS_PY313[@]}"
+    fi
+    printf '%s' "${STAMP}" > "${tmp}/.complete"
     rm -rf "${PYDEPS}"
     mv "${tmp}" "${PYDEPS}"
 fi

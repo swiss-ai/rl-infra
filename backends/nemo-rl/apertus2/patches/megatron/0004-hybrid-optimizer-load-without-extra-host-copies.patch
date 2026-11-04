@@ -1,0 +1,49 @@
+--- a/megatron/core/optimizer/cpu_offloading/hybrid_optimizer.py
++++ b/megatron/core/optimizer/cpu_offloading/hybrid_optimizer.py
+@@ -270,11 +270,20 @@
+             for param in group["params"]:
+                 orig_param = param
+                 cpu_copy = False
++                # After a load master_param already is the fp32 copy. A new clone would hold a
++                # second one on top of it until the next step, once per load_state_dict.
++                fp32_param = None
++                if self.param_update_in_fp32 and param.dtype != torch.float32:
++                    fp32_param = self.state.get(param, {}).get("master_param")
+                 if offload_params_numel < offload_threshold and param.is_cuda:
+-                    param = param.detach().clone().cpu().pin_memory()
++                    if fp32_param is None:
++                        param = param.detach().clone().cpu().pin_memory()
+                     offload_params_numel += param.numel()
+                     cpu_copy = True
+-                if self.param_update_in_fp32 and param.dtype != torch.float32:
++                if fp32_param is not None:
++                    param = fp32_param
++                    param_to_fp32_param[orig_param] = param
++                elif self.param_update_in_fp32 and param.dtype != torch.float32:
+                     param = param.detach().clone().float()
+                     param_to_fp32_param[orig_param] = param
+ 
+@@ -457,11 +466,22 @@
+         which can solve the problem of checkpoint loading for an inplace operation
+         such as loading a torch distributed checkpoint, for example.
+         """
++        # Only the state is wanted, so the CPU params share one zero grad. Grads of their own
++        # would take as much host memory as the params, during a load that does not use them.
++        cpu_params = [p for optimizer in self.cpu_optimizers for p in _param_generator(optimizer)]
++        if cpu_params:
++            largest = max(cpu_params, key=lambda p: p.numel())
++            zeros = torch.zeros(largest.numel(), dtype=largest.dtype)
++            for param in cpu_params:
++                param.grad = zeros[: param.numel()].view_as(param).to(param.dtype)
+         for group in self.param_groups:
+             for param in group["params"]:
+-                param.grad = torch.randn_like(param)
++                if param not in self.gpu_params_map_cpu_copy:
++                    param.grad = torch.randn_like(param)
+         self.step()
+         self.zero_grad()
++        for param in cpu_params:
++            param.grad = None
+ 
+     @property
+     def sub_optimizers(self):

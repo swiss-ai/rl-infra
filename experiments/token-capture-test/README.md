@@ -22,7 +22,7 @@ OpenSandbox traffic.
 
 ## Run
 
-Same prerequisites as `run-harbor-osb.sh` (setup done, Gym at `apertus2-osb`,
+Same prerequisites as `run-harbor-osb.sh` (setup done, Gym set up by `setup-gym.sh`,
 `~/.opensandbox_token`). The model is downloaded to `$SCRATCH/huggingface` on first use; the task
 images are public `docker.io/swebench/sweb.eval.x86_64.*` images.
 

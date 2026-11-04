@@ -48,16 +48,14 @@ bash experiments/chonk-sc/check.sh             # RUNS="a" or RUNS="b" for one ru
   note if the cluster clone differs. In that merge #2517 also replaces f196's
   `resolve_distributed_executor_backend` (`uni` for EP > TP) with its inline choice (`mp`); the
   legacy Chonk runs (5184052) ran with the same code.
-- **(c) Gym checkout** (run B): branch `apertus2-osb-capture`, Gym patch 0001 (`harbor_model_base_url`
-  / `base_url_for_run`: without it capture records nothing and every row is rejected, job 5236016),
-  0002 (`_should_mask`, capture-aware masking), `nemo_gym/token_id_capture`, the OpenSandbox
-  configs. Fix:
+- **(c) Gym checkout** (run B): `setup-gym.sh` has applied the current `patches/gym` set (its stamp
+  matches), Gym patch 0010 (`harbor_model_base_url` / `base_url_for_run`: without it capture records
+  nothing and every row is rejected, job 5236016), 0011 (`_should_mask`, capture-aware masking),
+  `nemo_gym/token_id_capture`, the OpenSandbox configs (patches 0006-0009). Fix:
   ```bash
-  GYM_BRANCH=apertus2-osb-capture GYM_PATCHES="$(ls $PWD/backends/nemo-rl/apertus2/patches/gym/*.patch)" \
-      bash backends/nemo-rl/apertus2/setup-gym.sh
+  bash backends/nemo-rl/apertus2/setup-gym.sh
   ```
-  The checkout is shared by every run of the clone: run B needs it on `apertus2-osb-capture`, legacy
-  harbor runs (Rob's) use `apertus2-osb`.
+  One checkout serves every run of the clone (main's tasks, Rob's harbor runs, run B).
 - **(a) configs**: writes `$SCRATCH/chonk-sc-check/run-{a,b}.yaml` exactly as the launchers do
   (A: `run.sh` → `[recipe, run-a-gsm8k.yaml]`; B: `run-harbor-osb.sh` → `[recipe,
   envs/harbor-osb.yaml, run-b-harbor-sc.yaml]`), then `check.py` runs the clone's own code:

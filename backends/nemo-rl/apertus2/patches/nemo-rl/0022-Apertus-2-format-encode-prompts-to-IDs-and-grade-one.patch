@@ -1,0 +1,1006 @@
+From 0d14adeb3319abf1a81762e61e2e1169a826dc70 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Sun, 1 Nov 2026 06:11:16 +0900
+Subject: [PATCH] Apertus 2 format: encode prompts to IDs and grade one output
+ frame
+
+A model trained on the Apertus 2 message format has no chat template: its
+prompts are built from typed messages, and its outputs are frames that only
+token IDs can split safely. Selected by config, so other models are unchanged.
+
+- apertus2_math_data_processor encodes the prompt with apertus-common.
+- policy.generation.output_format=apertus2 applies the format's token mask in
+  vLLM and parses each output from its token IDs.
+- env.math.reward_frame picks the graded frame, claim or reply. The other is
+  verified too, and frames/* metrics and val_data_step*.jsonl compare them.
+---
+ examples/configs/grpo_math_1B.yaml            |   4 +
+ nemo_rl/algorithms/grpo.py                    |   9 +
+ nemo_rl/data/apertus2_format.py               | 180 ++++++++++++++++++
+ nemo_rl/data/processors.py                    |  56 ++++++
+ nemo_rl/environments/math_environment.py      | 145 ++++++++++----
+ nemo_rl/experience/rollouts.py                |  39 +++-
+ nemo_rl/models/generation/interfaces.py       |   2 +
+ nemo_rl/models/generation/vllm/vllm_worker.py |   7 +
+ pyrefly.toml                                  |   1 +
+ tests/unit/data/test_apertus2_format.py       | 171 +++++++++++++++++
+ .../environments/test_math_environment.py     |  73 +++++++
+ .../unit/reference_configs/grpo_math_1B.yaml  |   2 +
+ 12 files changed, 654 insertions(+), 35 deletions(-)
+ create mode 100644 nemo_rl/data/apertus2_format.py
+ create mode 100644 tests/unit/data/test_apertus2_format.py
+
+diff --git a/examples/configs/grpo_math_1B.yaml b/examples/configs/grpo_math_1B.yaml
+index 35f1d8a05..e4aa7fc98 100644
+--- a/examples/configs/grpo_math_1B.yaml
++++ b/examples/configs/grpo_math_1B.yaml
+@@ -418,6 +418,8 @@ policy:
+     val_top_p: ${.top_p}
+     val_top_k: ${.top_k}
+     stop_token_ids: null
++    # null, or "apertus2": block the format's forbidden token IDs and split outputs into frames (needs env.math.reward_frame)
++    output_format: null
+     stop_strings: null
+     # null = topology default (IPC colocated, NCCL non-colocated). For
+     # non-colocated Megatron generation it selects the packed collective; use
+@@ -556,6 +558,8 @@ env:
+   math:
+     num_workers: 8
+     math_verify_impl: "hf_math_verify"
++    # With output_format apertus2, the frame the reward grades: "claim" or "reply"
++    reward_frame: null
+ 
+ logger:
+   log_dir: "logs"  # Base directory for all logs
+diff --git a/nemo_rl/algorithms/grpo.py b/nemo_rl/algorithms/grpo.py
+index 18e0677bd..a52bf3965 100644
+--- a/nemo_rl/algorithms/grpo.py
++++ b/nemo_rl/algorithms/grpo.py
+@@ -4309,6 +4309,7 @@ def validate(
+         total_rewards = []
+         total_lengths = []
+         all_message_logs = []  # Collect all message logs
++        all_frame_metrics = []  # Per-sample Apertus 2 frame counts, if any
+ 
+         max_batches = (
+             master_config.grpo.max_val_samples // master_config.grpo.val_batch_size
+@@ -4401,6 +4402,8 @@ def validate(
+ 
+             total_rewards.extend(val_batch["total_reward"].tolist())
+             total_lengths.append(gen_metrics["mean_gen_tokens_per_sample"])
++            if "frame_metrics" in val_batch:
++                all_frame_metrics.extend(val_batch["frame_metrics"])
+ 
+             # Collect message logs for later display
+             to_env = [
+@@ -4446,6 +4449,10 @@ def validate(
+         }
+         if pass_k is not None:
+             val_metrics["pass_k"] = pass_k
++        for name in all_frame_metrics[0] if all_frame_metrics else ():
++            val_metrics[f"frames/{name}"] = sum(
++                metrics[name] for metrics in all_frame_metrics
++            ) / len(all_frame_metrics)
+ 
+         # Print sample conversations only once at the end of validation
+         try:
+@@ -4483,6 +4490,8 @@ def validate(
+             "content": all_message_logs,
+             "rewards": total_rewards,
+         }
++        if all_frame_metrics:
++            val_log_data["frame_metrics"] = all_frame_metrics
+         logger.log_batched_dict_as_jsonl(val_log_data, f"val_data_step{step}.jsonl")
+ 
+     # Make sure to reset the timer after validation
+diff --git a/nemo_rl/data/apertus2_format.py b/nemo_rl/data/apertus2_format.py
+new file mode 100644
+index 000000000..73a2ed660
+--- /dev/null
++++ b/nemo_rl/data/apertus2_format.py
+@@ -0,0 +1,180 @@
++# Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""The Apertus 2 message format for rollouts, on top of apertus-common.
++
++Apertus 2 has no chat template. Prompts are encoded from typed messages to token
++IDs, and generated tokens are split into frames at their control tokens, so that
++text can never pass for a control token.
++"""
++
++import json
++from dataclasses import dataclass
++from functools import lru_cache
++from typing import Any
++
++APERTUS2_OUTPUT_FORMAT = "apertus2"
++# A claim is a bare answer; a longer one is the model talking in the claim frame.
++LONG_CLAIM_CHARS = 40
++
++
++@dataclass
++class Apertus2Output:
++    """One burst of generated tokens, split into the frames rollouts care about.
++
++    Attributes:
++        claim: Payload of the last claim frame, or None if there is none.
++        reply: Payloads of the reply frames, joined, or None if there is none.
++        has_call: Whether the burst has a tool call frame.
++        error: The parser's message when the tokens are not valid frames.
++        truncated: Whether generation hit the token limit.
++    """
++
++    claim: str | None
++    reply: str | None
++    has_call: bool
++    error: str | None
++    truncated: bool
++
++
++@lru_cache(maxsize=1)
++def _get_encoding(tokenizer_path: str) -> Any:
++    # apertus-common is an optional dependency, needed only by this format. From
++    # the path, not the tokenizer object: load_encoding changes how the backend
++    # tokenizer it is given treats special tokens.
++    from apertus_common import load_encoding
++
++    return load_encoding(tokenizer_path)
++
++
++def encode_prompt(
++    tokenizer_path: str, *, system_prompt: str, user_text: str
++) -> list[int]:
++    """Encode a system frame and one user message, ending at ``<|/in|>``.
++
++    The model writes the first ``<|out|>`` itself, so nothing is prefilled.
++
++    Args:
++        tokenizer_path: Directory of the Apertus 2 tokenizer.
++        system_prompt: The system frame's JSON object, such as
++            ``{"thinking":"medium","tools":[]}``.
++        user_text: Text of the user message.
++
++    Returns:
++        The prompt's token IDs.
++    """
++    # apertus-common is an optional dependency, needed only by this format.
++    from apertus_common import Conversation, SystemPrompt, User
++
++    return _get_encoding(tokenizer_path).encode_conversation(
++        Conversation(
++            system=SystemPrompt.model_validate(json.loads(system_prompt)),
++            items=[User(payload=user_text)],
++        )
++    )
++
++
++def allowed_token_ids(tokenizer_path: str) -> list[int]:
++    """Return every token ID the model may generate, for vLLM's sampling params."""
++    encoding = _get_encoding(tokenizer_path)
++    forbidden = set(encoding.generation_constraints.forbidden_token_ids)
++    return [i for i in range(encoding.vocab_size) if i not in forbidden]
++
++
++def parse_output(
++    tokenizer_path: str, token_ids: list[int], *, truncated: bool
++) -> Apertus2Output:
++    """Split generated tokens into frames.
++
++    Tokens that are not valid frames give no claim and no reply, even where one
++    was already complete: only a whole, well-formed burst is graded.
++
++    Args:
++        tokenizer_path: Directory of the Apertus 2 tokenizer.
++        token_ids: The generated tokens, including ``<|wait|>``.
++        truncated: Whether generation hit the token limit.
++
++    Returns:
++        The frames of the burst.
++    """
++    # apertus-common is an optional dependency, needed only by this format.
++    from apertus_common import Call, Claim, Reply, StreamParseError
++
++    parser = _get_encoding(tokenizer_path).output_parser()
++    try:
++        parser.push_tokens(token_ids)
++        items = parser.finish().items
++    except StreamParseError as error:
++        return Apertus2Output(
++            claim=None,
++            reply=None,
++            has_call=False,
++            error=str(error),
++            truncated=truncated,
++        )
++
++    claims = [item.payload for item in items if isinstance(item, Claim)]
++    replies = [item.payload for item in items if isinstance(item, Reply)]
++    return Apertus2Output(
++        claim=claims[-1] if claims else None,
++        reply="".join(replies) if replies else None,
++        has_call=any(isinstance(item, Call) for item in items),
++        error=None,
++        truncated=truncated,
++    )
++
++
++def frame_text(output: Apertus2Output, frame: str) -> str:
++    """Return the text of a frame, empty if the output does not have it.
++
++    Args:
++        output: The parsed burst.
++        frame: "claim" or "reply".
++
++    Returns:
++        The frame's text.
++    """
++    if frame == "claim":
++        return output.claim or ""
++    if frame == "reply":
++        return output.reply or ""
++    raise ValueError(f"Unknown Apertus 2 frame {frame!r}: expected claim or reply.")
++
++
++def frame_metrics(
++    output: Apertus2Output, *, claim_score: float, reply_score: float
++) -> dict[str, float]:
++    """Return per-sample counts of how the frames came out, to average over a batch.
++
++    Args:
++        output: The parsed burst.
++        claim_score: Verifier score of the claim.
++        reply_score: Verifier score of the reply.
++
++    Returns:
++        One value per metric.
++    """
++    claim = output.claim
++    claim_right = claim_score > 0
++    reply_right = reply_score > 0
++    return {
++        "claim_correct": float(claim_right),
++        "reply_correct": float(reply_right),
++        "claim_right_reply_wrong": float(claim_right and not reply_right),
++        "reply_right_claim_wrong": float(reply_right and not claim_right),
++        "malformed": float(output.error is not None and not output.truncated),
++        "no_claim": float(output.error is None and claim is None),
++        "claim_chars": float(len(claim)) if claim else 0.0,
++        "long_claim": float(claim is not None and len(claim) > LONG_CLAIM_CHARS),
++        "undeclared_call": float(output.has_call),
++    }
+diff --git a/nemo_rl/data/processors.py b/nemo_rl/data/processors.py
+index 4c1439a3a..3573b72ec 100644
+--- a/nemo_rl/data/processors.py
++++ b/nemo_rl/data/processors.py
+@@ -30,6 +30,7 @@ from nemo_rl.data.interfaces import (
+     TaskDataSpec,
+     VLMMessageLogType,
+ )
++from nemo_rl.data.apertus2_format import encode_prompt
+ from nemo_rl.data.llm_message_utils import get_formatted_message_log
+ 
+ TokenizerType = PreTrainedTokenizerBase
+@@ -622,6 +623,60 @@ def math_hf_data_processor(
+     return output
+ 
+ 
++def apertus2_math_data_processor(
++    datum_dict: dict[str, Any],
++    task_data_spec: TaskDataSpec,
++    tokenizer: TokenizerType,
++    max_seq_length: int,
++    idx: int,
++) -> DatumSpec:
++    """Like math_hf_data_processor, for the Apertus 2 message format.
++
++    The prompt is encoded to token IDs directly instead of being rendered to a
++    string and tokenized, so problem text cannot become control tokens.
++    """
++    user_message = datum_dict["messages"]
++    problem = user_message[0]["content"]
++    extra_env_info = {"ground_truth": user_message[1]["content"]}
++
++    assert task_data_spec.system_prompt, (
++        "Apertus 2 needs system_prompt_file: a JSON file with the system frame, "
++        'such as {"thinking":"medium","tools":[]}.'
++    )
++    formatted_content = (
++        task_data_spec.prompt.format(problem) if task_data_spec.prompt else problem
++    )
++    token_ids = torch.tensor(
++        encode_prompt(
++            tokenizer.name_or_path,
++            system_prompt=task_data_spec.system_prompt,
++            user_text=formatted_content,
++        ),
++        dtype=torch.long,
++    )
++    message_log: LLMMessageLogType = [
++        {"role": "user", "content": formatted_content, "token_ids": token_ids}
++    ]
++
++    length = len(token_ids)
++
++    loss_multiplier = 1.0
++    if length >= max_seq_length:
++        # make smaller and mask out
++        message_log[0]["token_ids"] = token_ids[: min(4, max_seq_length)]
++        loss_multiplier = 0.0
++
++    output: DatumSpec = {
++        "message_log": message_log,
++        "length": length,
++        "extra_env_info": extra_env_info,
++        "loss_multiplier": loss_multiplier,
++        "idx": idx,
++        "task_name": datum_dict["task_name"],
++    }
++    return output
++
++
+ def vlm_hf_data_processor(
+     datum_dict: dict[str, Any],
+     task_data_spec: TaskDataSpec,
+@@ -1014,6 +1069,7 @@ PROCESSOR_REGISTRY: Dict[str, TaskDataProcessFnCallable] = cast(
+     Dict[str, TaskDataProcessFnCallable],
+     {
+         "default": math_hf_data_processor,
++        "apertus2_math_data_processor": apertus2_math_data_processor,
+         "helpsteer3_data_processor": helpsteer3_data_processor,
+         "kd_data_processor": kd_data_processor,
+         "math_data_processor": math_data_processor,
+diff --git a/nemo_rl/environments/math_environment.py b/nemo_rl/environments/math_environment.py
+index e453f3b3b..8874fec8c 100644
+--- a/nemo_rl/environments/math_environment.py
++++ b/nemo_rl/environments/math_environment.py
+@@ -25,6 +25,7 @@ from math_verify.errors import TimeoutException
+ from math_verify.metric import math_metric
+ from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
+ 
++from nemo_rl.data.apertus2_format import Apertus2Output, frame_metrics, frame_text
+ from nemo_rl.data.interfaces import LLMMessageLogType
+ from nemo_rl.distributed.batched_data_dict import BatchedDataDict
+ from nemo_rl.distributed.virtual_cluster import PY_EXECUTABLES
+@@ -46,6 +47,9 @@ class MathEnvConfig(TypedDict):
+     # The verifier type. None defaults to "math".
+     verifier_type: NotRequired[str | None]
+     math_verify_impl: NotRequired[str | None]
++    # Frame of the Apertus 2 format the reward grades: "claim" or "reply". The other
++    # frame is verified too, as a metric. None grades the whole response as text.
++    reward_frame: NotRequired[str | None]
+ 
+ 
+ @contextlib.contextmanager
+@@ -370,6 +374,23 @@ class HFMultiRewardVerifyWorker:
+ class MathEnvironmentMetadata(TypedDict):
+     ground_truth: str
+     extracted_answer: str | None
++    # Per-sample counts from the Apertus 2 frames, set by step().
++    frame_metrics: NotRequired[dict[str, float]]
++
++
++def _apertus2_outputs(
++    message_log_batch: list[LLMMessageLogType],
++) -> list[Apertus2Output] | None:
++    """Return each conversation's last parsed output, or None for plain-text responses."""
++    outputs = [
++        [
++            message["apertus2_output"]
++            for message in conversation
++            if "apertus2_output" in message
++        ]
++        for conversation in message_log_batch
++    ]
++    return [parsed[-1] for parsed in outputs] if any(outputs) else None
+ 
+ 
+ # Use a base class to share some functions to avoid code duplication.
+@@ -453,41 +474,15 @@ class MathEnvironment(BaseMathEnvironment):
+         "multilingual_multichoice": MultilingualMultichoiceVerifyWorker,
+     }
+ 
+-    def step(
++    def _verify(
+         self,
+-        message_log_batch: list[LLMMessageLogType],
+-        metadata: list[MathEnvironmentMetadata],
+-        return_extracted_answer: bool = False,
+-    ) -> EnvironmentReturn[MathEnvironmentMetadata]:
+-        """Runs a step in the math environment.
+-
+-        Args:
+-            message_log: list[list[dict[str, str]]]. A batch of OpenAI-API-like message logs that represent interactions with the LLM.
+-            metadata: list[MathEnvironmentMetadata]. The grader will use the 'ground_truth' key to evaluate correctness. The extracted answer will be stored to caculate cons@k.
+-
+-        Returns:
+-            EnvironmentReturn: A tuple containing:
+-                - list[dict[str, str]]: Observations/responses batch
+-                - list[dict]: Updated metadata
+-                - list[str]: Next stop strings for the next turn
+-                - Tensor: Rewards tensor
+-                - Tensor: Done flags tensor
+-        """
+-        # Extract the assistant's responses from the message history
+-        # Each message list should have at least one assistant response
+-        assistant_response_batch = []
+-        for conversation in message_log_batch:
+-            assistant_responses = [
+-                str(interaction["content"])
+-                for interaction in conversation
+-                if interaction["role"] == "assistant"
+-            ]
+-            assistant_response_batch.append("".join(assistant_responses))
+-
+-        ground_truths = [g["ground_truth"] for g in metadata]
+-
++        responses: list[str],
++        ground_truths: list[str],
++        return_extracted_answer: bool,
++    ) -> tuple[list[float], list[str | None] | None]:
++        """Verify responses on the workers, returning scores and extracted answers."""
+         chunked_assistant_response_batch = chunk_list_to_workers(
+-            assistant_response_batch, self.num_workers
++            responses, self.num_workers
+         )
+         chunked_ground_truths = chunk_list_to_workers(ground_truths, self.num_workers)
+ 
+@@ -524,6 +519,90 @@ class MathEnvironment(BaseMathEnvironment):
+                 extracted_answers.extend(worker_answers)
+             results.extend(worker_scores)
+ 
++        return results, extracted_answers
++
++    def _add_frame_metrics(
++        self,
++        outputs: list[Apertus2Output],
++        metadata: list[MathEnvironmentMetadata],
++        reward_frame: str,
++        reward_scores: list[float],
++    ) -> list[MathEnvironmentMetadata]:
++        """Verify the frame the reward did not grade, and record how the frames compare."""
++        side_frame = "reply" if reward_frame == "claim" else "claim"
++        side_scores, _ = self._verify(
++            [frame_text(output, side_frame) for output in outputs],
++            [m["ground_truth"] for m in metadata],
++            return_extracted_answer=False,
++        )
++        claim_scores, reply_scores = (
++            (reward_scores, side_scores)
++            if reward_frame == "claim"
++            else (side_scores, reward_scores)
++        )
++        return [
++            {
++                **m,
++                "frame_metrics": frame_metrics(
++                    output, claim_score=claim_score, reply_score=reply_score
++                ),
++            }
++            for m, output, claim_score, reply_score in zip(
++                metadata, outputs, claim_scores, reply_scores
++            )
++        ]
++
++    def step(
++        self,
++        message_log_batch: list[LLMMessageLogType],
++        metadata: list[MathEnvironmentMetadata],
++        return_extracted_answer: bool = False,
++    ) -> EnvironmentReturn[MathEnvironmentMetadata]:
++        """Runs a step in the math environment.
++
++        Args:
++            message_log: list[list[dict[str, str]]]. A batch of OpenAI-API-like message logs that represent interactions with the LLM.
++            metadata: list[MathEnvironmentMetadata]. The grader will use the 'ground_truth' key to evaluate correctness. The extracted answer will be stored to caculate cons@k.
++
++        Returns:
++            EnvironmentReturn: A tuple containing:
++                - list[dict[str, str]]: Observations/responses batch
++                - list[dict]: Updated metadata
++                - list[str]: Next stop strings for the next turn
++                - Tensor: Rewards tensor
++                - Tensor: Done flags tensor
++        """
++        # Extract the assistant's responses from the message history
++        # Each message list should have at least one assistant response
++        assistant_response_batch = []
++        for conversation in message_log_batch:
++            assistant_responses = [
++                str(interaction["content"])
++                for interaction in conversation
++                if interaction["role"] == "assistant"
++            ]
++            assistant_response_batch.append("".join(assistant_responses))
++
++        ground_truths = [g["ground_truth"] for g in metadata]
++
++        reward_frame = self.cfg.get("reward_frame")
++        outputs = _apertus2_outputs(message_log_batch)
++        if (reward_frame is None) != (outputs is None):
++            raise ValueError(
++                "env.math.reward_frame and policy.generation.output_format must be "
++                "set together: frames are graded only when both are."
++            )
++        if outputs is not None:
++            assistant_response_batch = [
++                frame_text(output, reward_frame) for output in outputs
++            ]
++
++        results, extracted_answers = self._verify(
++            assistant_response_batch, ground_truths, return_extracted_answer
++        )
++        if outputs is not None:
++            metadata = self._add_frame_metrics(outputs, metadata, reward_frame, results)
++
+         observations = [
+             {
+                 "role": "environment",
+diff --git a/nemo_rl/experience/rollouts.py b/nemo_rl/experience/rollouts.py
+index 38a518d16..4038c8c8b 100644
+--- a/nemo_rl/experience/rollouts.py
++++ b/nemo_rl/experience/rollouts.py
+@@ -35,6 +35,7 @@ from transformers import PreTrainedTokenizerBase
+ from wandb import Table
+ 
+ from nemo_rl.algorithms.utils import get_gdpo_reward_component_keys
++from nemo_rl.data.apertus2_format import APERTUS2_OUTPUT_FORMAT, parse_output
+ from nemo_rl.data.interfaces import (
+     DatumSpec,
+     FlatMessagesType,
+@@ -740,6 +741,12 @@ async def generate_responses_async(
+         "generation backend must also implement generate_async."
+     )
+ 
++    is_apertus2 = generation_config.get("output_format") == APERTUS2_OUTPUT_FORMAT
++    assert not is_apertus2 or backend == "vllm", (
++        "policy.generation.output_format=apertus2 is only implemented for vLLM, "
++        "which applies the format's token mask."
++    )
++
+     # Use async generation with per-sample streaming
+     collected_indexed_outputs: list[
+         tuple[int, BatchedDataDict[GenerationOutputSpec]]
+@@ -781,7 +788,10 @@ async def generate_responses_async(
+         generated_part = full_output[input_len:total_length]
+         generated_ids.append(generated_part)
+ 
+-    generated_texts = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
++    # The Apertus 2 frames stay readable in the logged text; rewards read parsed frames.
++    generated_texts = tokenizer.batch_decode(
++        generated_ids, skip_special_tokens=not is_apertus2
++    )
+ 
+     # Append to message log
+     for i, (text, input_length, total_length) in enumerate(
+@@ -797,6 +807,12 @@ async def generate_responses_async(
+             assistant_message["generation_logprobs"] = generation_outputs["logprobs"][
+                 i, input_length:total_length
+             ]
++        if is_apertus2:
++            assistant_message["apertus2_output"] = parse_output(
++                tokenizer.name_or_path,
++                generated_ids[i].tolist(),
++                truncated=bool(response_truncated[i]),
++            )
+         if "routed_experts" in generation_outputs:
+             routed_experts = generation_outputs["routed_experts"][i]
+             prefix_length = _attach_routed_experts_to_message_log_prefix(
+@@ -857,7 +873,9 @@ def calculate_rewards(
+     """
+     # Extract message logs for environment (most recent interaction)
+     to_env = [
+-        get_keys_from_message_log(batch["message_log"][i], ["role", "content"])
++        get_keys_from_message_log(
++            batch["message_log"][i], ["role", "content", "apertus2_output"]
++        )
+         for i in range(len(batch["message_log"]))
+     ]
+     task_names = batch["task_name"]
+@@ -1357,6 +1375,7 @@ async def run_sample_multi_turn_rollout(
+     terminated = False
+     truncated = False
+     max_turns_reached = False
++    frame_metrics: dict[str, float] | None = None  # set by format-aware environments
+ 
+     # Track per-turn metrics
+     turn_gen_tokens = []
+@@ -1450,6 +1469,8 @@ async def run_sample_multi_turn_rollout(
+             total_reward += sum(float(r[0].item()) for r in env_output.rewards.values())
+         else:
+             total_reward += float(env_output.rewards[0].item())
++        if env_output.metadata[0] is not None:
++            frame_metrics = env_output.metadata[0].get("frame_metrics")
+         # Check termination
+         terminated = env_output.terminateds[0].item()
+         env_obs_content = env_output.observations[0]["content"]
+@@ -1527,6 +1548,7 @@ async def run_sample_multi_turn_rollout(
+         "max_gen_tokens_per_turn": max_gen_tokens_per_turn,
+         # Pass-through per-worker per-turn accounting for aggregation at batch level
+         "per_worker_token_counts": per_worker_token_counts,
++        "frame_metrics": frame_metrics,
+     }
+ 
+     return final_sample_state, sample_metrics
+@@ -1595,6 +1617,14 @@ def _aggregate_multi_turn_rollout_metrics(
+         "min_total_reward": min(m["total_reward"] for m in all_sample_metrics),
+     }
+ 
++    frame_metrics = [
++        m["frame_metrics"] for m in all_sample_metrics if m.get("frame_metrics")
++    ]
++    for name in frame_metrics[0] if frame_metrics else ():
++        rollout_metrics[f"frames/{name}"] = (
++            sum(m[name] for m in frame_metrics) / batch_size
++        )
++
+     if "per_worker_token_counts" in all_sample_metrics[0]:
+         per_worker_token_counts = {}
+         for sample_metrics in all_sample_metrics:
+@@ -1697,6 +1727,11 @@ async def _run_multi_turn_rollout_async(
+         }
+     )
+ 
++    if any(metrics.get("frame_metrics") for metrics in all_sample_metrics):
++        final_batch["frame_metrics"] = [
++            metrics["frame_metrics"] for metrics in all_sample_metrics
++        ]
++
+     # Preserve named per-component rewards for GDPO. Mixed environment batches
+     # use zero for samples that do not expose a given reward component.
+     reward_component_keys = sorted(
+diff --git a/nemo_rl/models/generation/interfaces.py b/nemo_rl/models/generation/interfaces.py
+index 7b5460f8e..000b15d42 100644
+--- a/nemo_rl/models/generation/interfaces.py
++++ b/nemo_rl/models/generation/interfaces.py
+@@ -232,6 +232,8 @@ class GenerationConfig(TypedDict):
+     stop_token_ids: list[int] | None
+     stop_strings: list[str] | None
+     bad_words: NotRequired[list[str] | None]
++    # "apertus2" blocks the format's forbidden token IDs and splits outputs into frames.
++    output_format: NotRequired[str | None]
+     colocated: NotRequired[ColocationConfig]
+     port_range_low: NotRequired[int]
+     port_range_high: NotRequired[int]
+diff --git a/nemo_rl/models/generation/vllm/vllm_worker.py b/nemo_rl/models/generation/vllm/vllm_worker.py
+index 3f5ee705e..b5553717c 100644
+--- a/nemo_rl/models/generation/vllm/vllm_worker.py
++++ b/nemo_rl/models/generation/vllm/vllm_worker.py
+@@ -24,6 +24,7 @@ import ray
+ import torch
+ from transformers import AutoConfig
+ 
++from nemo_rl.data.apertus2_format import APERTUS2_OUTPUT_FORMAT, allowed_token_ids
+ from nemo_rl.distributed.batched_data_dict import BatchedDataDict
+ from nemo_rl.distributed.refit_watchdog import RefitAborted, is_refit_abort
+ from nemo_rl.distributed.virtual_cluster import (
+@@ -459,6 +460,11 @@ class BaseVllmGenerationWorker:
+         """Lightweight config setup. No model loading, no heavy imports."""
+         self.cfg = config
+         self.model_name = self.cfg["model_name"]
++        self.allowed_token_ids = (
++            allowed_token_ids(self.model_name)
++            if self.cfg.get("output_format") == APERTUS2_OUTPUT_FORMAT
++            else None
++        )
+         # Refined from the model's expert count in _load_model.
+         self.routed_experts_dtype = ROUTED_EXPERTS_FALLBACK_DTYPE
+         self.tensor_parallel_size = self.cfg["vllm_cfg"]["tensor_parallel_size"]
+@@ -826,6 +832,7 @@ class BaseVllmGenerationWorker:
+             include_stop_str_in_output=True,
+             bad_words=self.cfg.get("bad_words"),
+             ignore_eos=self.cfg.get("ignore_eos", False),
++            allowed_token_ids=self.allowed_token_ids,
+         )
+ 
+     def start_gpu_profiling(self) -> None:
+diff --git a/pyrefly.toml b/pyrefly.toml
+index 4da90a30b..284097c88 100644
+--- a/pyrefly.toml
++++ b/pyrefly.toml
+@@ -75,6 +75,7 @@ project-includes = [
+   "nemo_rl/algorithms/x_token/__init__.py",
+   "nemo_rl/algorithms/x_token/utils.py",
+   "nemo_rl/data/__init__.py",
++  "nemo_rl/data/apertus2_format.py",
+   "nemo_rl/data/chat_templates.py",
+   "nemo_rl/data/collate_fn.py",
+   "nemo_rl/data/dataloader.py",
+diff --git a/tests/unit/data/test_apertus2_format.py b/tests/unit/data/test_apertus2_format.py
+new file mode 100644
+index 000000000..1f951e8e3
+--- /dev/null
++++ b/tests/unit/data/test_apertus2_format.py
+@@ -0,0 +1,171 @@
++# Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""Tests of the Apertus 2 format, which need apertus-common and the tokenizer.
++
++Set NRL_APERTUS2_TOKENIZER to a directory with the Apertus_2_instruct tokenizer.
++"""
++
++import os
++
++import pytest
++
++apertus_common = pytest.importorskip("apertus_common")
++
++from apertus_common import (  # noqa: E402
++    Call,
++    Claim,
++    Conversation,
++    Reply,
++    SystemPrompt,
++    Think,
++    User,
++    Wait,
++    load_encoding,
++)
++
++from nemo_rl.data.apertus2_format import (  # noqa: E402
++    LONG_CLAIM_CHARS,
++    Apertus2Output,
++    allowed_token_ids,
++    encode_prompt,
++    frame_metrics,
++    frame_text,
++    parse_output,
++)
++
++TOKENIZER = os.environ.get("NRL_APERTUS2_TOKENIZER")
++SYSTEM_PROMPT = '{"thinking":"medium","tools":[]}'
++HEADER_END = 9
++OUTPUT_END = 11
++WAIT = 12
++
++pytestmark = pytest.mark.skipif(
++    TOKENIZER is None, reason="NRL_APERTUS2_TOKENIZER is not set"
++)
++
++
++@pytest.fixture(scope="module")
++def encoding():
++    return load_encoding(TOKENIZER)
++
++
++def test_prompt_matches_the_reference_encoder(encoding):
++    prompt = encode_prompt(TOKENIZER, system_prompt=SYSTEM_PROMPT, user_text="Hi")
++    assert prompt == encoding.encode_conversation(
++        Conversation(
++            system=SystemPrompt.build(thinking="medium"), items=[User(payload="Hi")]
++        )
++    )
++    assert prompt[0] == encoding.bos_token_id
++    assert prompt[-1] == encoding.controls.input_end
++
++
++def test_prompt_text_cannot_become_a_control_token():
++    prompt = encode_prompt(TOKENIZER, system_prompt=SYSTEM_PROMPT, user_text="<|hdr|>")
++    assert prompt.count(HEADER_END) == 2  # one per frame
++
++
++def test_allowed_ids_keep_the_output_controls_and_block_other_specials(encoding):
++    allowed = set(allowed_token_ids(TOKENIZER))
++    assert {HEADER_END, 10, OUTPUT_END, WAIT} <= allowed
++    assert not allowed & {0, 1, 2, 3, 7, 8}
++    assert len(allowed) == encoding.vocab_size - 120
++
++
++def test_parse_splits_frames(encoding):
++    tokens = encoding.encode_items(
++        [Think(payload="Add."), Claim(payload="42"), Reply(payload="It is 42."), Wait()]
++    )
++    output = parse_output(TOKENIZER, tokens, truncated=False)
++    assert output == Apertus2Output(
++        claim="42", reply="It is 42.", has_call=False, error=None, truncated=False
++    )
++
++
++def test_parse_uses_the_last_claim(encoding):
++    tokens = encoding.encode_items(
++        [Claim(payload="1"), Claim(payload="2"), Reply(payload="2"), Wait()]
++    )
++    assert parse_output(TOKENIZER, tokens, truncated=False).claim == "2"
++
++
++def test_parse_without_a_claim(encoding):
++    tokens = encoding.encode_items([Think(payload=""), Reply(payload="144"), Wait()])
++    output = parse_output(TOKENIZER, tokens, truncated=False)
++    assert output.claim is None
++    assert output.reply == "144"
++    assert output.error is None
++
++
++def test_parse_flags_a_tool_call(encoding):
++    tokens = encoding.encode_items(
++        [Call(name="python", counter=0, payload='{"code":"1"}'), Wait()]
++    )
++    assert parse_output(TOKENIZER, tokens, truncated=False).has_call
++
++
++def test_parse_rejects_invalid_frames_even_with_a_complete_claim(encoding):
++    tokens = encoding.encode_items([Claim(payload="42"), Reply(payload="42"), Wait()])
++    broken = [tokens[0], OUTPUT_END, *tokens]
++    output = parse_output(TOKENIZER, broken, truncated=False)
++    assert output.claim is None
++    assert output.reply is None
++    assert output.error is not None
++
++
++def test_parse_of_a_cut_off_output(encoding):
++    tokens = encoding.encode_items(
++        [Claim(payload="42"), Reply(payload="It is"), Wait()]
++    )
++    output = parse_output(TOKENIZER, tokens[:-2], truncated=True)
++    assert output.claim is None
++    assert output.error is not None
++    assert frame_metrics(output, claim_score=0.0, reply_score=0.0)["malformed"] == 0.0
++
++
++def _output(**changes):
++    fields = {
++        "claim": "42",
++        "reply": "It is 42.",
++        "has_call": False,
++        "error": None,
++        "truncated": False,
++    }
++    return Apertus2Output(**{**fields, **changes})
++
++
++def test_frame_text():
++    assert frame_text(_output(), "claim") == "42"
++    assert frame_text(_output(), "reply") == "It is 42."
++    assert frame_text(_output(claim=None), "claim") == ""
++    with pytest.raises(ValueError, match="Unknown Apertus 2 frame"):
++        frame_text(_output(), "think")
++
++
++@pytest.mark.parametrize(
++    "output, claim_score, reply_score, expected",
++    [
++        (_output(), 1.0, 1.0, {"claim_correct": 1.0, "reply_correct": 1.0}),
++        (_output(), 1.0, 0.0, {"claim_right_reply_wrong": 1.0}),
++        (_output(), 0.0, 1.0, {"reply_right_claim_wrong": 1.0}),
++        (_output(claim=None), 0.0, 1.0, {"no_claim": 1.0}),
++        (_output(claim=None, reply=None, error="bad"), 0.0, 0.0, {"malformed": 1.0}),
++        (_output(claim="x" * (LONG_CLAIM_CHARS + 1)), 0.0, 0.0, {"long_claim": 1.0}),
++        (_output(has_call=True), 0.0, 0.0, {"undeclared_call": 1.0}),
++    ],
++)
++def test_frame_metrics(output, claim_score, reply_score, expected):
++    metrics = frame_metrics(output, claim_score=claim_score, reply_score=reply_score)
++    for name, value in expected.items():
++        assert metrics[name] == value
+diff --git a/tests/unit/environments/test_math_environment.py b/tests/unit/environments/test_math_environment.py
+index 458f1ab55..8685dca51 100644
+--- a/tests/unit/environments/test_math_environment.py
++++ b/tests/unit/environments/test_math_environment.py
+@@ -16,6 +16,7 @@ import time
+ import pytest
+ import ray
+ 
++from nemo_rl.data.apertus2_format import Apertus2Output
+ from nemo_rl.environments.utils import create_env
+ 
+ # ============================================================================
+@@ -567,3 +568,75 @@ def test_select_extracted_answer_never_raises(extracted_answer, impl, expected):
+     from nemo_rl.environments.math_environment import _select_extracted_answer
+ 
+     assert _select_extracted_answer(extracted_answer, impl) == expected
++
++
++# ============================================================================
++# Apertus 2 frames
++# ============================================================================
++
++
++@pytest.fixture(scope="module")
++def claim_env():
++    """Create a MathEnvironment that grades the claim frame."""
++    env = create_env("math", {"num_workers": 2, "reward_frame": "claim"})
++    yield env
++    env.shutdown.remote()
++    ray.kill(env)
++    time.sleep(0.2)
++
++
++def _frames_conversation(claim, reply, error=None, truncated=False):
++    return [
++        {"role": "user", "content": "What is 6 * 7?"},
++        {
++            "role": "assistant",
++            # The verifier must read the frame, not this text.
++            "content": "<|out|>think<|hdr|>The answer is 41.<|/out|>",
++            "apertus2_output": Apertus2Output(
++                claim=claim,
++                reply=reply,
++                has_call=False,
++                error=error,
++                truncated=truncated,
++            ),
++        },
++    ]
++
++
++def test_claim_frame_sets_the_reward_and_the_reply_is_a_metric(claim_env):
++    conversations = [
++        _frames_conversation("42", "It is \\boxed{42}."),
++        _frames_conversation("42", "It is \\boxed{41}."),
++        _frames_conversation("41", "It is \\boxed{42}."),
++        _frames_conversation(None, "It is \\boxed{42}."),
++        _frames_conversation(None, None, error="invalid frames"),
++    ]
++    metadata = [{"ground_truth": "42"} for _ in conversations]
++    result = ray.get(claim_env.step.remote(conversations, metadata))
++
++    assert result.rewards.tolist() == [1.0, 1.0, 0.0, 0.0, 0.0]
++    metrics = [m["frame_metrics"] for m in result.metadata]
++    assert [m["reply_correct"] for m in metrics] == [1.0, 0.0, 1.0, 1.0, 0.0]
++    assert [m["claim_right_reply_wrong"] for m in metrics] == [0.0, 1.0, 0.0, 0.0, 0.0]
++    assert [m["reply_right_claim_wrong"] for m in metrics] == [0.0, 0.0, 1.0, 1.0, 0.0]
++    assert [m["no_claim"] for m in metrics] == [0.0, 0.0, 0.0, 1.0, 0.0]
++    assert [m["malformed"] for m in metrics] == [0.0, 0.0, 0.0, 0.0, 1.0]
++
++
++def test_frames_without_a_reward_frame_fail_loudly(math_env):
++    with pytest.raises(ValueError, match="must be set together"):
++        ray.get(
++            math_env.step.remote(
++                [_frames_conversation("42", "42")], [{"ground_truth": "42"}]
++            )
++        )
++
++
++def test_a_reward_frame_without_frames_fails_loudly(claim_env):
++    with pytest.raises(ValueError, match="must be set together"):
++        ray.get(
++            claim_env.step.remote(
++                [[{"role": "assistant", "content": "\\boxed{42}"}]],
++                [{"ground_truth": "42"}],
++            )
++        )
+diff --git a/tests/unit/reference_configs/grpo_math_1B.yaml b/tests/unit/reference_configs/grpo_math_1B.yaml
+index 4f8afce71..c597aa506 100644
+--- a/tests/unit/reference_configs/grpo_math_1B.yaml
++++ b/tests/unit/reference_configs/grpo_math_1B.yaml
+@@ -393,6 +393,7 @@ policy:
+     val_top_p: ${.top_p}
+     val_top_k: ${.top_k}
+     stop_token_ids: null
++    output_format: null
+     stop_strings: null
+     # null = topology default (IPC colocated, NCCL non-colocated). For
+     # non-colocated Megatron generation it selects the packed collective; use
+@@ -528,6 +529,7 @@ env:
+   math:
+     num_workers: 8
+     math_verify_impl: "hf_math_verify"
++    reward_frame: null
+ 
+ logger:
+   log_dir: "logs"  # Base directory for all logs
+-- 
+2.43.0
+
