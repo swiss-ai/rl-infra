@@ -1,0 +1,377 @@
+From d9dff707369f11090918ce50fd73ecfac7f3431d Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Wed, 4 Nov 2026 09:03:38 +0000
+Subject: [PATCH] feat(harbor_agent): mini-swe-agent on the Gym model server
+ (in-sandbox, non-streaming)
+
+MiniSweAgentNemoGym subclasses Harbor's installed mini-swe-agent and points
+every run at its own api_base (harbor_agent's rollout URL, capture prefix
+included), e.g. the per-sandbox model tunnel at http://127.0.0.1:8000.
+
+A small model class (mini_swe_agent_pod/nemo_gym_mini.py) is written into
+the sandbox and loaded with `mini --model-class`; its settings come as JSON
+in NEMO_GYM_MINI:
+- the rollout's sampling parameters replace mini.yaml's temperature 0.0
+  (vllm_model has no sampling_overrides here, so they would reach vLLM);
+- litellm's cost lookup is disabled (mini re-raises its error for every
+  model litellm does not know);
+- max_turns ends the run with LimitsExceeded (mini's default step limit
+  is unlimited).
+
+litellm calls without streaming, so this works under worker-owned token
+capture, which rejects stream: true (OpenCode always streams).
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ .../custom_agents/mini_swe_agent_nemo_gym.py  |  94 ++++++++++
+ .../mini_swe_agent_pod/nemo_gym_mini.py       |  53 ++++++
+ .../test_mini_swe_agent_nemo_gym.py           | 176 ++++++++++++++++++
+ 3 files changed, 323 insertions(+)
+ create mode 100644 responses_api_agents/harbor_agent/custom_agents/mini_swe_agent_nemo_gym.py
+ create mode 100644 responses_api_agents/harbor_agent/custom_agents/mini_swe_agent_pod/nemo_gym_mini.py
+ create mode 100644 responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py
+
+diff --git a/responses_api_agents/harbor_agent/custom_agents/mini_swe_agent_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/mini_swe_agent_nemo_gym.py
+new file mode 100644
+index 000000000..f7e10d227
+--- /dev/null
++++ b/responses_api_agents/harbor_agent/custom_agents/mini_swe_agent_nemo_gym.py
+@@ -0,0 +1,94 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++# http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""Harbor's installed mini-swe-agent, pointed at a NeMo Gym model server.
++
++Harbor's own agent passes the model URL only through the node's global ``OPENAI_API_BASE`` and keeps
++mini's default config (``temperature: 0.0``, no step limit, a litellm cost lookup that fails for a
++model litellm does not know). This subclass gives every run its own ``api_base`` (harbor_agent's
++rollout URL, with the capture prefix under token capture), the rollout's sampling parameters and a
++call limit, through a small model class (``mini_swe_agent_pod/nemo_gym_mini.py``) that it writes into
++the sandbox and loads with ``mini --model-class``.
++
++mini-swe-agent runs inside the task sandbox and calls the model with litellm, without streaming,
++so it works with worker-owned token capture (which rejects ``stream: true``). ``api_base`` must be
++reachable from the sandbox (harbor_agent's ``harbor_model_base_url``, e.g. the per-sandbox model
++tunnel at http://127.0.0.1:8000). Harbor's install script and ATIF conversion are inherited.
++"""
++
++import json
++import shlex
++from pathlib import Path
++from typing import Any
++
++from harbor.agents.installed.base import ExecInput
++from harbor.agents.installed.mini_swe_agent import MiniSweAgent
++
++
++POD_MODULE = Path(__file__).parent / "mini_swe_agent_pod" / "nemo_gym_mini.py"
++POD_DIR = "/tmp/nemo-gym-mini"
++
++# Responses API names -> chat-completions names (litellm). Unset ones are not sent.
++SAMPLING_KEYS = {"temperature": "temperature", "top_p": "top_p", "max_output_tokens": "max_tokens"}
++
++
++class MiniSweAgentNemoGym(MiniSweAgent):
++    def __init__(
++        self,
++        *args: Any,
++        api_base: str | None = None,
++        api_key: str = "EMPTY",
++        responses_create_params: dict[str, Any] | None = None,
++        max_turns: int | None = None,
++        **kwargs: Any,
++    ) -> None:
++        super().__init__(*args, **kwargs)
++        if not api_base:
++            raise ValueError("MiniSweAgentNemoGym needs api_base (harbor_agent passes the model server URL)")
++        self._api_base = api_base
++        self._api_key = api_key
++        self._responses_create_params = responses_create_params or {}
++        self._max_turns = max_turns
++
++    @staticmethod
++    def name() -> str:
++        return "mini-swe-agent-nemo-gym"
++
++    def _litellm_model(self) -> str:
++        if not self.model_name:
++            raise ValueError("MiniSweAgentNemoGym needs a model name")
++        # litellm's OpenAI-compatible provider; the rest is sent as the request's model name
++        return f"openai/{self.model_name}"
++
++    def mini_settings(self) -> dict[str, Any]:
++        model_kwargs: dict[str, Any] = {"api_base": self._api_base, "api_key": self._api_key}
++        for src, dst in SAMPLING_KEYS.items():
++            if self._responses_create_params.get(src) is not None:
++                model_kwargs[dst] = self._responses_create_params[src]
++        return {"model_kwargs": model_kwargs, "max_calls": int(self._max_turns or 0)}
++
++    def create_run_agent_commands(self, instruction: str) -> list[ExecInput]:
++        module = shlex.quote(POD_MODULE.read_text())
++        command = (
++            f"mkdir -p {POD_DIR} && printf '%s' {module} > {POD_DIR}/nemo_gym_mini.py && "
++            f"PYTHONPATH={POD_DIR} mini -m {shlex.quote(self._litellm_model())} "
++            f"--model-class nemo_gym_mini.NemoGymModel -t {shlex.quote(instruction)} -y "
++            f"-o {self._mini_swe_agent_trajectory_path} -l 0 --exit-immediately "
++            f"2>&1 </dev/null | tee /logs/agent/mini-swe-agent.txt"
++        )
++        env = {
++            "MSWEA_CONFIGURED": "true",  # no interactive first-run setup
++            "NEMO_GYM_MINI": json.dumps(self.mini_settings()),
++        }
++        return [ExecInput(command=command, env=env)]
+diff --git a/responses_api_agents/harbor_agent/custom_agents/mini_swe_agent_pod/nemo_gym_mini.py b/responses_api_agents/harbor_agent/custom_agents/mini_swe_agent_pod/nemo_gym_mini.py
+new file mode 100644
+index 000000000..3d876cbc9
+--- /dev/null
++++ b/responses_api_agents/harbor_agent/custom_agents/mini_swe_agent_pod/nemo_gym_mini.py
+@@ -0,0 +1,53 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++# http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""mini-swe-agent model class for a NeMo Gym model server. Runs INSIDE the task sandbox, in
++mini-swe-agent's own Python (``mini --model-class nemo_gym_mini.NemoGymModel``); Gym never imports it.
++
++MiniSweAgentNemoGym writes this file into the sandbox and passes its settings as JSON in
++``NEMO_GYM_MINI``:
++
++- ``model_kwargs`` replace those of mini's config (its default ``mini.yaml`` has ``temperature: 0.0``):
++  the rollout's ``api_base``/``api_key`` and the on-policy sampling parameters.
++- ``max_calls`` > 0 ends the run with mini's ``LimitsExceeded`` (a normal end, the verifier still runs)
++  before that many model calls are exceeded; mini's own step limit lives in the agent config.
++
++The cost lookup is disabled: the Gym model server's model is not in litellm's price list, and
++mini-swe-agent re-raises every cost-calculation error, which would fail every call.
++"""
++
++import json
++import os
++
++import litellm
++from minisweagent.agents.default import LimitsExceeded
++from minisweagent.models.litellm_model import LitellmModel
++
++
++SETTINGS = json.loads(os.environ.get("NEMO_GYM_MINI") or "{}")
++
++litellm.cost_calculator.completion_cost = lambda *args, **kwargs: 0.0
++
++
++class NemoGymModel(LitellmModel):
++    def __init__(self, **kwargs):
++        model_kwargs = dict(kwargs.pop("model_kwargs", None) or {})
++        model_kwargs.update(SETTINGS.get("model_kwargs") or {})
++        super().__init__(model_kwargs=model_kwargs, **kwargs)
++        self.max_calls = int(SETTINGS.get("max_calls") or 0)
++
++    def query(self, messages, **kwargs):
++        if 0 < self.max_calls <= self.n_calls:
++            raise LimitsExceeded(f"Model call limit reached ({self.max_calls}).")
++        return super().query(messages, **kwargs)
+diff --git a/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py
+new file mode 100644
+index 000000000..d9296a6fa
+--- /dev/null
++++ b/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py
+@@ -0,0 +1,176 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++# http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++import json
++import os
++import shutil
++import subprocess
++import sys
++import textwrap
++from pathlib import Path
++
++import pytest
++
++from responses_api_agents.harbor_agent.custom_agents import mini_swe_agent_nemo_gym as mod
++from responses_api_agents.harbor_agent.custom_agents.mini_swe_agent_nemo_gym import MiniSweAgentNemoGym
++
++
++API_BASE = "http://127.0.0.1:8000/ng-rollout/3-1/training-token-capture/v1"
++MODEL = "Qwen/Qwen3-4B-Instruct-2507"
++
++
++def _agent(tmp_path: Path, **kwargs) -> MiniSweAgentNemoGym:
++    return MiniSweAgentNemoGym(logs_dir=tmp_path, model_name=MODEL, api_base=API_BASE, **kwargs)
++
++
++def test_requires_api_base(tmp_path: Path) -> None:
++    with pytest.raises(ValueError, match="api_base"):
++        MiniSweAgentNemoGym(logs_dir=tmp_path, model_name=MODEL)
++
++
++def test_settings_carry_rollout_url_and_on_policy_sampling(tmp_path: Path) -> None:
++    agent = _agent(
++        tmp_path,
++        responses_create_params={"temperature": 1.0, "top_p": 1.0, "max_output_tokens": 2048, "input": []},
++        max_turns=20,
++    )
++    assert agent.mini_settings() == {
++        "model_kwargs": {
++            "api_base": API_BASE,
++            "api_key": "EMPTY",
++            "temperature": 1.0,
++            "top_p": 1.0,
++            "max_tokens": 2048,
++        },
++        "max_calls": 20,
++    }
++
++
++def test_unset_sampling_is_not_sent_and_no_limit_by_default(tmp_path: Path) -> None:
++    assert _agent(tmp_path).mini_settings() == {
++        "model_kwargs": {"api_base": API_BASE, "api_key": "EMPTY"},
++        "max_calls": 0,
++    }
++
++
++def test_run_command(tmp_path: Path) -> None:
++    (cmd,) = _agent(tmp_path, max_turns=5).create_run_agent_commands("print 'hi' > /app/out.txt")
++    assert f"PYTHONPATH={mod.POD_DIR} mini -m openai/{MODEL} --model-class nemo_gym_mini.NemoGymModel " in cmd.command
++    assert "-t 'print '\"'\"'hi'\"'\"' > /app/out.txt' -y " in cmd.command
++    assert "-o /logs/agent/mini-swe-agent.trajectory.json -l 0 --exit-immediately" in cmd.command
++    assert cmd.command.endswith("| tee /logs/agent/mini-swe-agent.txt")
++    assert cmd.env["MSWEA_CONFIGURED"] == "true"
++    assert json.loads(cmd.env["NEMO_GYM_MINI"])["max_calls"] == 5
++    # Harbor's MiniSweAgent reads OPENAI_API_BASE/API keys from the node's environment; this one must not
++    assert set(cmd.env) == {"MSWEA_CONFIGURED", "NEMO_GYM_MINI"}
++
++
++def test_ignores_harbor_agent_extra_kwargs(tmp_path: Path) -> None:
++    # harbor_agent passes Terminus-2's kwargs too (temperature, model_info); they must be accepted
++    agent = _agent(tmp_path, temperature=1.0, model_info={"max_input_tokens": 1}, version="abc123")
++    assert agent.create_run_agent_commands("x")
++    assert agent._version == "abc123"
++
++
++# Stubs of the two packages nemo_gym_mini.py imports, shaped like mini-swe-agent 1.x / litellm.
++_STUBS = {
++    "litellm/__init__.py": "from . import cost_calculator\n",
++    "litellm/cost_calculator.py": (
++        "def completion_cost(response):\n    raise RuntimeError('model not in price list')\n"
++    ),
++    "minisweagent/__init__.py": "",
++    "minisweagent/agents/__init__.py": "",
++    "minisweagent/agents/default.py": "class TerminatingException(Exception): pass\n"
++    "class LimitsExceeded(TerminatingException): pass\n",
++    "minisweagent/models/__init__.py": "",
++    "minisweagent/models/litellm_model.py": textwrap.dedent(
++        """
++        import litellm
++
++        class LitellmModel:
++            def __init__(self, *, model_name, model_kwargs=None):
++                self.model_name, self.model_kwargs = model_name, model_kwargs or {}
++                self.n_calls, self.cost = 0, 0.0
++
++            def query(self, messages, **kwargs):
++                cost = litellm.cost_calculator.completion_cost(None)  # mini re-raises errors here
++                self.n_calls += 1
++                self.cost += cost
++                return {"content": f"call {self.n_calls}", "kwargs": self.model_kwargs}
++        """
++    ),
++}
++
++# Stands in for `mini`: loads the model class the way mini does and records what it sees.
++_FAKE_MINI = textwrap.dedent(
++    """\
++    #!{python}
++    import importlib, json, sys
++    args = sys.argv[1:]
++    module, cls = args[args.index("--model-class") + 1].rsplit(".", 1)
++    Model = getattr(importlib.import_module(module), cls)
++    m = Model(model_name=args[args.index("-m") + 1], model_kwargs={{"temperature": 0.0, "drop_params": True}})
++    out = []
++    from minisweagent.agents.default import LimitsExceeded
++    for _ in range(3):
++        try:
++            out.append(m.query([]))
++        except LimitsExceeded as e:
++            out.append({{"limit": str(e)}})
++    print(json.dumps({{"task": args[args.index("-t") + 1], "out": out, "cost": m.cost}}))
++    """
++)
++
++
++@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
++def test_run_command_in_bash_loads_the_model_class(tmp_path: Path) -> None:
++    stubs = tmp_path / "stubs"
++    for rel, src in _STUBS.items():
++        (stubs / rel).parent.mkdir(parents=True, exist_ok=True)
++        (stubs / rel).write_text(src)
++    bin_dir = tmp_path / "bin"
++    bin_dir.mkdir()
++    (bin_dir / "mini").write_text(_FAKE_MINI.format(python=sys.executable))
++    (bin_dir / "mini").chmod(0o755)
++    pod_dir = tmp_path / "pod"
++    logs = tmp_path / "logs"
++    (logs / "agent").mkdir(parents=True)
++
++    agent = _agent(tmp_path, responses_create_params={"temperature": 1.0, "top_p": 0.9}, max_turns=2)
++    (cmd,) = agent.create_run_agent_commands("fix it; don't 'break' $HOME")
++    command = cmd.command.replace(mod.POD_DIR, str(pod_dir)).replace("/logs/agent", str(logs / "agent"))
++    env = {
++        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
++        **cmd.env,
++    }
++    # the pod module's dir comes first via the command's own PYTHONPATH; the stubs stand in for mini's venv
++    command = command.replace(f"PYTHONPATH={pod_dir} ", f"PYTHONPATH={pod_dir}{os.pathsep}{stubs} ")
++    res = subprocess.run(["bash", "-c", command], env=env, capture_output=True, text=True, timeout=60)
++    assert res.returncode == 0, res.stderr
++
++    assert (pod_dir / "nemo_gym_mini.py").read_text() == mod.POD_MODULE.read_text()
++    result = json.loads(res.stdout.strip().splitlines()[-1])
++    assert result["task"] == "fix it; don't 'break' $HOME"
++    first, second, third = result["out"]
++    assert first["kwargs"] == {
++        "temperature": 1.0,  # the rollout's, not mini's 0.0
++        "top_p": 0.9,
++        "drop_params": True,
++        "api_base": API_BASE,
++        "api_key": "EMPTY",
++    }
++    assert second["content"] == "call 2"
++    assert third == {"limit": "Model call limit reached (2)."}
++    assert result["cost"] == 0.0
++    assert (logs / "agent" / "mini-swe-agent.txt").read_text() == res.stdout
+-- 
+2.55.0
+

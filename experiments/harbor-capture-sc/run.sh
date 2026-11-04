@@ -3,7 +3,9 @@
 # capture at the model endpoint, Qwen3-4B on one node. See README.md.
 #   bash experiments/harbor-capture-sc/run.sh [overrides...]
 # Env:
-#   AGENT                  terminus (default) or opencode
+#   AGENT                  terminus (default), mini (mini-swe-agent in the sandbox, implies TUNNEL=1; Gym
+#                          patch 0005, mini-sc.yaml) or opencode
+#   MSWEA_VERSION          mini only: li-boxuan/mini-swe-agent git ref (default: the commit pinned in mini-sc.yaml)
 #   HARBOR_MODEL_BASE_URL  opencode only: model-server URL as reachable from the pods (required)
 #   OPENCODE_VERSION       opencode only: opencode-ai npm version (default: latest)
 #   TUNNEL                 1: per-sandbox reverse tunnel sandbox 127.0.0.1:8000 -> policy_model (Gym patch
@@ -32,6 +34,16 @@ AGENT="${AGENT:-terminus}"
 export OVERLAY=""
 case "${AGENT}" in
     terminus) ;;
+    mini)
+        grep -q MiniSweAgentNemoGym \
+            "${GYM_DIR}/responses_api_agents/harbor_agent/custom_agents/mini_swe_agent_nemo_gym.py" 2>/dev/null || {
+            echo "ERROR: AGENT=mini needs Gym patch 0005 in ${GYM_DIR}; re-run setup-gym.sh as above" >&2
+            exit 1
+        }
+        # the agent calls the model from inside the sandbox: only through the tunnel
+        TUNNEL=1
+        export OVERLAY="${HERE}/mini-sc.yaml"
+        ;;
     opencode)
         [[ -n "${HARBOR_MODEL_BASE_URL:-}" ]] || {
             echo "ERROR: AGENT=opencode needs HARBOR_MODEL_BASE_URL (model server as reachable from the pods)" >&2
@@ -40,9 +52,10 @@ case "${AGENT}" in
         export HARBOR_MODEL_BASE_URL
         export OVERLAY="${HERE}/opencode-sc.yaml"
         ;;
-    *) echo "ERROR: AGENT must be terminus or opencode, not ${AGENT}" >&2; exit 1 ;;
+    *) echo "ERROR: AGENT must be terminus, mini or opencode, not ${AGENT}" >&2; exit 1 ;;
 esac
 [[ -z "${OPENCODE_VERSION:-}" ]] || export OPENCODE_VERSION
+[[ -z "${MSWEA_VERSION:-}" ]] || export MSWEA_VERSION
 
 if [[ "${TUNNEL:-0}" == 1 ]]; then
     grep -q server_start_script \

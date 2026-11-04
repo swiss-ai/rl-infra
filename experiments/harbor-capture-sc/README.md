@@ -41,21 +41,24 @@ The previous smoke test (4 sandboxes, ~7 min) is still one command:
 |---|---|
 | `terminus-sc.yaml` | task: micro-tasks via `harbor_agent` + Terminus-2, Single-Controller blocks, token capture |
 | `opencode-sc.yaml` | overlay: OpenCode (installed in the pod) instead of Terminus-2 |
+| `mini-sc.yaml` | overlay (`AGENT=mini`): mini-swe-agent (installed in the pod) instead of Terminus-2, model via the tunnel |
 | `tunnel-sc.yaml` | overlay (`TUNNEL=1`): per-sandbox reverse tunnel, sandbox `127.0.0.1:8000` -> `policy_model` |
-| `run.sh` | `AGENT=terminus` (default) or `AGENT=opencode`; calls `run-harbor-osb.sh` |
+| `run.sh` | `AGENT=terminus` (default), `AGENT=mini` or `AGENT=opencode`; calls `run-harbor-osb.sh` |
 | `../../backends/nemo-rl/apertus2/patches/gym/0001-*.patch` | `harbor_agent` builds the agent's model URL with `base_url_for_run` (rollout capture prefix); new `harbor_model_base_url` |
 | `../../backends/nemo-rl/apertus2/patches/gym/0002-*.patch` | `OpenCodeNemoGym` agent; no masking of empty-output rollouts under capture |
 | `../../backends/nemo-rl/apertus2/patches/gym/0003-*.patch` | `harbor_environment_kwargs.model_tunnel`: chisel tunnel per sandbox, opened in `NemoGymSandboxEnvironment.start()` |
 | `../../backends/nemo-rl/apertus2/patches/gym/0004-*.patch` | tunnel fix after job 5245999: server start waits for `Listening on`; pod-side log in errors |
+| `../../backends/nemo-rl/apertus2/patches/gym/0005-*.patch` | `MiniSweAgentNemoGym` agent: per-run `api_base`, rollout sampling params, no litellm cost lookup, `max_turns` call limit |
 | `../../backends/nemo-rl/apertus2/fetch-chisel.sh` | chisel 1.12.0 (amd64 + arm64, pinned sha256) into `CHISEL_DIR` |
 
 ## Environment variables of `run.sh`
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AGENT` | `terminus` | `terminus`: Terminus-2, loop on the node, commands in the pod (task `terminus-sc.yaml`). `opencode`: OpenCode installed and run in the pod (adds overlay `opencode-sc.yaml`). Anything else is refused. |
+| `AGENT` | `terminus` | `terminus`: Terminus-2, loop on the node, commands in the pod (task `terminus-sc.yaml`). `mini`: mini-swe-agent installed and run in the pod, model through the tunnel (adds `mini-sc.yaml`, forces `TUNNEL=1`, needs patch 0005). `opencode`: OpenCode installed and run in the pod (adds overlay `opencode-sc.yaml`). Anything else is refused. |
 | `HARBOR_MODEL_BASE_URL` | none | `AGENT=opencode` only, required: the Gym model server as reachable from the pods, without `/v1`. `harbor_agent` appends the capture prefix and `/v1`. |
 | `OPENCODE_VERSION` | latest | `AGENT=opencode` only: `opencode-ai` npm version installed in each pod. |
+| `MSWEA_VERSION` | `8e8a515f...` (mini-sc.yaml) | `AGENT=mini` only: git ref of `li-boxuan/mini-swe-agent` (Harbor's install source) installed in each pod. |
 | `TUNNEL` | `0` | `1`: add `tunnel-sc.yaml` (needs patch 0003); fetches chisel into `CHISEL_DIR` (`$SCRATCH/chisel`) on the login node first. Run name gets `-tunnel`. |
 | `HARBOR_ROOT` | `$SCRATCH/osb/harbor_micro` | micro-task tree (`tasks/`, `train.jsonl`, `validation.jsonl`) |
 | `RUN` | `harbor-sc-<AGENT>-<date>` | run name (logs, sandbox labels) |
@@ -153,7 +156,40 @@ Tunnel shortcuts still open: `tls_skip_verify: true`; the OpenSandbox API key an
 secure-access token are in the chisel client's argv on the node (chisel takes headers only as
 flags; its own per-sandbox password goes through `AUTH`).
 
-## Step B: OpenCode (needs a model endpoint the pods can reach)
+## Step B: mini-swe-agent in the sandbox, model through the tunnel (`AGENT=mini`)
+
+    AGENT=mini bash experiments/harbor-capture-sc/run.sh
+
+Before the first run, re-run step 1 of "Before the first run" (adds patch 0005). The agent loop runs
+inside the task sandbox: Harbor installs mini-swe-agent there at agent setup (apt-get curl,
+build-essential, git; uv; `uv tool install git+https://github.com/li-boxuan/mini-swe-agent@<ref>`;
+the pods have internet; Harbor allows 360 s for agent setup), then runs `mini` with the task. Every
+model call goes from the pod to `http://127.0.0.1:8000/ng-rollout/<id>/training-token-capture/v1`,
+through the per-sandbox tunnel to `policy_model`, which captures the tokens. litellm sends
+`stream: false`, so capture accepts it (OpenCode streams and gets 422).
+
+What patch 0005 changes against Harbor's own mini-swe-agent: the URL comes per run (Harbor's reads
+the node's global `OPENAI_API_BASE`); the rollout's `temperature`/`top_p`/`max_output_tokens`
+replace mini's default config (`temperature: 0.0`; `vllm_model` pins no sampling here, so 0.0 would
+reach vLLM and make all GRPO samples of a prompt alike); litellm's cost lookup is disabled (mini
+re-raises it for every model litellm does not know); after `max_turns` (20) model calls the run ends
+with mini's `LimitsExceeded` (its own step limit is unlimited). It does this with a model class
+written into the pod and loaded through `mini --model-class`; settings in `NEMO_GYM_MINI` (JSON).
+
+Expected: trials reach the verifier with rewards mixing 0 and 1 and `grad_norm > 0`, as in job
+5236250. To check first, in one trial dir (not `result.json` or `config.json`, which hold the
+OpenSandbox key):
+
+    T=$(ls -d $HARBOR_ROOT/jobs/<date>/swe_lego/Qwen3-4B-Instruct-2507/*/* | head -1)
+    ls $T/agent/                                   # setup/, command-0/, mini-swe-agent.txt, trajectory.json
+    tail -n 30 $T/agent/setup/stdout.txt           # INSTALL_SUCCESS
+    tail -n 30 $T/agent/mini-swe-agent.txt         # the run; litellm errors show up here
+    grep -c '"role": "assistant"' $T/agent/mini-swe-agent.trajectory.json   # model calls (<= 20)
+
+Likely first failures: agent setup over 360 s (apt-get under gVisor at 32 parallel); a litellm
+parameter the server rejects (shows in `mini-swe-agent.txt` as an `APIError`, not retried).
+
+## Step B with OpenCode (needs a model endpoint the pods can reach)
 
     HARBOR_MODEL_BASE_URL=https://<reachable host>/<path> OPENCODE_VERSION=<x.y.z> \
         AGENT=opencode bash experiments/harbor-capture-sc/run.sh
