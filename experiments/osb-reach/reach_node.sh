@@ -12,15 +12,20 @@ RC=0
 
 # The image's system Python lacks the OpenSandbox SDK and tenacity; the runs create sandboxes from
 # Gym's harbor_agent server venv (built by the first Harbor run under NEMO_GYM_VENV_DIR), so use that.
+echo "== node $(hostname) ($(uname -m)), $(date +%T): looking for the sandbox client python under ${NEMO_GYM_VENV_DIR}"
 if [[ -z "${REACH_PYTHON:-}" ]]; then
     for p in "${NEMO_GYM_VENV_DIR}/responses_api_agents/harbor_agent/.venv/bin/python" \
              "${NEMO_GYM_VENV_DIR}"/*/*/.venv/bin/python; do
-        [[ -x "${p}" ]] && "${p}" -c "import opensandbox, tenacity, omegaconf, nemo_gym" 2>/dev/null \
+        [[ -x "${p}" ]] || continue
+        echo "   $(date +%T) trying ${p}"
+        # job 5253171 hung 20 min without output somewhere before the first test; bound every step
+        timeout 180 "${p}" -X importtime -c "import opensandbox, tenacity, omegaconf, nemo_gym" 2>import_check.log \
             && { REACH_PYTHON="${p}"; break; }
+        echo "   $(date +%T) failed (rc $?), last imports:"; tail -n 5 import_check.log | sed 's/^/     /'
     done
 fi
 [[ -n "${REACH_PYTHON:-}" ]] || { echo "ERROR: no Gym venv with opensandbox+tenacity under ${NEMO_GYM_VENV_DIR}; set REACH_PYTHON" >&2; exit 1; }
-echo "== node $(hostname) ($(uname -m)), tests:${TESTS}, sandbox client python: ${REACH_PYTHON}"
+echo "== $(date +%T) tests:${TESTS}, sandbox client python: ${REACH_PYTHON}"
 
 if [[ "${TESTS}" == *" tcp "* ]]; then
 echo "== pod -> node TCP, listener port ${PORT}"
@@ -67,6 +72,8 @@ fi
 # Gym's own tunnel code (patch 0003, ModelTunnel) through AsyncSandbox, as NemoGymSandboxEnvironment runs it.
 if [[ "${TESTS}" == *" gymtunnel "* ]]; then
     echo "== Gym model_tunnel (patch 0003): ${TUNNELS:-32} sandboxes, OLD_START=${OLD_START:-0}"
-    "${REACH_PYTHON}" "${HERE}/gym_tunnel.py" || RC=$?
+    # with -X faulthandler, `timeout -s ABRT` makes a hang dump every thread's stack (GYM_TUNNEL_TIMEOUT_S)
+    PYTHONUNBUFFERED=1 timeout -s ABRT "${GYM_TUNNEL_TIMEOUT_S:-900}" \
+        "${REACH_PYTHON}" -X faulthandler "${HERE}/gym_tunnel.py" || RC=$?
 fi
 exit "${RC}"
