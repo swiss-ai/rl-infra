@@ -44,7 +44,8 @@ while [[ ! -e "${LOG_DIR}/ENDED" ]]; do
   now=$(date +%s)
   size=$(stat -c %s "${DRIVER_LOG}")
   if (( size > offset )); then
-    hit="$(tail -c +$(( offset + 1 )) "${DRIVER_LOG}" | grep -m1 -iE "${TIMEOUT_RE}")"
+    # the one-line MasterConfig dump has "deepep" and many *timeout* keys (false alarm in jobs 5255374, 5255592)
+    hit="$(tail -c +$(( offset + 1 )) "${DRIVER_LOG}" | grep -v "MasterConfig(" | grep -m1 -iE "${TIMEOUT_RE}")"
     offset=${size}
     if [[ -n "${hit}" ]] && (( now - last_dump >= 120 )); then
       dump "communication timeout in the driver log: $(cut -c1-300 <<<"${hit}")"
