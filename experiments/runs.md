@@ -252,6 +252,16 @@ RUN=sft-mix-dapo-gsm8k-lr2e-6 JOB_TIME=1-05:00:00 bash run.sh envs/dapo-gsm8k-sf
     policy.megatron_cfg.optimizer.lr=2.0e-6
 ```
 
+## Last SFT checkpoint, DAPO
+
+Job 1210085, 16 nodes. The same run as 1190615, from iter_0019374, the last save of the SFT run. The recipe
+stages hanint05's HF export of it by link:
+
+```bash
+RUN=sft19374-dapo-adamw-lr2e-6 RECIPE=recipes/apertus2-chonk-sft19374-vllm-adamw-dapo.yaml JOB_TIME=1-00:00:00 bash run.sh envs/dapo-math-sft.yaml \
+    policy.megatron_cfg.optimizer.lr=2.0e-6
+```
+
 ## SFT, rubric
 
 Job 1192745, 14 nodes:
