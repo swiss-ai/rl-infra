@@ -73,7 +73,7 @@ bash experiments/chonk-sc/check.sh             # RUNS="a" or RUNS="b" for one ru
   runs `preflight.sh` as `launch.sh` will.
 
 Python: `CHECK_PYTHON`, else a venv `$SCRATCH/chonk-sc-check/venv` built on first use from a Python
->= 3.12 on PATH with `omegaconf==2.3.1 hydra-core==1.3.2 pydantic==2.13.5 pyyaml` (the clone's
+>= 3.12 on PATH (on the login nodes `python3.14`, tried first) with `omegaconf==2.3.1 hydra-core==1.3.2 pydantic==2.13.5 pyyaml` (the clone's
 `uv.lock` versions; pip needs PyPI). Packages the config modules import but the venv lacks (torch,
 ray, transformers, vllm, ...) are replaced by inert stubs and listed (`note stubbed`), with
 `__version__` from the clone's `uv.lock`; the validators themselves are pure pydantic/config code.

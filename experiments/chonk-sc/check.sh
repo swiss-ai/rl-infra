@@ -51,7 +51,8 @@ pick_python() {
     if [[ -x "${venv}/bin/python" ]] && "${venv}/bin/python" -c "import omegaconf, hydra, pydantic" 2>/dev/null; then
         echo "${venv}/bin/python"; return 0
     fi
-    for c in python3.13 python3.12 python3; do
+    # login nodes: python3.14 (the system python3 is older)
+    for c in python3.14 python3.13 python3.12 python3; do
         command -v "${c}" >/dev/null || continue
         "${c}" -c 'import sys; sys.exit(sys.version_info < (3, 12))' 2>/dev/null && { base="$(command -v "${c}")"; break; }
     done
