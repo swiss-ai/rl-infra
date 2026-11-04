@@ -190,7 +190,7 @@ for v in NRL_REFIT_BUFFER_MEMORY_RATIO NRL_REFIT_NUM_BUFFERS; do
   [[ "$t" == "$gv" ]] || err "$v differs between trainer ('$t') and generation ('$gv'); the refit broadcast hangs"
 done
 must=$(r checkpointing.checkpoint_must_save_by)
-if [[ -n "${must}" && "${must}" != null && -n "${JOB_TIME:-}" ]]; then
+if [[ "$(r checkpointing.enabled)" == true && -n "${must}" && "${must}" != null && -n "${JOB_TIME:-}" ]]; then
   secs() { local s=$1 d=0; [[ "$s" == *-* ]] && { d=${s%%-*}; s=${s#*-}; }; IFS=: read -r a b c <<<"$s"; echo $(( d*86400 + 10#$a*3600 + 10#$b*60 + 10#${c:-0} )); }
   IFS=: read -r md mh mm ms <<<"${must}"
   must_s=$(( 10#$md*86400 + 10#$mh*3600 + 10#$mm*60 + 10#$ms ))
