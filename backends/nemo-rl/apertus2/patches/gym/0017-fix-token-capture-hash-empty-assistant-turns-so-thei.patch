@@ -1,0 +1,528 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Wed, 4 Nov 2026 14:36:57 +0000
+Subject: [PATCH] fix(token-capture): hash empty assistant turns so their calls
+ stay resolvable
+
+assistant_fingerprint hashed only the content parts and tool calls of
+model-authored items, and _content_of drops empty text. A reply with no
+text and no tool call therefore added nothing to the hash, so the call
+that produced it got the same continuation fingerprint as its parent.
+The next request matched both ledger rows, both recorded contexts were a
+prefix of it, and the resolver refused to choose: FileLineageStore
+._resolve_row returns None for more than one row (reported as no_match),
+RolloutLineage.resolve_node reports ambiguous. The call was poisoned as
+unresolved_parent and every later call of the rollout followed.
+
+Evidence (job 5256202, Terminus-2 on a pretraining checkpoint, 1404/2380
+replies empty): 62/192 rollouts rejected with unresolved_parent. In all
+62 the ledger holds two committed rows with the same fingerprint right
+before the first unresolved call; none of the 130 accepted rollouts has
+a repeated fingerprint.
+
+Fix: a turn is a run of consecutive model-authored items (standalone
+reasoning items are skipped and do not split a run). A run that hashed no
+field gets an explicit marker. Non-empty turns hash exactly as before, so
+the golden vectors are unchanged; content ""/None/[]/empty text blocks
+still hash identically, and tool-call-only turns (content None or "", or
+an empty Responses message next to a function_call) hash as before.
+FINGERPRINT_VERSION goes to 2 because fingerprints of histories with an
+empty turn change; rows stamped by an older model server are then
+ignored (fail closed) instead of compared across canonicalizations.
+
+Tests: new fingerprint and ledger cases, plus the reproduction suite
+test_token_capture_empty_assistant.py (10 former strict xfails now pass,
+13 controls unchanged).
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ nemo_gym/token_id_capture/fingerprint.py      |  22 +-
+ .../test_conversation_fingerprint.py          |  49 +++
+ .../test_token_capture_empty_assistant.py     | 309 ++++++++++++++++++
+ tests/unit_tests/test_token_capture_ledger.py |  41 +++
+ 4 files changed, 420 insertions(+), 1 deletion(-)
+ create mode 100644 tests/unit_tests/test_token_capture_empty_assistant.py
+
+diff --git a/nemo_gym/token_id_capture/fingerprint.py b/nemo_gym/token_id_capture/fingerprint.py
+index efa661c3d..e29937e94 100644
+--- a/nemo_gym/token_id_capture/fingerprint.py
++++ b/nemo_gym/token_id_capture/fingerprint.py
+@@ -41,7 +41,7 @@ import orjson
+ 
+ # Increment when fingerprint canonicalization or hash layout changes.
+ # Resolvers ignore entries stamped with a different version.
+-FINGERPRINT_VERSION = 1
++FINGERPRINT_VERSION = 2
+ 
+ _FINGERPRINT_DOMAIN = b"nemo-gym-lineage"
+ _CONTEXT_DOMAIN = b"nemo-gym-lineage-context"
+@@ -53,22 +53,42 @@ def assistant_fingerprint(messages: list[dict]) -> str:
+     The fingerprint identifies the call that produced the last model-authored turn.
+     User and tool content is excluded from the lookup key.
+     Dialect-specific tool-call shapes normalize to the same hash input.
++
++    A turn is a run of consecutive model-authored items.
++    A turn with no text and no tool call (an empty reply) hashes an explicit marker.
++    Without it, the call that produced an empty reply would share its parent's fingerprint.
++    The next request would then match both calls and resolve as ambiguous.
++    Non-empty turns hash exactly as before, so their fingerprints do not change.
+     """
+     hasher = hashlib.sha256(_FINGERPRINT_DOMAIN)
+     count = 0
++    # Whether the current run of consecutive model-authored items hashed any field.
++    # ``None`` means no run is open.
++    run_hashed: bool | None = None
+     for message in messages or []:
+         if not isinstance(message, dict):
+             raise ValueError(f"request item is not an object: {type(message).__name__}")
+         if not _is_assistant_authored(message):
++            if message.get("type") == "reasoning":
++                # Excluded like reasoning content; it neither opens nor closes a turn.
++                continue
++            if run_hashed is False:
++                _update_field(hasher, b"\x05", "")
++            run_hashed = None
+             continue
+         count += 1
++        run_hashed = bool(run_hashed)
+         for content_type, payload in _content_of(message.get("content")):
+             _update_field(hasher, b"\x00", content_type)
+             _update_field(hasher, b"\x01", payload)
++            run_hashed = True
+         for call_id, name, arguments in _tools_of(message):
+             _update_field(hasher, b"\x02", call_id)
+             _update_field(hasher, b"\x03", name)
+             _update_field(hasher, b"\x04", arguments)
++            run_hashed = True
++    if run_hashed is False:
++        _update_field(hasher, b"\x05", "")
+     if count == 0:
+         return ""
+     return hasher.hexdigest()
+diff --git a/tests/unit_tests/test_conversation_fingerprint.py b/tests/unit_tests/test_conversation_fingerprint.py
+index 9b1a755a5..95f7dfe21 100644
+--- a/tests/unit_tests/test_conversation_fingerprint.py
++++ b/tests/unit_tests/test_conversation_fingerprint.py
+@@ -94,3 +94,52 @@ def test_a_non_object_item_raises_for_the_caller_to_handle():
+         assistant_fingerprint([42])
+     with pytest.raises(ValueError):
+         conversation_digest(["not a dict"])
++
++
++def test_an_empty_assistant_turn_still_counts_as_a_turn():
++    # An agent that answers a parse error with a re-prompt echoes the model's
++    # empty reply. If empty turns hashed as nothing, the call that produced the
++    # empty reply would share its fingerprint with its parent, and the next
++    # request would match both (unresolved parent, job 5256202).
++    answer = {"role": "assistant", "content": "answer"}
++    empty = {"role": "assistant", "content": ""}
++    retry = {"role": "user", "content": "Previous response had parsing errors"}
++    one = assistant_fingerprint([answer, retry, empty])
++    two = assistant_fingerprint([answer, retry, empty, retry, empty])
++    assert len({assistant_fingerprint([answer]), one, two}) == 3
++    assert assistant_fingerprint([empty]) != assistant_fingerprint([empty, retry, empty])
++
++
++def test_an_empty_assistant_turn_hashes_identically_across_dialects():
++    shapes = [
++        {"role": "assistant", "content": ""},
++        {"role": "assistant", "content": None},
++        {"role": "assistant", "content": []},
++        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "", "annotations": []}]},
++        {"role": "assistant", "content": [{"type": "text", "text": ""}]},
++        # A standalone reasoning item is excluded; it neither adds nor splits a turn.
++        [{"type": "reasoning", "summary": []}, {"role": "assistant", "content": ""}],
++    ]
++    fingerprints = {assistant_fingerprint(shape if isinstance(shape, list) else [shape]) for shape in shapes}
++    assert len(fingerprints) == 1 and fingerprints != {""}
++
++
++def test_an_empty_text_part_next_to_a_tool_call_is_not_an_empty_turn():
++    # Chat sends a tool-call-only turn with content None or "", Responses may
++    # add an empty message item before the function_call item. All of them
++    # carry the same model output and must keep hashing the same.
++    call = {"type": "function_call", "call_id": "c1", "name": "f", "arguments": "{}"}
++    chat_none = {
++        "role": "assistant",
++        "content": None,
++        "tool_calls": [{"id": "c1", "function": {"name": "f", "arguments": "{}"}}],
++    }
++    chat_empty = dict(chat_none, content="")
++    responses_with_empty_message = [{"type": "message", "role": "assistant", "content": []}, call]
++    fingerprints = {
++        assistant_fingerprint([call]),
++        assistant_fingerprint([chat_none]),
++        assistant_fingerprint([chat_empty]),
++        assistant_fingerprint(responses_with_empty_message),
++    }
++    assert len(fingerprints) == 1
+diff --git a/tests/unit_tests/test_token_capture_empty_assistant.py b/tests/unit_tests/test_token_capture_empty_assistant.py
+new file mode 100644
+index 000000000..c380d9d16
+--- /dev/null
++++ b/tests/unit_tests/test_token_capture_empty_assistant.py
+@@ -0,0 +1,309 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++"""Reproduce ``unresolved_parent`` after a content-less assistant response.
++
++Observed in a Terminus-2 GRPO run: the policy often answers with an empty string,
++the harness echoes ``{"role": "assistant", "content": ""}`` and asks again
++("Previous response had parsing errors ..."). The next call is then poisoned.
++
++Mechanism (before the fix): ``assistant_fingerprint`` hashed only the *content* of assistant turns
++and ``_content_of`` drops empty text, so a content-less, tool-less assistant turn
++adds nothing to the hash. A call whose response is empty therefore gets the same
++continuation fingerprint as its parent. The next request matches two ledger rows
++(parent and empty child), both of whose recorded contexts are a prefix of the
++request, so the resolver refuses to choose:
++
++* ``RolloutLineage.resolve_node`` (in-memory index): two candidates with different
++  cumulative digests -> UNRESOLVED ``ambiguous``.
++* ``FileLineageStore._resolve_row`` (ledger rows, the production path): two rows
++  share the fingerprint -> ``len(records) != 1`` -> None, and the reported reason
++  is the incremental index's ``no_match``.
++
++An empty response on the *first* call does not trigger it: its fingerprint is that
++of "one content-less assistant turn", which no other row shares. That is why
++rollouts whose only empty response was call 0 survived.
++
++The fix hashes an explicit marker for a model-authored turn with no content and no tool call.
++The reproductions now pass; the controls guard the cases that already resolved.
++"""
++
++from __future__ import annotations
++
++import pytest
++
++from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint
++from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
++from nemo_gym.token_id_capture.records import ParentResolutionStatus
++from nemo_gym.token_id_capture.sink import (
++    UNRESOLVED_PARENT_REASON,
++    CaptureContext,
++    reset_token_sink,
++    resolve_parent,
++    set_token_sink,
++)
++from nemo_gym.token_id_capture.staging.digest import (
++    EMPTY_EXTRAS_DIGEST,
++    compute_chain_hash,
++    hash_token_ids,
++)
++from nemo_gym.token_id_capture.staging.records import CallRecord, CaptureLedgerCommit, RolloutManifest
++
++
++# Shapes taken from Terminus-2 trial micro-json-062 (job 5256202).
++SYSTEM_TASK = {
++    "role": "user",
++    "content": "You are an AI assistant tasked with solving command-line tasks ... Format your response as JSON.",
++}
++ASSISTANT_JSON = {
++    "role": "assistant",
++    "content": '{"analysis": "look around", "plan": "list files", "commands": [{"keystrokes": "ls\\n"}]}',
++}
++TERMINAL_OUTPUT = {"role": "user", "content": "New Terminal Output:\nroot@box:/# ls\napp  server\n"}
++PARSE_ERROR = {
++    "role": "user",
++    "content": (
++        "Previous response had parsing errors:\nERROR: No valid JSON found in response\n"
++        "WARNINGS: - No valid JSON object found\n\nPlease fix these issues and provide a proper JSON response."
++    ),
++}
++ASSISTANT_EMPTY = {"role": "assistant", "content": ""}
++ASSISTANT_NONE = {"role": "assistant", "content": None}
++ASSISTANT_WHITESPACE = {"role": "assistant", "content": "\n\n"}
++ASSISTANT_TOOL_ONLY = {
++    "role": "assistant",
++    "content": None,
++    "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "bash", "arguments": '{"cmd": "ls"}'}}],
++}
++TOOL_RESULT = {"role": "tool", "tool_call_id": "call_1", "content": "app  server"}
++
++
++def _served(message: dict) -> dict:
++    """The response item the model server records (``response_to_output_items`` on a chat payload)."""
++    return {"type": "message", **message}
++
++
++class _Ledger:
++    """Commit calls into a ledger exactly as the external-staging commit hook does."""
++
++    def __init__(self, store, rollout_id: str = "r1") -> None:
++        self.store = store
++        self.rollout_id = rollout_id
++        self.tokens: list[int] = []
++        self.chain_hash: str | None = None
++        self.staging_chain: list[str] = []
++        self.calls: list[str] = []
++
++    async def commit(self, request_items: list[dict], response: dict) -> str:
++        call_id = f"c{len(self.calls) + 1}"
++        prev_len = len(self.tokens)
++        # Every call generates at least one token (EOS even for an empty answer),
++        # so cumulative digests of different calls always differ.
++        delta = list(range(prev_len + 1000, prev_len + 1010))
++        self.tokens += delta
++        self.chain_hash = compute_chain_hash(self.chain_hash, delta)
++        parent = self.calls[-1] if self.calls else None
++        staging_key = f"{self.rollout_id}/{call_id}"
++        self.staging_chain = self.staging_chain + [staging_key]
++        record = CallRecord(
++            model_call_id=call_id,
++            parent_call_id=parent,
++            staging_key=staging_key,
++            weight_version=1,
++            prev_len=prev_len,
++            delta_len=len(delta),
++            cum_len=len(self.tokens),
++            digest="a" * 64,
++            extras_digest=EMPTY_EXTRAS_DIGEST,
++            mode="text" if parent is None else "token_in",
++            response_id=f"chatcmpl-{call_id}",
++            admitted_at=1.0,
++            chain_hash=self.chain_hash,
++            cumulative_hash=hash_token_ids(self.tokens),
++        )
++        await self.store.record(
++            CaptureLedgerCommit(
++                rollout_id=self.rollout_id,
++                record=record,
++                staging_chain=tuple(self.staging_chain),
++                request_items=request_items,
++                response_items=[_served(response)],
++            )
++        )
++        self.calls.append(call_id)
++        return call_id
++
++
++async def _replay(store, turns: list[tuple[dict, dict]]) -> tuple[_Ledger, list[dict]]:
++    """Commit ``(user, assistant)`` turns in order; return the ledger and the full history."""
++    ledger = _Ledger(store)
++    history: list[dict] = []
++    for user, assistant in turns:
++        history.append(user)
++        await ledger.commit(list(history), assistant)
++        history.append(assistant)
++    return ledger, history
++
++
++async def _admit(store, request_items: list[dict], model_call_id: str) -> CaptureContext:
++    context = CaptureContext(
++        rollout_id="r1",
++        model_call_id=model_call_id,
++        token_sink=None,
++        lineage_store=store,
++        external_staging=True,
++    )
++    token = set_token_sink(context)
++    try:
++        await resolve_parent(request_items)
++    finally:
++        reset_token_sink(token)
++    return context
++
++
++@pytest.fixture(params=["file", "memory"])
++def store(request, tmp_path):
++    if request.param == "file":
++        return FileLineageStore(tmp_path)
++    return InMemoryLineageStore()
++
++
++# --- fingerprint level -------------------------------------------------------
++
++
++def test_empty_content_spellings_fingerprint_identically():
++    """Served ``""`` and echoed ``None``/missing/``[]`` must keep matching (passes today, must survive a fix)."""
++    spellings = [
++        {"role": "assistant", "content": ""},
++        {"role": "assistant", "content": None},
++        {"role": "assistant"},
++        {"role": "assistant", "content": []},
++        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": ""}]},
++    ]
++    prints = {assistant_fingerprint([SYSTEM_TASK, ASSISTANT_JSON, PARSE_ERROR, m]) for m in spellings}
++    assert len(prints) == 1
++
++
++def test_empty_assistant_turn_changes_fingerprint():
++    before = assistant_fingerprint([SYSTEM_TASK, ASSISTANT_JSON])
++    after = assistant_fingerprint([SYSTEM_TASK, ASSISTANT_JSON, PARSE_ERROR, ASSISTANT_EMPTY])
++    assert before != after
++
++
++def test_repeated_empty_assistant_turns_change_fingerprint():
++    one = assistant_fingerprint([SYSTEM_TASK, ASSISTANT_EMPTY])
++    two = assistant_fingerprint([SYSTEM_TASK, ASSISTANT_EMPTY, PARSE_ERROR, ASSISTANT_EMPTY])
++    assert one != two
++
++
++# --- resolver level: failing reproductions -----------------------------------
++
++
++async def test_empty_response_after_nonempty_call_resolves(store):
++    """c1 answers JSON, c2 answers "", c3 must continue c2 (56/62 Run B rejections)."""
++    ledger, history = await _replay(store, [(SYSTEM_TASK, ASSISTANT_JSON), (TERMINAL_OUTPUT, ASSISTANT_EMPTY)])
++    resolution = await store.resolve("r1", history + [PARSE_ERROR])
++    assert resolution.status == ParentResolutionStatus.RESOLVED, resolution.reason
++    assert resolution.match.model_call_id == ledger.calls[-1]
++
++
++async def test_consecutive_empty_responses_from_first_call_resolve(store):
++    """c1 and c2 both answer "": c3 must continue c2 (5/62 Run B rejections)."""
++    ledger, history = await _replay(store, [(SYSTEM_TASK, ASSISTANT_EMPTY), (PARSE_ERROR, ASSISTANT_EMPTY)])
++    resolution = await store.resolve("r1", history + [PARSE_ERROR])
++    assert resolution.status == ParentResolutionStatus.RESOLVED, resolution.reason
++    assert resolution.match.model_call_id == ledger.calls[-1]
++
++
++async def test_empty_response_echoed_as_none_resolves(store):
++    """Served ``""``, echoed by the harness as ``content: None`` (litellm may do this)."""
++    ledger, history = await _replay(store, [(SYSTEM_TASK, ASSISTANT_JSON), (TERMINAL_OUTPUT, ASSISTANT_EMPTY)])
++    history[-1] = ASSISTANT_NONE
++    resolution = await store.resolve("r1", history + [PARSE_ERROR])
++    assert resolution.status == ParentResolutionStatus.RESOLVED, resolution.reason
++    assert resolution.match.model_call_id == ledger.calls[-1]
++
++
++# --- resolver level: controls that pass today --------------------------------
++
++
++async def test_empty_response_on_first_call_resolves(store):
++    """Survivor pattern: the only empty answer is call 0 (18/18 Run B survivors with an empty row)."""
++    ledger, history = await _replay(
++        store,
++        [(SYSTEM_TASK, ASSISTANT_EMPTY), (PARSE_ERROR, ASSISTANT_JSON), (TERMINAL_OUTPUT, ASSISTANT_JSON)],
++    )
++    resolution = await store.resolve("r1", history + [TERMINAL_OUTPUT])
++    assert resolution.status == ParentResolutionStatus.RESOLVED, resolution.reason
++    assert resolution.match.model_call_id == ledger.calls[-1]
++
++
++async def test_empty_response_on_first_call_then_next_call_resolves(store):
++    """The call right after a first-call empty answer has a unique parent."""
++    ledger, history = await _replay(store, [(SYSTEM_TASK, ASSISTANT_EMPTY)])
++    resolution = await store.resolve("r1", history + [PARSE_ERROR])
++    assert resolution.status == ParentResolutionStatus.RESOLVED, resolution.reason
++    assert resolution.match.model_call_id == "c1"
++
++
++async def test_whitespace_only_response_resolves(store):
++    """``"\\n\\n"`` is non-empty content and is hashed, so it does not collapse."""
++    ledger, history = await _replay(store, [(SYSTEM_TASK, ASSISTANT_JSON), (TERMINAL_OUTPUT, ASSISTANT_WHITESPACE)])
++    resolution = await store.resolve("r1", history + [PARSE_ERROR])
++    assert resolution.status == ParentResolutionStatus.RESOLVED, resolution.reason
++    assert resolution.match.model_call_id == ledger.calls[-1]
++
++
++async def test_tool_call_only_response_resolves(store):
++    """``content: None`` with tool calls is fingerprinted by its tool calls."""
++    ledger, history = await _replay(store, [(SYSTEM_TASK, ASSISTANT_JSON), (TERMINAL_OUTPUT, ASSISTANT_TOOL_ONLY)])
++    resolution = await store.resolve("r1", history + [TOOL_RESULT])
++    assert resolution.status == ParentResolutionStatus.RESOLVED, resolution.reason
++    assert resolution.match.model_call_id == ledger.calls[-1]
++
++
++async def test_identical_nonempty_responses_resolve(store):
++    """Repeating the same non-empty answer still extends the fingerprint."""
++    ledger, history = await _replay(store, [(SYSTEM_TASK, ASSISTANT_JSON), (TERMINAL_OUTPUT, ASSISTANT_JSON)])
++    resolution = await store.resolve("r1", history + [TERMINAL_OUTPUT])
++    assert resolution.status == ParentResolutionStatus.RESOLVED, resolution.reason
++    assert resolution.match.model_call_id == ledger.calls[-1]
++
++
++# --- sink level: the rollout is poisoned -------------------------------------
++
++
++async def test_sink_admits_call_after_empty_response(store):
++    """Run B: ``Unresolved parent for model call ... poisoning the call``."""
++    ledger, history = await _replay(
++        store,
++        [(SYSTEM_TASK, ASSISTANT_JSON), (TERMINAL_OUTPUT, ASSISTANT_JSON), (TERMINAL_OUTPUT, ASSISTANT_EMPTY)],
++    )
++    context = await _admit(store, history + [PARSE_ERROR], model_call_id="c4")
++    manifest = RolloutManifest.model_validate(await store.manifest("r1"))
++    assert [failure.reason for failure in manifest.failures] == []
++    assert context.capture_admission is not None
++    assert context.capture_admission.mode == "token_in"
++    assert context.capture_admission.parent_call_id == ledger.calls[-1]
++
++
++async def test_sink_admits_call_after_first_call_empty(store):
++    """Control at the sink level: a first-call empty answer does not poison."""
++    ledger, history = await _replay(store, [(SYSTEM_TASK, ASSISTANT_EMPTY)])
++    context = await _admit(store, history + [PARSE_ERROR], model_call_id="c2")
++    manifest = RolloutManifest.model_validate(await store.manifest("r1"))
++    assert manifest.failures == []
++    assert context.capture_admission is not None and context.capture_admission.parent_call_id == "c1"
++    assert UNRESOLVED_PARENT_REASON not in [failure.reason for failure in manifest.failures]
+diff --git a/tests/unit_tests/test_token_capture_ledger.py b/tests/unit_tests/test_token_capture_ledger.py
+index 7f6171be9..3d5ed7214 100644
+--- a/tests/unit_tests/test_token_capture_ledger.py
++++ b/tests/unit_tests/test_token_capture_ledger.py
+@@ -240,6 +240,47 @@ async def test_admission_match_uses_staging_chain_without_wire_prefix(store):
+     assert context.request_items == [USER_1, ASSISTANT_1, USER_2]
+ 
+ 
++@pytest.mark.asyncio
++@pytest.mark.parametrize("first_reply", [ASSISTANT_1, {"role": "assistant", "content": ""}])
++async def test_a_call_after_an_empty_reply_resolves_to_the_call_that_produced_it(store, first_reply):
++    """An empty reply is a turn: its call must not share a fingerprint with its parent (job 5256202).
++
++    Terminus-2 answers an empty model reply with a "parsing errors" user turn and
++    echoes the empty assistant turn back. Before the fix both c1 and c2 matched c3's
++    request and c3 was poisoned as ``unresolved_parent``.
++    """
++    retry = {"role": "user", "content": "Previous response had parsing errors"}
++    empty_served = {"type": "message", "role": "assistant", "content": ""}
++    empty_echoed = {"role": "assistant", "content": ""}
++    await store.record(_commit(_call_record("c1"), [USER_1], [first_reply], staging_chain=("r1/c1",)))
++    tokens_2 = TOKENS_1 + [901, 902]
++    await store.record(
++        _commit(
++            _call_record(
++                "c2",
++                parent_call_id="c1",
++                prev_len=len(TOKENS_1),
++                delta_len=2,
++                chain_hash=compute_chain_hash(CHAIN_HASH_1, [901, 902]),
++                cumulative_hash=hash_token_ids(tokens_2),
++            ),
++            [USER_1, first_reply, retry],
++            [empty_served],
++            staging_chain=("r1/c1", "r1/c2"),
++        )
++    )
++
++    context = await _admit(store, [USER_1, first_reply, retry, empty_echoed, retry], model_call_id="c3")
++
++    admission = context.capture_admission
++    assert admission is not None
++    assert admission.parent_call_id == "c2"
++    assert admission.prev_len == len(tokens_2)
++    # c1's own continuation is still unique and still resolves to c1.
++    resolution = await store.resolve("r1", [USER_1, first_reply, retry])
++    assert resolution.match is not None and resolution.match.model_call_id == "c1"
++
++
+ @pytest.mark.asyncio
+ async def test_staging_chain_grows_across_external_calls(store):
+     await _record_call_1(store)
+-- 
+2.55.0
+

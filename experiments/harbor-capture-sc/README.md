@@ -51,6 +51,7 @@ The previous smoke test (4 sandboxes, ~7 min) is still one command:
 | `../../backends/nemo-rl/apertus2/patches/gym/0014-*.patch` | `MiniSweAgentNemoGym` agent: per-run `api_base`, rollout sampling params, no litellm cost lookup, `max_turns` call limit |
 | `../../backends/nemo-rl/apertus2/patches/gym/0015-*.patch` | fix after job 5253837: mini-swe-agent sends messages with `role`/`content` only (its `extra` field got 422 on every second call) |
 | `../../backends/nemo-rl/apertus2/patches/gym/0016-*.patch` | fix after job 5255374: the `max_turns` call limit raises `CallLimitReached` (mini's `LimitsExceeded` made `mini` prompt on stdin -> `EOFError`) |
+| `../../backends/nemo-rl/apertus2/patches/gym/0017-*.patch` | fix after job 5256202 (Gym token capture, upstream code): an assistant reply with no text and no tool call added nothing to the lineage fingerprint, so the next call matched two ledger rows and its rollout was rejected `unresolved_parent` (62/192 rollouts with Chonk). Empty turns now hash a marker; `FINGERPRINT_VERSION` 2. Report `research/reports/2026-11-04-capture-unresolved-parent-fix.md` (alpernates workspace). |
 | `../../backends/nemo-rl/apertus2/fetch-chisel.sh` | chisel 1.12.0 (amd64 + arm64, pinned sha256) into `CHISEL_DIR` |
 
 ## Environment variables of `run.sh`
