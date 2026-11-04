@@ -1,0 +1,416 @@
+From c25df7d4be35e05c2e9356d76c50598e698d58df Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Sun, 1 Nov 2026 07:37:00 +0900
+Subject: [PATCH] Apertus 2 format: serve it on the chat endpoint for Gym
+
+Gym talks to vLLM over the chat endpoint, in text. With output_format apertus2
+the prompt is encoded with apertus-common and the format's token mask applies.
+The response carries the reply as content and the thinking as reasoning, both
+parsed from the generated tokens. An output without a reply finishes as length,
+so that Gym treats it as a reply cut off by the token limit.
+---
+ examples/configs/grpo_math_1B.yaml            |  2 +
+ nemo_rl/data/apertus2_format.py               | 28 +++++-
+ nemo_rl/models/generation/interfaces.py       |  3 +
+ nemo_rl/models/generation/vllm/utils.py       | 34 +++++++
+ nemo_rl/models/generation/vllm/vllm_worker.py |  9 +-
+ .../generation/vllm/vllm_worker_async.py      | 22 +++++
+ tests/unit/data/test_apertus2_format.py       | 94 ++++++++++++++++++-
+ .../unit/reference_configs/grpo_math_1B.yaml  |  1 +
+ 8 files changed, 188 insertions(+), 5 deletions(-)
+
+diff --git a/examples/configs/grpo_math_1B.yaml b/examples/configs/grpo_math_1B.yaml
+index e4aa7fc98..ebfe72f93 100644
+--- a/examples/configs/grpo_math_1B.yaml
++++ b/examples/configs/grpo_math_1B.yaml
+@@ -420,6 +420,8 @@ policy:
+     stop_token_ids: null
+     # null, or "apertus2": block the format's forbidden token IDs and split outputs into frames (needs env.math.reward_frame)
+     output_format: null
++    # With output_format apertus2 on the HTTP server: file with the system frame's JSON object
++    system_prompt_file: null
+     stop_strings: null
+     # null = topology default (IPC colocated, NCCL non-colocated). For
+     # non-colocated Megatron generation it selects the packed collective; use
+diff --git a/nemo_rl/data/apertus2_format.py b/nemo_rl/data/apertus2_format.py
+index 73a2ed660..8b3bad357 100644
+--- a/nemo_rl/data/apertus2_format.py
++++ b/nemo_rl/data/apertus2_format.py
+@@ -33,6 +33,7 @@ class Apertus2Output:
+     """One burst of generated tokens, split into the frames rollouts care about.
+ 
+     Attributes:
++        think: Payloads of the think frames, joined, or None if there is none.
+         claim: Payload of the last claim frame, or None if there is none.
+         reply: Payloads of the reply frames, joined, or None if there is none.
+         has_call: Whether the burst has a tool call frame.
+@@ -40,6 +41,7 @@ class Apertus2Output:
+         truncated: Whether generation hit the token limit.
+     """
+ 
++    think: str | None
+     claim: str | None
+     reply: str | None
+     has_call: bool
+@@ -84,6 +86,27 @@ def encode_prompt(
+     )
+ 
+ 
++def encode_chat_prompt(
++    tokenizer_path: str, *, system_prompt: str, messages: list[dict[str, Any]]
++) -> list[int]:
++    """Encode OpenAI-style chat messages, ending at ``<|/in|>``.
++
++    Args:
++        tokenizer_path: Directory of the Apertus 2 tokenizer.
++        system_prompt: The system frame's JSON object, such as
++            ``{"thinking":"medium","tools":[]}``.
++        messages: The request's messages.
++
++    Returns:
++        The prompt's token IDs.
++    """
++    # apertus-common is an optional dependency, needed only by this format.
++    from apertus_common import from_openai
++
++    mapped = from_openai(messages, system_defaults=json.loads(system_prompt))
++    return _get_encoding(tokenizer_path).encode_conversation(mapped.value)
++
++
+ def allowed_token_ids(tokenizer_path: str) -> list[int]:
+     """Return every token ID the model may generate, for vLLM's sampling params."""
+     encoding = _get_encoding(tokenizer_path)
+@@ -108,7 +131,7 @@ def parse_output(
+         The frames of the burst.
+     """
+     # apertus-common is an optional dependency, needed only by this format.
+-    from apertus_common import Call, Claim, Reply, StreamParseError
++    from apertus_common import Call, Claim, Reply, StreamParseError, Think
+ 
+     parser = _get_encoding(tokenizer_path).output_parser()
+     try:
+@@ -116,6 +139,7 @@ def parse_output(
+         items = parser.finish().items
+     except StreamParseError as error:
+         return Apertus2Output(
++            think=None,
+             claim=None,
+             reply=None,
+             has_call=False,
+@@ -123,9 +147,11 @@ def parse_output(
+             truncated=truncated,
+         )
+ 
++    thoughts = [item.payload for item in items if isinstance(item, Think)]
+     claims = [item.payload for item in items if isinstance(item, Claim)]
+     replies = [item.payload for item in items if isinstance(item, Reply)]
+     return Apertus2Output(
++        think="".join(thoughts) if thoughts else None,
+         claim=claims[-1] if claims else None,
+         reply="".join(replies) if replies else None,
+         has_call=any(isinstance(item, Call) for item in items),
+diff --git a/nemo_rl/models/generation/interfaces.py b/nemo_rl/models/generation/interfaces.py
+index 000b15d42..a9c478518 100644
+--- a/nemo_rl/models/generation/interfaces.py
++++ b/nemo_rl/models/generation/interfaces.py
+@@ -234,6 +234,9 @@ class GenerationConfig(TypedDict):
+     bad_words: NotRequired[list[str] | None]
+     # "apertus2" blocks the format's forbidden token IDs and splits outputs into frames.
+     output_format: NotRequired[str | None]
++    # Apertus 2 on the chat endpoint: file with the system frame's JSON object. Gym
++    # requests carry only chat messages, so the frame comes from here.
++    system_prompt_file: NotRequired[str | None]
+     colocated: NotRequired[ColocationConfig]
+     port_range_low: NotRequired[int]
+     port_range_high: NotRequired[int]
+diff --git a/nemo_rl/models/generation/vllm/utils.py b/nemo_rl/models/generation/vllm/utils.py
+index 019efad8f..25761276a 100644
+--- a/nemo_rl/models/generation/vllm/utils.py
++++ b/nemo_rl/models/generation/vllm/utils.py
+@@ -17,6 +17,7 @@ from typing import Any, Optional
+ 
+ import torch
+ 
++from nemo_rl.data.apertus2_format import parse_output
+ from nemo_rl.data.multimodal_utils import (
+     VLLM_CONTENT_KEY,
+     VLLM_MULTI_MODAL_DATA_KEY,
+@@ -408,6 +409,39 @@ def attach_routed_experts_to_chat_response_choices(
+     return response
+ 
+ 
++def apply_apertus2_output_to_chat_response_choices(
++    response: Any,
++    final_request_output: Any,
++    tokenizer_path: str,
++) -> Any:
++    """Replace chat response text with the frames parsed from the generated tokens.
++
++    The client gets the reply as content and the thinking as reasoning. An output
++    without a reply finishes as ``length``, so that clients treat it as a reply cut
++    off by the token limit.
++
++    Args:
++        response: The ChatCompletionResponse.
++        final_request_output: vLLM's final RequestOutput for the request.
++        tokenizer_path: Directory of the Apertus 2 tokenizer.
++
++    Returns:
++        The response, changed in place.
++    """
++    outputs = {output.index: output for output in final_request_output.outputs}
++    for choice in response.choices:
++        output = parse_output(
++            tokenizer_path,
++            list(outputs[choice.index].token_ids),
++            truncated=choice.finish_reason == "length",
++        )
++        choice.message.content = output.reply or ""
++        choice.message.reasoning = output.think or None
++        if not output.reply:
++            choice.finish_reason = "length"
++    return response
++
++
+ def attach_token_information_to_chat_response_choices(
+     response: Any,
+     final_request_output: Any,
+diff --git a/nemo_rl/models/generation/vllm/vllm_worker.py b/nemo_rl/models/generation/vllm/vllm_worker.py
+index b5553717c..52e0a0f0d 100644
+--- a/nemo_rl/models/generation/vllm/vllm_worker.py
++++ b/nemo_rl/models/generation/vllm/vllm_worker.py
+@@ -460,11 +460,14 @@ class BaseVllmGenerationWorker:
+         """Lightweight config setup. No model loading, no heavy imports."""
+         self.cfg = config
+         self.model_name = self.cfg["model_name"]
++        self.is_apertus2 = self.cfg.get("output_format") == APERTUS2_OUTPUT_FORMAT
+         self.allowed_token_ids = (
+-            allowed_token_ids(self.model_name)
+-            if self.cfg.get("output_format") == APERTUS2_OUTPUT_FORMAT
+-            else None
++            allowed_token_ids(self.model_name) if self.is_apertus2 else None
+         )
++        self.apertus2_system_prompt: Optional[str] = None
++        if self.is_apertus2 and self.cfg["vllm_cfg"].get("expose_http_server"):
++            with open(self.cfg["system_prompt_file"], encoding="utf-8") as prompt_file:
++                self.apertus2_system_prompt = prompt_file.read()
+         # Refined from the model's expert count in _load_model.
+         self.routed_experts_dtype = ROUTED_EXPERTS_FALLBACK_DTYPE
+         self.tensor_parallel_size = self.cfg["vllm_cfg"]["tensor_parallel_size"]
+diff --git a/nemo_rl/models/generation/vllm/vllm_worker_async.py b/nemo_rl/models/generation/vllm/vllm_worker_async.py
+index 28f32c452..04d36443a 100644
+--- a/nemo_rl/models/generation/vllm/vllm_worker_async.py
++++ b/nemo_rl/models/generation/vllm/vllm_worker_async.py
+@@ -28,6 +28,7 @@ import torch
+ import uvicorn
+ from fastapi import FastAPI
+ 
++from nemo_rl.data.apertus2_format import encode_chat_prompt
+ from nemo_rl.data_plane.adapters.tq_mooncake_checkpoint import run_checkpoint_command
+ from nemo_rl.distributed.batched_data_dict import BatchedDataDict
+ from nemo_rl.distributed.virtual_cluster import (
+@@ -50,6 +51,7 @@ from nemo_rl.models.generation.vllm.collective_rpc import (
+ )
+ from nemo_rl.models.generation.vllm.config import parse_nvfp4_pertoken_rollout
+ from nemo_rl.models.generation.vllm.utils import (
++    apply_apertus2_output_to_chat_response_choices,
+     attach_routed_experts_to_chat_response_choices,
+     attach_token_information_to_chat_response_choices,
+     format_prompt_for_vllm_generation,
+@@ -915,6 +917,19 @@ class VllmAsyncGenerationWorkerImpl(
+                         )
+                     raise
+ 
++                if worker_self.is_apertus2:
++                    # The format has no chat template: only the rendered prompt's token
++                    # IDs are replaced, so that the render above just satisfies vLLM.
++                    assert request.required_prefix_token_ids is None, (
++                        "Apertus 2 on the chat endpoint handles one turn; a continuation "
++                        "must extend the exact tokens of the last one."
++                    )
++                    res[1][0]["prompt_token_ids"] = encode_chat_prompt(
++                        worker_self.model_name,
++                        system_prompt=worker_self.apertus2_system_prompt,
++                        messages=messages_for_replace_prefix_tokens,
++                    )
++
+                 # Token capture: build the admission once, before branching,
+                 # and resolve its prefix from it (staging_chain -> cached TQ
+                 # read, inline ids, or nothing for a text root). The
+@@ -1087,6 +1102,11 @@ class VllmAsyncGenerationWorkerImpl(
+                         final_res,
+                     )
+ 
++                if worker_self.is_apertus2:
++                    response = apply_apertus2_output_to_chat_response_choices(
++                        response, final_res, worker_self.model_name
++                    )
++
+                 if worker_self._return_routed_experts_enabled():
+                     response = attach_routed_experts_to_chat_response_choices(
+                         response,
+@@ -1221,6 +1241,8 @@ class VllmAsyncGenerationWorkerImpl(
+                 f"params (val_temperature={generation_config['val_temperature']}, "
+                 f"val_top_p={generation_config['val_top_p']})"
+             )
++            if worker_self.is_apertus2:
++                request.allowed_token_ids = worker_self.allowed_token_ids
+ 
+             try:
+                 generator = await openai_serving_chat.create_chat_completion(
+diff --git a/tests/unit/data/test_apertus2_format.py b/tests/unit/data/test_apertus2_format.py
+index 1f951e8e3..617cb5a9d 100644
+--- a/tests/unit/data/test_apertus2_format.py
++++ b/tests/unit/data/test_apertus2_format.py
+@@ -17,6 +17,7 @@ Set NRL_APERTUS2_TOKENIZER to a directory with the Apertus_2_instruct tokenizer.
+ """
+ 
+ import os
++from types import SimpleNamespace
+ 
+ import pytest
+ 
+@@ -34,10 +35,14 @@ from apertus_common import (  # noqa: E402
+     load_encoding,
+ )
+ 
++from nemo_rl.models.generation.vllm.utils import (  # noqa: E402
++    apply_apertus2_output_to_chat_response_choices,
++)
+ from nemo_rl.data.apertus2_format import (  # noqa: E402
+     LONG_CLAIM_CHARS,
+     Apertus2Output,
+     allowed_token_ids,
++    encode_chat_prompt,
+     encode_prompt,
+     frame_metrics,
+     frame_text,
+@@ -76,6 +81,28 @@ def test_prompt_text_cannot_become_a_control_token():
+     assert prompt.count(HEADER_END) == 2  # one per frame
+ 
+ 
++def test_chat_prompt_matches_the_math_prompt():
++    prompt = encode_chat_prompt(
++        TOKENIZER,
++        system_prompt=SYSTEM_PROMPT,
++        messages=[{"role": "user", "content": "Hi <|hdr|>"}],
++    )
++    assert prompt == encode_prompt(
++        TOKENIZER, system_prompt=SYSTEM_PROMPT, user_text="Hi <|hdr|>"
++    )
++
++
++def test_chat_prompt_reads_text_parts():
++    prompt = encode_chat_prompt(
++        TOKENIZER,
++        system_prompt=SYSTEM_PROMPT,
++        messages=[{"role": "user", "content": [{"type": "text", "text": "Hi"}]}],
++    )
++    assert prompt == encode_prompt(
++        TOKENIZER, system_prompt=SYSTEM_PROMPT, user_text="Hi"
++    )
++
++
+ def test_allowed_ids_keep_the_output_controls_and_block_other_specials(encoding):
+     allowed = set(allowed_token_ids(TOKENIZER))
+     assert {HEADER_END, 10, OUTPUT_END, WAIT} <= allowed
+@@ -89,7 +116,12 @@ def test_parse_splits_frames(encoding):
+     )
+     output = parse_output(TOKENIZER, tokens, truncated=False)
+     assert output == Apertus2Output(
+-        claim="42", reply="It is 42.", has_call=False, error=None, truncated=False
++        think="Add.",
++        claim="42",
++        reply="It is 42.",
++        has_call=False,
++        error=None,
++        truncated=False,
+     )
+ 
+ 
+@@ -136,6 +168,7 @@ def test_parse_of_a_cut_off_output(encoding):
+ 
+ def _output(**changes):
+     fields = {
++        "think": "Add.",
+         "claim": "42",
+         "reply": "It is 42.",
+         "has_call": False,
+@@ -169,3 +202,62 @@ def test_frame_metrics(output, claim_score, reply_score, expected):
+     metrics = frame_metrics(output, claim_score=claim_score, reply_score=reply_score)
+     for name, value in expected.items():
+         assert metrics[name] == value
++
++
++def _chat_response(finish_reason):
++    message = SimpleNamespace(content="decoded text", reasoning=None)
++    choice = SimpleNamespace(index=0, finish_reason=finish_reason, message=message)
++    return SimpleNamespace(choices=[choice])
++
++
++def _engine_output(token_ids):
++    return SimpleNamespace(outputs=[SimpleNamespace(index=0, token_ids=token_ids)])
++
++
++def test_chat_response_gets_the_reply_and_the_thinking(encoding):
++    tokens = encoding.encode_items(
++        [Think(payload="Add."), Claim(payload="42"), Reply(payload="It is 42."), Wait()]
++    )
++    response = apply_apertus2_output_to_chat_response_choices(
++        _chat_response("stop"), _engine_output(tokens), TOKENIZER
++    )
++    choice = response.choices[0]
++    assert choice.message.content == "It is 42."
++    assert choice.message.reasoning == "Add."
++    assert choice.finish_reason == "stop"
++
++
++def test_an_empty_think_is_no_reasoning(encoding):
++    tokens = encoding.encode_items([Think(payload=""), Reply(payload="Hi."), Wait()])
++    response = apply_apertus2_output_to_chat_response_choices(
++        _chat_response("stop"), _engine_output(tokens), TOKENIZER
++    )
++    assert response.choices[0].message.reasoning is None
++
++
++@pytest.mark.parametrize(
++    "items",
++    [
++        [Think(payload="Only thinking.")],
++        [Think(payload="Add."), Reply(payload=""), Wait()],
++        [Claim(payload="42"), Wait()],
++    ],
++)
++def test_output_without_a_reply_finishes_as_truncated(encoding, items):
++    response = apply_apertus2_output_to_chat_response_choices(
++        _chat_response("stop"), _engine_output(encoding.encode_items(items)), TOKENIZER
++    )
++    choice = response.choices[0]
++    assert choice.message.content == ""
++    assert choice.finish_reason == "length"
++
++
++def test_invalid_frames_finish_as_truncated(encoding):
++    tokens = encoding.encode_items([Reply(payload="42"), Wait()])
++    response = apply_apertus2_output_to_chat_response_choices(
++        _chat_response("stop"),
++        _engine_output([tokens[0], OUTPUT_END, *tokens]),
++        TOKENIZER,
++    )
++    assert response.choices[0].message.content == ""
++    assert response.choices[0].finish_reason == "length"
+diff --git a/tests/unit/reference_configs/grpo_math_1B.yaml b/tests/unit/reference_configs/grpo_math_1B.yaml
+index c597aa506..426372f0b 100644
+--- a/tests/unit/reference_configs/grpo_math_1B.yaml
++++ b/tests/unit/reference_configs/grpo_math_1B.yaml
+@@ -394,6 +394,7 @@ policy:
+     val_top_k: ${.top_k}
+     stop_token_ids: null
+     output_format: null
++    system_prompt_file: null
+     stop_strings: null
+     # null = topology default (IPC colocated, NCCL non-colocated). For
+     # non-colocated Megatron generation it selects the packed collective; use
+-- 
+2.43.0
+

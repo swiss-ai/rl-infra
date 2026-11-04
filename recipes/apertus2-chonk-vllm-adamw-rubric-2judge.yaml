@@ -1,0 +1,6 @@
+defaults: apertus2-chonk-vllm-adamw-rubric.yaml
+
+# 8 trainer nodes, 4 vLLM nodes and 2 judge nodes. Run with RECIPE=<this file> and
+# env.judge_pool.num_nodes=2: run.sh reads the job's size from the recipe, not from overrides.
+cluster:
+  num_nodes: 14

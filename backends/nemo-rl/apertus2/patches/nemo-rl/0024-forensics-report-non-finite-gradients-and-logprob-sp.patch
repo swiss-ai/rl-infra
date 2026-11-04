@@ -1,0 +1,402 @@
+From 6412ae0458df450aae33bcf6e2b2da6e9773e910 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Mon, 2 Nov 2026 00:28:38 +0900
+Subject: [PATCH] forensics: report non-finite gradients and logprob spikes
+
+A NaN from Megatron's gradient check says only which rank and which iteration failed, so job 1190668 left no way to tell a few bad elements from a broken forward pass. When train fails on that check, write how many gradient elements are bad and in which parameters, and save the batch that rank was training on. NRL_FORENSICS_TEST_NAN=<n> poisons one gradient on the n-th train call to exercise this in a debug run.
+
+Tokens whose log-probability moves by 10 or more between get_logprobs and training are also reported, at most three per microbatch, with the generation, get_logprobs and training values. The ratios are already computed for the metrics, so a step without a spike does no extra work.
+---
+ nemo_rl/algorithms/loss/loss_functions.py     |  47 +++++++
+ .../policy/workers/megatron_policy_worker.py  |   1 +
+ nemo_rl/utils/failure_forensics.py            |  69 +++++++++-
+ tests/unit/algorithms/test_loss_functions.py  |  37 +++++-
+ tests/unit/utils/test_failure_forensics.py    | 122 ++++++++++++++++++
+ 5 files changed, 274 insertions(+), 2 deletions(-)
+ create mode 100644 tests/unit/utils/test_failure_forensics.py
+
+diff --git a/nemo_rl/algorithms/loss/loss_functions.py b/nemo_rl/algorithms/loss/loss_functions.py
+index 282154753..09732161f 100755
+--- a/nemo_rl/algorithms/loss/loss_functions.py
++++ b/nemo_rl/algorithms/loss/loss_functions.py
+@@ -12,6 +12,7 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
++import math
+ import warnings
+ from typing import TYPE_CHECKING, Any, NotRequired, Optional, TypedDict, TypeVar
+ 
+@@ -61,6 +62,41 @@ if TYPE_CHECKING:
+ 
+ Tensor = TypeVar("Tensor", bound=torch.Tensor)
+ 
++# A token whose log-probability moves this far between get_logprobs and training is
++# reported: that is far more than one training step should move it.
++_LOG_RATIO_SPIKE = 10.0
++_RATIO_SPIKE = math.exp(_LOG_RATIO_SPIKE)
++_MAX_SPIKES_PER_MICROBATCH = 3
++
++
++def _report_ratio_spikes(
++    curr_logprobs: torch.Tensor,
++    prev_logprobs: torch.Tensor,
++    generation_logprobs: torch.Tensor,
++    mask: torch.Tensor,
++    input_ids: torch.Tensor,
++) -> None:
++    """Print the worst tokens of a microbatch past ``_LOG_RATIO_SPIKE``.
++
++    The three log-probabilities show which pass is the odd one out, and the tokens
++    leading up to the spike identify the sequence in the saved rollouts.
++    """
++    log_ratios = curr_logprobs - prev_logprobs
++    spiked = (log_ratios.abs() >= _LOG_RATIO_SPIKE) & mask.bool()
++    rows, positions = spiked.nonzero(as_tuple=True)
++    order = log_ratios[rows, positions].abs().argsort(descending=True)
++    rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
++    for i in order[:_MAX_SPIKES_PER_MICROBATCH].tolist():
++        row, pos = rows[i].item(), positions[i].item()
++        print(
++            f"[ratio-spike] rank={rank} row={row} pos={pos} "
++            f"curr={curr_logprobs[row, pos].item():.3f} "
++            f"prev={prev_logprobs[row, pos].item():.3f} "
++            f"gen={generation_logprobs[row, pos].item():.3f} "
++            f"tokens={input_ids[row, max(pos - 6, 0) : pos + 2].tolist()}",
++            flush=True,
++        )
++
+ 
+ class DraftCrossEntropyLossConfig(TypedDict):
+     vocab_parallel_group: Optional[torch.distributed.ProcessGroup]
+@@ -854,6 +890,17 @@ class ClippedPGLossFn(LossFunction):
+                 probs_ratio_max = masked_ratios.max().item()
+                 probs_ratio_clamped_min = masked_ratios_clamped.min().item()
+                 probs_ratio_clamped_max = masked_ratios_clamped.max().item()
++                if not self.disable_ppo_ratio and (
++                    probs_ratio_max >= _RATIO_SPIKE
++                    or probs_ratio_min <= 1.0 / _RATIO_SPIKE
++                ):
++                    _report_ratio_spikes(
++                        curr_logprobs.detach(),
++                        prev_logprobs,
++                        generation_logprobs,
++                        mask,
++                        data["input_ids"],
++                    )
+             else:
+                 probs_ratio_min = float("inf")
+                 probs_ratio_max = float("-inf")
+diff --git a/nemo_rl/models/policy/workers/megatron_policy_worker.py b/nemo_rl/models/policy/workers/megatron_policy_worker.py
+index 2ba736929..3dd3f14f3 100644
+--- a/nemo_rl/models/policy/workers/megatron_policy_worker.py
++++ b/nemo_rl/models/policy/workers/megatron_policy_worker.py
+@@ -1064,6 +1064,7 @@ class MegatronPolicyWorkerImpl(
+                     batch_size=local_gbs,
+                 )
+                 batch = gb_result["batch"]
++                failure_forensics.note_batch(batch)
+                 global_valid_seqs = gb_result["global_valid_seqs"]
+                 global_valid_toks = gb_result["global_valid_toks"]
+ 
+diff --git a/nemo_rl/utils/failure_forensics.py b/nemo_rl/utils/failure_forensics.py
+index 2b2776f02..21d5814a2 100644
+--- a/nemo_rl/utils/failure_forensics.py
++++ b/nemo_rl/utils/failure_forensics.py
+@@ -27,13 +27,18 @@ Enabled by ``NRL_FORENSICS_DIR`` (one directory per run, shared by all ranks):
+   of every live allocation with the Python stack that made it, written for
+   out-of-memory errors only (PyTorch's, and NCCL's ``Cuda failure 'out of
+   memory'``). Open it at https://pytorch.org/memory_viz.
++- ``nonfinite-rank<r>-<time>.txt``: written when ``train`` fails on Megatron's NaN or
++  Inf gradient check: how many elements are bad overall and in which parameters. The
++  batch this rank was training on goes to the ``.pt`` file of the same name.
+ 
+ ``NRL_FORENSICS_TEST_OOM=1`` makes the first ``train`` call request 1 TiB of GPU
+-memory, to check the whole path in a debug run.
++memory, and ``NRL_FORENSICS_TEST_NAN=<n>`` makes the gradient of one parameter NaN from
++the n-th ``train`` call on, to check the whole path in a debug run.
+ """
+ 
+ import functools
+ import os
++import re
+ import socket
+ import threading
+ import time
+@@ -44,6 +49,8 @@ import torch
+ 
+ _GB = float(1 << 30)
+ _MAX_REPORTS = 5
++_MAX_NONFINITE_PARAMS = 50
++_NONFINITE_GRAD_ERROR = re.compile(r"found (NaN|Inf) in local grad norm")
+ 
+ _state: dict[str, Any] = {
+     "dir": None,
+@@ -53,6 +60,8 @@ _state: dict[str, Any] = {
+     "history": False,
+     "reports": 0,
+     "snapshots": 0,
++    "batch": None,
++    "train_calls": 0,
+ }
+ 
+ 
+@@ -134,6 +143,56 @@ def _on_torch_oom(device: int, alloc: int, device_total: int, device_free: int)
+     )
+ 
+ 
++def note_batch(batch: Any) -> None:
++    """Keep a reference to the batch in training, for ``report_nonfinite_grads``."""
++    _state["batch"] = batch
++
++
++def _poison_one_grad(model: Any) -> None:
++    param = next(p for p in model.parameters() if p.requires_grad)
++    param.register_hook(lambda grad: grad * float("nan"))
++
++
++def report_nonfinite_grads(model: Any) -> None:
++    """Write which parameters hold non-finite gradients, and save the batch in training."""
++    if _state["dir"] is None:
++        return
++    stem = os.path.join(_state["dir"], f"nonfinite-rank{_state['rank']}-{_stamp()}")
++    try:
++        rows = []
++        checked = 0
++        for name, param in model.named_parameters():
++            grad = getattr(param, "main_grad", None)
++            if grad is None:
++                grad = param.grad
++            if grad is None:
++                continue
++            checked += grad.numel()
++            bad = int((~torch.isfinite(grad)).sum().item())
++            if bad:
++                bad_weights = int((~torch.isfinite(param.data)).sum().item())
++                expert = not getattr(param, "allreduce", True)
++                rows.append((bad, grad.numel(), bad_weights, expert, name))
++        rows.sort(reverse=True)
++        with open(f"{stem}.txt", "w") as f:
++            f.write(
++                f"rank={_state['rank']} host={socket.gethostname()} "
++                f"device={_state['device']} phase={_state['phase']}\n"
++                f"non-finite gradient elements: {sum(r[0] for r in rows)} of {checked}, "
++                f"in {len(rows)} parameters\n"
++                "bad_grads\tgrad_size\tbad_weights\texpert\tname\n"
++            )
++            for row in rows[:_MAX_NONFINITE_PARAMS]:
++                f.write("\t".join(str(value) for value in row) + "\n")
++        batch = _state["batch"]
++        if batch is not None:
++            tensors = {k: v.detach().cpu() for k, v in batch.items() if torch.is_tensor(v)}
++            torch.save(tensors, f"{stem}.pt")
++        print(f"[forensics] rank={_state['rank']} wrote {stem}.txt", flush=True)
++    except Exception as e:
++        print(f"[forensics] rank={_state['rank']} gradient report failed: {e!r}", flush=True)
++
++
+ def dump_on_failure(fn: Callable) -> Callable:
+     """Decorate a worker method so a failure inside it leaves a report behind."""
+ 
+@@ -142,10 +201,18 @@ def dump_on_failure(fn: Callable) -> Callable:
+         try:
+             if fn.__name__ == "train" and os.environ.get("NRL_FORENSICS_TEST_OOM") == "1":
+                 torch.empty(1 << 40, dtype=torch.uint8, device="cuda")
++            if fn.__name__ == "train":
++                _state["train_calls"] += 1
++                if str(_state["train_calls"]) == os.environ.get("NRL_FORENSICS_TEST_NAN"):
++                    _poison_one_grad(args[0].model)
+             return fn(*args, **kwargs)
+         except Exception as e:
+             report(f"exception in {fn.__name__}", e)
++            if _NONFINITE_GRAD_ERROR.search(str(e)):
++                report_nonfinite_grads(args[0].model)
+             raise
++        finally:
++            _state["batch"] = None
+ 
+     return wrapper
+ 
+diff --git a/tests/unit/algorithms/test_loss_functions.py b/tests/unit/algorithms/test_loss_functions.py
+index 22f772ee4..93eb13ac1 100644
+--- a/tests/unit/algorithms/test_loss_functions.py
++++ b/tests/unit/algorithms/test_loss_functions.py
+@@ -27,7 +27,10 @@ from nemo_rl.algorithms.loss import (
+     prepare_loss_input,
+ )
+ from nemo_rl.algorithms.loss.interfaces import MetricNormalizer
+-from nemo_rl.algorithms.loss.loss_functions import CrossTokenizerDistillationLossFn
++from nemo_rl.algorithms.loss.loss_functions import (
++    CrossTokenizerDistillationLossFn,
++    _report_ratio_spikes,
++)
+ from nemo_rl.algorithms.utils import calculate_kl, masked_mean
+ from nemo_rl.algorithms.x_token.loss_utils import (
+     build_exact_token_map,
+@@ -3142,3 +3145,35 @@ def test_vocab_parallel_gather_columns_tp_sharded(monkeypatch):
+     ref[..., idx].float().backward(grad_out)
+     torch.testing.assert_close(shards[0].grad, ref.grad[..., :v_local])
+     torch.testing.assert_close(shards[1].grad, ref.grad[..., v_local:])
++
++
++def test_ratio_spikes_are_reported_worst_first_and_capped(capsys):
++    curr = torch.zeros(2, 8)
++    prev = torch.zeros(2, 8)
++    generation = torch.full((2, 8), -1.0)
++    input_ids = torch.arange(18).reshape(2, 9)
++    mask = torch.ones(2, 8)
++    prev[0, 2] = -12.0  # curr far above prev
++    curr[1, 5] = -20.0  # curr far below prev
++    prev[1, 1] = -11.0
++    prev[1, 2] = -10.5
++    prev[0, 7] = -30.0  # the largest, but masked
++    mask[0, 7] = 0.0
++
++    _report_ratio_spikes(curr, prev, generation, mask, input_ids)
++
++    lines = capsys.readouterr().out.strip().splitlines()
++    assert len(lines) == 3
++    assert "row=1 pos=5 curr=-20.000 prev=0.000 gen=-1.000" in lines[0]
++    assert lines[0].endswith("tokens=[9, 10, 11, 12, 13, 14, 15]")
++    assert "row=0 pos=2 curr=0.000 prev=-12.000" in lines[1]
++    assert "row=1 pos=1" in lines[2]
++    assert not any("pos=7" in line for line in lines)
++
++
++def test_no_ratio_spike_prints_nothing(capsys):
++    logprobs = torch.full((1, 4), -1.0)
++
++    _report_ratio_spikes(logprobs, logprobs + 9.9, logprobs, torch.ones(1, 4), torch.zeros(1, 5))
++
++    assert capsys.readouterr().out == ""
+diff --git a/tests/unit/utils/test_failure_forensics.py b/tests/unit/utils/test_failure_forensics.py
+new file mode 100644
+index 000000000..f7e175a89
+--- /dev/null
++++ b/tests/unit/utils/test_failure_forensics.py
+@@ -0,0 +1,122 @@
++# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++import pytest
++import torch
++
++from nemo_rl.utils import failure_forensics
++
++
++@pytest.fixture
++def forensics_dir(tmp_path, monkeypatch):
++    monkeypatch.setitem(failure_forensics._state, "dir", str(tmp_path))
++    monkeypatch.setitem(failure_forensics._state, "rank", 5)
++    monkeypatch.setitem(failure_forensics._state, "reports", 0)
++    monkeypatch.setitem(failure_forensics._state, "batch", None)
++    monkeypatch.setitem(failure_forensics._state, "train_calls", 0)
++    return tmp_path
++
++
++class Worker:
++    def __init__(self, error):
++        self.model = torch.nn.Linear(2, 2)
++        self.error = error
++        self.batch_seen = None
++
++    @failure_forensics.dump_on_failure
++    def train(self):
++        failure_forensics.note_batch({"input_ids": torch.ones(2, 3), "note": "not a tensor"})
++        self.batch_seen = failure_forensics._state["batch"]
++        self.model(torch.ones(1, 2)).sum().backward()
++        self.model.weight.grad[0, 1] = float("nan")
++        if self.error:
++            raise RuntimeError(self.error)
++        return "done"
++
++
++def test_nan_check_failure_names_the_parameter_and_saves_the_batch(forensics_dir):
++    worker = Worker("Rank 5: found NaN in local grad norm for bucket #0 in backward pass")
++
++    with pytest.raises(RuntimeError, match="found NaN"):
++        worker.train()
++
++    text = next(forensics_dir.glob("nonfinite-rank5-*.txt")).read_text()
++    assert "non-finite gradient elements: 1 of 6, in 1 parameters" in text
++    assert "1\t4\t0\tFalse\tweight" in text
++    assert "bias" not in text
++    saved = torch.load(next(forensics_dir.glob("nonfinite-rank5-*.pt")))
++    assert set(saved) == {"input_ids"}
++    assert saved["input_ids"].shape == (2, 3)
++
++
++def test_expert_parameters_and_main_grad_are_reported(forensics_dir):
++    model = torch.nn.Linear(2, 2)
++    model.weight.grad = torch.zeros_like(model.weight)
++    model.weight.main_grad = torch.full_like(model.weight, float("inf"))
++    model.weight.allreduce = False
++
++    failure_forensics.report_nonfinite_grads(model)
++
++    text = next(forensics_dir.glob("nonfinite-rank5-*.txt")).read_text()
++    assert "4\t4\t0\tTrue\tweight" in text
++
++
++def test_other_failures_do_not_scan_the_gradients(forensics_dir):
++    worker = Worker("some other failure")
++
++    with pytest.raises(RuntimeError, match="some other failure"):
++        worker.train()
++
++    assert not list(forensics_dir.glob("nonfinite-*"))
++
++
++def test_batch_is_released_when_train_returns(forensics_dir):
++    worker = Worker(None)
++
++    assert worker.train() == "done"
++
++    assert worker.batch_seen is not None
++    assert failure_forensics._state["batch"] is None
++
++
++def test_report_failure_does_not_replace_the_original_error(forensics_dir, monkeypatch, capsys):
++    worker = Worker("found Inf in local grad norm for bucket #0")
++    monkeypatch.setattr(torch, "save", lambda *args: (_ for _ in ()).throw(OSError("disk full")))
++
++    with pytest.raises(RuntimeError, match="found Inf"):
++        worker.train()
++
++    assert "gradient report failed" in capsys.readouterr().out
++
++
++def test_test_switch_poisons_the_chosen_train_call_only(forensics_dir, monkeypatch):
++    monkeypatch.setenv("NRL_FORENSICS_TEST_NAN", "2")
++    poisoned = []
++    monkeypatch.setattr(failure_forensics, "_poison_one_grad", poisoned.append)
++    worker = Worker(None)
++
++    worker.train()
++    assert poisoned == []
++    worker.train()
++    assert poisoned == [worker.model]
++    worker.train()
++    assert poisoned == [worker.model]
++
++
++def test_poisoned_gradient_is_nan():
++    model = torch.nn.Linear(2, 2)
++    failure_forensics._poison_one_grad(model)
++
++    model(torch.ones(1, 2)).sum().backward()
++
++    assert torch.isnan(model.weight.grad).all()
+-- 
+2.43.0
+

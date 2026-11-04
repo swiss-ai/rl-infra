@@ -1,0 +1,8 @@
+grpo:
+  skip_zero_advantage_groups: true
+  reward_shaping:
+    enabled: true
+    stop_properly_penalty_coef: 0.0
+    overlong_buffer_length: null
+    overlong_buffer_penalty: null
+    max_response_length: null

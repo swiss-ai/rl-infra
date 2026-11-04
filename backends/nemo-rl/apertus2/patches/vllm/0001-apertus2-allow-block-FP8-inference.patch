@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Thu, 29 Oct 2026 06:40:00 +0900
+Subject: [PATCH] apertus2: allow block FP8 inference
+
+The model refused any quant_config, although its linear and fused-MoE
+layers already take one. Block FP8 (NeMo-RL precision: fp8) now passes;
+every other quantization still raises. The router (GateLinear) and qb_beta
+get no quant_config and stay in fp32. FP8 has to leave self_attn in bf16:
+in KDA layers in_proj_qkvgfab shares a 128-row scale block between b_proj
+and f_a_proj, and the refit quantizes each checkpoint shard separately.
+
+---
+ vllm/model_executor/models/apertus2.py | 16 ++++++++++++----
+ 1 file changed, 12 insertions(+), 4 deletions(-)
+
+diff --git a/vllm/model_executor/models/apertus2.py b/vllm/model_executor/models/apertus2.py
+--- a/vllm/model_executor/models/apertus2.py
++++ b/vllm/model_executor/models/apertus2.py
+@@ -822,9 +822,17 @@
+         cache_config = vllm_config.cache_config
+         quant_config = vllm_config.quant_config
+         parallel_config = vllm_config.parallel_config
+-        if quant_config is not None:
++        # Block FP8 quantizes the linear layers and routed experts on the fly.
++        # The router (GateLinear) and qb_beta stay in fp32 either way. The KDA
++        # in_proj_qkvgfab merges b_proj (num_heads rows) into one 128-row scale
++        # block with f_a_proj, so a refit that quantizes per checkpoint shard
++        # must leave it unquantized (e.g. ignored_layers for self_attn).
++        if quant_config is not None and not (
++            quant_config.get_name() == "fp8"
++            and getattr(quant_config, "weight_block_size", None) is not None
++        ):
+             raise ValueError(
+-                "Apertus2 currently supports only unquantized BF16 inference."
++                "Apertus2 supports only unquantized BF16 or block FP8 inference."
+             )
+         if vllm_config.model_config.dtype != torch.bfloat16:
+             raise ValueError(
+@@ -1074,8 +1082,8 @@
+     packed_modules_mapping = {
+         **Apertus2ForCausalLM.packed_modules_mapping,
+         # q/k/v_proj appear in both qkv_proj and in_proj_qkvgfab; the two are
+-        # told apart by layer index in load_weights. Unquantized BF16 (all
+-        # this model supports) never consults this mapping.
++        # told apart by layer index in load_weights. Quantization consults this
++        # mapping to skip all shards of a fused layer together.
+         "in_proj_qkvgfab": ["q_proj", "k_proj", "v_proj", "b_proj", "f_a_proj"],
+         "conv1d": ["q_conv1d", "k_conv1d", "v_conv1d"],
+     }
+-- 
+2.43.0
+

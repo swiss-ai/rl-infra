@@ -1,0 +1,23 @@
+User: My sourdough starter smells like nail polish remover. Is it ruined?
+Assistant: No, it is probably just hungry. That acetone smell shows up when the yeast and bacteria have run out of food. Discard all but a few spoonfuls, feed it with equal weights of flour and water, and keep it somewhere warm. Repeat every 12 hours and it should smell pleasantly sour again within a day or two. Only throw it out if you see pink or orange streaks or fuzzy mold.
+
+User: Explain what a hash table is to someone who knows basic Python.
+Assistant: A hash table stores key-value pairs so you can find a value almost instantly, and Python's dict is one. It keeps an internal array of slots. When you store a key, Python runs hash(key) to turn it into a number and uses that number to pick a slot. Looking the key up repeats the same calculation and goes straight to that slot instead of scanning everything. Two keys can land in the same slot, which is called a collision, so the table also has a rule for trying another slot. This is why d["name"] stays fast with a million entries, while searching a list that size gets slower as it grows.
+
+User: Write a short, polite email asking my landlord to fix a leaking kitchen tap.
+Assistant: Subject: Leaking kitchen tap at Flat 4
+
+Hi Ms. Novak,
+
+The kitchen tap in my flat has started leaking steadily from the base, and tightening it has not helped. Could you please arrange for someone to repair it this week? I am home most evenings after 6 pm and can give access at another time if that is easier.
+
+Thank you for your help.
+
+Best regards,
+Sam
+
+User: What's the difference between weather and climate?
+Assistant: Weather is what the atmosphere is doing at a particular place and time, such as rain this afternoon or a heatwave next week. Climate is the long-term pattern of weather in a region, usually averaged over 30 years or more. In short, weather tells you whether to take an umbrella today, while climate tells you what kind of clothes to own.
+
+User: {}
+Assistant:

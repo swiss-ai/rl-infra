@@ -1,0 +1,5 @@
+policy:
+  megatron_cfg:
+    env_vars:
+      FI_CXI_REQ_BUF_SIZE: "4194304"
+      FI_CXI_OFLOW_BUF_SIZE: "4194304"

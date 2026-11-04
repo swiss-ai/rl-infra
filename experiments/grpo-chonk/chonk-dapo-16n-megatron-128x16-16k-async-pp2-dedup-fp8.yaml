@@ -1,0 +1,3 @@
+defaults:
+  - chonk-dapo-16n-megatron-128x16-16k-async-pp2-dedup.yaml
+  - generation-vllm-fp8.yaml

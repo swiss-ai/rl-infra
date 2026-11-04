@@ -1,0 +1,1048 @@
+From 71a9ad10f351af1f77cff50e2965e38bd4369a7a Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Mon, 2 Nov 2026 02:16:45 +0900
+Subject: [PATCH] Apertus 2 format: tool calls on the chat endpoint
+
+The request's tools go into the system frame, and call frames come back as
+tool calls with their arguments as written, so that a bad call reaches the
+agent and its error goes back to the model. A result extends the exact tokens
+of the last turn: OpenAI messages cannot hold claims or the model's own call
+counters, and rollouts must stay contiguous.
+
+vLLM's render no longer sees the messages, because it parses tool arguments as
+JSON and the model may have written anything there.
+
+Rollouts on Gym now count their tool calls and the ones the model got wrong.
+---
+ nemo_rl/data/apertus2_format.py               | 119 +++++-
+ nemo_rl/experience/rollouts.py                |  47 +++
+ nemo_rl/models/generation/vllm/utils.py       |  24 +-
+ .../generation/vllm/vllm_worker_async.py      | 117 +++---
+ tests/unit/data/test_apertus2_format.py       | 364 +++++++++++++++++-
+ .../environments/test_math_environment.py     |   2 +-
+ tests/unit/experience/test_rollouts.py        |  29 ++
+ 7 files changed, 625 insertions(+), 77 deletions(-)
+
+diff --git a/nemo_rl/data/apertus2_format.py b/nemo_rl/data/apertus2_format.py
+index 8b3bad357..22956f489 100644
+--- a/nemo_rl/data/apertus2_format.py
++++ b/nemo_rl/data/apertus2_format.py
+@@ -28,6 +28,21 @@ APERTUS2_OUTPUT_FORMAT = "apertus2"
+ LONG_CLAIM_CHARS = 40
+ 
+ 
++@dataclass
++class Apertus2Call:
++    """One tool call frame.
++
++    Attributes:
++        name: Name of the tool, which may not be one the system frame declares.
++        counter: The number the model gave the call, which a result must repeat.
++        arguments: The frame's payload, which may not be valid JSON.
++    """
++
++    name: str
++    counter: int
++    arguments: str
++
++
+ @dataclass
+ class Apertus2Output:
+     """One burst of generated tokens, split into the frames rollouts care about.
+@@ -36,7 +51,7 @@ class Apertus2Output:
+         think: Payloads of the think frames, joined, or None if there is none.
+         claim: Payload of the last claim frame, or None if there is none.
+         reply: Payloads of the reply frames, joined, or None if there is none.
+-        has_call: Whether the burst has a tool call frame.
++        calls: The tool call frames, in order.
+         error: The parser's message when the tokens are not valid frames.
+         truncated: Whether generation hit the token limit.
+     """
+@@ -44,7 +59,7 @@ class Apertus2Output:
+     think: str | None
+     claim: str | None
+     reply: str | None
+-    has_call: bool
++    calls: list[Apertus2Call]
+     error: str | None
+     truncated: bool
+ 
+@@ -87,7 +102,11 @@ def encode_prompt(
+ 
+ 
+ def encode_chat_prompt(
+-    tokenizer_path: str, *, system_prompt: str, messages: list[dict[str, Any]]
++    tokenizer_path: str,
++    *,
++    system_prompt: str,
++    messages: list[dict[str, Any]],
++    tools: list[dict[str, Any]] | None,
+ ) -> list[int]:
+     """Encode OpenAI-style chat messages, ending at ``<|/in|>``.
+ 
+@@ -96,17 +115,95 @@ def encode_chat_prompt(
+         system_prompt: The system frame's JSON object, such as
+             ``{"thinking":"medium","tools":[]}``.
+         messages: The request's messages.
++        tools: The request's OpenAI tool definitions, or None if it has none.
+ 
+     Returns:
+         The prompt's token IDs.
+     """
+     # apertus-common is an optional dependency, needed only by this format.
+-    from apertus_common import from_openai
+-
+-    mapped = from_openai(messages, system_defaults=json.loads(system_prompt))
++    from apertus_common import MappingPolicy, from_openai
++
++    defaults = json.loads(system_prompt)
++    if tools and defaults.get("tools") == []:
++        del defaults["tools"]
++    mapped = from_openai(
++        messages,
++        # vLLM's request model adds fields of its own, which from_openai refuses.
++        tools=[{"type": tool["type"], "function": tool["function"]} for tool in tools]
++        if tools
++        else None,
++        system_defaults=defaults,
++        policy=MappingPolicy(merge_system_messages=True),
++    )
+     return _get_encoding(tokenizer_path).encode_conversation(mapped.value)
+ 
+ 
++def _message_text(message: dict[str, Any]) -> str:
++    content = message["content"]
++    if isinstance(content, str):
++        return content
++    return "".join(part["text"] for part in content)
++
++
++def extend_chat_prompt(
++    tokenizer_path: str, *, prefix_token_ids: list[int], messages: list[dict[str, Any]]
++) -> list[int]:
++    """Add the messages after the last generated burst to the exact tokens so far.
++
++    The history is not encoded again: OpenAI messages cannot hold claims or a call's
++    counter, and rollouts must extend the tokens that were really generated.
++
++    Args:
++        tokenizer_path: Directory of the Apertus 2 tokenizer.
++        prefix_token_ids: The last prompt and its generated tokens.
++        messages: The request's messages, with the last burst as the last assistant
++            message.
++
++    Returns:
++        The prompt's token IDs, ending at ``<|/in|>``.
++    """
++    # apertus-common is an optional dependency, needed only by this format.
++    from apertus_common import Result, User
++
++    encoding = _get_encoding(tokenizer_path)
++    assert prefix_token_ids[-1] == encoding.controls.wait, (
++        "An Apertus 2 conversation continues only after a burst that ended at <|wait|>."
++    )
++    # A burst cannot contain <|/in|>, because the model may not generate it.
++    burst_start = len(prefix_token_ids) - prefix_token_ids[::-1].index(
++        encoding.controls.input_end
++    )
++    calls = parse_output(
++        tokenizer_path, prefix_token_ids[burst_start:], truncated=False
++    ).calls
++
++    last_assistant = max(
++        index
++        for index, message in enumerate(messages)
++        if message["role"] == "assistant"
++    )
++    call_ids = [call["id"] for call in messages[last_assistant].get("tool_calls", [])]
++    items: list[Any] = []
++    for message in messages[last_assistant + 1 :]:
++        if message["role"] == "tool":
++            call = calls[call_ids.index(message["tool_call_id"])]
++            items.append(
++                Result(
++                    name=call.name,
++                    counter=call.counter,
++                    payload=_message_text(message),
++                )
++            )
++        elif message["role"] == "user":
++            items.append(User(payload=_message_text(message)))
++        else:
++            raise ValueError(
++                f"Cannot continue an Apertus 2 conversation with a {message['role']!r} "
++                "message: expected tool or user."
++            )
++    return prefix_token_ids + encoding.encode_items(items)
++
++
+ def allowed_token_ids(tokenizer_path: str) -> list[int]:
+     """Return every token ID the model may generate, for vLLM's sampling params."""
+     encoding = _get_encoding(tokenizer_path)
+@@ -142,7 +239,7 @@ def parse_output(
+             think=None,
+             claim=None,
+             reply=None,
+-            has_call=False,
++            calls=[],
+             error=str(error),
+             truncated=truncated,
+         )
+@@ -154,7 +251,11 @@ def parse_output(
+         think="".join(thoughts) if thoughts else None,
+         claim=claims[-1] if claims else None,
+         reply="".join(replies) if replies else None,
+-        has_call=any(isinstance(item, Call) for item in items),
++        calls=[
++            Apertus2Call(name=item.name, counter=item.counter, arguments=item.payload)
++            for item in items
++            if isinstance(item, Call)
++        ],
+         error=None,
+         truncated=truncated,
+     )
+@@ -202,5 +303,5 @@ def frame_metrics(
+         "no_claim": float(output.error is None and claim is None),
+         "claim_chars": float(len(claim)) if claim else 0.0,
+         "long_claim": float(claim is not None and len(claim) > LONG_CLAIM_CHARS),
+-        "undeclared_call": float(output.has_call),
++        "undeclared_call": float(bool(output.calls)),
+     }
+diff --git a/nemo_rl/experience/rollouts.py b/nemo_rl/experience/rollouts.py
+index 4038c8c8b..619e890f1 100644
+--- a/nemo_rl/experience/rollouts.py
++++ b/nemo_rl/experience/rollouts.py
+@@ -304,6 +304,37 @@ def _add_r3_fallback_metrics(
+ _ROLLOUT_DUMP_LOCK = threading.Lock()
+ 
+ 
++def _tool_call_counts(full_result: dict[str, Any]) -> dict[str, int]:
++    """Count a rollout's tool calls and the ones the model got wrong.
++
++    A bad call goes back to the model as a tool error and the rollout goes on, so
++    nothing else in the metrics shows it.
++
++    Args:
++        full_result: The rollout's result from NeMo-Gym.
++
++    Returns:
++        The number of calls, of calls to undeclared tools, and of calls whose
++        arguments are not JSON.
++    """
++    response = full_result.get("response", {})
++    calls = [
++        item for item in response.get("output", []) if item["type"] == "function_call"
++    ]
++    declared = {tool.get("name") for tool in response.get("tools") or []}
++    bad_arguments = 0
++    for call in calls:
++        try:
++            json.loads(call["arguments"])
++        except json.JSONDecodeError:
++            bad_arguments += 1
++    return {
++        "tool_calls": len(calls),
++        "undeclared_tool_calls": sum(call["name"] not in declared for call in calls),
++        "bad_argument_tool_calls": bad_arguments,
++    }
++
++
+ def nemo_gym_rollout_dump_path(env_config: dict[str, Any], filename: str) -> Optional[str]:
+     """Return where to save a batch's full Gym results: ``env.rollout_dir``, or nowhere."""
+     rollout_dir = env_config.get("rollout_dir")
+@@ -3106,6 +3137,7 @@ def _postprocess_single_nemo_gym_group(
+                     ),
+                     default=0,
+                 ),
++                **_tool_call_counts(r["full_result"]),
+             }
+             for r in results
+         ]
+@@ -3146,6 +3178,21 @@ def _postprocess_single_nemo_gym_group(
+                 batch_size,
+                 "total_reward",
+             ),
++            **calculate_single_metric(
++                [m["tool_calls"] for m in all_sample_metrics],
++                batch_size,
++                "tool_calls_per_sample",
++            ),
++            **calculate_single_metric(
++                [m["undeclared_tool_calls"] for m in all_sample_metrics],
++                batch_size,
++                "undeclared_tool_calls_per_sample",
++            ),
++            **calculate_single_metric(
++                [m["bad_argument_tool_calls"] for m in all_sample_metrics],
++                batch_size,
++                "bad_argument_tool_calls_per_sample",
++            ),
+             "natural_termination_rate": sum(
+                 not m["hit_max_tokens"] for m in all_sample_metrics
+             )
+diff --git a/nemo_rl/models/generation/vllm/utils.py b/nemo_rl/models/generation/vllm/utils.py
+index 25761276a..999a2f9d2 100644
+--- a/nemo_rl/models/generation/vllm/utils.py
++++ b/nemo_rl/models/generation/vllm/utils.py
+@@ -413,21 +413,29 @@ def apply_apertus2_output_to_chat_response_choices(
+     response: Any,
+     final_request_output: Any,
+     tokenizer_path: str,
++    *,
++    tools_declared: bool,
+ ) -> Any:
+     """Replace chat response text with the frames parsed from the generated tokens.
+ 
+-    The client gets the reply as content and the thinking as reasoning. An output
+-    without a reply finishes as ``length``, so that clients treat it as a reply cut
+-    off by the token limit.
++    The client gets the reply as content, the thinking as reasoning, and the calls as
++    tool calls with their arguments as written, so that a bad call reaches the agent
++    and its error goes back to the model. An output with neither a reply nor a usable
++    call finishes as ``length``, so that clients treat it as a reply cut off by the
++    token limit.
+ 
+     Args:
+         response: The ChatCompletionResponse.
+         final_request_output: vLLM's final RequestOutput for the request.
+         tokenizer_path: Directory of the Apertus 2 tokenizer.
++        tools_declared: Whether the request has tools. Without any, calls are ignored.
+ 
+     Returns:
+         The response, changed in place.
+     """
++    # vLLM is installed only where generation runs.
++    from vllm.entrypoints.openai.engine.protocol import FunctionCall, ToolCall
++
+     outputs = {output.index: output for output in final_request_output.outputs}
+     for choice in response.choices:
+         output = parse_output(
+@@ -437,7 +445,15 @@ def apply_apertus2_output_to_chat_response_choices(
+         )
+         choice.message.content = output.reply or ""
+         choice.message.reasoning = output.think or None
+-        if not output.reply:
++        if tools_declared and output.calls and not output.truncated:
++            choice.message.tool_calls = [
++                ToolCall(
++                    function=FunctionCall(name=call.name, arguments=call.arguments)
++                )
++                for call in output.calls
++            ]
++            choice.finish_reason = "tool_calls"
++        elif not output.reply:
+             choice.finish_reason = "length"
+     return response
+ 
+diff --git a/nemo_rl/models/generation/vllm/vllm_worker_async.py b/nemo_rl/models/generation/vllm/vllm_worker_async.py
+index 04d36443a..7db2c12ae 100644
+--- a/nemo_rl/models/generation/vllm/vllm_worker_async.py
++++ b/nemo_rl/models/generation/vllm/vllm_worker_async.py
+@@ -28,7 +28,7 @@ import torch
+ import uvicorn
+ from fastapi import FastAPI
+ 
+-from nemo_rl.data.apertus2_format import encode_chat_prompt
++from nemo_rl.data.apertus2_format import encode_chat_prompt, extend_chat_prompt
+ from nemo_rl.data_plane.adapters.tq_mooncake_checkpoint import run_checkpoint_command
+ from nemo_rl.distributed.batched_data_dict import BatchedDataDict
+ from nemo_rl.distributed.virtual_cluster import (
+@@ -882,6 +882,13 @@ class VllmAsyncGenerationWorkerImpl(
+                         message["tool_calls"] = list(message["tool_calls"])
+ 
+                 messages_for_replace_prefix_tokens = deepcopy(messages)
++                apertus2_tool_dicts = tool_dicts
++                if worker_self.is_apertus2:
++                    # The format has no chat template: the prompt is encoded below, and
++                    # this render only has to satisfy vLLM. It must not see the history,
++                    # because it parses the model's tool arguments as JSON.
++                    messages = [{"role": "user", "content": ""}]
++                    tool_dicts = None
+ 
+                 # Temporarily set to 1 so vLLM's pre-tokenization length check passes;
+                 # the actual value will be set through _clamp_max_tokens later.
+@@ -917,19 +924,6 @@ class VllmAsyncGenerationWorkerImpl(
+                         )
+                     raise
+ 
+-                if worker_self.is_apertus2:
+-                    # The format has no chat template: only the rendered prompt's token
+-                    # IDs are replaced, so that the render above just satisfies vLLM.
+-                    assert request.required_prefix_token_ids is None, (
+-                        "Apertus 2 on the chat endpoint handles one turn; a continuation "
+-                        "must extend the exact tokens of the last one."
+-                    )
+-                    res[1][0]["prompt_token_ids"] = encode_chat_prompt(
+-                        worker_self.model_name,
+-                        system_prompt=worker_self.apertus2_system_prompt,
+-                        messages=messages_for_replace_prefix_tokens,
+-                    )
+-
+                 # Token capture: build the admission once, before branching,
+                 # and resolve its prefix from it (staging_chain -> cached TQ
+                 # read, inline ids, or nothing for a text root). The
+@@ -951,6 +945,13 @@ class VllmAsyncGenerationWorkerImpl(
+                     not hasattr(request, "required_prefix_token_ids")
+                     or request.required_prefix_token_ids is None
+                 ):
++                    if worker_self.is_apertus2:
++                        res[1][0]["prompt_token_ids"] = encode_chat_prompt(
++                            worker_self.model_name,
++                            system_prompt=worker_self.apertus2_system_prompt,
++                            messages=messages_for_replace_prefix_tokens,
++                            tools=apertus2_tool_dicts,
++                        )
+                     # Clamp the request's max output tokens so that input + output <= max_model_len.
+                     if actual_request_max_tokens is not None:
+                         self._clamp_max_tokens(
+@@ -967,50 +968,57 @@ class VllmAsyncGenerationWorkerImpl(
+ 
+                 model_prefix_token_ids = list(request.required_prefix_token_ids)
+ 
+-                # Token-in splice path — shared by staging_chain and direct prefix.
+-                last_assistant_message_idx = None
+-                for i in reversed(range(len(messages_for_replace_prefix_tokens))):
+-                    if messages_for_replace_prefix_tokens[i]["role"] == "assistant":
+-                        last_assistant_message_idx = i
+-                        break
++                engine_prompt = res[1][0]
+ 
+-                if last_assistant_message_idx is None:
+-                    messages_to_last_assistant_message = (
+-                        messages_for_replace_prefix_tokens
++                if worker_self.is_apertus2:
++                    final_prompt_token_ids = extend_chat_prompt(
++                        worker_self.model_name,
++                        prefix_token_ids=model_prefix_token_ids,
++                        messages=messages_for_replace_prefix_tokens,
+                     )
+                 else:
+-                    messages_to_last_assistant_message = (
+-                        messages_for_replace_prefix_tokens[
+-                            : last_assistant_message_idx + 1
+-                        ]
+-                    )
+-
+-                modified_request = request.model_copy(
+-                    update={"add_generation_prompt": False}
+-                )
++                    # Token-in splice path — shared by staging_chain and direct prefix.
++                    last_assistant_message_idx = None
++                    for i in reversed(range(len(messages_for_replace_prefix_tokens))):
++                        if messages_for_replace_prefix_tokens[i]["role"] == "assistant":
++                            last_assistant_message_idx = i
++                            break
+ 
+-                corresponding_res = await super().preprocess_chat(
+-                    request=modified_request,
+-                    messages=messages_to_last_assistant_message,
+-                    default_template=default_template,
+-                    default_template_content_format=default_template_content_format,
+-                    default_template_kwargs=default_template_kwargs,
+-                    tool_dicts=tool_dicts,
+-                    parser=parser,
+-                    skip_mm_cache=skip_mm_cache,
+-                )
+-                actual_corresponding_token_ids = corresponding_res[1][0][
+-                    "prompt_token_ids"
+-                ]
++                    if last_assistant_message_idx is None:
++                        messages_to_last_assistant_message = (
++                            messages_for_replace_prefix_tokens
++                        )
++                    else:
++                        messages_to_last_assistant_message = (
++                            messages_for_replace_prefix_tokens[
++                                : last_assistant_message_idx + 1
++                            ]
++                        )
+ 
+-                engine_prompt = res[1][0]
++                    modified_request = request.model_copy(
++                        update={"add_generation_prompt": False}
++                    )
+ 
+-                final_prompt_token_ids = replace_prefix_tokens(
+-                    tokenizer=self.renderer.tokenizer,
+-                    model_prefix_token_ids=model_prefix_token_ids,
+-                    template_prefix_token_ids=actual_corresponding_token_ids,
+-                    template_token_ids=engine_prompt["prompt_token_ids"],
+-                )
++                    corresponding_res = await super().preprocess_chat(
++                        request=modified_request,
++                        messages=messages_to_last_assistant_message,
++                        default_template=default_template,
++                        default_template_content_format=default_template_content_format,
++                        default_template_kwargs=default_template_kwargs,
++                        tool_dicts=tool_dicts,
++                        parser=parser,
++                        skip_mm_cache=skip_mm_cache,
++                    )
++                    actual_corresponding_token_ids = corresponding_res[1][0][
++                        "prompt_token_ids"
++                    ]
++
++                    final_prompt_token_ids = replace_prefix_tokens(
++                        tokenizer=self.renderer.tokenizer,
++                        model_prefix_token_ids=model_prefix_token_ids,
++                        template_prefix_token_ids=actual_corresponding_token_ids,
++                        template_token_ids=engine_prompt["prompt_token_ids"],
++                    )
+ 
+                 engine_prompt["prompt_token_ids"] = final_prompt_token_ids
+ 
+@@ -1104,7 +1112,10 @@ class VllmAsyncGenerationWorkerImpl(
+ 
+                 if worker_self.is_apertus2:
+                     response = apply_apertus2_output_to_chat_response_choices(
+-                        response, final_res, worker_self.model_name
++                        response,
++                        final_res,
++                        worker_self.model_name,
++                        tools_declared=bool(request.tools),
+                     )
+ 
+                 if worker_self._return_routed_experts_enabled():
+diff --git a/tests/unit/data/test_apertus2_format.py b/tests/unit/data/test_apertus2_format.py
+index 617cb5a9d..4e5796a9d 100644
+--- a/tests/unit/data/test_apertus2_format.py
++++ b/tests/unit/data/test_apertus2_format.py
+@@ -17,6 +17,7 @@ Set NRL_APERTUS2_TOKENIZER to a directory with the Apertus_2_instruct tokenizer.
+ """
+ 
+ import os
++import sys
+ from types import SimpleNamespace
+ 
+ import pytest
+@@ -28,6 +29,7 @@ from apertus_common import (  # noqa: E402
+     Claim,
+     Conversation,
+     Reply,
++    Result,
+     SystemPrompt,
+     Think,
+     User,
+@@ -40,10 +42,12 @@ from nemo_rl.models.generation.vllm.utils import (  # noqa: E402
+ )
+ from nemo_rl.data.apertus2_format import (  # noqa: E402
+     LONG_CLAIM_CHARS,
++    Apertus2Call,
+     Apertus2Output,
+     allowed_token_ids,
+     encode_chat_prompt,
+     encode_prompt,
++    extend_chat_prompt,
+     frame_metrics,
+     frame_text,
+     parse_output,
+@@ -60,11 +64,35 @@ pytestmark = pytest.mark.skipif(
+ )
+ 
+ 
++WEATHER_TOOL = {
++    "type": "function",
++    "function": {
++        "name": "get_weather",
++        "description": "Weather in a city.",
++        "parameters": {
++            "type": "object",
++            "properties": {"city": {"type": "string"}},
++            "required": ["city"],
++        },
++    },
++}
++
++
+ @pytest.fixture(scope="module")
+ def encoding():
+     return load_encoding(TOKENIZER)
+ 
+ 
++@pytest.fixture(autouse=True)
++def vllm_response_types(monkeypatch):
++    """Stands in for vLLM's response types, which only the generation image has."""
++    monkeypatch.setitem(
++        sys.modules,
++        "vllm.entrypoints.openai.engine.protocol",
++        SimpleNamespace(ToolCall=SimpleNamespace, FunctionCall=SimpleNamespace),
++    )
++
++
+ def test_prompt_matches_the_reference_encoder(encoding):
+     prompt = encode_prompt(TOKENIZER, system_prompt=SYSTEM_PROMPT, user_text="Hi")
+     assert prompt == encoding.encode_conversation(
+@@ -86,6 +114,7 @@ def test_chat_prompt_matches_the_math_prompt():
+         TOKENIZER,
+         system_prompt=SYSTEM_PROMPT,
+         messages=[{"role": "user", "content": "Hi <|hdr|>"}],
++        tools=None,
+     )
+     assert prompt == encode_prompt(
+         TOKENIZER, system_prompt=SYSTEM_PROMPT, user_text="Hi <|hdr|>"
+@@ -97,12 +126,227 @@ def test_chat_prompt_reads_text_parts():
+         TOKENIZER,
+         system_prompt=SYSTEM_PROMPT,
+         messages=[{"role": "user", "content": [{"type": "text", "text": "Hi"}]}],
++        tools=None,
+     )
+     assert prompt == encode_prompt(
+         TOKENIZER, system_prompt=SYSTEM_PROMPT, user_text="Hi"
+     )
+ 
+ 
++def _weather_system():
++    function = WEATHER_TOOL["function"]
++    return SystemPrompt.model_validate(
++        {
++            "thinking": "medium",
++            "tools": [
++                {
++                    "name": function["name"],
++                    "description": function["description"],
++                    "schema": function["parameters"],
++                }
++            ],
++        }
++    )
++
++
++def test_chat_prompt_declares_the_request_tools(encoding):
++    # As vLLM's request model dumps a tool.
++    tool = {
++        **WEATHER_TOOL,
++        "defer_loading": None,
++        "function": {
++            **WEATHER_TOOL["function"],
++            "strict": None,
++            "defer_loading": None,
++        },
++    }
++    prompt = encode_chat_prompt(
++        TOKENIZER,
++        system_prompt=SYSTEM_PROMPT,
++        messages=[{"role": "user", "content": "Weather?"}],
++        tools=[tool],
++    )
++    assert prompt == encoding.encode_conversation(
++        Conversation(system=_weather_system(), items=[User(payload="Weather?")])
++    )
++
++
++def test_chat_prompt_merges_system_and_developer_messages():
++    prompt = encode_chat_prompt(
++        TOKENIZER,
++        system_prompt=SYSTEM_PROMPT,
++        messages=[
++            {"role": "developer", "content": "Be brief."},
++            {"role": "user", "content": "Hi"},
++        ],
++        tools=None,
++    )
++    assert prompt[0] == load_encoding(TOKENIZER).bos_token_id
++
++
++def _assistant(*call_ids):
++    calls = [
++        {
++            "id": call_id,
++            "type": "function",
++            "function": {"name": "get_weather", "arguments": "not looked at"},
++        }
++        for call_id in call_ids
++    ]
++    return {"role": "assistant", "content": None, "tool_calls": calls}
++
++
++def _tool(call_id, content):
++    return {"role": "tool", "tool_call_id": call_id, "content": content}
++
++
++def _first_prompt(encoding):
++    return encoding.encode_conversation(
++        Conversation(system=_weather_system(), items=[User(payload="Weather?")])
++    )
++
++
++def test_a_tool_result_extends_the_exact_tokens_and_copies_the_counter(encoding):
++    # A claim has no OpenAI form, and the model chose the counter: encoding the
++    # history again would lose both.
++    burst = [
++        Think(payload="Look it up."),
++        Claim(payload="unknown"),
++        Call(name="get_weather", counter=3, payload='{"city":"Bern"}'),
++        Wait(),
++    ]
++    first = _first_prompt(encoding)
++    prefix = first + encoding.encode_items(burst)
++    prompt = extend_chat_prompt(
++        TOKENIZER,
++        prefix_token_ids=prefix,
++        messages=[
++            {"role": "user", "content": "Weather?"},
++            _assistant("call_a"),
++            _tool("call_a", "Cold."),
++        ],
++    )
++    assert prompt[: len(prefix)] == prefix
++    assert prompt == encoding.encode_conversation(
++        Conversation(
++            system=_weather_system(),
++            items=[
++                User(payload="Weather?"),
++                *burst,
++                Result(name="get_weather", counter=3, payload="Cold."),
++            ],
++        )
++    )
++
++
++def test_results_are_matched_to_calls_by_id(encoding):
++    prefix = _first_prompt(encoding) + encoding.encode_items(
++        [
++            Call(name="get_weather", counter=0, payload='{"city":"Bern"}'),
++            Call(name="other_tool", counter=1, payload="{}"),
++            Wait(),
++        ]
++    )
++    prompt = extend_chat_prompt(
++        TOKENIZER,
++        prefix_token_ids=prefix,
++        messages=[
++            _assistant("call_a", "call_b"),
++            _tool("call_b", "Second."),
++            _tool("call_a", "First."),
++        ],
++    )
++    assert prompt[len(prefix) :] == encoding.encode_items(
++        [
++            Result(name="other_tool", counter=1, payload="Second."),
++            Result(name="get_weather", counter=0, payload="First."),
++        ]
++    )
++
++
++def test_a_conversation_continues_after_tool_results_from_earlier_bursts(encoding):
++    first_burst = encoding.encode_items(
++        [Call(name="get_weather", counter=0, payload="{}"), Wait()]
++    )
++    result = encoding.encode_items(
++        [Result(name="get_weather", counter=0, payload="Cold.")]
++    )
++    second_burst = encoding.encode_items(
++        [Call(name="get_weather", counter=0, payload='{"city":"Bern"}'), Wait()]
++    )
++    prefix = _first_prompt(encoding) + first_burst + result + second_burst
++    prompt = extend_chat_prompt(
++        TOKENIZER,
++        prefix_token_ids=prefix,
++        messages=[
++            _assistant("call_a"),
++            _tool("call_a", "Cold."),
++            _assistant("call_b"),
++            _tool("call_b", [{"type": "text", "text": "Still cold."}]),
++        ],
++    )
++    assert prompt[len(prefix) :] == encoding.encode_items(
++        [Result(name="get_weather", counter=0, payload="Still cold.")]
++    )
++
++
++def test_a_user_message_can_follow_a_reply(encoding):
++    prefix = _first_prompt(encoding) + encoding.encode_items(
++        [Reply(payload="Cold."), Wait()]
++    )
++    prompt = extend_chat_prompt(
++        TOKENIZER,
++        prefix_token_ids=prefix,
++        messages=[
++            {"role": "assistant", "content": "Cold."},
++            {"role": "user", "content": "Thanks"},
++        ],
++    )
++    assert prompt[len(prefix) :] == encoding.encode_items([User(payload="Thanks")])
++
++
++def test_a_result_for_an_unknown_call_fails(encoding):
++    prefix = _first_prompt(encoding) + encoding.encode_items(
++        [Call(name="get_weather", counter=0, payload="{}"), Wait()]
++    )
++    with pytest.raises(ValueError, match="not in list"):
++        extend_chat_prompt(
++            TOKENIZER,
++            prefix_token_ids=prefix,
++            messages=[_assistant("call_a"), _tool("call_b", "Cold.")],
++        )
++
++
++def test_only_tool_and_user_messages_can_follow_a_burst(encoding):
++    prefix = _first_prompt(encoding) + encoding.encode_items(
++        [Reply(payload="Cold."), Wait()]
++    )
++    with pytest.raises(ValueError, match="expected tool or user"):
++        extend_chat_prompt(
++            TOKENIZER,
++            prefix_token_ids=prefix,
++            messages=[
++                {"role": "assistant", "content": "Cold."},
++                {"role": "system", "content": "Be brief."},
++            ],
++        )
++
++
++def test_a_conversation_continues_only_after_wait(encoding):
++    prefix = _first_prompt(encoding) + encoding.encode_items(
++        [Reply(payload="Cold."), Wait()]
++    )
++    with pytest.raises(AssertionError, match="ended at <\\|wait\\|>"):
++        extend_chat_prompt(
++            TOKENIZER,
++            prefix_token_ids=prefix[:-1],
++            messages=[
++                {"role": "assistant", "content": "Cold."},
++                {"role": "user", "content": "Thanks"},
++            ],
++        )
++
++
+ def test_allowed_ids_keep_the_output_controls_and_block_other_specials(encoding):
+     allowed = set(allowed_token_ids(TOKENIZER))
+     assert {HEADER_END, 10, OUTPUT_END, WAIT} <= allowed
+@@ -119,7 +363,7 @@ def test_parse_splits_frames(encoding):
+         think="Add.",
+         claim="42",
+         reply="It is 42.",
+-        has_call=False,
++        calls=[],
+         error=None,
+         truncated=False,
+     )
+@@ -140,11 +384,28 @@ def test_parse_without_a_claim(encoding):
+     assert output.error is None
+ 
+ 
+-def test_parse_flags_a_tool_call(encoding):
++def test_parse_finds_the_tool_calls(encoding):
+     tokens = encoding.encode_items(
+-        [Call(name="python", counter=0, payload='{"code":"1"}'), Wait()]
++        [
++            Call(name="python", counter=2, payload='{"code":"1"}'),
++            Call(name="python", counter=3, payload="{}"),
++            Wait(),
++        ]
+     )
+-    assert parse_output(TOKENIZER, tokens, truncated=False).has_call
++    assert parse_output(TOKENIZER, tokens, truncated=False).calls == [
++        Apertus2Call(name="python", counter=2, arguments='{"code":"1"}'),
++        Apertus2Call(name="python", counter=3, arguments="{}"),
++    ]
++
++
++@pytest.mark.parametrize("arguments", ['{"city":', "not json", ""])
++def test_parse_keeps_a_call_with_bad_arguments(encoding, arguments):
++    tokens = encoding.encode_items(
++        [Call(name="get_weather", counter=0, payload=arguments), Wait()]
++    )
++    output = parse_output(TOKENIZER, tokens, truncated=False)
++    assert output.error is None
++    assert output.calls[0].arguments == arguments
+ 
+ 
+ def test_parse_rejects_invalid_frames_even_with_a_complete_claim(encoding):
+@@ -171,7 +432,7 @@ def _output(**changes):
+         "think": "Add.",
+         "claim": "42",
+         "reply": "It is 42.",
+-        "has_call": False,
++        "calls": [],
+         "error": None,
+         "truncated": False,
+     }
+@@ -195,7 +456,12 @@ def test_frame_text():
+         (_output(claim=None), 0.0, 1.0, {"no_claim": 1.0}),
+         (_output(claim=None, reply=None, error="bad"), 0.0, 0.0, {"malformed": 1.0}),
+         (_output(claim="x" * (LONG_CLAIM_CHARS + 1)), 0.0, 0.0, {"long_claim": 1.0}),
+-        (_output(has_call=True), 0.0, 0.0, {"undeclared_call": 1.0}),
++        (
++            _output(calls=[Apertus2Call(name="python", counter=0, arguments="{}")]),
++            0.0,
++            0.0,
++            {"undeclared_call": 1.0},
++        ),
+     ],
+ )
+ def test_frame_metrics(output, claim_score, reply_score, expected):
+@@ -205,7 +471,7 @@ def test_frame_metrics(output, claim_score, reply_score, expected):
+ 
+ 
+ def _chat_response(finish_reason):
+-    message = SimpleNamespace(content="decoded text", reasoning=None)
++    message = SimpleNamespace(content="decoded text", reasoning=None, tool_calls=[])
+     choice = SimpleNamespace(index=0, finish_reason=finish_reason, message=message)
+     return SimpleNamespace(choices=[choice])
+ 
+@@ -219,7 +485,7 @@ def test_chat_response_gets_the_reply_and_the_thinking(encoding):
+         [Think(payload="Add."), Claim(payload="42"), Reply(payload="It is 42."), Wait()]
+     )
+     response = apply_apertus2_output_to_chat_response_choices(
+-        _chat_response("stop"), _engine_output(tokens), TOKENIZER
++        _chat_response("stop"), _engine_output(tokens), TOKENIZER, tools_declared=False
+     )
+     choice = response.choices[0]
+     assert choice.message.content == "It is 42."
+@@ -230,7 +496,7 @@ def test_chat_response_gets_the_reply_and_the_thinking(encoding):
+ def test_an_empty_think_is_no_reasoning(encoding):
+     tokens = encoding.encode_items([Think(payload=""), Reply(payload="Hi."), Wait()])
+     response = apply_apertus2_output_to_chat_response_choices(
+-        _chat_response("stop"), _engine_output(tokens), TOKENIZER
++        _chat_response("stop"), _engine_output(tokens), TOKENIZER, tools_declared=False
+     )
+     assert response.choices[0].message.reasoning is None
+ 
+@@ -245,7 +511,10 @@ def test_an_empty_think_is_no_reasoning(encoding):
+ )
+ def test_output_without_a_reply_finishes_as_truncated(encoding, items):
+     response = apply_apertus2_output_to_chat_response_choices(
+-        _chat_response("stop"), _engine_output(encoding.encode_items(items)), TOKENIZER
++        _chat_response("stop"),
++        _engine_output(encoding.encode_items(items)),
++        TOKENIZER,
++        tools_declared=False,
+     )
+     choice = response.choices[0]
+     assert choice.message.content == ""
+@@ -258,6 +527,81 @@ def test_invalid_frames_finish_as_truncated(encoding):
+         _chat_response("stop"),
+         _engine_output([tokens[0], OUTPUT_END, *tokens]),
+         TOKENIZER,
++        tools_declared=False,
+     )
+     assert response.choices[0].message.content == ""
+     assert response.choices[0].finish_reason == "length"
++
++
++def test_calls_become_tool_calls(encoding):
++    tokens = encoding.encode_items(
++        [
++            Think(payload="Look it up."),
++            Call(name="get_weather", counter=0, payload='{"city":"Bern"}'),
++            Wait(),
++        ]
++    )
++    response = apply_apertus2_output_to_chat_response_choices(
++        _chat_response("stop"), _engine_output(tokens), TOKENIZER, tools_declared=True
++    )
++    choice = response.choices[0]
++    assert choice.message.content == ""
++    assert choice.message.reasoning == "Look it up."
++    assert choice.finish_reason == "tool_calls"
++    call = choice.message.tool_calls[0].function
++    assert (call.name, call.arguments) == ("get_weather", '{"city":"Bern"}')
++
++
++def test_a_bad_call_reaches_the_agent_as_written(encoding):
++    tokens = encoding.encode_items(
++        [Call(name="no_such_tool", counter=0, payload="not json"), Wait()]
++    )
++    response = apply_apertus2_output_to_chat_response_choices(
++        _chat_response("stop"), _engine_output(tokens), TOKENIZER, tools_declared=True
++    )
++    choice = response.choices[0]
++    assert choice.finish_reason == "tool_calls"
++    call = choice.message.tool_calls[0].function
++    assert (call.name, call.arguments) == ("no_such_tool", "not json")
++
++
++def test_a_reply_next_to_a_call_stays_the_content(encoding):
++    tokens = encoding.encode_items(
++        [
++            Reply(payload="Let me check."),
++            Call(name="get_weather", counter=0, payload="{}"),
++            Wait(),
++        ]
++    )
++    response = apply_apertus2_output_to_chat_response_choices(
++        _chat_response("stop"), _engine_output(tokens), TOKENIZER, tools_declared=True
++    )
++    choice = response.choices[0]
++    assert choice.message.content == "Let me check."
++    assert choice.finish_reason == "tool_calls"
++    assert len(choice.message.tool_calls) == 1
++
++
++def test_a_call_without_declared_tools_finishes_as_truncated(encoding):
++    tokens = encoding.encode_items(
++        [Call(name="python", counter=0, payload="{}"), Wait()]
++    )
++    response = apply_apertus2_output_to_chat_response_choices(
++        _chat_response("stop"), _engine_output(tokens), TOKENIZER, tools_declared=False
++    )
++    choice = response.choices[0]
++    assert choice.message.tool_calls == []
++    assert choice.finish_reason == "length"
++
++
++def test_a_call_cut_off_by_the_token_limit_is_not_run(encoding):
++    tokens = encoding.encode_items([Call(name="get_weather", counter=0, payload="{}")])
++    response = apply_apertus2_output_to_chat_response_choices(
++        _chat_response("length"),
++        _engine_output(tokens),
++        TOKENIZER,
++        tools_declared=True,
++    )
++    choice = response.choices[0]
++    assert choice.message.tool_calls == []
++    assert choice.finish_reason == "length"
+diff --git a/tests/unit/environments/test_math_environment.py b/tests/unit/environments/test_math_environment.py
+index 8685dca51..abe791255 100644
+--- a/tests/unit/environments/test_math_environment.py
++++ b/tests/unit/environments/test_math_environment.py
+@@ -595,7 +595,7 @@ def _frames_conversation(claim, reply, error=None, truncated=False):
+             "apertus2_output": Apertus2Output(
+                 claim=claim,
+                 reply=reply,
+-                has_call=False,
++                calls=[],
+                 error=error,
+                 truncated=truncated,
+             ),
+diff --git a/tests/unit/experience/test_rollouts.py b/tests/unit/experience/test_rollouts.py
+index 39b667eaf..206e0fb02 100644
+--- a/tests/unit/experience/test_rollouts.py
++++ b/tests/unit/experience/test_rollouts.py
+@@ -2775,3 +2775,32 @@ def test_run_async_nemo_gym_rollout(
+     1. In nemo_rl/experience/rollouts.py::run_async_nemo_gym_rollout, the sampling params are passed appropriately
+     2. In nemo_rl/models/generation/vllm/vllm_worker_async.py::VllmAsyncGenerationWorker::_setup_vllm_server::create_chat_completion, the sampling params (like top_k) are set as appropriate
+     """
++
++
++def test_tool_call_counts_show_the_calls_the_model_got_wrong():
++    full_result = {
++        "response": {
++            "tools": [{"type": "function", "name": "get_weather"}],
++            "output": [
++                {"type": "reasoning"},
++                {"type": "function_call", "name": "get_weather", "arguments": "{}"},
++                {"type": "function_call_output", "output": "Cold."},
++                {"type": "function_call", "name": "get_weather", "arguments": "{bad"},
++                {"type": "function_call", "name": "python", "arguments": "{}"},
++                {"type": "message"},
++            ],
++        }
++    }
++    assert rollouts_mod._tool_call_counts(full_result) == {
++        "tool_calls": 3,
++        "undeclared_tool_calls": 1,
++        "bad_argument_tool_calls": 1,
++    }
++
++
++def test_tool_call_counts_of_a_rollout_without_a_response():
++    assert rollouts_mod._tool_call_counts({}) == {
++        "tool_calls": 0,
++        "undeclared_tool_calls": 0,
++        "bad_argument_tool_calls": 0,
++    }
+-- 
+2.43.0
+

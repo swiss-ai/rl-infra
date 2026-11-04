@@ -1,0 +1,209 @@
+diff --git a/resources_servers/rubric_judge/README.md b/resources_servers/rubric_judge/README.md
+index 09b93488..9564712c 100644
+--- a/resources_servers/rubric_judge/README.md
++++ b/resources_servers/rubric_judge/README.md
+@@ -33,6 +33,10 @@ without a chat template.
+ | Empty reply | 0 | none |
+ | No verdict after `judge_retries` | 0, and flagged `mask_sample` | up to `judge_retries + 1` per rubric |
+ 
++`judged_text` sets what the judge reads as the completion: `reply` (the default),
++`thinking_and_reply`, or `conversation`, which puts the question in front of those. Thinking comes
++from the response's reasoning items, so a model without them is judged on its reply in every view.
++
+ A judge failure says nothing about the response, so NeMo-RL leaves a flagged sample out of the
+ loss. A reply that gives no digit is a failure too, and so is a prompt over the judge's context.
+ Per-rubric scores come back as `rubric_<name>` fields.
+diff --git a/resources_servers/rubric_judge/app.py b/resources_servers/rubric_judge/app.py
+index 21c0c49c..85991acd 100644
+--- a/resources_servers/rubric_judge/app.py
++++ b/resources_servers/rubric_judge/app.py
+@@ -34,7 +34,7 @@ from __future__ import annotations
+ 
+ import asyncio
+ from pathlib import Path
+-from typing import Any, Dict, List, Optional, Tuple
++from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
+ 
+ import yaml
+ from pydantic import ConfigDict, Field
+@@ -74,6 +74,41 @@ def raw_message_text(response: Optional[NeMoGymResponse]) -> str:
+     return "\n".join(chunks)
+ 
+ 
++def reasoning_text(response: Optional[NeMoGymResponse]) -> str:
++    """The model's thinking from a Responses API payload, verbatim."""
++    if response is None:
++        return ""
++    chunks: List[str] = []
++    for item in response.output or []:
++        if getattr(item, "type", None) != "reasoning":
++            continue
++        for part in getattr(item, "summary", None) or []:
++            chunks.append(getattr(part, "text", "") or "")
++    return "\n".join(chunks)
++
++
++def judged_completion(
++    response: Optional[NeMoGymResponse],
++    question: str,
++    *,
++    judged_text: str,
++    stop_strings: Sequence[str],
++) -> str:
++    """The completion the judge reads, empty when there is no reply.
++
++    Thinking and the question only add to a reply, so an output without one stays
++    unscored in every view.
++    """
++    reply = clean_response(raw_message_text(response), stop_strings)
++    if not reply or judged_text == "reply":
++        return reply
++    thinking = reasoning_text(response).strip()
++    sections = [f"Thinking: {thinking}"] if thinking else []
++    if judged_text == "conversation":
++        return "\n\n".join([f"User: {question}", *sections, f"Assistant: {reply}"])
++    return "\n\n".join([*sections, f"Reply: {reply}"])
++
++
+ def hit_token_limit(response: Optional[NeMoGymResponse]) -> bool:
+     """Whether a token limit cut the reply off.
+ 
+@@ -106,6 +141,13 @@ class RubricJudgeConfig(BaseResourcesServerConfig):
+         default=0.0,
+         description="Reward of a reply cut off by a token limit, given without a judge call.",
+     )
++    judged_text: Literal["reply", "thinking_and_reply", "conversation"] = Field(
++        default="reply",
++        description=(
++            "What the judge reads as the completion: the reply, the model's thinking and the reply, "
++            "or the whole conversation, with the question in front of those."
++        ),
++    )
+     # The verdict comes from the distribution, not the sampled token, so these only
+     # have to match the judge pool's own sampling, which NeMo-RL's server enforces.
+     temperature: float = 1.0
+@@ -205,10 +247,18 @@ class RubricJudgeServer(SimpleResourcesServer):
+             **rubric_fields,
+         )
+ 
++    def _judged_completion(self, body: RubricJudgeVerifyRequest) -> str:
++        return judged_completion(
++            body.response,
++            body.question,
++            judged_text=self.config.judged_text,
++            stop_strings=self.config.stop_strings,
++        )
++
+     async def _verify_alpaca_eval(self, body: RubricJudgeVerifyRequest) -> RubricJudgeVerifyResponse:
+         # AlpacaEval judges a reply as it stands, so truncation is reported but not penalized.
+         truncated = hit_token_limit(body.response)
+-        answer = clean_response(raw_message_text(body.response), self.config.stop_strings)
++        answer = self._judged_completion(body)
+         if not answer:
+             return self._verify_response(body, 0.0, truncated=truncated)
+         win = await pairwise_win(
+@@ -231,7 +281,7 @@ class RubricJudgeServer(SimpleResourcesServer):
+         if hit_token_limit(body.response):
+             return self._verify_response(body, self.config.truncated_reward, truncated=True)
+ 
+-        answer = clean_response(raw_message_text(body.response), self.config.stop_strings)
++        answer = self._judged_completion(body)
+         if not answer:
+             return self._verify_response(body, 0.0)
+ 
+diff --git a/resources_servers/rubric_judge/configs/rubric_judge.yaml b/resources_servers/rubric_judge/configs/rubric_judge.yaml
+index 2996407f..fe5c182e 100644
+--- a/resources_servers/rubric_judge/configs/rubric_judge.yaml
++++ b/resources_servers/rubric_judge/configs/rubric_judge.yaml
+@@ -18,6 +18,8 @@ rubric_judge:
+       # A reply cut off by a token limit gets this reward without a judge call, so the judge never
+       # scores a half-finished reply and the policy learns to finish within the limit.
+       truncated_reward: 0.0
++      # What the judge reads: reply, thinking_and_reply or conversation.
++      judged_text: reply
+ 
+ rubric_judge_simple_agent:
+   responses_api_agents:
+diff --git a/resources_servers/rubric_judge/tests/test_app.py b/resources_servers/rubric_judge/tests/test_app.py
+index 0be310f1..51764135 100644
+--- a/resources_servers/rubric_judge/tests/test_app.py
++++ b/resources_servers/rubric_judge/tests/test_app.py
+@@ -28,6 +28,8 @@ from nemo_gym.openai_utils import (
+     NeMoGymResponseCreateParamsNonStreaming,
+     NeMoGymResponseOutputMessage,
+     NeMoGymResponseOutputText,
++    NeMoGymResponseReasoningItem,
++    NeMoGymSummary,
+ )
+ from nemo_gym.server_utils import ServerClient
+ from resources_servers.rubric_judge.app import (
+@@ -35,7 +37,9 @@ from resources_servers.rubric_judge.app import (
+     RubricJudgeServer,
+     RubricJudgeVerifyRequest,
+     hit_token_limit,
++    judged_completion,
+     raw_message_text,
++    reasoning_text,
+ )
+ 
+ 
+@@ -258,3 +262,59 @@ async def test_alpaca_eval_masks_a_reply_without_a_verdict():
+     result = await server.verify(make_request(baseline_answer="The reference."))
+ 
+     assert result.instance_config == {"mask_sample": True}
++
++
++def make_thinking_request(reply="The answer.", thinking="Because."):
++    request = make_request(reply)
++    reasoning = NeMoGymResponseReasoningItem(
++        id="rs_1",
++        type="reasoning",
++        summary=[NeMoGymSummary(type="summary_text", text=thinking)],
++    )
++    request.response.output.insert(0, reasoning)
++    return request
++
++
++def test_reasoning_text_reads_the_reasoning_items():
++    assert reasoning_text(make_thinking_request().response) == "Because."
++    assert reasoning_text(make_request().response) == ""
++
++
++@pytest.mark.parametrize(
++    "judged_text, expected",
++    [
++        ("reply", "The answer."),
++        ("thinking_and_reply", "Thinking: Because.\n\nReply: The answer."),
++        (
++            "conversation",
++            "User: Why?\n\nThinking: Because.\n\nAssistant: The answer.",
++        ),
++    ],
++)
++def test_judged_text_sets_what_the_judge_reads(judged_text, expected):
++    response = make_thinking_request().response
++    completion = judged_completion(
++        response, "Why?", judged_text=judged_text, stop_strings=[]
++    )
++    assert completion == expected
++
++
++@pytest.mark.parametrize("judged_text", ["reply", "thinking_and_reply", "conversation"])
++@pytest.mark.asyncio
++async def test_thinking_without_a_reply_skips_the_judge(judged_text):
++    server = make_server(judged_text=judged_text)
++    result = await server.verify(make_thinking_request(reply=""))
++
++    assert result.reward == 0.0
++    server.server_client.post.assert_not_called()
++
++
++@pytest.mark.asyncio
++async def test_output_without_a_reply_counts_as_truncated():
++    server = make_server()
++    result = await server.verify(make_request("", incomplete=True))
++
++    assert result.reward == 0.0
++    assert result.judge_truncated
++    server.server_client.post.assert_not_called()
++

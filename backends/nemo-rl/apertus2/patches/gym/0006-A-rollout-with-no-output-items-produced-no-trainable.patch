@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Konstantinos Pitas <cwstas2007@hotmail.com>
+Date: Wed, 23 Sep 2026 19:34:48 +0200
+Subject: [PATCH 6/9] A rollout with no output items produced no trainable
+ token, this patch masks these outputs
+
+(cherry picked from commit 08400c03241a66f8696d26f615d2049ab0d30075)
+Signed-off-by: ambroise-b <ambroise.borbely@epfl.ch>
+---
+ responses_api_agents/harbor_agent/app.py | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/responses_api_agents/harbor_agent/app.py b/responses_api_agents/harbor_agent/app.py
+index 43159df56..749ef4403 100644
+--- a/responses_api_agents/harbor_agent/app.py
++++ b/responses_api_agents/harbor_agent/app.py
+@@ -336,6 +336,15 @@ class HarborAgent(SimpleResponsesAPIAgent):
+                 response=response,
+                 instance_id=instance_id,
+                 metadata=trial_result if trial_result else {},
++                # A rollout with no output items produced no trainable token at
++                # all -- the trial died during environment setup, blew the
++                # context window on the first turn, or `run()` above fell through
++                # to its except branch. There is nothing to learn from it, and a
++                # single one otherwise aborts the whole training step. Flag it so
++                # the trainer can drop it from the gradient instead; NeMo-RL
++                # reads this exact path (instance_config.mask_sample), which is
++                # also how anyswe_agent reports sandbox failures.
++                instance_config={"mask_sample": not output_items},
+                 context_length_exceeded_error=int(agent_error_flags.get("context_length_exceeded", False)),
+                 memory_limit_exceeded_error=int(agent_error_flags.get("memory_limit_exceeded", False)),
+                 agent_timeout_error=int(
+-- 
+2.55.0
+
