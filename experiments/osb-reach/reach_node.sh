@@ -74,6 +74,9 @@ if [[ "${TESTS}" == *" gymtunnel "* ]]; then
     echo "== Gym model_tunnel (patch 0003): ${TUNNELS:-32} sandboxes, OLD_START=${OLD_START:-0}"
     # with -X faulthandler, `timeout -s ABRT` makes a hang dump every thread's stack (GYM_TUNNEL_TIMEOUT_S)
     PYTHONUNBUFFERED=1 timeout -s ABRT "${GYM_TUNNEL_TIMEOUT_S:-900}" \
-        "${REACH_PYTHON}" -X faulthandler "${HERE}/gym_tunnel.py" || RC=$?
+        "${REACH_PYTHON}" -X faulthandler "${HERE}/gym_tunnel.py"
+    rc=$?
+    echo "== $(date +%T) gym_tunnel.py exit ${rc} (124 or 134 = timeout)"
+    [[ ${rc} -eq 0 ]] || RC=${rc}
 fi
 exit "${RC}"

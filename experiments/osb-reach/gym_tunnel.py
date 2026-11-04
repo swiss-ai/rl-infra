@@ -36,7 +36,11 @@ TUNNELS = int(os.environ.get("TUNNELS") or "32")
 STREAM_S = int(os.environ.get("STREAM_S") or "5")
 IDLE_S = int(os.environ.get("IDLE_S") or "5")
 
-logging.basicConfig(level=logging.INFO, format="[gym_tunnel %(asctime)s] %(message)s", datefmt="%H:%M:%S")
+# force: importing nemo_gym already ran logging.debug() (nemo_gym/__init__.py _augment_sys_path), whose implicit
+# basicConfig() installs a WARNING root handler; without force all INFO output is dropped (run 20261104-091416)
+logging.basicConfig(
+    level=logging.INFO, format="[gym_tunnel %(asctime)s] %(message)s", datefmt="%H:%M:%S", force=True
+)
 log = logging.getLogger("gym_tunnel")
 
 if os.environ.get("OLD_START") == "1":
