@@ -1,0 +1,104 @@
+From a830f20c31cb49a7014f082d7ec2ce3bb650a7f8 Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Wed, 4 Nov 2026 12:13:27 +0000
+Subject: [PATCH] fix(harbor_agent): mini-swe-agent call limit ends the run
+ instead of prompting
+
+`mini` runs InteractiveAgent, whose query() catches LimitsExceeded and asks
+for a new step/cost limit on stdin. With stdin /dev/null that raises
+EOFError, so every rollout that hit max_turns ended as EOFError (job
+5255374: 26/96). The trajectory, verifier and capture were unaffected,
+only the exit status was wrong.
+
+NemoGymModel raises its own CallLimitReached (a TerminatingException),
+which InteractiveAgent does not catch; DefaultAgent.run ends the run with
+exit status CallLimitReached.
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ .../mini_swe_agent_pod/nemo_gym_mini.py            | 14 ++++++++++----
+ .../custom_agents/test_mini_swe_agent_nemo_gym.py  | 10 ++++++----
+ 2 files changed, 16 insertions(+), 8 deletions(-)
+
+diff --git a/responses_api_agents/harbor_agent/custom_agents/mini_swe_agent_pod/nemo_gym_mini.py b/responses_api_agents/harbor_agent/custom_agents/mini_swe_agent_pod/nemo_gym_mini.py
+index c2abafa73..a1d15b391 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/mini_swe_agent_pod/nemo_gym_mini.py
++++ b/responses_api_agents/harbor_agent/custom_agents/mini_swe_agent_pod/nemo_gym_mini.py
+@@ -20,8 +20,10 @@ MiniSweAgentNemoGym writes this file into the sandbox and passes its settings as
+ 
+ - ``model_kwargs`` replace those of mini's config (its default ``mini.yaml`` has ``temperature: 0.0``):
+   the rollout's ``api_base``/``api_key`` and the on-policy sampling parameters.
+-- ``max_calls`` > 0 ends the run with mini's ``LimitsExceeded`` (a normal end, the verifier still runs)
+-  before that many model calls are exceeded; mini's own step limit lives in the agent config.
++- ``max_calls`` > 0 ends the run with ``CallLimitReached`` (a TerminatingException: a normal end with
++  that exit status, the verifier still runs) before that many model calls are exceeded; mini's own step
++  limit lives in the agent config. Not mini's ``LimitsExceeded``: ``mini`` runs InteractiveAgent, whose
++  ``query`` catches it and asks for a new limit on stdin (/dev/null -> EOFError; job 5255374).
+ 
+ Messages are sent with ``role`` and ``content`` only: mini stores each assistant reply with an
+ ``extra`` field (the raw response), and Gym's model server rejects unknown message fields with 422
+@@ -35,7 +37,7 @@ import json
+ import os
+ 
+ import litellm
+-from minisweagent.agents.default import LimitsExceeded
++from minisweagent.agents.default import TerminatingException
+ from minisweagent.models.litellm_model import LitellmModel
+ 
+ 
+@@ -44,6 +46,10 @@ SETTINGS = json.loads(os.environ.get("NEMO_GYM_MINI") or "{}")
+ litellm.cost_calculator.completion_cost = lambda *args, **kwargs: 0.0
+ 
+ 
++class CallLimitReached(TerminatingException):
++    pass
++
++
+ class NemoGymModel(LitellmModel):
+     def __init__(self, **kwargs):
+         model_kwargs = dict(kwargs.pop("model_kwargs", None) or {})
+@@ -53,6 +59,6 @@ class NemoGymModel(LitellmModel):
+ 
+     def query(self, messages, **kwargs):
+         if 0 < self.max_calls <= self.n_calls:
+-            raise LimitsExceeded(f"Model call limit reached ({self.max_calls}).")
++            raise CallLimitReached(f"Model call limit reached ({self.max_calls}).")
+         sent = [{"role": m["role"], "content": m["content"]} for m in messages]
+         return super().query(sent, **kwargs)
+diff --git a/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py
+index bf2bc0911..5d078f149 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py
+@@ -126,7 +126,7 @@ _FAKE_MINI = textwrap.dedent(
+     Model = getattr(importlib.import_module(module), cls)
+     m = Model(model_name=args[args.index("-m") + 1], model_kwargs={{"temperature": 0.0, "drop_params": True}})
+     out = []
+-    from minisweagent.agents.default import LimitsExceeded
++    from minisweagent.agents.default import LimitsExceeded, TerminatingException
+     # mini's history: assistant replies carry `extra` (the raw response), as in DefaultAgent.add_message
+     history = [{{"role": "system", "content": "sys"}}, {{"role": "user", "content": "task"}}]
+     for _ in range(3):
+@@ -135,8 +135,10 @@ _FAKE_MINI = textwrap.dedent(
+             out.append(reply)
+             history += [{{"role": "assistant", "content": reply["content"], "extra": {{"response": {{}}}}}},
+                         {{"role": "user", "content": "observation"}}]
+-        except LimitsExceeded as e:
+-            out.append({{"limit": str(e)}})
++        except LimitsExceeded:
++            out.append({{"limit": "LimitsExceeded"}})  # InteractiveAgent would prompt on stdin here
++        except TerminatingException as e:
++            out.append({{"limit": type(e).__name__ + ": " + str(e)}})
+     print(json.dumps({{"task": args[args.index("-t") + 1], "out": out, "cost": m.cost}}))
+     """
+ )
+@@ -184,6 +186,6 @@ def test_run_command_in_bash_loads_the_model_class(tmp_path: Path) -> None:
+     # which rejects unknown message fields with 422 (job 5253837: every second call failed)
+     assert second["sent"][2] == {"role": "assistant", "content": "call 1"}
+     assert all(set(msg) == {"role", "content"} for msg in second["sent"])
+-    assert third == {"limit": "Model call limit reached (2)."}
++    assert third == {"limit": "CallLimitReached: Model call limit reached (2)."}
+     assert result["cost"] == 0.0
+     assert (logs / "agent" / "mini-swe-agent.txt").read_text() == res.stdout
+-- 
+2.55.0
+
