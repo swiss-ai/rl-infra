@@ -50,6 +50,7 @@ The previous smoke test (4 sandboxes, ~7 min) is still one command:
 | `../../backends/nemo-rl/apertus2/patches/gym/0004-*.patch` | tunnel fix after job 5245999: server start waits for `Listening on`; pod-side log in errors |
 | `../../backends/nemo-rl/apertus2/patches/gym/0005-*.patch` | `MiniSweAgentNemoGym` agent: per-run `api_base`, rollout sampling params, no litellm cost lookup, `max_turns` call limit |
 | `../../backends/nemo-rl/apertus2/patches/gym/0006-*.patch` | fix after job 5253837: mini-swe-agent sends messages with `role`/`content` only (its `extra` field got 422 on every second call) |
+| `../../backends/nemo-rl/apertus2/patches/gym/0007-*.patch` | fix after job 5255374: the `max_turns` call limit raises `CallLimitReached` (mini's `LimitsExceeded` made `mini` prompt on stdin -> `EOFError`) |
 | `../../backends/nemo-rl/apertus2/fetch-chisel.sh` | chisel 1.12.0 (amd64 + arm64, pinned sha256) into `CHISEL_DIR` |
 
 ## Environment variables of `run.sh`
@@ -174,7 +175,8 @@ the node's global `OPENAI_API_BASE`); the rollout's `temperature`/`top_p`/`max_o
 replace mini's default config (`temperature: 0.0`; `vllm_model` pins no sampling here, so 0.0 would
 reach vLLM and make all GRPO samples of a prompt alike); litellm's cost lookup is disabled (mini
 re-raises it for every model litellm does not know); after `max_turns` (20) model calls the run ends
-with mini's `LimitsExceeded` (its own step limit is unlimited). It does this with a model class
+with `CallLimitReached` (patch 0007; mini's own step limit is unlimited, and its `LimitsExceeded`
+makes `mini` prompt on stdin, which ended as `EOFError` before 0007). It does this with a model class
 written into the pod and loaded through `mini --model-class`; settings in `NEMO_GYM_MINI` (JSON).
 
 Expected: trials reach the verifier with rewards mixing 0 and 1 and `grad_norm > 0`, as in job
@@ -187,9 +189,14 @@ OpenSandbox key):
     tail -n 30 $T/agent/mini-swe-agent.txt         # the run; litellm errors show up here
     grep -c '"role": "assistant"' $T/agent/mini-swe-agent.trajectory.json   # model calls (<= 20)
 
+Job 5255374 (2026-11-04, with 0006): works end to end, 3/3 steps, reward 0.72/0.53/0.69, ~500 response
+tokens per rollout, capture exactly matches mini's calls (report
+`research/reports/2026-11-04-job-5255374-mini-rerun.md`); 26/96 hit the 20-call cap as `EOFError` (fixed
+by 0007); 327 format errors in 90/96 trials (submit echo outside a code block).
+
 Job 5253837 (2026-11-04, without 0006): every trial stopped after one model call, `RetryError` from
 422 `extra_forbidden` on the second call (mini's `extra` message field); 0006 fixes it. Check after
-the rerun: `exit_status` in `mini-swe-agent.trajectory.json` is `Submitted`/`LimitsExceeded`, not
+the rerun: `exit_status` in `mini-swe-agent.trajectory.json` is `Submitted`/`CallLimitReached` (`EOFError` without 0007), not
 `RetryError`, and more than one assistant message per trial.
 
 Likely first failures: agent setup over 360 s (apt-get under gVisor at 32 parallel); a litellm
