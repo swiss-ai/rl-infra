@@ -1,0 +1,118 @@
+# Shared by check.sh, run-a.sh and run-b.sh (sourced, not run). Defines how runs A and B compose
+# their configs (the same files, in the same order, as ../../run.sh and ../../run-harbor-osb.sh
+# write them) and the static checks of the NeMo-RL clone and the Gym checkout.
+# Needs HERE (this directory) and ROOT (the rl-infra checkout) set by the caller.
+
+APERTUS2_DIR="${ROOT}/backends/nemo-rl/apertus2"
+# 12 nodes: 8 trainer (Megatron EP32, CPU AdamW) + 4 vLLM (TP1 EP4); the recipe sets num_nodes
+CHONK_RECIPE="${ROOT}/recipes/apertus2-chonk-vllm-adamw.yaml"
+SC_SCRIPT=examples/run_grpo_single_controller.py
+
+# compose_cfg <a|b> <out.yaml>: the top-level config the launcher writes.
+#   A: ../../run.sh writes   defaults: [RECIPE, TASK]           with TASK = run-a-gsm8k.yaml
+#   B: ../../run-harbor-osb.sh writes defaults: [RECIPE, TASK, OVERLAY...]
+#      with TASK = envs/harbor-osb.yaml, OVERLAY = run-b-harbor-sc.yaml
+compose_cfg() {
+    case "$1" in
+        a) printf 'defaults:\n  - %s\n  - %s\n' "$(realpath "${CHONK_RECIPE}")" "$(realpath "${HERE}/run-a-gsm8k.yaml")" > "$2" ;;
+        b) printf 'defaults:\n  - %s\n  - %s\n  - %s\n' "$(realpath "${CHONK_RECIPE}")" \
+               "$(realpath "${ROOT}/envs/harbor-osb.yaml")" "$(realpath "${HERE}/run-b-harbor-sc.yaml")" > "$2" ;;
+        *) echo "compose_cfg: run must be a or b" >&2; return 1 ;;
+    esac
+}
+
+# check_nemo_rl_clone: the merged NeMo-RL clone (NEMO_RL_DIR) has the pinned PRs, NVIDIA-NeMo/RL#2517
+# removed the async_engine assert for vLLM EP != TP, and f196's refit / membership / token-capture
+# code in vllm_generation.py survived the -Xtheirs merge. Prints one line per check; returns the
+# number of failures.
+check_nemo_rl_clone() {
+    local d="${NEMO_RL_DIR}" fails=0 repo pr sha n
+    local gen="${d}/nemo_rl/models/generation/vllm/vllm_generation.py"
+    local wrk="${d}/nemo_rl/models/generation/vllm/vllm_worker.py"
+    ok()  { echo "  ok    $*"; }
+    bad() { echo "  FAIL  $*"; fails=$((fails + 1)); }
+    note() { echo "  note  $*"; }
+    [[ -e "${d}/.git" && -f "${gen}" ]] || { bad "no NeMo-RL clone at ${d}"; return 1; }
+    echo "  clone ${d}: $(git -C "${d}" branch --show-current 2>/dev/null) @ $(git -C "${d}" rev-parse --short HEAD)"
+    # shellcheck disable=SC1090
+    ( source "${PIN_FILE:-${APERTUS2_DIR}/pin}"
+      git -C "${d}" merge-base --is-ancestor "${NEMO_RL_COMMIT}" HEAD ) \
+        && ok "based on the pinned f196 commit" || bad "not based on the pinned NeMo-RL commit (backends/nemo-rl/apertus2/pin)"
+    while read -r repo pr sha; do
+        [[ -n "${sha}" ]] || continue
+        git -C "${d}" merge-base --is-ancestor "${sha}" HEAD 2>/dev/null \
+            && ok "${repo} PR #${pr} merged (${sha:0:9})" || bad "${repo} PR #${pr} (${sha:0:9}) not merged; run backends/nemo-rl/apertus2/setup.sh"
+    done <<< "$(source "${PIN_FILE:-${APERTUS2_DIR}/pin}"; echo "${NEMO_RL_PRS}")"
+    # NVIDIA-NeMo/RL#2517 @05db6ab36
+    grep -q "vLLM async_engine has some issues when using DP inside vLLM" "${gen}" \
+        && bad "vllm_generation.py still asserts async_engine off for vLLM EP != TP (plain f196 line ~191-199): #2517 not applied" \
+        || ok "#2517: async_engine assert for EP != TP is gone"
+    grep -q "workers_per_vllm_instance" "${gen}" \
+        && ok "#2517: DP-aware rank_prefix in init_collective (workers_per_vllm_instance)" \
+        || bad "#2517: init_collective has no DP-aware rank_prefix (workers_per_vllm_instance missing)"
+    grep -q "data_parallel_external_lb" "${wrk}" \
+        && ok "#2517: external-LB vLLM DP kwargs for async_engine in vllm_worker.py" \
+        || bad "#2517: vllm_worker.py lacks data_parallel_external_lb (async_engine + vLLM DP)"
+    # f196 code the SC path uses (refit through CollectiveWeightSynchronizer, membership, capture)
+    for m in "def _refit_leader_workers" "get_dp_leader_worker_idx" "refit_timeout_s" \
+             "membership.shard_prefixes" "def setup_token_capture"; do
+        grep -qF "${m}" "${gen}" && ok "f196 marker in vllm_generation.py: ${m}" \
+            || bad "f196 marker missing from vllm_generation.py: ${m} (the #2517 -Xtheirs merge reverted newer code)"
+    done
+    [[ -f "${d}/nemo_rl/weight_sync/collective_weight_synchronizer.py" ]] \
+        && ok "nemo_rl/weight_sync/collective_weight_synchronizer.py present" \
+        || bad "nemo_rl/weight_sync/collective_weight_synchronizer.py missing"
+    for f in "${SC_SCRIPT}" nemo_rl/algorithms/single_controller.py nemo_rl/algorithms/single_controller_utils/config.py; do
+        [[ -f "${d}/${f}" ]] && ok "${f} present" || bad "${f} missing"
+    done
+    # Reference: the merge reproduced from local commits (f196 + #5 + #1 + #2517 -Xtheirs + #8 +
+    # patches) changes these two files against f196 by exactly these line counts. #2517 replaced
+    # f196's resolve_distributed_executor_backend ("uni" for EP > TP) with its inline choice ("mp"),
+    # which is what the legacy Chonk runs (5184052) used too.
+    n="$(git -C "${d}" diff --numstat "$(source "${PIN_FILE:-${APERTUS2_DIR}/pin}"; echo "${NEMO_RL_COMMIT}")" HEAD \
+        -- nemo_rl/models/generation/vllm/vllm_generation.py nemo_rl/models/generation/vllm/vllm_worker.py \
+        | awk '{printf "%s +%s -%s; ", $3, $1, $2}')"
+    if [[ "${n}" == "nemo_rl/models/generation/vllm/vllm_generation.py +9 -19; nemo_rl/models/generation/vllm/vllm_worker.py +33 -19; " ]]; then
+        ok "vllm_generation.py / vllm_worker.py differ from f196 exactly as the reference merge (+9 -19, +33 -19)"
+    else
+        note "vllm_generation.py / vllm_worker.py vs f196: ${n:-no diff }(reference merge: +9 -19, +33 -19); inspect with git -C ${d} diff ${NEMO_RL_COMMIT:-<pin>} HEAD -- nemo_rl/models/generation/vllm/"
+    fi
+    grep -q "distributed_executor_backend\"\] = \"mp\"" "${wrk}" \
+        && note "vLLM executor backend for EP > TP at TP1: mp (#2517, as in the legacy Chonk runs)" \
+        || note "vLLM executor backend for EP > TP: not #2517's 'mp' (f196 resolve_distributed_executor_backend -> 'uni'?)"
+    return "${fails}"
+}
+
+# check_gym_capture: the shared Gym checkout of this clone has what run B needs: branch
+# apertus2-osb-capture with rl-infra Gym patch 0001 (harbor_agent hands the agent the
+# rollout-prefixed model URL, base_url_for_run; without it capture records nothing and every row
+# is rejected, job 5236016) and 0002 (_should_mask: under capture empty output is not masked,
+# failed trials still are). Same marker as ../harbor-capture-sc/run.sh. Returns the number of failures.
+check_gym_capture() {
+    local g="${NEMO_RL_DIR}/3rdparty/Gym-workspace/Gym" fails=0 br
+    local app="${g}/responses_api_agents/harbor_agent/app.py"
+    ok()  { echo "  ok    $*"; }
+    bad() { echo "  FAIL  $*"; fails=$((fails + 1)); }
+    [[ -f "${g}/nemo_gym/__init__.py" ]] || { bad "no Gym checkout in ${g}"; return 1; }
+    br="$(git -C "${g}" branch --show-current 2>/dev/null)"
+    echo "  Gym ${g}: ${br:-detached} @ $(git -C "${g}" rev-parse --short HEAD 2>/dev/null)"
+    [[ "${br}" == apertus2-osb-capture ]] && ok "Gym branch apertus2-osb-capture" \
+        || bad "Gym branch is '${br}', not apertus2-osb-capture"
+    grep -q harbor_model_base_url "${app}" 2>/dev/null && grep -q "base_url_for_run(" "${app}" \
+        && ok "Gym patch 0001: harbor_agent routes model calls through the rollout URL" \
+        || bad "Gym patch 0001 missing (harbor_model_base_url / base_url_for_run in harbor_agent/app.py)"
+    grep -q "def _should_mask" "${app}" 2>/dev/null \
+        && ok "Gym patch 0002: capture-aware _should_mask" \
+        || bad "Gym patch 0002 missing (_should_mask in harbor_agent/app.py)"
+    [[ -d "${g}/nemo_gym/token_id_capture" ]] && ok "nemo_gym/token_id_capture present" \
+        || bad "nemo_gym/token_id_capture missing from the Gym checkout"
+    for f in nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
+             responses_api_agents/harbor_agent/configs/harbor_agent_opensandbox_training.yaml; do
+        [[ -f "${g}/${f}" ]] && ok "${f} present" || bad "${f} missing (OpenSandbox commits, setup-gym.sh)"
+    done
+    if (( fails )); then
+        echo "  fix: GYM_BRANCH=apertus2-osb-capture GYM_PATCHES=\"$(ls "${APERTUS2_DIR}"/patches/gym/*.patch | tr '\n' ' ')\" \\"
+        echo "         bash ${APERTUS2_DIR}/setup-gym.sh"
+    fi
+    return "${fails}"
+}

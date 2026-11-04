@@ -1,0 +1,74 @@
+# Run B: the Single-Controller (SC) version of Daint job 5184052. Overlay merged last by
+# ../../run-harbor-osb.sh over ../../recipes/apertus2-chonk-vllm-adamw.yaml (12 nodes: 8 trainer
+# EP32 + 4 vLLM EP4) and ../../envs/harbor-osb.yaml (Harbor micro-tasks under $HARBOR_ROOT,
+# Terminus-2, 8 prompts x 8 generations = 64 sandboxes, 4096 tokens total, 1024 new tokens per
+# turn, train_global_batch_size 64). Launched by run-b.sh.
+#
+# Adds what SC needs and turns on token capture at the model endpoint (needs the Gym checkout
+# apertus2-osb-capture with rl-infra Gym patches 0001 + 0002; run-b.sh checks it). Plan: research
+# report 2026-11-04-chonk-single-controller-feasibility.md, sections 1 and 5 (run 2).
+
+grpo:
+  # 5184052 ran 5; 3 is enough to time steps 2-3 after the first (slow) one
+  max_num_steps: 3
+  # SC entrypoint raises unless the legacy async block (age 1, in-flight weight updates) is null;
+  # async_rl below replaces it
+  async_grpo: null
+  # SC refuses these with token capture; null in grpo_math_1B.yaml already, explicit here
+  invalid_tool_call_advantage: null
+  malformed_thinking_advantage: null
+
+# policy.train_global_batch_size stays 64 (= 8 x 8, harbor-osb.yaml) and max_total_sequence_length
+# 4096 (8192 OOMs on 12 nodes, job 5186694)
+
+# TransferQueue data plane, mandatory for SC. impl transfer_queue, backend simple and
+# num_storage_units ${mul:2, ${cluster.num_nodes}} (= 24 on 12 nodes) come from grpo_math_1B.yaml;
+# do not copy the 1-node value 2 from ../harbor-capture-sc/terminus-sc.yaml.
+data_plane:
+  enabled: true
+
+async_rl:
+  sampler:
+    name: in_order
+    # 0 = synchronous. 5184052 used max_trajectory_age_steps 1, which is lookahead 1 here (run C)
+    max_lookahead_versions: 0
+  recompute_kv_cache_after_weight_updates: true
+  # one chunk per step (memory: see run-a-gsm8k.yaml)
+  min_groups_for_streaming_train: ${grpo.num_prompts_per_step}
+  # 8 prompt groups x 8 = 64 rollouts in flight; the harbor concurrency (64, derived in
+  # harbor-osb.yaml) must be >= max_inflight_prompts x generations or rollouts queue inside Gym
+  # and eat rollout_timeout_s. At lookahead 1 both become 16 and the concurrency 128.
+  max_inflight_prompts: ${grpo.num_prompts_per_step}
+  max_buffered_rollouts: ${grpo.num_prompts_per_step}
+  rollout_failure:
+    # one retry of a prompt group after an infra failure (timeout, transport); a failed Harbor
+    # trial is not one (harbor_agent scores it 0). No drops: a prompt that fails twice ends the run.
+    max_infra_attempts_per_prompt: 2
+    max_data_attempts_per_prompt: 2
+    max_skipped_prompts: 0
+    max_consecutive_dropped_prompts: 0
+    nemo_gym:
+      # whole prompt group: sandbox start + agent (micro-task timeout_sec 900) + verifier (120);
+      # ~4800 for SWE-Lego. Keep `native` empty: SC rejects it on a Gym run.
+      rollout_timeout_s: 1800
+  stall_watchdog:
+    # must exceed rollout_timeout_s; abort instead of the default warn
+    stall_timeout_s: 2100
+    stall_action: abort
+  generation_fleet_health:
+    # the rebuild path computes refit rank prefixes without vLLM DP (weight_sync/membership.py)
+    enabled: false
+    restart_dead_shards: false
+
+# NeMo-RL turns off Gym's token echo, turns on Gym's token_id_capture for all agents (external
+# staging through the vLLM workers into TransferQueue, ledger under <log_dir>/gym_token_capture)
+# and rebuilds the rows from it. Patch 0008's degenerate-rollout masking is inert under capture.
+token_capture:
+  enabled: true
+
+reward_penalties:
+  # skipped on the capture path anyway (false in grpo_math_1B.yaml); explicit
+  penalize_duplicated_reasoning: false
+  penalize_empty_final_answer: false
+  penalize_unwanted_tokens: false
+  penalize_malformed_think_tag: false

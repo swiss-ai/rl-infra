@@ -1,0 +1,72 @@
+# Run A: Apertus 2 Chonk on GSM8K through NeMo-RL's Single-Controller (SC) path, no Gym, no
+# OpenSandbox, no token capture. Task file for ../../run.sh (merged over
+# ../../recipes/apertus2-chonk-vllm-adamw.yaml: 12 nodes = 8 trainer, Megatron EP32 + CPU AdamW,
+# and 4 vLLM, TP1 EP4 = vLLM DP4 per node via NVIDIA-NeMo/RL#2517). Launched by run-a.sh.
+#
+# Tests the trainer and refit side of SC at Chonk scale on its own: the split train API with MoE
+# EP32 and CPU-offloaded distributed AdamW, CollectiveWeightSynchronizer refit to 16 vLLM DP
+# workers, TransferQueue with 24 storage units on 12 nodes. Plan: research report
+# 2026-11-04-chonk-single-controller-feasibility.md, section 6 (run 1).
+defaults: ../../envs/gsm8k.yaml
+
+grpo:
+  # SC: one RL step is exactly one optimizer step, so prompts x generations must equal
+  # policy.train_global_batch_size (512). The legacy recipe's 128 x 16 = 4 optimizer steps per
+  # RL step is not expressible on SC.
+  num_prompts_per_step: 32
+  num_generations_per_prompt: 16
+  max_num_steps: 3
+  # SC has no validation loop (setup raises otherwise)
+  val_period: 0
+  val_at_start: false
+  val_at_end: false
+  # SC entrypoint raises unless the legacy async block is null; async_rl below replaces it
+  async_grpo: null
+
+# plumbing run: no 200 GB checkpoint write (with checkpointing on, SC would also need
+# metric_name null or train:* and save_data_plane true)
+checkpointing:
+  enabled: false
+
+policy:
+  # = 32 x 16, already the recipe's value; a literal because preflight.sh does arithmetic on it
+  train_global_batch_size: 512
+  # the GSM8K recipe's own length (smaller than 4096); 8192 OOMs on 12 nodes (job 5186694)
+  max_total_sequence_length: 2048
+
+# TransferQueue data plane, mandatory for SC. impl transfer_queue, backend simple and
+# num_storage_units ${mul:2, ${cluster.num_nodes}} (= 24 on 12 nodes) come from grpo_math_1B.yaml.
+data_plane:
+  enabled: true
+
+async_rl:
+  sampler:
+    name: in_order
+    # 0 = synchronous: generation never runs ahead of the trainer (IS ratios all 1)
+    max_lookahead_versions: 0
+  recompute_kv_cache_after_weight_updates: true
+  # one chunk per step: with streaming SC keeps the train grad buffers resident during the next
+  # chunk's log-prob pass, and Chonk on 12 nodes has no memory to spare
+  min_groups_for_streaming_train: ${grpo.num_prompts_per_step}
+  # one step in flight; in_order needs prompts x (lookahead + 1) = 32 buffer slots
+  max_inflight_prompts: ${grpo.num_prompts_per_step}
+  max_buffered_rollouts: ${grpo.num_prompts_per_step}
+  rollout_failure:
+    max_infra_attempts_per_prompt: 2
+    max_data_attempts_per_prompt: 2
+    max_skipped_prompts: 0
+    max_consecutive_dropped_prompts: 0
+    # native path: leave both native and nemo_gym blocks at their defaults (SC rejects a
+    # populated nemo_gym block on a native run)
+  stall_watchdog:
+    # a hang ends the job instead of burning the allocation (default action is only warn)
+    stall_timeout_s: 1800
+    stall_action: abort
+  generation_fleet_health:
+    # the rebuild path computes refit rank prefixes without vLLM DP (weight_sync/membership.py)
+    enabled: false
+    restart_dead_shards: false
+
+# native rollouts: no Gym, so no token capture (setup requires the Gym path for it)
+token_capture:
+  enabled: false
