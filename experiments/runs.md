@@ -441,3 +441,80 @@ RUN=sft-code-gym-osb-128x16 JOB_TIME=1-05:00:00 bash run.sh envs/code-gen-sft.ya
 It stopped at step 20: the step-20 validation, 10 times over, ran the head node out of host memory while training's
 memory was on it too, and Slurm killed a trainer rank. `envs/code-gen-osb-sft.yaml` has this job's settings with
 validation once per prompt, as in job 1202265.
+
+## SFT, Harbor terminal tasks
+
+Terminus-2 through Gym's `harbor_agent`, a fresh OpenSandbox pod per trial, Robert's micro-tasks (`envs/harbor-osb-sft.yaml`,
+Gym patches 0006-0010, NeMo-RL patches 0031 and 0032). The runs below started from the clone
+`$HOME/projects/nemo-rl-apertus2-harbor`, which had those patches before main did; from main, leave out `NEMO_RL_DIR`.
+The tasks, and a check of one task per family on real pods:
+
+```bash
+python3.12 envs/make_micro_tasks.py --out $SCRATCH/harbor/micro/tasks
+python3.12 envs/validate_micro_tasks.py $SCRATCH/harbor/micro/tasks --api-key-file ~/.opensandbox_token
+```
+
+Debug runs of 2 steps, 12 nodes, 8x8 trials:
+
+```bash
+RUN=sft-harbor-micro-debug3 JOB_TIME=02:00:00 NEMO_RL_DIR=$HOME/projects/nemo-rl-apertus2-harbor bash run.sh envs/harbor-osb-sft.yaml \
+    grpo.max_num_steps=2 \
+    checkpointing.enabled=false \
+    env.nemo_gym.sandbox.opensandbox.connection.api_key_file=$HOME/.opensandbox_token
+```
+
+- Job 1209869: a turn after one with thinking failed with HTTP 422 (Gym refuses an assistant message with its
+  thinking), so most trials stopped after one turn. Cancelled; `interleaved_thinking: false` since.
+- Job 1209940: 2 to 20 turns per trial, no errors, but every advantage was 0: the first prompt shows each pod's
+  hostname, so GRPO grouped each trial alone. Fixed by NeMo-RL patch 0032.
+- Job 1210063: advantages from -2.47 to 2.47, loss 0.15 and 0.46. Validation 20/32 at step 0, 21/32 after step 2,
+  each about 16 minutes; a step's 64 trials took about 16 minutes. Generation KL error 0.002.
+
+A run leaves the pods of its last batch behind until `sandbox_ttl_s` (1 h). To delete them, by the run's label:
+
+```bash
+printf 'sandbox:\n  opensandbox:\n    connection:\n      domain: https://opensandbox-gvisor.breithorn.svc.cscs.ch\n      api_key_file: %s\n' \
+    $HOME/.opensandbox_token > $SCRATCH/opensandbox-connection.yaml
+$SCRATCH/nemo-rl-apertus2/gym-venvs/resources_servers/code_gen/.venv/bin/python \
+    $NEMO_RL_DIR/3rdparty/Gym-workspace/Gym/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py \
+    --connection-config $SCRATCH/opensandbox-connection.yaml --run-id <run name> --user rl-infra --reap
+```
+
+Proof-of-concept runs, 20 steps, 12 nodes each, validation every 5 steps on 64 trials, lr 2e-6, weights saved at
+the end only. Harbor's trial directories go to `/home01` (one's own file quota) instead of `$SCRATCH`, whose group
+quota was at 4.8M of 5M files. Job 1210340, all 8 families (`--count 192 --num-validation 32`, 4 validation tasks per
+family, 2 trials each), and job 1210341, the reverse family only (`--families reverse --count 96 --num-validation
+16`, 4 trials each):
+
+```bash
+python3.12 envs/make_micro_tasks.py --out $SCRATCH/harbor/micro-all/tasks --count 192 --num-validation 32
+python3.12 envs/make_micro_tasks.py --out $SCRATCH/harbor/micro-reverse/tasks --families reverse --count 96 --num-validation 16
+for spec in "sft-harbor-micro8-20 micro-all 2" "sft-harbor-reverse-20 micro-reverse 4"; do
+    set -- $spec
+    RUN=$1 JOB_TIME=09:00:00 NEMO_RL_DIR=$HOME/projects/nemo-rl-apertus2-harbor bash run.sh envs/harbor-osb-sft.yaml \
+        grpo.max_num_steps=20 \
+        grpo.val_period=5 \
+        grpo.val_num_generations_per_prompt=$3 \
+        policy.megatron_cfg.optimizer.lr=2.0e-6 \
+        checkpointing.save_period=20 \
+        checkpointing.save_optimizer=false \
+        checkpointing.checkpoint_must_save_by=00:08:30:00 \
+        harbor_data_dir=$SCRATCH/harbor/$2 \
+        env.nemo_gym.harbor_agent.responses_api_agents.harbor_agent.harbor_jobs_dir=$HOME/harbor-jobs/$1 \
+        env.nemo_gym.sandbox.opensandbox.connection.api_key_file=$HOME/.opensandbox_token
+done
+```
+
+Results, from the rollout dumps (validation on 64 trials each time; "tool" = trials that typed `rev` or Python's
+`[::-1]`/`reversed(`):
+
+| Validation step | 0 | 5 | 10 | 15 | 20 |
+|---|---|---|---|---|---|
+| reverse only (1210341) | 21/64 | 23/64 | 23/64 | 35/64 | 35/64 |
+| reverse only, tool use | 28/64 | 29/64 | 32/64 | 40/64 | 51/64 |
+| all 8 families (1210340) | 39/64 | 41/64 | 44/64 | 40/64 | 43/64 |
+
+The reverse run learned to use a tool: at step 0 trials with a tool solved 20/28 and those without 1/36. Its training
+reward went from 0.32 (mean of the first 5 weight versions) to 0.61 (last 5). The all-families run moved from 0.61 to
+0.66 in training reward and stayed within noise on validation: the easy families are near 8/8, and each hard family
+is 1/8 of the data. Jobs took 3 h 52 and 4 h 10; weights of step 20 (no optimizer) are in `results/<run>/step_20`.
