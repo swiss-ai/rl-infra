@@ -6,9 +6,10 @@
 #   JOB_TIME=1-05:00:00 bash run.sh envs/code-gen-osb-sft.yaml \
 #       env.nemo_gym.code_gen.resources_servers.code_gen.opensandbox.api_key_file=$HOME/.opensandbox_token \
 #       checkpointing.checkpoint_must_save_by=01:04:30:00
-# The settings are those of jobs 1202265 and 1202946 (experiments/runs.md), with validation once per
-# prompt. The reward is 1 only if every test passes, Gym's standard score, so a time-out on any test
-# scores 0.
+# The settings are those of jobs 1202265 and 1202946 (experiments/runs.md), with 16k tokens, no thinking
+# budget and Gym on a generation node, as in jobs 1210281 and 1213376. They need NeMo-RL patches 0029 and
+# 0030; setup.sh adds them to an older clone. The reward is 1 only if every test passes, Gym's standard
+# score, so a time-out on any test scores 0.
 defaults: ../recipes/apertus2-chonk-sft-vllm-adamw-code.yaml
 script: examples/nemo_gym/run_grpo_nemo_gym.py
 
@@ -23,9 +24,9 @@ grpo:
   # The Gym entrypoint refuses any other value and validates on the whole validation file.
   max_val_samples: null
   val_batch_size: null
-  # Gym's own setting is 10, but at 10 job 1202946 ran the head node out of host memory at the step-20
-  # validation, with training's memory on the same node.
-  val_num_generations_per_prompt: 1
+  # Gym's own setting. Ten tries need NeMo-RL patch 0029 (rows pickled before Ray sends them) and
+  # place_on_generation_node below: without them jobs 1202946, 1209910 and 1210146 ran out of host memory.
+  val_num_generations_per_prompt: 10
   # The DAPO layout's math settings: the Gym entrypoint refuses reward shaping, and the rubric runs on
   # Gym do not skip groups.
   reward_shaping:
@@ -41,9 +42,12 @@ policy:
     optimizer:
       lr: 2.0e-6
   generation:
-    max_new_tokens: 8192
-    # 3/4 of max_new_tokens: vLLM closes a think frame here, so that a reply always has room.
-    thinking_token_budget: 6144
+    max_new_tokens: 16384
+    # No budget. A budget makes vLLM close the think frame at that many tokens (3/4 of max_new_tokens
+    # leaves a reply room), but it slows generation: vLLM then needs each step's tokens on the CPU
+    # before the next step and cannot schedule ahead. A one-node benchmark generated 1.5x fewer
+    # tokens/s with it at 64 rollouts per GPU, 1.9x fewer at 128.
+    thinking_token_budget: null
     output_format: apertus2
     system_prompt_file: ${oc.env:RL_INFRA_DIR}/envs/apertus2-system.json
     stop_token_ids: [12]
@@ -92,6 +96,9 @@ env:
     is_trajectory_collection: false
     # Gym's servers live on several Ray nodes and must advertise the node IP.
     use_absolute_ip: true
+    # NeMo-RL patch 0030. Gym's agent server holds every request in flight, unit tests included (up to
+    # 99.5 GB in a 10x validation), so Gym runs on a generation node instead of next to the trainer.
+    place_on_generation_node: true
     config_paths:
     - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
     - resources_servers/code_gen/configs/code_gen.yaml
