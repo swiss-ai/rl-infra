@@ -39,17 +39,6 @@ if [[ -n "${SFT_EXPORT}" ]]; then
     export CHONK_MODEL_STAGE=copy STAGE_SHARDS=link
 fi
 
-# A recipe on an SFT checkpoint names its export. apertus-common goes in an overlay of its own, so
-# it never reaches the overlay other jobs run from, and the export is staged next to the base model.
-SFT_EXPORT="$(yq r "${RECIPE}" sft_export)"
-if [[ -n "${SFT_EXPORT}" ]]; then
-    source "${PIN_FILE}"
-    export PYDEPS_APERTUS2="${SCRATCH}/nemo-rl-apertus2/apertus-common-${APERTUS_COMMON_COMMIT:0:9}"
-    export PYDEPS="${PYDEPS}-apertus2"
-    export SRC="${SCRATCH}/${SFT_EXPORT}" DST="${SCRATCH}/models/$(basename "${SFT_EXPORT}")"
-    export CHONK_MODEL_STAGE=copy STAGE_SHARDS=link
-fi
-
 LOG="${OUT}/setup.log"
 echo "== setup (log: ${LOG})"
 { SKIP_VLLM_IMAGE=1 bash "${APERTUS2_DIR}/setup.sh" && bash "${ROOT}/experiments/grpo-chonk/stage_model.sh" \
