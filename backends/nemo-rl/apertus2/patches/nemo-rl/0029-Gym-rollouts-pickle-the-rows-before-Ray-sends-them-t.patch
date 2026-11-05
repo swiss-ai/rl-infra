@@ -1,0 +1,82 @@
+From 1604f849114f986a94b8da640fe88d80014a38ad Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Wed, 4 Nov 2026 21:50:49 +0900
+Subject: [PATCH] Gym rollouts: pickle the rows before Ray sends them to the
+ Gym actor
+
+Ray 2.56 encodes plain lists and dicts in actor-call arguments with msgpack, which writes out every
+repeat of a row in full although the repeats share their objects. Validation sends each row
+val_num_generations_per_prompt times: at 10, competitive coding's 4.4 GB of unit tests came to 44 GB
+in the driver and again in the head node's object store, kept for the rest of the run, and ran the
+head node out of host memory at the step-20 validation (job 1202946). Pickle keeps one copy of each
+shared object.
+
+_merge_nemo_gym_instance_streams pickles the rows, and NemoGym.run_rollouts unpickles them when they
+come as bytes. Job 1208963: driver 21 GB and raylet 8 GB, against 55 and 43 GB without it (job
+1208371); its two validations scored 42.6 and 43.2%.
+---
+ nemo_rl/environments/nemo_gym.py | 10 ++++++++--
+ nemo_rl/experience/rollouts.py   |  7 ++++++-
+ 2 files changed, 14 insertions(+), 3 deletions(-)
+
+diff --git a/nemo_rl/environments/nemo_gym.py b/nemo_rl/environments/nemo_gym.py
+index 0bcef5b8a..a5a661bd4 100644
+--- a/nemo_rl/environments/nemo_gym.py
++++ b/nemo_rl/environments/nemo_gym.py
+@@ -15,6 +15,7 @@ import asyncio
+ import json
+ import math
+ import os
++import pickle
+ import subprocess
+ import sys
+ import threading
+@@ -741,12 +742,17 @@ Depending on your data shape, you may want to change these values."""
+ 
+     async def run_rollouts(
+         self,
+-        nemo_gym_examples: list[dict],
++        nemo_gym_examples: list[dict] | bytes,
+         timer_prefix: str,
+         deduplicate_multimodal_data: bool = False,
+     ) -> AsyncGenerator[tuple[int, dict, dict, dict | None], None]:
+-        """Stream postprocessed rollouts as NeMo-Gym tasks complete."""
++        """Stream postprocessed rollouts as NeMo-Gym tasks complete.
++
++        The rows may come pickled, which keeps one copy of what repeated rows share.
++        """
+         self._require_spinup()
++        if isinstance(nemo_gym_examples, bytes):
++            nemo_gym_examples = pickle.loads(nemo_gym_examples)
+         if not nemo_gym_examples:
+             raise ValueError("NeMo-Gym rollout batch must not be empty")
+         if self._tokenizer is None:
+diff --git a/nemo_rl/experience/rollouts.py b/nemo_rl/experience/rollouts.py
+index 619e890f1..96b18db49 100644
+--- a/nemo_rl/experience/rollouts.py
++++ b/nemo_rl/experience/rollouts.py
+@@ -19,6 +19,7 @@ import asyncio
+ import copy
+ import json
+ import os
++import pickle
+ import statistics
+ import threading
+ import uuid
+@@ -2593,8 +2594,12 @@ async def _merge_nemo_gym_instance_streams(
+                 enabled=debug_payload_metrics,
+             )
+         )
++        # Ray encodes plain lists and dicts with msgpack, which writes out every
++        # repeat of a row in full although the repeats share their strings: ten
++        # repeats of a validation set with 4.4 GB of unit tests came to 44 GB on
++        # the driver's node. Pickle keeps one copy of each shared object.
+         stream = handle.run_rollouts.options(num_returns="streaming").remote(
+-            *ray_arguments
++            pickle.dumps(rows, protocol=pickle.HIGHEST_PROTOCOL), *ray_arguments[1:]
+         )
+         iterator = stream.__aiter__()
+         iterators[iterator] = instance_label
+-- 
+2.43.0
+

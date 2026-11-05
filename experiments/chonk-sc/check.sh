@@ -5,7 +5,7 @@
 #   (b) the merged NeMo-RL clone ($NEMO_RL_DIR): pinned PRs merged, NVIDIA-NeMo/RL#2517 removed the
 #       async_engine assert for vLLM EP != TP, f196's refit/membership/token-capture code survived
 #       the -Xtheirs merge (grep markers, see common.sh)
-#   (c) run B only: the Gym checkout carries the current patches/gym set, incl. 0010 + 0011
+#   (c) run B only: the Gym checkout carries the current patches/gym set, incl. 0011 + 0012
 #   (a) composes the run A and run B configs exactly as run-a.sh / run-b.sh will, then resolves and
 #       validates them with the clone's own NeMo-RL code (check.py: load_config, the launcher's
 #       overrides, MasterConfig, validate_single_controller_config, setup's config-only checks)

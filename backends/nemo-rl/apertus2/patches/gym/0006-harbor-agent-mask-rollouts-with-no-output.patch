@@ -1,17 +1,9 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Konstantinos Pitas <cwstas2007@hotmail.com>
-Date: Wed, 23 Sep 2026 19:34:48 +0200
-Subject: [PATCH 6/9] A rollout with no output items produced no trainable
- token, this patch masks these outputs
-
-(cherry picked from commit 08400c03241a66f8696d26f615d2049ab0d30075)
-Signed-off-by: ambroise-b <ambroise.borbely@epfl.ch>
----
- responses_api_agents/harbor_agent/app.py | 9 +++++++++
- 1 file changed, 9 insertions(+)
+Harbor agent: flag a rollout with no output items (mask_sample), so the trainer drops it from the
+gradient instead of aborting the step. Cherry-pick of swiss-ai/nemo-gym 810196ff6 (Konstantinos Pitas),
+branch swissai/harbor_agent_osb_v0.7.0, as Robert ran it on KISTI (rl-infra branch harbor-osb).
 
 diff --git a/responses_api_agents/harbor_agent/app.py b/responses_api_agents/harbor_agent/app.py
-index 43159df56..749ef4403 100644
+index 43159df5..749ef440 100644
 --- a/responses_api_agents/harbor_agent/app.py
 +++ b/responses_api_agents/harbor_agent/app.py
 @@ -336,6 +336,15 @@ class HarborAgent(SimpleResponsesAPIAgent):
@@ -30,6 +22,3 @@ index 43159df56..749ef4403 100644
                  context_length_exceeded_error=int(agent_error_flags.get("context_length_exceeded", False)),
                  memory_limit_exceeded_error=int(agent_error_flags.get("memory_limit_exceeded", False)),
                  agent_timeout_error=int(
--- 
-2.55.0
-

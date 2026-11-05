@@ -1,17 +1,10 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Konstantinos Pitas <cwstas2007@hotmail.com>
-Date: Mon, 19 Oct 2026 19:14:37 +0200
-Subject: [PATCH 9/9] Various bug fixes
-
----
- .../sandbox/providers/opensandbox/provider.py |  9 +++++
- responses_api_agents/harbor_agent/app.py      | 35 +++++++++++++++++--
- .../harbor_agent/overrides.txt                |  9 +++++
- 3 files changed, 51 insertions(+), 2 deletions(-)
- create mode 100644 responses_api_agents/harbor_agent/overrides.txt
+Harbor agent and OpenSandbox provider fixes: secure_access as a provider option, the Gym config shipped
+to the Ray task that runs a trial, and pathspec in the agent's venv. Cherry-pick of swiss-ai/nemo-gym
+85f6def4a (Konstantinos Pitas), branch swissai/harbor_agent_osb_v0.7.0, as Robert ran it on KISTI
+(rl-infra branch harbor-osb).
 
 diff --git a/nemo_gym/sandbox/providers/opensandbox/provider.py b/nemo_gym/sandbox/providers/opensandbox/provider.py
-index 6c79c4a30..024cca80d 100644
+index 6c79c4a3..024cca80 100644
 --- a/nemo_gym/sandbox/providers/opensandbox/provider.py
 +++ b/nemo_gym/sandbox/providers/opensandbox/provider.py
 @@ -618,6 +618,9 @@ class OpenSandboxProviderOptions:
@@ -52,7 +45,7 @@ index 6c79c4a30..024cca80d 100644
              kwargs["timeout"] = timedelta(seconds=spec.ttl_s)
          if spec.ready_timeout_s is not None:
 diff --git a/responses_api_agents/harbor_agent/app.py b/responses_api_agents/harbor_agent/app.py
-index 749ef4403..2c866a540 100644
+index 749ef440..2c866a54 100644
 --- a/responses_api_agents/harbor_agent/app.py
 +++ b/responses_api_agents/harbor_agent/app.py
 @@ -24,6 +24,7 @@ from uuid import uuid4
@@ -121,7 +114,7 @@ index 749ef4403..2c866a540 100644
                  # one executor thread per in-flight trial, so completed trials
 diff --git a/responses_api_agents/harbor_agent/overrides.txt b/responses_api_agents/harbor_agent/overrides.txt
 new file mode 100644
-index 000000000..94577a3f8
+index 00000000..94577a3f
 --- /dev/null
 +++ b/responses_api_agents/harbor_agent/overrides.txt
 @@ -0,0 +1,9 @@
@@ -134,6 +127,3 @@ index 000000000..94577a3f8
 +#
 +# Same remedy, same reason, as responses_api_agents/miniswe_sandboxed_agent.
 +pathspec
--- 
-2.55.0
-

@@ -1,28 +1,9 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: ambroise-b <ambroise.borbely@epfl.ch>
-Date: Thu, 15 Oct 2026 17:28:05 +0200
-Subject: [PATCH 7/9] feat(harbor_agent): derive CPU caps in
- NemoGymSandboxEnvironment
-
-Add an opt-in `derive_cpu_env` kwarg that sets CPU_CAP_ENV_VARS
-(OMP_NUM_THREADS, PYTEST_XDIST_AUTO_NUM_WORKERS, ...) to the sandbox's
-CPU limit, as opencode_sandboxed_agent already does. Sandboxes see the
-host's full core count, so test runners and BLAS pools otherwise fan
-out far past the limit and get throttled or group-OOM killed. Explicit
-sandbox_env entries win. Off by default to keep existing behavior.
-
-Also assert the mask_sample flag in the harbor_agent app tests.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Signed-off-by: ambroise-b <ambroise.borbely@epfl.ch>
----
- .../custom_envs/nemo_gym_sandbox/environment.py | 11 ++++++++++-
- .../harbor_agent/tests/test_app.py              |  3 +++
- .../harbor_agent/tests/test_environment.py      | 17 +++++++++++++++++
- 3 files changed, 30 insertions(+), 1 deletion(-)
+Harbor agent: cap test runners and BLAS pools at the task's CPU limit in the sandbox environment.
+Cherry-pick of swiss-ai/nemo-gym 0fe241c66 (Ambroise Borbely), branch swissai/harbor_agent_osb_v0.7.0,
+as Robert ran it on KISTI (rl-infra branch harbor-osb).
 
 diff --git a/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/environment.py b/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/environment.py
-index 5e34da04a..601c5254c 100644
+index 5e34da04..601c5254 100644
 --- a/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/environment.py
 +++ b/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/environment.py
 @@ -46,6 +46,7 @@ from nemo_gym.sandbox import (
@@ -72,7 +53,7 @@ index 5e34da04a..601c5254c 100644
              resources=resources,
              provider_options=dict(self._sandbox_provider_options),
 diff --git a/responses_api_agents/harbor_agent/tests/test_app.py b/responses_api_agents/harbor_agent/tests/test_app.py
-index 85155224c..71bb7e11f 100644
+index 85155224..71bb7e11 100644
 --- a/responses_api_agents/harbor_agent/tests/test_app.py
 +++ b/responses_api_agents/harbor_agent/tests/test_app.py
 @@ -351,6 +351,7 @@ class TestApp:
@@ -93,7 +74,7 @@ index 85155224c..71bb7e11f 100644
          assert response.responses_create_params.input == []
  
 diff --git a/responses_api_agents/harbor_agent/tests/test_environment.py b/responses_api_agents/harbor_agent/tests/test_environment.py
-index d648d0aa6..6116ca5bd 100644
+index d648d0aa..6116ca5b 100644
 --- a/responses_api_agents/harbor_agent/tests/test_environment.py
 +++ b/responses_api_agents/harbor_agent/tests/test_environment.py
 @@ -182,6 +182,23 @@ class TestStartStop:
@@ -120,6 +101,3 @@ index d648d0aa6..6116ca5bd 100644
      @pytest.mark.asyncio
      async def test_start_applies_image_rewrites(self, tmp_path):
          env = _make_environment(
--- 
-2.55.0
-

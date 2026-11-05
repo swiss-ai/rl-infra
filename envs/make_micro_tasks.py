@@ -6,11 +6,11 @@ and a verifier that writes 1 or 0 to /logs/verifier/reward.txt. Every task has a
 tests-passing solution in solution/solve.sh, used to check the verifier (not used in training).
 
     python3 make_micro_tasks.py --out <dir>/tasks [--count 96] [--seed 0] [--num-validation 8]
+        [--families reverse,sorted]   (default: all 8; the validation rows are split evenly over them)
 
 Writes <dir>/tasks/<task>/..., plus <dir>/train.jsonl, <dir>/validation.jsonl and <dir>/task_names.txt
-(<dir> is the parent of --out; point HARBOR_ROOT at it). Every row's instance_id is
-`swe_lego::<task>`: envs/harbor-osb.yaml maps the dataset alias swe_lego to <dir>/tasks.
-Standard library only.
+(<dir> is the parent of --out). Every row's instance_id is `micro::<task>`: envs/harbor-osb-sft.yaml
+maps the dataset alias micro to <dir>/tasks. Standard library only. From Robert's branch harbor-osb.
 """
 
 from __future__ import annotations
@@ -182,20 +182,31 @@ def main() -> None:
     ap.add_argument("--count", type=int, default=96)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--num-validation", type=int, default=8)
-    ap.add_argument("--alias", default="swe_lego", help="dataset alias used in instance_id")
+    ap.add_argument("--alias", default="micro", help="dataset alias used in instance_id")
+    ap.add_argument("--families", default=None, help="comma-separated families (default: all)")
     a = ap.parse_args()
+    families = FAMILIES
+    if a.families:
+        by_name = {f.__name__.removeprefix("t_"): f for f in FAMILIES}
+        families = [by_name[n] for n in a.families.split(",")]
     r = random.Random(a.seed)
     a.out.mkdir(parents=True, exist_ok=True)
     names = []
     for i in range(a.count):
-        fam = FAMILIES[i % len(FAMILIES)]
+        fam = families[i % len(families)]
         family, ins, check, sol = fam(r)
         write_task(a.out, i, family, ins, check, sol)
         names.append(f"micro-{family}-{i:03d}")
     # Rows in the format NemoGymDataset reads for harbor_agent (same as prepare_harbor_osb_dataset.py).
     order = names[:]
     random.Random(a.seed).shuffle(order)
-    val, train = order[:a.num_validation], order[a.num_validation:]
+    # The same number of validation tasks from each family (the first ones of each in the shuffle).
+    per_family = {}
+    for n in order:
+        per_family.setdefault(n.split("-")[1], []).append(n)
+    take = a.num_validation // len(per_family)
+    val = [n for group in per_family.values() for n in group[:take]]
+    train = [n for n in order if n not in set(val)]
     root = a.out.parent
 
     def rows(selected):

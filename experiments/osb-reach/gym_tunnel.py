@@ -1,4 +1,4 @@
-"""Gym's own per-sandbox model tunnel (Gym patch 0012, model_tunnel.py) on Breithorn, without a training
+"""Gym's own per-sandbox model tunnel (Gym patch 0013, model_tunnel.py) on Breithorn, without a training
 run: the exact code path of NemoGymSandboxEnvironment (AsyncSandbox with Gym's opensandbox.yaml, incl.
 background_exec, one provider per sandbox, transport httpx as in the runs; ModelTunnel.open/close),
 TUNNELS sandboxes in parallel, model_stub.py on this node as the tunnel target.

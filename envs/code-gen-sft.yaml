@@ -31,6 +31,9 @@ policy:
   generation:
     max_new_tokens: 16384
     # 3/4 of max_new_tokens: vLLM closes a think frame here, so that a reply always has room.
+    # It slows generation: vLLM then needs each step's tokens on the CPU before the next step and
+    # cannot schedule ahead. A one-node benchmark generated 1.5x fewer tokens/s with it at 64
+    # rollouts per GPU, 1.9x fewer at 128. null turns it off.
     thinking_token_budget: 12288
     output_format: apertus2
     system_prompt_file: ${oc.env:RL_INFRA_DIR}/envs/apertus2-system.json

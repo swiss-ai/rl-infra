@@ -49,8 +49,8 @@ bash experiments/chonk-sc/check.sh             # RUNS="a" or RUNS="b" for one ru
   `resolve_distributed_executor_backend` (`uni` for EP > TP) with its inline choice (`mp`); the
   legacy Chonk runs (5184052) ran with the same code.
 - **(c) Gym checkout** (run B): `setup-gym.sh` has applied the current `patches/gym` set (its stamp
-  matches), Gym patch 0010 (`harbor_model_base_url` / `base_url_for_run`: without it capture records
-  nothing and every row is rejected, job 5236016), 0011 (`_should_mask`, capture-aware masking),
+  matches), Gym patch 0011 (`harbor_model_base_url` / `base_url_for_run`: without it capture records
+  nothing and every row is rejected, job 5236016), 0012 (`_should_mask`, capture-aware masking),
   `nemo_gym/token_id_capture`, the OpenSandbox configs (patches 0006-0009). Fix:
   ```bash
   bash backends/nemo-rl/apertus2/setup-gym.sh
@@ -126,7 +126,7 @@ bash experiments/chonk-sc/run-b.sh             # JOB_TIME default 02:30:00, RUN 
 of 5; lookahead 0 instead of age 1. `rollout_failure` 2 infra / 2 data attempts, no drops,
 `rollout_timeout_s` 1800 (whole prompt group), stall watchdog 2100 s abort, harbor concurrency 64
 (derived) = `max_inflight_prompts` x generations. `token_capture.enabled`: rows rebuilt from the
-ledger in `<log_dir>/gym_token_capture`; patch 0008's masking is inert under capture.
+ledger in `<log_dir>/gym_token_capture`; NeMo-RL patch 0031's masking is inert under capture.
 
 Tests (risks 3, 4): token capture with 16 vLLM DP workers on 4 nodes (a TQ client + token sink per
 worker), the capture ledger's `fcntl.flock` on scratch across nodes, ContextLengthExceeded /
@@ -173,7 +173,7 @@ shutdown and reaped by `envs/reap_after.sh`.
    per step. 8192 OOMs on 12 nodes (5186694): use the 20n recipe for that (run D).
 6. TransferQueue simple backend at 12 nodes / 24 units; host RAM on the CPU-offload trainer nodes.
 7. If all 64 rows of a step are invalid (e.g. an OpenSandbox outage), SC raises "no valid response
-   tokens after filtering" where legacy + patch 0008 trained a zero-loss step; Harbor trials failing
+   tokens after filtering" where legacy + mask_degenerate_rollouts trained a zero-loss step; Harbor trials failing
    on infra are scored 0 and not retried by NeMo-RL (job 5245999).
 
 Next (not prepared here): run C = run B with `async_rl.sampler.max_lookahead_versions=1`,

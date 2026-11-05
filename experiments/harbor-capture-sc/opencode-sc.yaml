@@ -5,9 +5,9 @@
 # Its model calls therefore start inside the pod and must reach the Gym model server (policy_model)
 # on the training node. OpenSandbox pods cannot reach CSCS-internal hosts, so this only works once
 # HARBOR_MODEL_BASE_URL names an address the pods can reach that forwards to policy_model (proxy,
-# tunnel). harbor_agent appends the rollout's capture prefix and /v1 to it (Gym patch 0010).
+# tunnel). harbor_agent appends the rollout's capture prefix and /v1 to it (Gym patch 0011).
 #
-# Gym patch 0011 provides the agent class (Harbor's own OpenCode agent at this pin knows only
+# Gym patch 0012 provides the agent class (Harbor's own OpenCode agent at this pin knows only
 # hosted providers) and stops masking its rollouts for having no ATIF trajectory: the tokens come
 # from the capture ledger, as with every other agent under token_capture.
 
