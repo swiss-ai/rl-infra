@@ -48,8 +48,12 @@ policy:
   generation:
     # Per agent turn. policy.max_total_sequence_length (16384) limits the whole trajectory.
     max_new_tokens: 6144
-    # Per turn: vLLM closes a think frame here, so that the reply always has room.
-    thinking_token_budget: 4096
+    # No thinking budget. At a budget vLLM forces the think frame closed and reports that token with
+    # logprob 0, while the trainer gives it e^-9 to e^-34: train/policy_kl_error read 1e2 to 4e9 in every
+    # Harbor run (training itself was fine, the IS weight of that token is ~0). A budget also slows
+    # generation 1.5-1.9x. A turn that thinks past max_new_tokens has no reply, and Terminus-2 answers
+    # it with a parse error.
+    thinking_token_budget: null
     output_format: apertus2
     system_prompt_file: ${oc.env:RL_INFRA_DIR}/envs/apertus2-system.json
     stop_token_ids: [12]

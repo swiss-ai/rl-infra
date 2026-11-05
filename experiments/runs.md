@@ -553,3 +553,9 @@ The reverse run learned to use a tool: at step 0 trials with a tool solved 20/28
 reward went from 0.32 (mean of the first 5 weight versions) to 0.61 (last 5). The all-families run moved from 0.61 to
 0.66 in training reward and stayed within noise on validation: the easy families are near 8/8, and each hard family
 is 1/8 of the data. Jobs took 3 h 52 and 4 h 10; weights of step 20 (no optimizer) are in `results/<run>/step_20`.
+
+These runs had a thinking budget of 4096 per turn. Their `train/policy_kl_error` (1e2 to 4e9) comes entirely from the
+2 to 14 turns per step that reached it: vLLM forces `<|/out|>` there and reports logprob 0, the trainer gives it e^-9
+to e^-34 (from the per-token dumps `train_data_step*.jsonl`). The coding run with a budget of 6144,
+`sft-code-full-128x16-wandb`, reads up to 5e11 for the same reason. The IS weight of such a token is about 0, so
+training was not affected. The task file has no budget since.
