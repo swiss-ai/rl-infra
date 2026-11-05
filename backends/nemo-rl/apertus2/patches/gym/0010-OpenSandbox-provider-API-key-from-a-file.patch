@@ -1,0 +1,115 @@
+OpenSandbox: connection.api_key_file, a file holding the API key, read when api_key is unset, by the
+provider and by cleanup_sandboxes.py --connection-config, so that the key stays out of configs, command
+lines and the job's environment. api_key is left out of the connection config's repr.
+
+diff --git a/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py b/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py
+index ee677fc2..64242776 100755
+--- a/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py
++++ b/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py
+@@ -174,7 +174,7 @@ def main(argv: list[str] | None = None) -> int:
+     parser = argparse.ArgumentParser(description=__doc__)
+     parser.add_argument(
+         "--connection-config",
+-        help="YAML file containing sandbox.opensandbox.connection, as an alternative to --domain/--api-key.",
++        help="YAML file containing sandbox.opensandbox.connection (api_key or api_key_file), as an alternative to --domain/--api-key.",
+     )
+     parser.add_argument("--domain", help="OpenSandbox domain, host or full URL.")
+     parser.add_argument("--api-key", help="OpenSandbox access key.")
+@@ -224,6 +224,9 @@ def main(argv: list[str] | None = None) -> int:
+ 
+         domain = connection.get("domain")
+         access_key = connection.get("api_key")
++        if not access_key and connection.get("api_key_file"):
++            with open(connection["api_key_file"], encoding="utf-8") as key_file:
++                access_key = key_file.read().strip()
+         protocol = connection.get("protocol") or "http"
+         for path, value in (("domain", domain), ("api_key", access_key)):
+             if not isinstance(value, str) or not value.strip():
+diff --git a/nemo_gym/sandbox/providers/opensandbox/provider.py b/nemo_gym/sandbox/providers/opensandbox/provider.py
+index 024cca80..c6208711 100644
+--- a/nemo_gym/sandbox/providers/opensandbox/provider.py
++++ b/nemo_gym/sandbox/providers/opensandbox/provider.py
+@@ -442,10 +442,13 @@ class OpenSandboxConnectionConfig:
+     ``domain`` on its own, but the provider reads ``protocol`` directly, hence
+     the normalization here. Only ``scheme://host[:port][/path-prefix]`` is
+     accepted: a query string or fragment is a configuration error.
++    ``api_key_file`` names a file holding the key, read when ``api_key`` is
++    unset, so that the key itself stays out of configs and the environment.
+     """
+ 
+     domain: str | None = None
+-    api_key: str | None = None
++    api_key: str | None = field(default=None, repr=False)
++    api_key_file: str | None = None
+     protocol: str | None = None
+     request_timeout_s: int | None = None
+     use_server_proxy: bool = False
+@@ -461,6 +464,8 @@ class OpenSandboxConnectionConfig:
+     tls_verify: bool = False
+ 
+     def __post_init__(self) -> None:
++        if self.api_key is None and self.api_key_file is not None:
++            self.api_key = Path(self.api_key_file).read_text().strip()
+         if self.domain is None:
+             return
+         self.domain, scheme = split_domain_scheme(self.domain)
+diff --git a/tests/unit_tests/test_opensandbox_cleanup.py b/tests/unit_tests/test_opensandbox_cleanup.py
+index 6412c785..e34bf278 100644
+--- a/tests/unit_tests/test_opensandbox_cleanup.py
++++ b/tests/unit_tests/test_opensandbox_cleanup.py
+@@ -471,6 +471,28 @@ def test_cli_uses_standalone_connection_config_and_forwards_return_codes(
+     assert "OpenSandbox cleanup failed: down" in capsys.readouterr().err
+ 
+ 
++def test_cli_reads_api_key_file_from_connection_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
++    key_file = tmp_path / "key"
++    key_file.write_text(f"{TEST_ACCESS_KEY}\n")
++    config = tmp_path / "env.yaml"
++    config.write_text(
++        "sandbox:\n"
++        "  opensandbox:\n"
++        "    connection:\n"
++        "      domain: https://sandbox.example\n"
++        f"      api_key_file: {key_file}\n"
++    )
++    calls = []
++
++    async def record_cleanup(**kwargs: object) -> int:
++        calls.append(kwargs)
++        return 0
++
++    monkeypatch.setattr(cleanup_sandboxes, "cleanup_sandboxes", record_cleanup)
++    assert cleanup_sandboxes.main(["--connection-config", str(config), "--run-id", "job-7", "--user", "alice"]) == 0
++    assert calls[0]["access_key"] == TEST_ACCESS_KEY
++
++
+ @pytest.mark.parametrize(
+     ("config", "message"),
+     [
+diff --git a/tests/unit_tests/test_opensandbox_provider.py b/tests/unit_tests/test_opensandbox_provider.py
+index f3877eb2..97ba4f62 100644
+--- a/tests/unit_tests/test_opensandbox_provider.py
++++ b/tests/unit_tests/test_opensandbox_provider.py
+@@ -564,6 +564,22 @@ def test_connection_config_and_image_policy(fake_opensandbox_sdk: None) -> None:
+     assert "headers" not in direct._connection_config().kwargs
+ 
+ 
++def test_connection_api_key_file(fake_opensandbox_sdk: None, tmp_path: Path) -> None:
++    key_file = tmp_path / "key"
++    key_file.write_text("file-key\n")  # pragma: allowlist secret
++    provider = opensandbox_provider.OpenSandboxProvider(
++        connection={"domain": "sandbox.example", "api_key_file": str(key_file), "use_server_proxy": True}
++    )
++    assert provider._connection_config().kwargs["api_key"] == "file-key"  # pragma: allowlist secret
++    assert "file-key" not in repr(provider._connection)
++
++    # An explicit api_key wins over the file.
++    provider = opensandbox_provider.OpenSandboxProvider(
++        connection={"api_key": "inline-key", "api_key_file": str(key_file)}  # pragma: allowlist secret
++    )
++    assert provider._connection.api_key == "inline-key"  # pragma: allowlist secret
++
++
+ def test_connection_transport_backends(fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch) -> None:
+     # Default backend is httpx, with the configured keepalive expiry on the pool.
+     provider = opensandbox_provider.OpenSandboxProvider()

@@ -4,12 +4,12 @@
 #   bash experiments/harbor-capture-sc/run.sh [overrides...]
 # Env:
 #   AGENT                  terminus (default), mini (mini-swe-agent in the sandbox, implies TUNNEL=1; Gym
-#                          patch 0014, mini-sc.yaml) or opencode
+#                          patch 0015, mini-sc.yaml) or opencode
 #   MSWEA_VERSION          mini only: li-boxuan/mini-swe-agent git ref (default: the commit pinned in mini-sc.yaml)
 #   HARBOR_MODEL_BASE_URL  opencode only: model-server URL as reachable from the pods (required)
 #   OPENCODE_VERSION       opencode only: opencode-ai npm version (default: latest)
 #   TUNNEL                 1: per-sandbox reverse tunnel sandbox 127.0.0.1:8000 -> policy_model (Gym patch
-#                          0012, tunnel-sc.yaml); every trial checks GET /health through it before starting.
+#                          0013, tunnel-sc.yaml); every trial checks GET /health through it before starting.
 #                          With terminus the agent still calls the model from the node (step A: the tunnel
 #                          runs alongside). CHISEL_DIR (default $SCRATCH/chisel) is filled on first use.
 #   HARBOR_ROOT            micro-task tree, train.jsonl, validation.jsonl (default $SCRATCH/osb/harbor_micro)
@@ -35,7 +35,7 @@ case "${AGENT}" in
     mini)
         grep -q MiniSweAgentNemoGym \
             "${GYM_DIR}/responses_api_agents/harbor_agent/custom_agents/mini_swe_agent_nemo_gym.py" 2>/dev/null || {
-            echo "ERROR: AGENT=mini needs Gym patches 0014-0016 (mini-swe-agent) in ${GYM_DIR}; re-run setup-gym.sh as above" >&2
+            echo "ERROR: AGENT=mini needs Gym patches 0015-0017 (mini-swe-agent) in ${GYM_DIR}; re-run setup-gym.sh as above" >&2
             exit 1
         }
         # the agent calls the model from inside the sandbox: only through the tunnel
@@ -58,7 +58,7 @@ esac
 if [[ "${TUNNEL:-0}" == 1 ]]; then
     grep -q server_start_script \
         "${GYM_DIR}/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/model_tunnel.py" 2>/dev/null || {
-        echo "ERROR: TUNNEL=1 needs Gym patches 0012+0013 (tunnel) in ${GYM_DIR}; re-run setup-gym.sh as above" >&2
+        echo "ERROR: TUNNEL=1 needs Gym patches 0013+0014 (tunnel) in ${GYM_DIR}; re-run setup-gym.sh as above" >&2
         exit 1
     }
     export CHISEL_VERSION="${CHISEL_VERSION:-1.12.0}" CHISEL_DIR="${CHISEL_DIR:-${SCRATCH}/chisel}"

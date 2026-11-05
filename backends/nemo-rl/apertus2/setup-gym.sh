@@ -30,9 +30,11 @@ stamp="$(cat "${APERTUS2_DIR}"/patches/gym/*.patch | git hash-object --stdin)"
 if [[ "$(cat "${GYM_DIR}/.git/rl-infra-patches" 2>/dev/null)" != "${stamp}" ]]; then
     git -C "${GYM_DIR}" checkout --quiet --force "${GYM_COMMIT}"
     # every file a patch creates (any version of it): untracked at the pin, so the checkout leaves it
-    added="$(cat "${APERTUS2_DIR}"/patches/gym/*.patch | git apply --summary 2>/dev/null | awk '$1 == "create" {print $4}' | sort -u)"
+    added="$(cat "${APERTUS2_DIR}"/patches/gym/*.patch | git -C "${GYM_DIR}" apply --summary 2>/dev/null | awk '$1 == "create" {print $4}' | sort -u)"
     [[ -z "${added}" ]] || git -C "${GYM_DIR}" clean -fdxq -- ${added}
-    git -C "${GYM_DIR}" clean -fdxq resources_servers/rubric_judge resources_servers/code_gen/opensandbox_pods.py
+    git -C "${GYM_DIR}" clean -fdxq resources_servers/rubric_judge resources_servers/code_gen/opensandbox_pods.py \
+        responses_api_agents/harbor_agent/configs/harbor_agent_opensandbox_training.yaml \
+        responses_api_agents/harbor_agent/overrides.txt
     for p in "${APERTUS2_DIR}"/patches/gym/*.patch; do
         git -C "${GYM_DIR}" apply "${p}"
         echo "== Gym: applied $(basename "${p}")"

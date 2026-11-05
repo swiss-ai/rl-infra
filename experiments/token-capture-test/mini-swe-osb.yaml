@@ -78,7 +78,7 @@ env:
     port_range_high: 5999
     is_trajectory_collection: false
     use_absolute_ip: true
-    # Same as envs/harbor-osb.yaml (patch 0008). Masks only rollouts the agent flags with
+    # Same as envs/harbor-osb.yaml (NeMo-RL patch 0031). Masks only rollouts the agent flags with
     # instance_config.mask_sample; mini_swe_agent_2 does not flag tokenless rollouts.
     mask_degenerate_rollouts: true
     config_paths:

@@ -1,27 +1,10 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: ambroise-b <ambroise.borbely@epfl.ch>
-Date: Thu, 15 Oct 2026 17:28:06 +0200
-Subject: [PATCH 8/9] feat(harbor_agent): add OpenSandbox config for RL
- training
-
-harbor_agent_opensandbox_training.yaml: the training sibling of
-harbor_agent_opensandbox.yaml. No benchmark dataset is wired in (the
-trainer supplies rows and its harbor_datasets alias), Terminus-2
-returns rollout details, and the sandbox settings follow the
-OpenSandbox best practices: small scheduling requests, amd64 platform,
-derive_cpu_env, 50ms execd grace, ready timeout below create.timeout_s
-and an exec timeout above verifier budgets.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Signed-off-by: ambroise-b <ambroise.borbely@epfl.ch>
----
- .../harbor_agent_opensandbox_training.yaml    | 110 ++++++++++++++++++
- 1 file changed, 110 insertions(+)
- create mode 100644 responses_api_agents/harbor_agent/configs/harbor_agent_opensandbox_training.yaml
+Harbor agent: harbor_agent_opensandbox_training.yaml, Terminus-2 on OpenSandbox for RL training.
+Cherry-pick of swiss-ai/nemo-gym 44c77151b (Ambroise Borbely), branch swissai/harbor_agent_osb_v0.7.0,
+as Robert ran it on KISTI (rl-infra branch harbor-osb).
 
 diff --git a/responses_api_agents/harbor_agent/configs/harbor_agent_opensandbox_training.yaml b/responses_api_agents/harbor_agent/configs/harbor_agent_opensandbox_training.yaml
 new file mode 100644
-index 000000000..a046df9e4
+index 00000000..a046df9e
 --- /dev/null
 +++ b/responses_api_agents/harbor_agent/configs/harbor_agent_opensandbox_training.yaml
 @@ -0,0 +1,110 @@
@@ -135,6 +118,3 @@ index 000000000..a046df9e4
 +      agent_server:
 +        type: responses_api_agents
 +        name: harbor_agent
--- 
-2.55.0
-

@@ -1,9 +1,19 @@
-From cfc47ae3adcd8d79d99f75b91e1049acb402eb26 Mon Sep 17 00:00:00 2001
-From: rob <rob@local>
-Date: Wed, 21 Oct 2026 11:38:04 +0200
-Subject: [PATCH] nemo_gym: mask_degenerate_rollouts (port of
- swiss-ai/nemo-rl-development 64327d7c, without the Hermes hunk)
+From 671ae68aee79fca876878ff42be271447b5c5023 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Wed, 4 Nov 2026 03:18:58 +0900
+Subject: [PATCH] NeMo Gym: a rollout that produced no tokens becomes a
+ zero-weight sample
 
+env.nemo_gym.mask_degenerate_rollouts turns a rollout that Gym flagged with
+instance_config.mask_sample and that produced no tokens (a sandbox that never
+came up, a first prompt over the context limit) into a one-token stand-in that
+GRPO's mask_sample filter drops, instead of aborting the whole step. It
+requires env.should_mask_flagged_samples.
+
+Port of Robert's patch 0008 on the rl-infra branch harbor-osb, itself a port of
+swiss-ai/nemo-rl-development 64327d7c without the Hermes hunk. Here turn_idx
+stays in the per-turn loop: the original moved it into the new block, which
+only matters for images per turn.
 ---
  nemo_rl/environments/nemo_gym.py              | 110 ++++++++++++++++
  .../test_nemo_gym_degenerate_rollouts.py      | 118 ++++++++++++++++++
@@ -11,7 +21,7 @@ Subject: [PATCH] nemo_gym: mask_degenerate_rollouts (port of
  create mode 100644 tests/unit/environments/test_nemo_gym_degenerate_rollouts.py
 
 diff --git a/nemo_rl/environments/nemo_gym.py b/nemo_rl/environments/nemo_gym.py
-index 0bcef5b8a..7843d4520 100644
+index 0bcef5b8a..56a9203fc 100644
 --- a/nemo_rl/environments/nemo_gym.py
 +++ b/nemo_rl/environments/nemo_gym.py
 @@ -330,6 +330,17 @@ class NemoGymConfig(TypedDict):
@@ -113,20 +123,20 @@ index 0bcef5b8a..7843d4520 100644
  # Fail fast rather than restart. The servers this actor owns are started in
  # _spinup, which Ray does not re-run after a restart, so a restarted actor is
  # permanently broken: _require_spinup() rejects every later rollout call, and
-@@ -1236,6 +1321,13 @@ output prompt token ids till seen: {output_item_dict["prompt_token_ids"][: len(s
-             batch_decode_items.append(
-                 (output_item_dict, prompt_token_ids, generation_token_ids)
+@@ -1238,6 +1323,13 @@ output prompt token ids till seen: {output_item_dict["prompt_token_ids"][: len(s
              )
-+
+             turn_idx += 1
+ 
 +        if not nemo_rl_message_log:
 +            degenerate_log = _degenerate_message_log(
 +                self.cfg, nemo_gym_result, tokenizer=tokenizer
 +            )
 +            if degenerate_log is not None:
 +                nemo_rl_message_log = degenerate_log
-             turn_idx += 1
- 
++
          if batch_decode_items:
+             prompt_strs = tokenizer.batch_decode(
+                 [item[1] for item in batch_decode_items]
 @@ -1515,6 +1607,11 @@ def _build_gym_actor_config(
          _value = nemo_gym_dict.pop(_flag, None)
          if _value is not None:
@@ -291,5 +301,5 @@ index 000000000..1c16991b2
 +            use_fastokens=False,
 +        )
 -- 
-2.54.0 (Apple Git-157)
+2.43.0
 

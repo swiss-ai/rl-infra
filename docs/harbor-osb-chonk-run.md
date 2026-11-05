@@ -153,7 +153,7 @@ The branch adds to David's blueprint:
 | `envs/make_micro_tasks.py` | Generates the micro-tasks and the `train.jsonl` / `validation.jsonl` rows |
 | `envs/validate_micro_tasks.py` | Checks the tasks on real sandboxes (reward 0 before, 1 after the reference solution) |
 | `backends/nemo-rl/apertus2/setup-gym.sh` | Puts Gym with the OpenSandbox provider into the NeMo-RL clone |
-| `backends/nemo-rl/apertus2/patches/nemo-rl/0008-...patch` | Ports `mask_degenerate_rollouts` into the NeMo-RL fork. `setup.sh` applies every patch in that directory |
+| `backends/nemo-rl/apertus2/patches/nemo-rl/0031-...patch` | Ports `mask_degenerate_rollouts` into the NeMo-RL fork. `setup.sh` applies every patch in that directory |
 | `backends/nemo-rl/apertus2/edf.toml.template` | `PYTHONPATH` gains the Gym checkout (`/opt/nemo-rl/3rdparty/Gym-workspace/Gym`) |
 | `backends/nemo-rl/apertus2/check_env.sh` | New section that imports Gym, the OpenSandbox provider and the Harbor agent |
 
@@ -209,8 +209,8 @@ current `openai`. Importing `from nemo_gym.cli import RunHelper, GlobalConfigDic
 
 ```bash
 export HARBOR_ROOT=$SCRATCH/osb/harbor_micro
-python3.11 envs/make_micro_tasks.py --out $HARBOR_ROOT/tasks --count 96 --seed 0 --num-validation 8
-OPENSANDBOX_API_KEY=$(tr -d '\n' < ~/.opensandbox_token) python3.11 envs/validate_micro_tasks.py $HARBOR_ROOT/tasks
+python3.11 envs/make_micro_tasks.py --out $HARBOR_ROOT/tasks --count 96 --seed 0 --num-validation 8 --alias swe_lego
+python3.11 envs/validate_micro_tasks.py $HARBOR_ROOT/tasks --api-key-file ~/.opensandbox_token
 ```
 
 The first command writes 96 task directories (88 train and 8 validation rows in `train.jsonl` /
@@ -325,7 +325,7 @@ All attempts so far died in the first two minutes of `ray-driver.log`, so read i
 | `policy.tokenizer.chat_template` | pass-through + EOS after assistant turns | **Required for multi-turn.** NeMo-RL's HTTP server splices each turn's generated tokens back in at the EOS that closes them |
 | `env.nemo_gym.harbor_agent_environment_server` | `null` | Kostas's Harbor config also starts `environment_servers/legacy_agent`, which only exists on his Gym branch |
 | `data` block with `_override_: true` | see file | Replaces the whole recipe `data` block, so it must carry **`use_multiple_dataloader: false`**: `grpo.setup()` indexes that key |
-| `env.nemo_gym.mask_degenerate_rollouts` | true | A rollout whose sandbox never came up returns no output items; this turns it into a zero-weight sample instead of aborting the step (patch 0008; needs `should_mask_flagged_samples`) |
+| `env.nemo_gym.mask_degenerate_rollouts` | true | A rollout whose sandbox never came up returns no output items; this turns it into a zero-weight sample instead of aborting the step (NeMo-RL patch 0031; needs `should_mask_flagged_samples`) |
 | `...harbor_agent.concurrency` | `num_prompts * num_generations` | One trial and one sandbox per in-flight rollout |
 | `...harbor_agent_kwargs.max_turns` | 20 | Terminus-2 turns per trial |
 | `...sandbox_provider_options.secure_access` | true | The cluster rejects every create without it (HTTP 422) |

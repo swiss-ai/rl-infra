@@ -1,0 +1,114 @@
+From 74bd85300bdd02e5907f0cf2d28f700eefe90800 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Wed, 4 Nov 2026 21:51:19 +0900
+Subject: [PATCH] Gym: env.nemo_gym.place_on_generation_node runs the Gym actor
+ on a generation node
+
+Ray puts the single NeMo-Gym actor, and with it the Gym servers it starts, on any node with a free
+CPU, often a training node. Gym's agent server holds every request in flight, unit tests included: a
+10x validation of competitive coding took it to 99.5 GB of host memory, and it kept 47 GB afterwards.
+Next to four Megatron ranks of about 77 GB each, that cost a training rank to the OOM killer (jobs
+1209910 and 1210146), or left the run waiting for 7 h on an agent server that had died with it (job
+1210040). Generation nodes had 250-350 GB free.
+
+With place_on_generation_node: true the actor is pinned to the Ray node of the first generation server
+URL. Setup fails if no live Ray node has that address, or if num_gpu_nodes, which places the actor on
+the driver's node, is set as well. The key is NeMo-RL's own and does not reach Gym, and a resumed run
+may change it. Jobs 1210281 and 1213376 passed 10x validations this way: the agent server peaked at
+81 GB on a generation node and the training nodes kept their headroom.
+---
+ .../rollout_checkpoint.py                     |  1 +
+ nemo_rl/environments/nemo_gym.py              | 44 ++++++++++++++++++-
+ 2 files changed, 44 insertions(+), 1 deletion(-)
+
+diff --git a/nemo_rl/algorithms/single_controller_utils/rollout_checkpoint.py b/nemo_rl/algorithms/single_controller_utils/rollout_checkpoint.py
+index c79163d9e..6c03e90ed 100644
+--- a/nemo_rl/algorithms/single_controller_utils/rollout_checkpoint.py
++++ b/nemo_rl/algorithms/single_controller_utils/rollout_checkpoint.py
+@@ -122,6 +122,7 @@ _BOOTSTRAP_FINGERPRINT_EXCLUDED_PATHS = frozenset(
+         "env.**.model_endpoint_readiness_timeout_seconds",
+         "env.**.nemo_gym_log_dir",
+         "env.**.num_gpu_nodes",
++        "env.**.place_on_generation_node",
+         "env.**.num_processes",
+         "env.**.num_workers",
+         "env.**.observability_enabled",
+diff --git a/nemo_rl/environments/nemo_gym.py b/nemo_rl/environments/nemo_gym.py
+index a5a661bd4..2b9870141 100644
+--- a/nemo_rl/environments/nemo_gym.py
++++ b/nemo_rl/environments/nemo_gym.py
+@@ -26,6 +26,7 @@ from functools import lru_cache
+ from pathlib import Path
+ from time import monotonic
+ from typing import Any, Dict, List, NotRequired, Optional, Protocol, TypedDict
++from urllib.parse import urlparse
+ 
+ import ray
+ import torch
+@@ -1502,6 +1503,8 @@ def _build_gym_actor_config(
+     # dict-shaped top-level keys are parsed as server instance configs.
+     for key in SHARDING_CONFIG_KEYS:
+         nemo_gym_dict.pop(key, None)
++    # Read by _build_single_gym_actor to place the actor.
++    nemo_gym_dict.pop("place_on_generation_node", None)
+ 
+     # NeMo-RL-side detection knobs are top-level NemoGymConfig fields
+     # (where the detector reads them), not part of Gym's global config.
+@@ -1800,6 +1803,35 @@ def build_nemo_gym_actors(
+     )
+ 
+ 
++def _generation_node_id(base_urls: list[str]) -> str:
++    """The Ray node that serves the first generation URL.
++
++    Gym's servers run on the NeMo-Gym actor's node and hold every request in
++    flight, unit tests included. Ten tries per validation prompt took the agent
++    server to 99.5 GB of host memory (47 GB kept afterwards), which on a
++    training node ran a Megatron rank out of memory. Generation nodes have
++    hundreds of GB free.
++    """
++    if not base_urls:
++        raise ValueError(
++            "env.nemo_gym.place_on_generation_node needs the generation server "
++            "URLs, and there are none."
++        )
++    host = urlparse(base_urls[0]).hostname
++    for node in ray.nodes():
++        if node["Alive"] and node["NodeManagerAddress"] == host:
++            print(
++                f"NeMo-Gym actor placed on generation node {host}, the node of "
++                f"{base_urls[0]}",
++                flush=True,
++            )
++            return node["NodeID"]
++    raise ValueError(
++        f"env.nemo_gym.place_on_generation_node: no live Ray node has the "
++        f"address {host} of {base_urls[0]}."
++    )
++
++
+ def _build_single_gym_actor(
+     nemo_gym_dict: dict[str, Any],
+     *,
+@@ -1827,7 +1859,17 @@ def _build_single_gym_actor(
+     actor_options: dict[str, Any] = {
+         "runtime_env": make_actor_runtime_env(NEMO_GYM_ACTOR_FQN)
+     }
+-    if nemo_gym_dict.get("num_gpu_nodes", 0):
++    if nemo_gym_dict.get("place_on_generation_node"):
++        if nemo_gym_dict.get("num_gpu_nodes", 0):
++            raise ValueError(
++                "env.nemo_gym.place_on_generation_node and num_gpu_nodes both "
++                "place the NeMo-Gym actor; set only one."
++            )
++        actor_options["scheduling_strategy"] = NodeAffinitySchedulingStrategy(
++            node_id=_generation_node_id(base_urls),
++            soft=False,
++        )
++    elif nemo_gym_dict.get("num_gpu_nodes", 0):
+         actor_options["scheduling_strategy"] = NodeAffinitySchedulingStrategy(
+             node_id=ray.get_runtime_context().get_node_id(),
+             soft=True,
+-- 
+2.43.0
+
