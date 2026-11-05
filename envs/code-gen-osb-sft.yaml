@@ -7,8 +7,9 @@
 #       env.nemo_gym.code_gen.resources_servers.code_gen.opensandbox.api_key_file=$HOME/.opensandbox_token \
 #       checkpointing.checkpoint_must_save_by=01:04:30:00
 # The settings are those of jobs 1202265 and 1202946 (experiments/runs.md), with 16k tokens, no thinking
-# budget and Gym on a generation node, as in jobs 1210281 and 1213376. They need NeMo-RL patches 0029 and
-# 0030; setup.sh adds them to an older clone. The reward is 1 only if every test passes, Gym's standard
+# budget and Gym on a generation node, as in jobs 1210281 and 1213376, plus one optimizer step per GRPO
+# step and PyTorch's memory capped (jobs 1222762, 1222763). They need NeMo-RL patches 0029, 0030 and 0033;
+# setup.sh adds them to an older clone. The reward is 1 only if every test passes, Gym's standard
 # score, so a time-out on any test scores 0.
 defaults: ../recipes/apertus2-chonk-sft-vllm-adamw-code.yaml
 script: examples/nemo_gym/run_grpo_nemo_gym.py
@@ -37,10 +38,17 @@ checkpointing:
   save_period: 50
 
 policy:
-  train_global_batch_size: 512
+  # One optimizer step per GRPO step: every rollout is used once.
+  train_global_batch_size: 2048
   megatron_cfg:
     optimizer:
       lr: 2.0e-6
+    env_vars:
+      # NeMo-RL patch 0033: PyTorch's allocator may use at most 78% of the GPU (74 GB). Uncapped, its
+      # cache of freed blocks filled the GPU (83-85 GB reserved against ~40 GB in use), and NCCL's and
+      # Triton's own allocations then failed (jobs 1216876, 1221319, 1221320). The other 21 GB cover
+      # NCCL at its default channels, 19.5 GB at most, during checkpoint saves (jobs 1222762, 1222763).
+      NRL_CUDA_MEMORY_FRACTION: "0.78"
   generation:
     max_new_tokens: 16384
     # No budget. A budget makes vLLM close the think frame at that many tokens (3/4 of max_new_tokens
