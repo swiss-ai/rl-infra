@@ -30,11 +30,12 @@ policy:
   train_global_batch_size: 512
   generation:
     max_new_tokens: 16384
-    # 3/4 of max_new_tokens: vLLM closes a think frame here, so that a reply always has room.
-    # It slows generation: vLLM then needs each step's tokens on the CPU before the next step and
-    # cannot schedule ahead. A one-node benchmark generated 1.5x fewer tokens/s with it at 64
-    # rollouts per GPU, 1.9x fewer at 128. null turns it off.
-    thinking_token_budget: 12288
+    # No budget, as in envs/code-gen-osb-sft.yaml. A budget makes vLLM close the think frame at that
+    # many tokens, but it slows generation: vLLM then needs each step's tokens on the CPU before the
+    # next step (1.5x fewer tokens/s at 64 rollouts per GPU, 1.9x at 128). vLLM also reports the forced
+    # closing token with logprob 0 while the trainer gives it e^-9 to e^-34, which made
+    # train/policy_kl_error read 1e2 to 4e9 in the Harbor runs.
+    thinking_token_budget: null
     output_format: apertus2
     system_prompt_file: ${oc.env:RL_INFRA_DIR}/envs/apertus2-system.json
     stop_token_ids: [12]
