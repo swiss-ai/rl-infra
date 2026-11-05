@@ -442,6 +442,41 @@ It stopped at step 20: the step-20 validation, 10 times over, ran the head node 
 memory was on it too, and Slurm killed a trainer rank. `envs/code-gen-osb-sft.yaml` has this job's settings with
 validation once per prompt, as in job 1202265.
 
+### Trainer GPU memory
+
+Robert's 3-step run of `envs/code-gen-osb-sft.yaml` (job 1216876) and the same config unchanged (job 1221319) died in
+the first training step with `ncclUnhandledCudaError`. PyTorch's cache of freed blocks had grown to 83-85 GB of the
+95 GB while about 40 GB were in use, and NCCL, which sets up its buffers at first use outside PyTorch, found the GPU
+full; a Triton kernel load failed the same way in job 1221320. NeMo-RL patch 0033 adds `NRL_CUDA_MEMORY_FRACTION`,
+which caps PyTorch's allocator, and the config sets 0.78 (74 GB): the other 21 GB cover NCCL at its default channels,
+whose largest use was 19.5 GB, during checkpoint saves. The config also trains with one optimizer step per GRPO step.
+
+3-step tests, 16 sandbox pods, all but the first with one optimizer step (`experiments/trainer-memory/launch.sh
+<variant>`; "free" is the lowest free GPU memory in 10 s samples over all trainer ranks):
+
+| Variant | Change | Result |
+|---|---|---|
+| base | none, four optimizer steps | NCCL error in step 1 |
+| 1opt | one optimizer step | 3 steps, 0.28 GB free, training 353/348 s (steps 2/3) |
+| 1opt-split512 | `PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512` | Triton out of memory in step 1 |
+| 1opt-nocumem | `NCCL_CUMEM_ENABLE=0` | NCCL error in step 1 |
+| 1opt-eagerconnect | `NCCL_RUNTIME_CONNECT=0` (trainer and vLLM) | NCCL error in step 1 |
+| 1opt-bf16grad | gradients reduced in bf16 | PyTorch out of memory in step 2 (66 GB live on one rank: expert routing imbalance) |
+| 1opt-pp22-20 | 22/20 layers on the two pipeline stages | 3 steps, 1.0 GB free |
+| 1opt-nccl16 | at most 16 NCCL channels (trainer and vLLM) | 3 steps, NCCL 10 GB instead of 16, 2.3 GB free |
+| 1opt-cap80-ckpt | cap 0.80, checkpoint and validation after step 2 | 3 steps, 3.8 GB free, training 355/362 s |
+| 1opt-cap78-ckpt | cap 0.78, checkpoint and validation after step 2 | 3 steps, 5.9 GB free, training 359/361 s |
+
+The full pass with the cap, job 1223855 (it started from the clone `$HOME/projects/nemo-rl-apertus2-mem`, which had
+patch 0033 before main did):
+
+```bash
+RUN=sft-code-osb-16k-cap78 JOB_TIME=1-05:00:00 bash run.sh envs/code-gen-osb-sft.yaml \
+    env.nemo_gym.code_gen.resources_servers.code_gen.opensandbox.api_key_file=$HOME/.opensandbox_token \
+    grpo.async_grpo.max_trajectory_age_steps=2 \
+    checkpointing.checkpoint_must_save_by=01:04:30:00
+```
+
 ## SFT, Harbor terminal tasks
 
 Terminus-2 through Gym's `harbor_agent`, a fresh OpenSandbox pod per trial, Robert's micro-tasks (`envs/harbor-osb-sft.yaml`,

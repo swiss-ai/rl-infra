@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Thu, 5 Nov 2026 23:30:00 +0900
+Subject: [PATCH] Megatron worker: NRL_CUDA_MEMORY_FRACTION caps PyTorch's allocator
+
+PyTorch keeps freed blocks cached, and in the 16k coding runs its cache grew to
+83-85 GB of the 95 GB while about 40 GB were in use. Allocations outside
+PyTorch then failed on a full GPU: NCCL buffers set up at first use (jobs
+1216876 and 1221319, ncclUnhandledCudaError) and a Triton kernel load in the
+KDA backward (job 1221320). With NRL_CUDA_MEMORY_FRACTION set, PyTorch stops
+at that share of the GPU and frees its cached blocks there, leaving the rest
+to the others. Unset, nothing changes.
+---
+ nemo_rl/models/policy/workers/megatron_policy_worker.py | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/nemo_rl/models/policy/workers/megatron_policy_worker.py b/nemo_rl/models/policy/workers/megatron_policy_worker.py
+index 3dd3f14f3..d42c14f0c 100644
+--- a/nemo_rl/models/policy/workers/megatron_policy_worker.py
++++ b/nemo_rl/models/policy/workers/megatron_policy_worker.py
+@@ -595,6 +595,13 @@ class MegatronPolicyWorkerImpl(
+         local_rank = int(gpu_ids[0])
+         os.environ["LOCAL_RANK"] = str(local_rank)
+         torch.cuda.set_device(local_rank)
++        # NRL_CUDA_MEMORY_FRACTION caps PyTorch's caching allocator at that share of the GPU. Without a
++        # cap its cache of freed blocks grows into every free byte, and allocations PyTorch does not
++        # make (NCCL buffers set up at first use, Triton kernel loads) then fail on a full GPU. At the
++        # cap PyTorch frees its own cached blocks and retries, so the rest stays free for them.
++        memory_fraction = os.environ.get("NRL_CUDA_MEMORY_FRACTION")
++        if memory_fraction:
++            torch.cuda.set_per_process_memory_fraction(float(memory_fraction), local_rank)
+ 
+         # Apply patch from https://github.com/NVIDIA/TransformerEngine/pull/2286/files
+         apply_transformer_engine_patch()
+-- 
+2.43.0
+
