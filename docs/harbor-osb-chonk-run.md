@@ -154,6 +154,7 @@ The branch adds to David's blueprint:
 | `envs/validate_micro_tasks.py` | Checks the tasks on real sandboxes (reward 0 before, 1 after the reference solution) |
 | `backends/nemo-rl/apertus2/setup-gym.sh` | Puts Gym with the OpenSandbox provider into the NeMo-RL clone |
 | `backends/nemo-rl/apertus2/patches/nemo-rl/0031-...patch` | Ports `mask_degenerate_rollouts` into the NeMo-RL fork. `setup.sh` applies every patch in that directory |
+| `backends/nemo-rl/apertus2/patches/nemo-rl/0033-...patch` | Apertus 2 format: a continuation after a burst cut off at a token limit (no `<|wait|>`), or a prompt over `max_model_len` with or without `max_tokens`, gets the context-length HTTP 400 instead of an assert -> HTTP 500 (job 5303503: 243 asserts, 5 rollouts). Gym turns the 400 into finish_reason `length`, Terminus-2 stops with `context_length_exceeded`. swiss-ai/Nemo-RL branch `apertus2-overflow-fix` f32c33d5c on `rlinfra-apertus2` |
 | `backends/nemo-rl/apertus2/edf.toml.template` | `PYTHONPATH` gains the Gym checkout (`/opt/nemo-rl/3rdparty/Gym-workspace/Gym`) |
 | `backends/nemo-rl/apertus2/check_env.sh` | New section that imports Gym, the OpenSandbox provider and the Harbor agent |
 
