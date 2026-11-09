@@ -36,9 +36,12 @@ policy:
       # forced token with logprob 0 while the trainer gives -10..-27, which made token_mult_prob_error
       # 6.25e6 / 14 / 70 (job 5305277, research/reports/2026-11-09-job-5305277-logprob-dump.md).
       # raw_logprobs reports the model's own logprob before the processor. With temperature 1.0, top_p 1.0
-      # and top_k None (check.py) only the forced tokens change, so training is unchanged (IS correction
-      # off) and the logprob-error metrics are honest again. Open: whether forced tokens should be trained
-      # on at all (masking needs code), and whether to use IS correction.
+      # and top_k None (check.py) only the forced tokens change, and the logprob-error metrics are honest.
+      # TRAINING DOES CHANGE: IS correction is on (use_importance_sampling_correction true, TIS 2.0,
+      # inherited from experiments/grpo-chonk/chonk-gsm8k-9n-megatron-128x16-async.yaml). Under
+      # processed_logprobs a forced token's IS weight exp(prev - gen) was ~e^-20, i.e. it was left out of
+      # the gradient by accident; under raw_logprobs its weight is ~1 and it is trained like a sampled token
+      # (~4 tokens per step). Open: mask forced tokens (needs code) or train on them.
       logprobs_mode: raw_logprobs
 
 async_rl:
