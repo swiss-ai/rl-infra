@@ -28,6 +28,18 @@ policy:
   # Rob's HF export of the last SFT save, staged here by run-s.sh (stage_model.sh: shards linked to
   # /capstor, config.json with the auto_map for the modeling code); vLLM loads it, Megatron imports it
   model_name: ${oc.env:SCRATCH}/models/chonk-lc-16k-v0.1-ep1-iter_0019374
+  generation:
+    vllm_cfg:
+      # PROVISIONAL, an engineering choice for now; needs a decision by an RL/algorithm specialist (HANDOFF
+      # §8 A.0 open items). vLLM's thinking budget (thinking_token_budget 4096, envs/harbor-osb-sft.yaml)
+      # forces <|/out|> at 4096 thinking tokens; with the default processed_logprobs vLLM reports that
+      # forced token with logprob 0 while the trainer gives -10..-27, which made token_mult_prob_error
+      # 6.25e6 / 14 / 70 (job 5305277, research/reports/2026-11-09-job-5305277-logprob-dump.md).
+      # raw_logprobs reports the model's own logprob before the processor. With temperature 1.0, top_p 1.0
+      # and top_k None (check.py) only the forced tokens change, so training is unchanged (IS correction
+      # off) and the logprob-error metrics are honest again. Open: whether forced tokens should be trained
+      # on at all (masking needs code), and whether to use IS correction.
+      logprobs_mode: raw_logprobs
 
 async_rl:
   rollout_failure:
