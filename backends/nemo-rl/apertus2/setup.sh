@@ -80,7 +80,12 @@ checkout_at() {   # <url> <dir> <commit> <ref the commit is reachable from>
     local url="$1" dir="$2" commit="$3" ref="$4"
     [[ "$(git -C "${dir}" rev-parse HEAD 2>/dev/null)" == "${commit}" ]] && return 0
     echo "== $(basename "${dir}") at ${commit:0:9}"
-    [[ -d "${dir}/.git" ]] || git clone --filter=blob:none --no-checkout "${url}" "${dir}"
+    # an existing checkout follows the URL too (e.g. switched from HTTPS to SSH)
+    if [[ -d "${dir}/.git" ]]; then
+        git -C "${dir}" remote set-url origin "${url}"
+    else
+        git clone --filter=blob:none --no-checkout "${url}" "${dir}"
+    fi
     git -C "${dir}" cat-file -e "${commit}^{commit}" 2>/dev/null || git -C "${dir}" fetch origin "${ref}"
     git -C "${dir}" checkout --detach "${commit}"
 }
