@@ -1,0 +1,628 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Mon, 9 Nov 2026 10:30:31 +0000
+Subject: [PATCH] fix(apertus2): answer a continuation after a truncated burst
+ with a context-length error
+
+Cause: with output_format apertus2 and Gym token capture in token_in mode,
+each request extends the exact tokens of the previous call through
+extend_chat_prompt, which asserted that the previous burst ended at
+<|wait|>. A burst cut off at a token limit has no <|wait|>, so the next
+request raised AssertionError; the HTTP handler's catch-all turned it into
+HTTP 500, which Gym retries. Separately, an Apertus 2 prompt was checked
+against max_model_len only when the request set max_tokens: vLLM's own
+check sees only the placeholder render, so an over-long prompt without
+max_tokens was never rejected by NeMo-RL.
+
+Fix: extend_chat_prompt raises TruncatedBurstError (a ValueError) when the
+last burst is non-empty and contains no <|wait|>, i.e. generation hit
+max_model_len or max_new_tokens. preprocess_chat maps it to the same
+VLLMValidationError as _clamp_max_tokens, with "maximum context length" in
+the message, so the handler answers HTTP 400 invalid_request_error and
+calls _abort_request_capture(reason="context_length") once. The call fails
+before begin_call, so nothing is staged for it. Any other prefix that does
+not end at <|wait|> still fails the assert. _clamp_max_tokens now always
+checks that the prompt leaves room, also without max_tokens.
+
+Gym's vllm_model turns a 400 with "context length" into an empty
+completion with finish_reason "length" and does not retry it; Terminus-2
+then raises ContextLengthExceededError and ends the trial, which is still
+verified. The uncommitted call is recorded with
+request_finished_without_staged_coordinates, which NeMo-RL does not count
+as poisoning, so the rollout's committed calls stay usable.
+
+Production evidence: job 5303503 logged 243 such AssertionErrors (81 Gym
+requests x 3 retries) in 5 rollouts; 4 of the 5 scored 0, losing ~70-90 s
+each.
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ nemo_rl/data/apertus2_format.py               |  35 +++-
+ .../generation/vllm/vllm_worker_async.py      |  64 ++++--
+ tests/unit/data/test_apertus2_format.py       |  21 +-
+ .../data/test_apertus2_truncated_burst.py     | 140 +++++++++++++
+ .../models/generation/test_vllm_generation.py | 197 ++++++++++++++++++
+ 5 files changed, 430 insertions(+), 27 deletions(-)
+ create mode 100644 tests/unit/data/test_apertus2_truncated_burst.py
+
+diff --git a/nemo_rl/data/apertus2_format.py b/nemo_rl/data/apertus2_format.py
+index fdfff58a9..8d9262eb3 100644
+--- a/nemo_rl/data/apertus2_format.py
++++ b/nemo_rl/data/apertus2_format.py
+@@ -67,6 +67,15 @@ class Apertus2Output:
+     truncated: bool
+ 
+ 
++class TruncatedBurstError(ValueError):
++    """The last burst was cut off before ``<|wait|>``, so the conversation is over.
++
++    Generation stops only at ``<|wait|>`` or at a token limit, and nothing may follow
++    a frame the model did not finish. The server answers this like a prompt that
++    exceeds the context: the client ends the trajectory, as it would there.
++    """
++
++
+ @lru_cache(maxsize=1)
+ def _get_encoding(tokenizer_path: str) -> Any:
+     # apertus-common is an optional dependency, needed only by this format. From
+@@ -164,18 +173,34 @@ def extend_chat_prompt(
+ 
+     Returns:
+         The prompt's token IDs, ending at ``<|/in|>``.
++
++    Raises:
++        TruncatedBurstError: If the last burst hit a token limit before
++            ``<|wait|>``.
+     """
+     # apertus-common is an optional dependency, needed only by this format.
+     from apertus_common import Result, User
+ 
+     encoding = _get_encoding(tokenizer_path)
+-    assert prefix_token_ids[-1] == encoding.controls.wait, (
++    wait = encoding.controls.wait
++    input_end = encoding.controls.input_end
++    if prefix_token_ids[-1] != wait and input_end in prefix_token_ids:
++        # A burst cannot contain <|/in|>, because the model may not generate it.
++        burst = prefix_token_ids[
++            len(prefix_token_ids) - prefix_token_ids[::-1].index(input_end) :
++        ]
++        # Generation stops at the first <|wait|>, so a burst without one was cut
++        # off. Anything else that does not end at <|wait|> is malformed.
++        if burst and wait not in burst:
++            raise TruncatedBurstError(
++                f"The last Apertus 2 burst ({len(burst)} tokens, after a prompt "
++                f"of {len(prefix_token_ids) - len(burst)}) was cut off before "
++                "<|wait|>, so the conversation cannot continue."
++            )
++    assert prefix_token_ids[-1] == wait, (
+         "An Apertus 2 conversation continues only after a burst that ended at <|wait|>."
+     )
+-    # A burst cannot contain <|/in|>, because the model may not generate it.
+-    burst_start = len(prefix_token_ids) - prefix_token_ids[::-1].index(
+-        encoding.controls.input_end
+-    )
++    burst_start = len(prefix_token_ids) - prefix_token_ids[::-1].index(input_end)
+     calls = parse_output(
+         tokenizer_path, prefix_token_ids[burst_start:], truncated=False
+     ).calls
+diff --git a/nemo_rl/models/generation/vllm/vllm_worker_async.py b/nemo_rl/models/generation/vllm/vllm_worker_async.py
+index 73e063da8..d2c1f9125 100644
+--- a/nemo_rl/models/generation/vllm/vllm_worker_async.py
++++ b/nemo_rl/models/generation/vllm/vllm_worker_async.py
+@@ -31,6 +31,7 @@ from fastapi import FastAPI
+ from nemo_rl.data.apertus2_format import (
+     APERTUS2_THINK_END,
+     APERTUS2_THINK_START,
++    TruncatedBurstError,
+     encode_chat_prompt,
+     extend_chat_prompt,
+ )
+@@ -853,9 +854,15 @@ class VllmAsyncGenerationWorkerImpl(
+                     request.max_tokens = max_tokens
+ 
+             def _clamp_max_tokens(
+-                self, request, request_max_tokens: int, prompt_token_ids: list[int]
++                self,
++                request,
++                request_max_tokens: int | None,
++                prompt_token_ids: list[int],
+             ) -> None:
+-                """Clamp the request's max output tokens so that input + output <= max_model_len."""
++                """Clamp the request's max output tokens so that input + output <= max_model_len.
++
++                Without a requested maximum, only checks that the prompt leaves room.
++                """
+                 remaining = self.model_config.max_model_len - len(prompt_token_ids)
+                 if remaining <= 0:
+                     # preserve the literal "context length" in this message to match Gym's overflow handling
+@@ -870,8 +877,8 @@ class VllmAsyncGenerationWorkerImpl(
+                         parameter="input_tokens",
+                         value=len(prompt_token_ids),
+                     )
+-                max_tokens = min(request_max_tokens, remaining)
+-                self._set_max_tokens(request, max_tokens)
++                if request_max_tokens is not None:
++                    self._set_max_tokens(request, min(request_max_tokens, remaining))
+ 
+             # vLLM 0.25 moved chat preprocessing to
+             # OnlineRenderer.preprocess_chat (tool_parser/reasoning_parser were
+@@ -965,12 +972,12 @@ class VllmAsyncGenerationWorkerImpl(
+                             tools=apertus2_tool_dicts,
+                         )
+                     # Clamp the request's max output tokens so that input + output <= max_model_len.
+-                    if actual_request_max_tokens is not None:
+-                        self._clamp_max_tokens(
+-                            request,
+-                            actual_request_max_tokens,
+-                            res[1][0]["prompt_token_ids"],
+-                        )
++                    # Apertus 2 replaced the prompt vLLM checked, so this always runs.
++                    self._clamp_max_tokens(
++                        request,
++                        actual_request_max_tokens,
++                        res[1][0]["prompt_token_ids"],
++                    )
+                     # Token capture, text mode: the full render is the exact
+                     # engine prompt.
+                     worker_self._begin_request_capture(
+@@ -983,11 +990,26 @@ class VllmAsyncGenerationWorkerImpl(
+                 engine_prompt = res[1][0]
+ 
+                 if worker_self.is_apertus2:
+-                    final_prompt_token_ids = extend_chat_prompt(
+-                        worker_self.model_name,
+-                        prefix_token_ids=model_prefix_token_ids,
+-                        messages=messages_for_replace_prefix_tokens,
+-                    )
++                    try:
++                        final_prompt_token_ids = extend_chat_prompt(
++                            worker_self.model_name,
++                            prefix_token_ids=model_prefix_token_ids,
++                            messages=messages_for_replace_prefix_tokens,
++                        )
++                    except TruncatedBurstError as error:
++                        # The trajectory is over, as after a context overflow, so
++                        # answer with the same error; Gym's overflow handling matches
++                        # the literal "context length".
++                        message = (
++                            f"{error} Treated as exceeding this model's maximum "
++                            f"context length ({self.model_config.max_model_len})."
++                        )
++                        LOGGER.warning("Apertus 2 burst was cut off: %s", message)
++                        raise VLLMValidationError(
++                            message,
++                            parameter="input_tokens",
++                            value=len(model_prefix_token_ids),
++                        ) from error
+                 else:
+                     # Token-in splice path — shared by staging_chain and direct prefix.
+                     last_assistant_message_idx = None
+@@ -1035,12 +1057,12 @@ class VllmAsyncGenerationWorkerImpl(
+                 engine_prompt["prompt_token_ids"] = final_prompt_token_ids
+ 
+                 # Clamp after prefix replacement since the prompt length may have changed.
+-                if actual_request_max_tokens is not None:
+-                    self._clamp_max_tokens(
+-                        request,
+-                        actual_request_max_tokens,
+-                        final_prompt_token_ids,
+-                    )
++                # Always: vLLM only checked the template render, not the spliced prompt.
++                self._clamp_max_tokens(
++                    request,
++                    actual_request_max_tokens,
++                    final_prompt_token_ids,
++                )
+ 
+                 # Token capture, token-in mode: the spliced prompt is the
+                 # exact engine prompt; begin_call re-checks the prefix it
+diff --git a/tests/unit/data/test_apertus2_format.py b/tests/unit/data/test_apertus2_format.py
+index df3211091..aebc2fc4c 100644
+--- a/tests/unit/data/test_apertus2_format.py
++++ b/tests/unit/data/test_apertus2_format.py
+@@ -46,6 +46,7 @@ from nemo_rl.data.apertus2_format import (  # noqa: E402
+     LONG_CLAIM_CHARS,
+     Apertus2Call,
+     Apertus2Output,
++    TruncatedBurstError,
+     allowed_token_ids,
+     encode_chat_prompt,
+     encode_prompt,
+@@ -335,6 +336,24 @@ def test_only_tool_and_user_messages_can_follow_a_burst(encoding):
+         )
+ 
+ 
++@pytest.mark.parametrize(
++    "cut", [1, 3], ids=["before_wait", "inside_the_reply_frame"]
++)
++def test_a_conversation_ends_after_a_burst_that_was_cut_off(encoding, cut):
++    prefix = _first_prompt(encoding) + encoding.encode_items(
++        [Reply(payload="Cold."), Wait()]
++    )
++    with pytest.raises(TruncatedBurstError, match="cut off before"):
++        extend_chat_prompt(
++            TOKENIZER,
++            prefix_token_ids=prefix[:-cut],
++            messages=[
++                {"role": "assistant", "content": "Cold."},
++                {"role": "user", "content": "Thanks"},
++            ],
++        )
++
++
+ def test_a_conversation_continues_only_after_wait(encoding):
+     prefix = _first_prompt(encoding) + encoding.encode_items(
+         [Reply(payload="Cold."), Wait()]
+@@ -342,7 +361,7 @@ def test_a_conversation_continues_only_after_wait(encoding):
+     with pytest.raises(AssertionError, match="ended at <\\|wait\\|>"):
+         extend_chat_prompt(
+             TOKENIZER,
+-            prefix_token_ids=prefix[:-1],
++            prefix_token_ids=prefix + encoding.encode_items([Reply(payload="More.")]),
+             messages=[
+                 {"role": "assistant", "content": "Cold."},
+                 {"role": "user", "content": "Thanks"},
+diff --git a/tests/unit/data/test_apertus2_truncated_burst.py b/tests/unit/data/test_apertus2_truncated_burst.py
+new file mode 100644
+index 000000000..515247899
+--- /dev/null
++++ b/tests/unit/data/test_apertus2_truncated_burst.py
+@@ -0,0 +1,140 @@
++# Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""Continuing an Apertus 2 conversation after a burst that was cut off.
++
++These run without apertus-common: a fake encoding stands in for it. The tests
++with the real encoding are in test_apertus2_format.py.
++"""
++
++import sys
++from dataclasses import dataclass
++from types import ModuleType, SimpleNamespace
++
++import pytest
++
++from nemo_rl.data import apertus2_format
++from nemo_rl.data.apertus2_format import (
++    TruncatedBurstError,
++    extend_chat_prompt,
++)
++
++INPUT_END = 8
++OUTPUT_START = 10
++OUTPUT_END = 11
++WAIT = 12
++TEXT = 1000
++PROMPT = [1, 2, 3, INPUT_END]
++
++
++@dataclass
++class _Item:
++    payload: str
++
++
++class _User(_Item):
++    pass
++
++
++class _Result(_Item):
++    def __init__(self, *, name, counter, payload):
++        super().__init__(payload)
++
++
++class _FakeEncoding:
++    controls = SimpleNamespace(wait=WAIT, input_end=INPUT_END)
++
++    @staticmethod
++    def encode_items(items):
++        return [token for item in items for token in (5, TEXT, INPUT_END)]
++
++    @staticmethod
++    def output_parser():
++        return SimpleNamespace(
++            push_tokens=lambda tokens: None,
++            finish=lambda: SimpleNamespace(items=[]),
++        )
++
++
++@pytest.fixture(autouse=True)
++def fake_encoding(monkeypatch):
++    """Stands in for apertus-common, which only the job image has."""
++    module = ModuleType("apertus_common")
++    module.User = _User
++    module.Result = _Result
++    module.StreamParseError = type("StreamParseError", (Exception,), {})
++    for name in ("Call", "Claim", "Reply", "Think"):
++        setattr(module, name, type(name, (), {}))
++    monkeypatch.setitem(sys.modules, "apertus_common", module)
++    monkeypatch.setattr(apertus2_format, "_get_encoding", lambda path: _FakeEncoding)
++
++
++def _extend(prefix):
++    return extend_chat_prompt(
++        "tokenizer",
++        prefix_token_ids=prefix,
++        messages=[
++            {"role": "user", "content": "Task"},
++            {"role": "assistant", "content": "Working."},
++            {"role": "user", "content": "Go on."},
++        ],
++    )
++
++
++def test_a_finished_burst_continues():
++    prefix = PROMPT + [OUTPUT_START, TEXT, OUTPUT_END, WAIT]
++    assert _extend(prefix) == prefix + [5, TEXT, INPUT_END]
++
++
++@pytest.mark.parametrize(
++    "burst",
++    [
++        # Cut off inside a frame, at max_model_len or max_new_tokens alike.
++        [OUTPUT_START, TEXT, TEXT],
++        # Cut off right after a frame closed.
++        [OUTPUT_START, TEXT, OUTPUT_END],
++        [OUTPUT_START],
++    ],
++)
++def test_a_burst_cut_off_before_wait_ends_the_conversation(burst):
++    with pytest.raises(TruncatedBurstError, match=r"cut off before <\|wait\|>"):
++        _extend(PROMPT + burst)
++
++
++def test_a_cut_off_burst_after_earlier_turns_ends_the_conversation():
++    earlier = PROMPT + [OUTPUT_START, TEXT, OUTPUT_END, WAIT, 5, TEXT, INPUT_END]
++    with pytest.raises(
++        TruncatedBurstError, match=r"\(3 tokens, after a prompt of 11\)"
++    ):
++        _extend(earlier + [OUTPUT_START, TEXT, TEXT])
++
++
++@pytest.mark.parametrize(
++    "prefix",
++    [
++        # No burst at all.
++        PROMPT,
++        # Tokens after <|wait|>, which ends generation.
++        PROMPT + [OUTPUT_START, TEXT, OUTPUT_END, WAIT, TEXT],
++        # No prompt the burst could follow.
++        [OUTPUT_START, TEXT, TEXT],
++    ],
++)
++def test_other_prefixes_that_do_not_end_at_wait_still_fail_loudly(prefix):
++    with pytest.raises(AssertionError, match=r"ended at <\|wait\|>"):
++        _extend(prefix)
++
++
++def test_the_truncation_error_is_not_an_assertion():
++    """The worker must be able to tell it apart from a broken prefix."""
++    assert not issubclass(TruncatedBurstError, AssertionError)
+diff --git a/tests/unit/models/generation/test_vllm_generation.py b/tests/unit/models/generation/test_vllm_generation.py
+index e69e4efe5..d8a33e575 100644
+--- a/tests/unit/models/generation/test_vllm_generation.py
++++ b/tests/unit/models/generation/test_vllm_generation.py
+@@ -942,6 +942,7 @@ async def test_context_overflow_returns_http_400_for_nemo_gym(monkeypatch):
+     worker._http_engine_client = worker.llm
+     worker._capture_calls = {}
+     worker.token_capture = None
++    worker.is_apertus2 = False
+     worker.llm_async_engine_args = MagicMock()
+     worker.llm_async_engine_args.create_model_config.return_value = MagicMock(
+         served_model_name="served-model", model="model-path"
+@@ -988,6 +989,202 @@ async def test_context_overflow_returns_http_400_for_nemo_gym(monkeypatch):
+     assert error["code"] == 400
+ 
+ 
++_APERTUS2_INPUT_END = 8
++_APERTUS2_WAIT = 12
++_APERTUS2_PROMPT = [1, 2, 3, _APERTUS2_INPUT_END]
++
++
++def _apertus2_http_worker(monkeypatch, *, max_model_len):
++    """An Apertus 2 HTTP server in token-in mode, on fake vLLM and apertus-common."""
++    from nemo_rl.data import apertus2_format
++
++    _, _, openai_serving_chat = _install_fake_vllm_openai_modules(monkeypatch)
++
++    async def render(self, *, request, messages, **kwargs):
++        return [messages], [{"prompt_token_ids": [0]}]
++
++    monkeypatch.setattr(
++        sys.modules["vllm.renderers.online_renderer"].OnlineRenderer,
++        "preprocess_chat",
++        render,
++        raising=False,
++    )
++    user = type("User", (), {"__init__": lambda self, payload: None})
++    monkeypatch.setitem(
++        sys.modules,
++        "apertus_common",
++        types.SimpleNamespace(
++            User=user,
++            Result=user,
++            Call=object,
++            Claim=object,
++            Reply=object,
++            Think=object,
++            StreamParseError=Exception,
++        ),
++    )
++    encoding = types.SimpleNamespace(
++        controls=types.SimpleNamespace(
++            wait=_APERTUS2_WAIT, input_end=_APERTUS2_INPUT_END
++        ),
++        encode_items=lambda items: [5, 6, _APERTUS2_INPUT_END] * len(items),
++        output_parser=lambda: types.SimpleNamespace(
++            push_tokens=lambda tokens: None,
++            finish=lambda: types.SimpleNamespace(items=[]),
++        ),
++    )
++    monkeypatch.setattr(apertus2_format, "_get_encoding", lambda path: encoding)
++
++    worker = VllmAsyncGenerationWorkerImpl.__new__(VllmAsyncGenerationWorkerImpl)
++    worker.cfg = {
++        "temperature": 1.0,
++        "top_p": 1.0,
++        "val_temperature": 0.0,
++        "val_top_p": 1.0,
++        "vllm_cfg": {},
++    }
++    worker.llm = MagicMock(model_config="model-config", renderer="renderer")
++    worker._http_engine_client = worker.llm
++    worker.llm_async_engine_args = MagicMock()
++    worker.llm_async_engine_args.create_model_config.return_value = MagicMock(
++        served_model_name="served-model", model="model-path"
++    )
++    worker.is_apertus2 = True
++    worker.model_name = "apertus2-tokenizer"
++    worker.allowed_token_ids = None
++    worker.thinking_token_budget = None
++    # Token capture in token-in mode: the ledger admitted the call with the prefix.
++    worker._capture_calls = {}
++    worker.token_capture = MagicMock()
++    worker._capture_admission = lambda request: types.SimpleNamespace(
++        mode="token_in"
++    )
++    worker._resolve_admission_prefix = lambda admission: list(
++        admission_prefix["ids"]
++    )
++    worker._enter_request_prefix = lambda request, prefix: setattr(
++        request, "required_prefix_token_ids", prefix
++    )
++    worker._abort_request_capture = MagicMock(wraps=worker._abort_request_capture)
++    admission_prefix = {"ids": []}
++
++    app = _FakeFastAPIApp()
++    worker._setup_vllm_openai_api_server(app)
++    serving_chat = openai_serving_chat.instances[0]
++    renderer = serving_chat.kwargs["online_renderer"]
++    renderer.model_config = types.SimpleNamespace(max_model_len=max_model_len)
++    chat_handler = next(
++        handler for path, handler in app.routes if path == "/v1/chat/completions"
++    )
++
++    served = {}
++
++    async def create_chat_completion(request, _raw_request):
++        _, engine_prompts = await renderer.preprocess_chat(
++            request, request.messages, None, "auto", {}
++        )
++        served["prompt_token_ids"] = engine_prompts[0]["prompt_token_ids"]
++        return served["prompt_token_ids"]
++
++    serving_chat.create_chat_completion = create_chat_completion
++
++    async def post(prefix):
++        admission_prefix["ids"] = prefix
++        request = types.SimpleNamespace(
++            top_k=-1,
++            top_p=1.0,
++            temperature=1.0,
++            max_tokens=None,
++            max_completion_tokens=None,
++            required_prefix_token_ids=None,
++            stream=False,
++            messages=[
++                {"role": "user", "content": "Task"},
++                {"role": "assistant", "content": "Working."},
++                {"role": "user", "content": "Go on."},
++            ],
++        )
++        return request, await chat_handler(request, MagicMock())
++
++    return worker, served, post
++
++
++def _assert_context_length_400(worker, request, response):
++    response_content = response.body.decode()
++    assert response.status_code == 400
++    assert "maximum context length" in response_content
++    assert _nemo_gym_recognizes_context_overflow(
++        status=response.status_code, response_content=response_content
++    )
++    error = json.loads(response_content)["error"]
++    assert error["type"] == "invalid_request_error"
++    assert error["param"] == "input_tokens"
++    # The call failed before the capture began it: nothing is staged or committed,
++    # and the one abort finds no state.
++    worker._abort_request_capture.assert_called_once_with(
++        request, reason="context_length"
++    )
++    worker.token_capture.begin_call.assert_not_called()
++    worker.token_capture.fail_call.assert_not_called()
++    worker.token_capture.complete_call_from_response.assert_not_called()
++    assert worker._capture_calls == {}
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize(
++    "burst_len",
++    [
++        pytest.param(124, id="cut_off_at_max_model_len"),
++        pytest.param(20, id="cut_off_at_max_new_tokens"),
++    ],
++)
++async def test_apertus2_continuation_after_a_cut_off_burst_returns_http_400(
++    monkeypatch, burst_len
++):
++    """Production job 5303503: this was an AssertionError, so HTTP 500, retried."""
++    worker, _, post = _apertus2_http_worker(monkeypatch, max_model_len=128)
++    prefix = _APERTUS2_PROMPT + [10] + [1000] * (burst_len - 1)
++    request, response = await post(prefix)
++    _assert_context_length_400(worker, request, response)
++    assert "cut off before <|wait|>" in response.body.decode()
++
++
++@pytest.mark.asyncio
++async def test_apertus2_continuation_beyond_max_model_len_returns_http_400(
++    monkeypatch,
++):
++    """Without a requested max_tokens, the extended prompt is still checked."""
++    worker, _, post = _apertus2_http_worker(monkeypatch, max_model_len=128)
++    prefix = _APERTUS2_PROMPT + [10] + [1000] * 121 + [_APERTUS2_WAIT]
++    request, response = await post(prefix)  # 127 + 3 new tokens
++    _assert_context_length_400(worker, request, response)
++    assert "fills or exceeds" in response.body.decode()
++
++
++@pytest.mark.asyncio
++async def test_apertus2_continuation_after_a_finished_burst_extends_the_prefix(
++    monkeypatch,
++):
++    worker, served, post = _apertus2_http_worker(monkeypatch, max_model_len=128)
++    prefix = _APERTUS2_PROMPT + [10, 1000, 11, _APERTUS2_WAIT]
++    await post(prefix)
++    assert served["prompt_token_ids"] == prefix + [5, 6, _APERTUS2_INPUT_END]
++    worker.token_capture.begin_call.assert_called_once()
++
++
++@pytest.mark.asyncio
++async def test_apertus2_continuation_after_a_malformed_prefix_still_fails(
++    monkeypatch,
++):
++    worker, _, post = _apertus2_http_worker(monkeypatch, max_model_len=128)
++    with pytest.raises(AssertionError, match=r"ended at <\|wait\|>"):
++        await post(_APERTUS2_PROMPT)
++    worker._abort_request_capture.assert_called_once()
++    assert worker._abort_request_capture.call_args.kwargs == {
++        "reason": "engine_error"
++    }
++
++
+ def test_nano_v3_reasoning_parser_swaps_reasoning_when_thinking_disabled(
+     monkeypatch,
+ ):
+-- 
+2.56.0
+
