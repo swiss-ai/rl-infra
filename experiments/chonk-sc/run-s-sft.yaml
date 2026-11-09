@@ -30,19 +30,18 @@ policy:
   model_name: ${oc.env:SCRATCH}/models/chonk-lc-16k-v0.1-ep1-iter_0019374
   generation:
     vllm_cfg:
-      # PROVISIONAL, an engineering choice for now; needs a decision by an RL/algorithm specialist (HANDOFF
-      # §8 A.0 open items). vLLM's thinking budget (thinking_token_budget 4096, envs/harbor-osb-sft.yaml)
-      # forces <|/out|> at 4096 thinking tokens; with the default processed_logprobs vLLM reports that
-      # forced token with logprob 0 while the trainer gives -10..-27, which made token_mult_prob_error
-      # 6.25e6 / 14 / 70 (job 5305277, research/reports/2026-11-09-job-5305277-logprob-dump.md).
-      # raw_logprobs reports the model's own logprob before the processor. With temperature 1.0, top_p 1.0
-      # and top_k None (check.py) only the forced tokens change, and the logprob-error metrics are honest.
-      # TRAINING DOES CHANGE: IS correction is on (use_importance_sampling_correction true, TIS 2.0,
-      # inherited from experiments/grpo-chonk/chonk-gsm8k-9n-megatron-128x16-async.yaml). Under
-      # processed_logprobs a forced token's IS weight exp(prev - gen) was ~e^-20, i.e. it was left out of
-      # the gradient by accident; under raw_logprobs its weight is ~1 and it is trained like a sampled token
-      # (~4 tokens per step). Open: mask forced tokens (needs code) or train on them.
-      logprobs_mode: raw_logprobs
+      # Explicit default, kept on purpose; a decision for an RL/algorithm specialist (HANDOFF §8, note
+      # research/reports/2026-11-09-forced-thinking-tokens-note.md). vLLM's thinking budget
+      # (thinking_token_budget 4096, envs/harbor-osb-sft.yaml) forces <|/out|> at 4096 thinking tokens.
+      # processed_logprobs reports that forced token with logprob 0 (trainer: -10..-27). Consequences:
+      # - training: IS correction is on (TIS 2.0, inherited from
+      #   experiments/grpo-chonk/chonk-gsm8k-9n-megatron-128x16-async.yaml), so the forced token's weight
+      #   exp(prev - gen) is ~e^-20: it is left out of the gradient (as in every run so far);
+      # - metrics: token_mult_prob_error / policy_kl_error / *seq_mult_prob_error are dominated by these
+      #   tokens (job 5305277: 6.25e6 / 14 / 70) and are no alarm; the 0034 dump (run-s-lpdump.yaml) shows
+      #   whether outliers are only the forced <|/out|> at burst offset ~4099.
+      # raw_logprobs would make the metrics honest but train the forced tokens (weight ~1); not chosen.
+      logprobs_mode: processed_logprobs
 
 async_rl:
   rollout_failure:
