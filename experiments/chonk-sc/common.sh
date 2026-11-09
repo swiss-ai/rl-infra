@@ -112,7 +112,8 @@ check_nemo_rl_clone() {
 # Gym patch 0011 (harbor_agent hands the agent the rollout-prefixed model URL, base_url_for_run;
 # without it capture records nothing and every row is rejected, job 5236016) and 0012
 # (_should_mask: under capture empty output is not masked, failed trials still are). Same marker
-# as ../harbor-capture-sc/run.sh. Returns the number of failures.
+# as ../harbor-capture-sc/run.sh; and 0019 (capture ignores think-wrapped reasoning, needed by run S).
+# Returns the number of failures.
 check_gym_capture() {
     local g="${NEMO_RL_DIR}/3rdparty/Gym-workspace/Gym" fails=0 stamp
     local app="${g}/responses_api_agents/harbor_agent/app.py"
@@ -132,6 +133,10 @@ check_gym_capture() {
         || bad "Gym patch 0012 missing (_should_mask in harbor_agent/app.py)"
     [[ -d "${g}/nemo_gym/token_id_capture" ]] && ok "nemo_gym/token_id_capture present" \
         || bad "nemo_gym/token_id_capture missing from the Gym checkout"
+    # 0019: without it every rollout whose model reasons is rejected unresolved_parent (job 5302914)
+    grep -q "def _strip_leading_reasoning" "${g}/nemo_gym/token_id_capture/fingerprint.py" 2>/dev/null \
+        && ok "Gym patch 0019: capture fingerprints ignore think-wrapped reasoning" \
+        || bad "Gym patch 0019 missing (_strip_leading_reasoning in token_id_capture/fingerprint.py)"
     for f in nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
              responses_api_agents/harbor_agent/configs/harbor_agent_opensandbox_training.yaml; do
         [[ -f "${g}/${f}" ]] && ok "${f} present" || bad "${f} missing (OpenSandbox commits, setup-gym.sh)"
