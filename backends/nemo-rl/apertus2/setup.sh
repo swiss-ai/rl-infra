@@ -146,7 +146,10 @@ export ENROOT_CACHE_PATH="${SCRATCH}/tmp/enroot/cache" ENROOT_DATA_PATH="${SCRAT
 ENROOT_TMP_BASE="${ENROOT_TMP_BASE:-/tmp}"
 stage_image() {   # <ref> <master> <work>
     local ref="$1" master="$2" work="$3" tmp
-    if [[ ! -s "${master}" ]]; then
+    if [[ ! -s "${master}" && -s "${work}" ]]; then
+        # e.g. STORE points somewhere without the masters: use the working copy, do not re-import
+        echo "WARNING: image master '${master}' missing; using ${work} as is (scratch is purged: keep a persistent copy and point the *_IMAGE_MASTER setting at it)" >&2
+    elif [[ ! -s "${master}" ]]; then
         [[ -n "${ref}" && -n "${master}" ]] \
             || { echo "ERROR: image master '${master}' missing and no registry to import it from on ${SITE}" >&2; return 1; }
         echo "== importing ${ref}"
@@ -157,7 +160,9 @@ stage_image() {   # <ref> <master> <work>
         rm -rf "${ENROOT_TEMP_PATH}"
         mv "${tmp}" "${work}"
         echo "== saving master ${master}"
-        cp "${work}" "${master}.tmp.$$" && mv "${master}.tmp.$$" "${master}"
+        mkdir -p "$(dirname "${master}")"
+        cp "${work}" "${master}.tmp.$$" && mv "${master}.tmp.$$" "${master}" \
+            || { rm -f "${master}.tmp.$$"; echo "WARNING: could not save master ${master}; ${work} is the only copy" >&2; }
     elif [[ ! -s "${work}" ]]; then
         echo "== staging ${work} from master"
         mkdir -p "$(dirname "${work}")"
@@ -181,7 +186,7 @@ else
 fi
 # Striped for many-node opens; not where the image is a shared master used in place.
 [[ "${IMAGE_WORK}" == "${IMAGE_MASTER}" ]] || lfs setstripe -c 16 -S 4M "${IMAGE_WORK_DIR}" 2>/dev/null || true
-if [[ -s "${IMAGE_MASTER}" ]]; then
+if [[ -s "${IMAGE_MASTER}" || -s "${IMAGE_WORK}" ]]; then
     stage_image "" "${IMAGE_MASTER}" "${IMAGE_WORK}"
 else
     # The image jobs run is built from the JFrog one, not imported.
