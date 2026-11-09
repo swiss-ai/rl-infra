@@ -8,7 +8,8 @@
 # Before submitting, on the login node:
 #   1. setup.sh with the apertus-common overlay (PYDEPS_APERTUS2, as ../../run.sh does for an SFT
 #      recipe) into an EDF of its own (SFT_EDF_NAME, default nemo-rl-apertus2-sft). It clones
-#      swiss-ai/apertus-common, a private repository: your GitHub login on Clariden needs access.
+#      swiss-ai/apertus-common, a private repository, over SSH (APERTUS_COMMON_URL): your SSH key on
+#      Clariden needs access to it.
 #   2. stage_model.sh: SFT_MODEL_SRC -> $SCRATCH/models/chonk-lc-16k-v0.1-ep1-iter_0019374 (shards
 #      linked, small files copied, modeling code from hfconverter added).
 #   3. the Gym checkout and NeMo-RL clone checks of run B.
@@ -36,6 +37,8 @@ export OPENSANDBOX_API_KEY_FILE
 
 # 1. setup.sh as ../../run.sh runs it for a recipe with sft_export, but with an EDF of its own; exported,
 #    so ../../run-harbor-osb.sh and launch.sh submit with the same EDF and overlay.
+# apertus-common is private: clone it over SSH (APERTUS_COMMON_URL overrides; the pin's default is HTTPS)
+export APERTUS_COMMON_URL="${APERTUS_COMMON_URL:-git@github.com:swiss-ai/apertus-common.git}"
 source "${PIN_FILE}"
 export EDF_NAME="${SFT_EDF_NAME}"
 export PYDEPS_APERTUS2="${SCRATCH}/nemo-rl-apertus2/apertus-common-${APERTUS_COMMON_COMMIT:0:9}"

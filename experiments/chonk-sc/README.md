@@ -187,7 +187,8 @@ Config, merged in this order (`common.sh`, `compose_cfg s`):
   `../../run.sh` does for a recipe with `sft_export`, into an EDF of its own
   (`~/.edf/nemo-rl-apertus2-sft.toml`, `SFT_EDF_NAME`): setup.sh bakes the overlay into the EDF, and a
   shared EDF would change under queued jobs of the other runs. It clones `swiss-ai/apertus-common`,
-  a private repository: your GitHub login on Clariden needs access to it.
+  a private repository, over SSH (`git@github.com:...`, `APERTUS_COMMON_URL` overrides): your SSH key on
+  Clariden needs access to it.
 - `experiments/grpo-chonk/stage_model.sh` to `$SCRATCH/models/chonk-lc-16k-v0.1-ep1-iter_0019374`: shards
   linked to `/capstor`, small files copied, the modeling code from hfconverter added and
   `config.json` given its `auto_map`.
