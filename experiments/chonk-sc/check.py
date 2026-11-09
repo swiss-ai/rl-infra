@@ -264,9 +264,12 @@ def _get(obj, key):
 storage_units = _get(_get(dpc, "simple"), "num_storage_units")
 print("  --- resolved")
 print(f"  nodes: {cl['num_nodes']} x {cl['gpus_per_node']} GPUs = {cl['num_nodes'] - gen_nodes} trainer + {gen_nodes} vLLM")
-print(f"  trainer: megatron {mg.get('enabled')} TP{mg.get('tensor_model_parallel_size')} EP{mg.get('expert_model_parallel_size')}, "
+print(f"  trainer: megatron {mg.get('enabled')} TP{mg.get('tensor_model_parallel_size')} PP{mg.get('pipeline_model_parallel_size')} "
+      f"EP{mg.get('expert_model_parallel_size')}, "
       f"cpu-offload optimizer {(mg.get('optimizer') or {}).get('optimizer_cpu_offload')}")
+print(f"  model: {p['model_name']}; output_format {gen.get('output_format')}")
 print(f"  vLLM: TP{vl['tensor_parallel_size']} EP{vl['expert_parallel_size']} (vLLM DP {vl['expert_parallel_size'] // vl['tensor_parallel_size']}), "
+      f"precision {vl.get('precision')}, "
       f"async_engine {vl['async_engine']}, expose_http_server {vl.get('expose_http_server')}, max_model_len {vl.get('max_model_len')}")
 print(f"  grpo: {prompts} prompts x {gens} = {prompts * gens}, train_global_batch_size {p['train_global_batch_size']}, "
       f"steps {g.max_num_steps}, epochs {g.max_num_epochs}, async_grpo {g.async_grpo}")
@@ -296,7 +299,6 @@ def expect(name, got, want):
 print("  --- plan")
 expect("cluster.num_nodes", cl["num_nodes"], 12)
 expect("vLLM nodes", gen_nodes, 4)
-expect("trainer EP", mg.get("expert_model_parallel_size"), 32)
 expect("vLLM TP/EP", (vl["tensor_parallel_size"], vl["expert_parallel_size"]), (1, 4))
 expect("vllm_cfg.async_engine", vl["async_engine"], True)
 expect("grpo.max_num_steps", g.max_num_steps, 3)
@@ -308,6 +310,8 @@ expect("data_plane num_storage_units", storage_units, 2 * cl["num_nodes"])
 expect("generation_fleet_health.enabled", a.generation_fleet_health.enabled, False)
 expect("checkpointing.enabled", ck["enabled"], False)
 expect("stall_action", a.stall_watchdog.stall_action, "abort")
+if EXPECT in ("a", "b"):
+    expect("trainer PP/EP", (mg.get("pipeline_model_parallel_size"), mg.get("expert_model_parallel_size")), (1, 32))
 if EXPECT == "a":
     expect("prompts x generations", (prompts, gens), (32, 16))
     expect("train_global_batch_size", p["train_global_batch_size"], 512)
@@ -318,13 +322,33 @@ else:
     hcfg = mc.env["nemo_gym"]["harbor_agent"]["responses_api_agents"]["harbor_agent"]
     expect("prompts x generations", (prompts, gens), (8, 8))
     expect("train_global_batch_size", p["train_global_batch_size"], 64)
-    expect("max_total_sequence_length", p["max_total_sequence_length"], 4096)
-    expect("max_new_tokens", gen["max_new_tokens"], 1024)
     expect("env.should_use_nemo_gym", use_gym, True)
     expect("token_capture.enabled", mc.token_capture.enabled, True)
     expect("rollout_failure infra/data attempts", (rf.max_infra_attempts_per_prompt, rf.max_data_attempts_per_prompt), (2, 2))
-    expect("rollout_timeout_s", rf.nemo_gym.rollout_timeout_s, 1800)
-    expect("stall_timeout_s", a.stall_watchdog.stall_timeout_s, 2100)
+    if EXPECT == "b":
+        expect("max_total_sequence_length", p["max_total_sequence_length"], 4096)
+        expect("max_new_tokens", gen["max_new_tokens"], 1024)
+        expect("rollout_timeout_s", rf.nemo_gym.rollout_timeout_s, 1800)
+        expect("stall_timeout_s", a.stall_watchdog.stall_timeout_s, 2100)
+    else:
+        # run S: main's SFT layout and format (recipes/apertus2-chonk-sft-vllm-adamw-tools.yaml,
+        # envs/harbor-osb-sft.yaml) with run-s-sft.yaml on top
+        osb = mc.env["nemo_gym"]["sandbox"]["opensandbox"]
+        kw = hcfg["harbor_agent_kwargs"]
+        expect("trainer PP/EP", (mg.get("pipeline_model_parallel_size"), mg.get("expert_model_parallel_size")), (2, 16))
+        expect("vLLM precision", vl.get("precision"), "fp8")
+        expect("max_total_sequence_length", p["max_total_sequence_length"], 16384)
+        expect("max_new_tokens", gen["max_new_tokens"], 6144)
+        expect("output_format", gen.get("output_format"), "apertus2")
+        expect("stop_token_ids", gen.get("stop_token_ids"), [12])
+        expect("model is the SFT export staged by run-s.sh", p["model_name"].endswith("/models/chonk-lc-16k-v0.1-ep1-iter_0019374"), True)
+        expect("rollout_timeout_s", rf.nemo_gym.rollout_timeout_s, 3000)
+        expect("stall_timeout_s", a.stall_watchdog.stall_timeout_s, 3300)
+        expect("interleaved_thinking", kw.get("interleaved_thinking"), False)
+        expect("OpenSandbox key only as a file path (api_key null)", (osb["connection"].get("api_key"), bool(osb["connection"].get("api_key_file"))), (None, True))
+        expect("pod label run = NEMO_GYM_RUN_ID (the reaper's filter)", osb["attribution"].get("run"), os.environ.get("NEMO_GYM_RUN_ID"))
+        expect("pod label user = NEMO_GYM_USER", osb["attribution"].get("user"), os.environ.get("NEMO_GYM_USER"))
+        expect("dataset alias swe_lego (run B's rows)", "swe_lego" in hcfg["harbor_datasets"], True)
     conc = hcfg["concurrency"]
     (ok if conc >= a.max_inflight_prompts * gens else fail)(
         f"harbor concurrency {conc} >= max_inflight_prompts x generations {a.max_inflight_prompts * gens}")

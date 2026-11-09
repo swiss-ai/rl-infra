@@ -1,4 +1,4 @@
-# Apertus 2 Chonk on NeMo-RL's Single-Controller path (step 0, run A, run B)
+# Apertus 2 Chonk on NeMo-RL's Single-Controller path (step 0, run A, run B, run S)
 
 Implements the run sequence of the feasibility analysis
 `research/reports/2026-11-04-chonk-single-controller-feasibility.md` (workspace, section 6):
@@ -11,7 +11,8 @@ i.e. vLLM DP4 per node through NVIDIA-NeMo/RL#2517) trained through
 | `check.sh`, `check.py` | step 0: static checks on the login node (no GPU, no sbatch) |
 | `run-a-gsm8k.yaml`, `run-a.sh` | run A: GSM8K, no Gym, no capture |
 | `run-b-harbor-sc.yaml`, `run-b.sh` | run B: SC rerun of Daint job 5184052 (Harbor micro-tasks, Terminus-2, token capture) |
-| `common.sh` | config composition and the clone / Gym checks, shared by the three scripts |
+| `run-s-sft.yaml`, `run-s.sh` | run S: run B on the SFT checkpoint (16k layout, Apertus 2 message format) |
+| `common.sh` | config composition and the clone / Gym checks, shared by the scripts |
 
 Both runs: 3 steps, `async_rl` sampler `in_order` with lookahead 0 (synchronous), one chunk per
 step (`min_groups_for_streaming_train` = `max_inflight_prompts` = `max_buffered_rollouts` =
@@ -158,6 +159,50 @@ Compare `invalid_row_rate` and `num_mask_sample_filtered` with the CLE trial cou
 rollout that ended in ContextLengthExceeded becomes an invalid (masked) row or keeps its earlier
 turns is not settled statically. After step 3 the pump starts one more batch (64 trials), cut off at
 shutdown and reaped by `envs/reap_after.sh`.
+
+## Run S: run B on the SFT checkpoint
+
+Run B with a checkpoint that can solve the tasks: Rob's HF export of the last SFT save,
+`/capstor/store/cscs/swissai/infra01/hf-checkpoints/chonk-lc-16k-v0.1-ep1/iter_0019374` (`SFT_MODEL_SRC`).
+The pretraining checkpoint of run B solved 2 of 192 and 0 of 192 trials (jobs 5256202, 5257203), so
+its gradient was zero. main ran the same task with SFT checkpoints on the Gym entrypoint (HANGANG jobs
+1210063-1210341: validation 39 -> 43 of 64, train reward 0.61 -> 0.66 over 20 steps).
+
+Config, merged in this order (`common.sh`, `compose_cfg s`):
+
+1. `recipes/apertus2-chonk-sft-vllm-adamw-tools.yaml`: 12 nodes, 8 trainer (Megatron PP2 EP16, CPU
+   AdamW) + 4 vLLM (TP1 EP4, FP8), 16384 tokens.
+2. `envs/harbor-osb-sft.yaml` without its `defaults:` and `script:` lines: Terminus-2 in the Apertus 2
+   message format (`output_format: apertus2`, system prompt, stop token 12, thinking budget 4096,
+   6144 new tokens per turn, `interleaved_thinking: false`), no leave-one-out baseline, no overlong
+   filtering.
+3. `run-b-harbor-sc.yaml`: SC, token capture, 3 steps, as run B.
+4. `run-s-sft.yaml`: the staged SFT model, run B's tasks and dataset alias, pod labels from
+   `NEMO_GYM_RUN_ID`/`NEMO_GYM_USER` (the reaper's filter), the OpenSandbox key as a file path,
+   validation and checkpointing off, `rollout_timeout_s` 3000, stall watchdog 3300 s.
+
+`run-s.sh` runs, on the login node and before the queue wait:
+
+- `setup.sh` with the apertus-common overlay (`PYDEPS_APERTUS2`, overlay `pydeps-apertus2`), as
+  `../../run.sh` does for a recipe with `sft_export`, into an EDF of its own
+  (`~/.edf/nemo-rl-apertus2-sft.toml`, `SFT_EDF_NAME`): setup.sh bakes the overlay into the EDF, and a
+  shared EDF would change under queued jobs of the other runs. It clones `swiss-ai/apertus-common`,
+  a private repository: your GitHub login on Clariden needs access to it.
+- `experiments/grpo-chonk/stage_model.sh` to `$SCRATCH/models/chonk-lc-16k-v0.1-ep1-iter_0019374`: shards
+  linked to `/capstor`, small files copied, the modeling code from hfconverter added and
+  `config.json` given its `auto_map`.
+- run B's Gym and NeMo-RL clone checks.
+
+```bash
+RUNS=s bash experiments/chonk-sc/check.sh      # step 0 for run S (default RUNS="a b s")
+bash experiments/chonk-sc/run-s.sh              # JOB_TIME default 03:00:00
+```
+
+What to look at: reward above 0 and non-zero `grad_norm` (the point of the run), then that capture
+rejects nothing (`invalid_row_rate` 0) in the Apertus 2 format. Risks, none tested on SC: Megatron PP2
+and the FP8 vLLM weight refit, memory at 16k on 12 GH200 nodes, a turn cut at `max_new_tokens`
+without a closed reply frame (`extend_chat_prompt` asserts on the next call, HTTP 500 to Gym).
+Research report `2026-11-05-sft-checkpoint-for-harbor-runs.md` (workspace), sections 4 and 5.
 
 ## Open risks (from the feasibility report, ranked)
 

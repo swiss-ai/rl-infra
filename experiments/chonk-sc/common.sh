@@ -1,4 +1,4 @@
-# Shared by check.sh, run-a.sh and run-b.sh (sourced, not run). Defines how runs A and B compose
+# Shared by check.sh, run-a.sh, run-b.sh and run-s.sh (sourced, not run). Defines how runs A, B and S compose
 # their configs (the same files, in the same order, as ../../run.sh and ../../run-harbor-osb.sh
 # write them) and the static checks of the NeMo-RL clone and the Gym checkout.
 # Needs HERE (this directory) and ROOT (the rl-infra checkout) set by the caller.
@@ -7,17 +7,41 @@ APERTUS2_DIR="${ROOT}/backends/nemo-rl/apertus2"
 # 12 nodes: 8 trainer (Megatron EP32, CPU AdamW) + 4 vLLM (TP1 EP4); the recipe sets num_nodes
 CHONK_RECIPE="${ROOT}/recipes/apertus2-chonk-vllm-adamw.yaml"
 SC_SCRIPT=examples/run_grpo_single_controller.py
+# Run S (run B on the SFT checkpoint): main's SFT tool-call recipe (12 nodes: 8 trainer Megatron PP2
+# EP16 + 4 vLLM TP1 EP4 FP8, 16384 tokens) and SFT Harbor task, Rob's HF export of the last SFT save
+# (SFT_MODEL_SRC, staged to SFT_MODEL_DIR by run-s.sh; run-s-sft.yaml names the same directory).
+SFT_RECIPE="${ROOT}/recipes/apertus2-chonk-sft-vllm-adamw-tools.yaml"
+SFT_TASK="${ROOT}/envs/harbor-osb-sft.yaml"
+SFT_MODEL_SRC="${SFT_MODEL_SRC:-/capstor/store/cscs/swissai/infra01/hf-checkpoints/chonk-lc-16k-v0.1-ep1/iter_0019374}"
+SFT_MODEL_DIR="${SCRATCH}/models/chonk-lc-16k-v0.1-ep1-iter_0019374"
+# Its own EDF: run S needs the apertus-common overlay in the container spec, which setup.sh bakes into
+# ~/.edf/<EDF_NAME>.toml; a shared EDF would change under jobs of the other runs waiting in the queue.
+SFT_EDF_NAME="${SFT_EDF_NAME:-nemo-rl-apertus2-sft}"
+
+# sft_task_copy <out.yaml>: the SFT task file without its `defaults:` (it would merge the 8075 recipe
+# over the one the launcher puts first) and `script:` (not a config key) lines, as ../../run.sh does
+# with yq; both are single top-level lines in that file.
+sft_task_copy() {
+    grep -vE '^(defaults|script):' "${SFT_TASK}" > "$1"
+    grep -q '^env:' "$1" && ! grep -qE '^(defaults|script):' "$1" || { echo "sft_task_copy: unexpected ${SFT_TASK}" >&2; return 1; }
+}
 
 # compose_cfg <a|b> <out.yaml>: the top-level config the launcher writes.
 #   A: ../../run.sh writes   defaults: [RECIPE, TASK]           with TASK = run-a-gsm8k.yaml
 #   B: ../../run-harbor-osb.sh writes defaults: [RECIPE, TASK, OVERLAY...]
 #      with TASK = envs/harbor-osb.yaml, OVERLAY = run-b-harbor-sc.yaml
+#   S: the same with RECIPE = SFT_RECIPE, TASK = sft_task_copy (written next to out.yaml as
+#      <out>-task.yaml), OVERLAY = run-b-harbor-sc.yaml run-s-sft.yaml
 compose_cfg() {
     case "$1" in
         a) printf 'defaults:\n  - %s\n  - %s\n' "$(realpath "${CHONK_RECIPE}")" "$(realpath "${HERE}/run-a-gsm8k.yaml")" > "$2" ;;
         b) printf 'defaults:\n  - %s\n  - %s\n  - %s\n' "$(realpath "${CHONK_RECIPE}")" \
                "$(realpath "${ROOT}/envs/harbor-osb.yaml")" "$(realpath "${HERE}/run-b-harbor-sc.yaml")" > "$2" ;;
-        *) echo "compose_cfg: run must be a or b" >&2; return 1 ;;
+        s) sft_task_copy "${2%.yaml}-task.yaml" || return 1
+           printf 'defaults:\n  - %s\n  - %s\n  - %s\n  - %s\n' "$(realpath "${SFT_RECIPE}")" \
+               "$(realpath "${2%.yaml}-task.yaml")" "$(realpath "${HERE}/run-b-harbor-sc.yaml")" \
+               "$(realpath "${HERE}/run-s-sft.yaml")" > "$2" ;;
+        *) echo "compose_cfg: run must be a, b or s" >&2; return 1 ;;
     esac
 }
 
