@@ -91,6 +91,10 @@ check_nemo_rl_clone() {
     grep -q "class TruncatedBurstError" "${d}/nemo_rl/data/apertus2_format.py" 2>/dev/null \
         && ok "NeMo-RL patch 0033: TruncatedBurstError in apertus2_format.py" \
         || bad "NeMo-RL patch 0033 missing (TruncatedBurstError in nemo_rl/data/apertus2_format.py); run backends/nemo-rl/apertus2/setup.sh"
+    # NeMo-RL patch 0034: logprob outlier dump (off unless run-s-lpdump.yaml sets NRL_LOGPROB_DUMP_DIR)
+    grep -q "NRL_LOGPROB_DUMP_DIR" "${d}/nemo_rl/algorithms/loss/logprob_dump.py" 2>/dev/null \
+        && ok "NeMo-RL patch 0034: nemo_rl/algorithms/loss/logprob_dump.py" \
+        || bad "NeMo-RL patch 0034 missing (nemo_rl/algorithms/loss/logprob_dump.py); run backends/nemo-rl/apertus2/setup.sh"
     for f in "${SC_SCRIPT}" nemo_rl/algorithms/single_controller.py nemo_rl/algorithms/single_controller_utils/config.py; do
         [[ -f "${d}/${f}" ]] && ok "${f} present" || bad "${f} missing"
     done
