@@ -86,6 +86,11 @@ check_nemo_rl_clone() {
     [[ -f "${d}/nemo_rl/weight_sync/collective_weight_synchronizer.py" ]] \
         && ok "nemo_rl/weight_sync/collective_weight_synchronizer.py present" \
         || bad "nemo_rl/weight_sync/collective_weight_synchronizer.py missing"
+    # NeMo-RL patch 0033: a continuation after a truncated Apertus 2 burst gets the context-length 400
+    # (without it: assert -> HTTP 500 retried by Gym, job 5303503); run S needs it
+    grep -q "class TruncatedBurstError" "${d}/nemo_rl/data/apertus2_format.py" 2>/dev/null \
+        && ok "NeMo-RL patch 0033: TruncatedBurstError in apertus2_format.py" \
+        || bad "NeMo-RL patch 0033 missing (TruncatedBurstError in nemo_rl/data/apertus2_format.py); run backends/nemo-rl/apertus2/setup.sh"
     for f in "${SC_SCRIPT}" nemo_rl/algorithms/single_controller.py nemo_rl/algorithms/single_controller_utils/config.py; do
         [[ -f "${d}/${f}" ]] && ok "${f} present" || bad "${f} missing"
     done
