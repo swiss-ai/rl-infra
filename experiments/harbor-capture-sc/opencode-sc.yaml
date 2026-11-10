@@ -51,8 +51,9 @@ env:
     policy_model:
       responses_api_models:
         vllm_model:
-          # REQUIRED: OpenCode sends no top_p and temperature 0.55 for model ids containing "qwen"
-          # (provider/transform.ts:482,500 @ v1.17.11); NeMo-RL's HTTP server asserts the train profile
+          # REQUIRED: OpenCode sends no temperature (capabilities.temperature is false for a model
+          # models.dev does not know: provider/provider.ts:1431, session/llm/request.ts:124 @ v1.17.11)
+          # and top_p 1 only for ids containing "qwen" (transform.ts:500); NeMo-RL's HTTP server asserts the train profile
           # (vllm_worker_async.py). Gym applies these last to every engine request (vllm_model/app.py).
           # Validation is off in terminus-sc.yaml (val_period 0), so no val profile is needed here.
           sampling_overrides:
