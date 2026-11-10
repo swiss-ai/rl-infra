@@ -56,6 +56,9 @@ The previous smoke test (4 sandboxes, ~7 min) is still one command:
 | `../../backends/nemo-rl/apertus2/patches/gym/0020-*.patch` | upstream Gym `295e2e681` (#3301), backport: the capture ledger records the response actually served to the client (needed by 0021). |
 | `../../backends/nemo-rl/apertus2/patches/gym/0021-*.patch` | upstream Gym `1c2dcc773` (#3382), backport, for agents that always stream (OpenCode): under worker-owned capture (`external_staging`) a `stream: true` request got 422 (`base_responses_api_model.py`); now the engine call is made non-streaming, committed to the ledger, and replayed to the client as SSE (`chat_streaming.py` / `responses_streaming.py`). No byte reaches the client before generation ends. Conflict: `FINGERPRINT_VERSION` 4 (ours was 3). nemo-gym branch `capture-stream-replay`. Design note `research/research_notes/2026-11-10-gym-stream-replay-design.md` (alpernates workspace). |
 | `../../backends/nemo-rl/apertus2/patches/gym/0022-*.patch` | test only: the `_Ledger` helper of the 0018/0019 tests stamps `fingerprint_version`, which parent resolution requires since 0021. |
+| `../../backends/nemo-rl/apertus2/patches/gym/0023-*.patch` | `OpenCodeNemoGym` for in-pod GRPO, OpenCode pinned 1.17.11 (keys checked against its source): run command `opencode ... run --format=json --title 'NeMo Gym' -- <instr> 2>&1 </dev/null \| tee` (stdin: `opencode run` reads a non-TTY stdin to EOF first, cli/cmd/run.ts:399 = the silent job 5236016), optional `timeout` wrapper (`opencode_timeout_sec`), `opencode_debug`; config: only provider `nemogym`, provider `timeout`/`headerTimeout` false (stream replay sends nothing until generation ends; a retry is an extra captured call), model `limit` from `model_info`, title/compaction/prune/snapshot off, `agent.build.steps` = `max_turns`, `task`/`webfetch`/`websearch`/`todowrite` denied, `opencode_config` deep-merged last; install: standalone binary from GitHub releases with built-in sha256 (`opencode_install: binary`, default) or npm. nemo-gym branch `opencode-adapter`. Note `research/research_notes/2026-11-10-opencode-adapter-patch.md` (alpernates workspace). |
+| `../../backends/nemo-rl/apertus2/patches/gym/0024-*.patch` | opt-in `harbor_mask_agent_timeout` (default false = unchanged): mask rollouts whose agent hit Harbor's agent timeout. |
+| `../../backends/nemo-rl/apertus2/patches/gym/0025-*.patch` | fix to 0023: `pipefail` only where the pod's shell supports it (a `set -o pipefail` error would end `/bin/sh` before OpenCode starts). |
 | `../../backends/nemo-rl/apertus2/fetch-chisel.sh` | chisel 1.12.0 (amd64 + arm64, pinned sha256) into `CHISEL_DIR` |
 
 ## Environment variables of `run.sh`
@@ -87,7 +90,7 @@ from that ledger (`RolloutReassembler`); the agent's own output carries no token
    working tree: 0001-0005 (rubric judge, code-gen, from `main`), 0006-0009 (Kostas Pitas'
    OpenSandbox commits from `swissai/harbor_agent_osb_v0.7.0`, as rebuilt on the pin; main's
    export), 0010 (from `main`: OpenSandbox `connection.api_key_file`), 0011-0019 (ours), 0020-0021
-   (upstream Gym backports: streaming under worker-owned capture), 0022 (ours, test helper). One
+   (upstream Gym backports: streaming under worker-owned capture), 0022-0025 (ours). One
    checkout serves every run; 0011 and 0012 are no-ops without `token_capture` (the URL
    is unchanged, masking as before), 0013 without `model_tunnel`. Re-running re-applies them when
    the patch set changed.

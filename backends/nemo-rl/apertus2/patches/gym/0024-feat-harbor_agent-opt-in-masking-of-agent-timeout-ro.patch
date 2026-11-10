@@ -1,0 +1,94 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Tue, 10 Nov 2026 07:24:45 +0000
+Subject: [PATCH 24/25] feat(harbor_agent): opt-in masking of agent-timeout
+ rollouts
+
+New config field harbor_mask_agent_timeout (default false): when set,
+a trial that ended in AgentTimeoutError is masked even if its verifier
+ran. Default behaviour is unchanged (such a rollout trains with the
+verifier's reward); whether to mask is still an open decision.
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ responses_api_agents/harbor_agent/app.py          | 15 ++++++++++++---
+ .../harbor_agent/tests/test_app.py                | 15 +++++++++++++++
+ 2 files changed, 27 insertions(+), 3 deletions(-)
+
+diff --git a/responses_api_agents/harbor_agent/app.py b/responses_api_agents/harbor_agent/app.py
+index a1e506d64..a52fb013a 100644
+--- a/responses_api_agents/harbor_agent/app.py
++++ b/responses_api_agents/harbor_agent/app.py
+@@ -106,6 +106,9 @@ class HarborAgentConfig(BaseResponsesAPIAgentConfig):
+     harbor_verifier_max_timeout: Optional[int] = None
+     # Multiplier applied to all Harbor timeouts after override/cap. None = 1.0.
+     harbor_timeout_multiplier: Optional[float] = None
++    # Also mask rollouts whose agent hit its timeout (AgentTimeoutError), even when the verifier
++    # ran. Off by default: such a rollout then trains with the verifier's reward.
++    harbor_mask_agent_timeout: bool = False
+ 
+     # --- Job output ---
+     # Directory where Harbor writes job results and trial artifacts.
+@@ -134,6 +137,11 @@ class HarborVerifyResponse(BaseVerifyResponse):
+     model_config = ConfigDict(extra="allow")
+ 
+ 
++def _exception_type(trial_result: Optional[dict]) -> Optional[str]:
++    """Harbor's exception_info.exception_type of a trial result dict (e.g. "AgentTimeoutError")."""
++    return ((trial_result or {}).get("exception_info") or {}).get("exception_type")
++
++
+ def _find_trial_dir_with_result(job_dir: Path) -> Optional[Path]:
+     if not job_dir.exists():
+         return None
+@@ -387,9 +395,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
+                 instance_config={"mask_sample": self._should_mask(trial_result, output_items)},
+                 context_length_exceeded_error=int(agent_error_flags.get("context_length_exceeded", False)),
+                 memory_limit_exceeded_error=int(agent_error_flags.get("memory_limit_exceeded", False)),
+-                agent_timeout_error=int(
+-                    ((trial_result or {}).get("exception_info") or {}).get("exception_type") == "AgentTimeoutError"
+-                ),
++                agent_timeout_error=int(_exception_type(trial_result) == "AgentTimeoutError"),
+             )
+ 
+             # Save result to disk (folder = run_id, file = task name)
+@@ -460,7 +466,10 @@ class HarborAgent(SimpleResponsesAPIAgent):
+         (and masks it itself when no call chain was captured); agents such as OpenCode write no ATIF
+         trajectory at all, so empty output is expected there. The rollout is still masked when the
+         trial failed or the verifier never produced a result, since its reward then means nothing.
++        With `harbor_mask_agent_timeout`, a trial that ended in AgentTimeoutError is masked as well.
+         """
++        if self.config.harbor_mask_agent_timeout and _exception_type(trial_result) == "AgentTimeoutError":
++            return True
+         if not self._token_id_capture_enabled():
+             return not output_items
+         return trial_result is None or not trial_result.get("verifier_result")
+diff --git a/responses_api_agents/harbor_agent/tests/test_app.py b/responses_api_agents/harbor_agent/tests/test_app.py
+index ab63debcd..23f2e14a6 100644
+--- a/responses_api_agents/harbor_agent/tests/test_app.py
++++ b/responses_api_agents/harbor_agent/tests/test_app.py
+@@ -507,6 +507,21 @@ class TestApp:
+         assert server._should_mask(None, []) is True
+         # trial ended without a verifier result (setup or agent crash)
+         assert server._should_mask({"verifier_result": None}, [{"type": "message"}]) is True
++        # an agent timeout with a verifier result trains by default
++        timed_out = {**verified, "exception_info": {"exception_type": "AgentTimeoutError"}}
++        assert server._should_mask(timed_out, []) is False
++
++    @pytest.mark.parametrize("token_id_capture", [False, True])
++    def test_mask_agent_timeout_is_opt_in(self, token_id_capture: bool) -> None:
++        server = _make_server(token_id_capture=token_id_capture, harbor_mask_agent_timeout=True)
++        server.server_client.global_config_dict = {"token_id_capture": {"enabled": token_id_capture}}
++        verified = {"verifier_result": {"rewards": {"reward": 1.0}}}
++        timed_out = {**verified, "exception_info": {"exception_type": "AgentTimeoutError"}}
++        other_error = {**verified, "exception_info": {"exception_type": "NonZeroAgentExitCodeError"}}
++        output = [{"type": "message"}]
++        assert server._should_mask(timed_out, output) is True
++        assert server._should_mask(other_error, output) is False
++        assert server._should_mask(verified, output) is False
+ 
+     def test_model_base_url_capture_needs_agent_opt_in(self) -> None:
+         server = _make_server()
+-- 
+2.56.0
+
