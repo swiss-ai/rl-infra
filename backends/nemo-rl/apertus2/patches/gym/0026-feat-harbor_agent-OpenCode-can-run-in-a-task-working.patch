@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Tue, 10 Nov 2026 08:45:12 +0000
+Subject: [PATCH] feat(harbor_agent): OpenCode can run in a task working
+ directory
+
+New kwarg opencode_workdir (absolute path, default unset = the exec's cwd).
+OpenCode's project is its cwd; the sandbox exec starts in / (or $HOME),
+where OpenCode warns 'failed to initialize fff ... file system root or home
+directory' and treats the whole file system as the project (job 5314432).
+The command creates the directory (tasks may expect the agent to) and cds
+into it; if that fails, OpenCode still runs.
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ .../custom_agents/opencode_nemo_gym.py        | 11 ++++++++
+ .../custom_agents/test_opencode_nemo_gym.py   | 26 +++++++++++++++++++
+ 2 files changed, 37 insertions(+)
+
+diff --git a/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py
+index 4a0498209..f3009235d 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py
+@@ -111,6 +111,7 @@ class OpenCodeNemoGym(OpenCode):
+         opencode_install: str = "binary",
+         opencode_sha256: str | None = None,
+         opencode_asset: str = DEFAULT_ASSET,
++        opencode_workdir: str | None = None,
+         **kwargs: Any,
+     ) -> None:
+         # Harbor's base keeps `version` (the OpenCode release, or the npm version for "npm").
+@@ -127,6 +128,8 @@ class OpenCodeNemoGym(OpenCode):
+             raise ValueError(f"invalid OpenCode version {self._version!r}")
+         if opencode_sha256 is not None and not _SHA256_RE.match(opencode_sha256):
+             raise ValueError("opencode_sha256 must be 64 lowercase hex digits")
++        if opencode_workdir is not None and not str(opencode_workdir).startswith("/"):
++            raise ValueError(f"opencode_workdir must be an absolute path, got {opencode_workdir!r}")
+         self._api_base = api_base
+         self._api_key = api_key
+         # Kept for reference; sampling values reach vLLM through vllm_model.sampling_overrides.
+@@ -138,6 +141,7 @@ class OpenCodeNemoGym(OpenCode):
+         self._debug = bool(opencode_debug)
+         self._install_method = opencode_install
+         self._asset = opencode_asset
++        self._workdir = opencode_workdir
+         self._sha256 = opencode_sha256 or KNOWN_ARCHIVE_SHA256.get((self._version, opencode_asset))
+ 
+     @staticmethod
+@@ -292,4 +296,11 @@ class OpenCodeNemoGym(OpenCode):
+         # anything (cli/cmd/run.ts:399), and the sandbox exec leaves it open. pipefail keeps
+         # OpenCode's exit status (e.g. 124 from timeout) instead of tee's.
+         command = f"{PIPEFAIL_IF_SUPPORTED}{shlex.join(argv)} 2>&1 </dev/null | tee {LOG_FILE}"
++        if self._workdir:
++            # OpenCode's project is its cwd; the sandbox exec starts in / (or $HOME), where OpenCode
++            # warns "failed to initialize fff ... file system root or home directory" and the whole
++            # file system is the project (job 5314432). Tasks may expect the agent to create the
++            # directory, so create it; if that fails, OpenCode still runs in the exec's cwd.
++            workdir = shlex.quote(self._workdir)
++            command = f"mkdir -p {workdir} && cd {workdir}; {command}"
+         return [ExecInput(command=command, env=self.opencode_env())]
+diff --git a/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
+index 3accc5219..556d046fb 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
+@@ -145,6 +145,32 @@ def test_run_command_starts_opencode_in_a_posix_sh(
+     assert proc.returncode == (3 if supports_pipefail else 0)
+ 
+ 
++def test_run_command_workdir(tmp_path: Path) -> None:
++    (plain,) = _agent(tmp_path).create_run_agent_commands("x")
++    assert not plain.command.startswith("mkdir")
++    (cmd,) = _agent(tmp_path, opencode_workdir="/app").create_run_agent_commands("x")
++    assert cmd.command == f"mkdir -p /app && cd /app; {plain.command}"
++    with pytest.raises(ValueError, match="absolute"):
++        _agent(tmp_path, opencode_workdir="app")
++
++
++@needs_bash
++def test_run_command_starts_opencode_in_the_created_workdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
++    log = tmp_path / "opencode.txt"
++    monkeypatch.setattr(mod, "LOG_FILE", str(log))
++    bin_dir = tmp_path / "bin"
++    bin_dir.mkdir()
++    fake = bin_dir / "opencode"
++    fake.write_text("#!/bin/sh\npwd\n")
++    fake.chmod(0o755)
++    workdir = tmp_path / "does" / "not" / "exist yet"
++    (cmd,) = _agent(tmp_path, opencode_workdir=str(workdir)).create_run_agent_commands("x")
++    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
++    proc = subprocess.run(["bash", "-c", cmd.command], cwd="/", capture_output=True, text=True, env=env, timeout=20)
++    assert proc.returncode == 0
++    assert log.read_text().splitlines() == [str(workdir)]
++
++
+ # --- environment ---------------------------------------------------------------------------------
+ 
+ 
+-- 
+2.56.0
+

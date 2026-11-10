@@ -3,7 +3,7 @@
 # per-sandbox reverse tunnel, sandbox 127.0.0.1:8000 -> policy_model (Gym patches 0013+0014), like
 # mini-sc.yaml.
 #
-# Gym patches used (run.sh checks markers of 0021 and 0023):
+# Gym patches used (run.sh checks markers of 0021 and 0026):
 #   0011/0012  per-rollout capture URL; capture-aware masking
 #   0020/0021  upstream backport: OpenCode (AI SDK) always streams; under worker-owned capture the
 #              engine call is made non-streaming, committed, and replayed to OpenCode as SSE. No byte
@@ -12,6 +12,7 @@
 #              pod from GitHub releases), `opencode run ... </dev/null` (job 5236016 hung reading stdin),
 #              no title / compaction / sub-agent calls (each extra conversation masks the rollout),
 #              model limits from model_info. Keys verified against OpenCode v1.17.11; keep that version.
+#   0026       opencode_workdir: OpenCode runs in the task directory (created if missing).
 # Note: research/research_notes/2026-11-10-opencode-adapter-patch.md (alpernates workspace).
 #
 # Env (run.sh exports them when set):
@@ -36,6 +37,9 @@ env:
             # oc.decode: oc.env returns strings, and bool("false") is True
             opencode_timeout_sec: ${oc.decode:${oc.env:OPENCODE_TIMEOUT_SEC,870}}
             opencode_debug: ${oc.decode:${oc.env:OPENCODE_DEBUG,false}}
+            # micro tasks work in /app (their instructions say "create /app if needed"); OpenCode's project
+            # is its cwd, and the exec's default (/ or $HOME) made it warn "failed to initialize fff" (5314432)
+            opencode_workdir: /app
             # terminus-sc.yaml gives max_output_tokens = the whole context; OpenCode's limit.output (and
             # OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX) should be the per-turn generation limit
             model_info:
