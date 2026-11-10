@@ -1,0 +1,796 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Tue, 10 Nov 2026 07:24:45 +0000
+Subject: [PATCH 23/25] feat(harbor_agent): OpenCode adapter for in-pod GRPO
+ runs (pinned 1.17.11)
+
+OpenCodeNemoGym gets the run command, environment, configuration and
+install it needs to run inside a task sandbox under token capture. All
+OpenCode keys and flags were checked against the OpenCode source at tag
+v1.17.11 (anomalyco/opencode 67aec2212); comments cite file:line there.
+
+Run command:
+  set -o pipefail; [timeout -k 10 <T>] opencode --model nemogym/<m> run
+  --format=json --title 'NeMo Gym' [--print-logs --log-level DEBUG]
+  -- <instruction> 2>&1 </dev/null | tee /logs/agent/opencode.txt
+- </dev/null: with a non-TTY stdin `opencode run` reads stdin to EOF
+  before anything else (cli/cmd/run.ts:399); the sandbox exec leaves it
+  open. Likely cause of the 900 s silence in job 5236016.
+- --title: a non-default title skips the title model call.
+- pipefail keeps OpenCode's exit status (124 from timeout) for
+  return-code.txt; the timeout wrapper is opt-in (opencode_timeout_sec).
+
+Config (OPENCODE_CONFIG_CONTENT), so that only the main loop calls the
+model (a second root masks a capture rollout without a witness):
+enabled_providers [nemogym]; provider options timeout/headerTimeout
+false (stream replay sends no byte before generation ends; a timed-out
+request would be retried as another captured call); model limit from
+model_info (output capped by max_output_tokens of the request);
+agent.title.disable; agent.build.steps = max_turns; compaction auto and
+prune off; snapshot off; permission "*" allow, task/webfetch/websearch/
+todowrite deny (denied tools leave the request's tool list). The
+opencode_config kwarg is deep-merged last (None deletes a key).
+
+Env: XDG_DATA_HOME=/logs/agent/opencode-data (DB and logs come back
+with the trial), OPENCODE_DISABLE_MODELS_FETCH/_AUTOUPDATE/
+_PROJECT_CONFIG, OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX, OPENCODE_FAKE_VCS.
+OPENCODE_DISABLE_SHARE does not exist in 1.17.11 (config share:
+disabled instead).
+
+Install: default (opencode_install: binary) downloads the standalone
+glibc binary opencode-linux-x64-baseline.tar.gz of the pinned release
+with python3 (curl fallback), checks sha256 (known digest for 1.17.11,
+or opencode_sha256), installs to /usr/local/bin and checks --version;
+skips when that version is already there. opencode_install: npm keeps
+Harbor's nvm/npm script. version defaults to 1.17.11.
+
+responses_create_params, max_turns and model_info are now explicit
+kwargs. Sampling values are still not sent by OpenCode; set them with
+vllm_model.sampling_overrides.
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ .../custom_agents/opencode_nemo_gym.py        | 241 +++++++++++--
+ .../install-opencode-binary.sh.j2             |  66 ++++
+ .../custom_agents/test_opencode_nemo_gym.py   | 336 +++++++++++++++++-
+ 3 files changed, 608 insertions(+), 35 deletions(-)
+ create mode 100644 responses_api_agents/harbor_agent/custom_agents/opencode_pod/install-opencode-binary.sh.j2
+
+diff --git a/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py
+index cdb898701..237817475 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py
+@@ -20,13 +20,27 @@ declares one OpenAI-compatible provider whose base URL is the `api_base` that ha
+ (the model server, with the rollout's capture prefix when token capture is on), so every call of
+ the in-sandbox OpenCode reaches the Gym model server and can be attributed to its rollout.
+ 
++Under token capture a rollout without a terminal witness (OpenCode returns no output items) is
++masked as soon as its calls form more than one root or chain. The configuration therefore switches
++off every model call that is not the main agent loop: session title, sub-agents (`task`),
++compaction and pruning; provider timeouts are off, because a timed-out request is retried and the
++retry is one more captured call. Sampling parameters are not set here (OpenCode does not send the
++rollout's temperature/top_p); set them with the Gym model server's `sampling_overrides`.
++
++OpenCode keys and flags below were checked against the OpenCode source at tag v1.17.11
++(github.com/anomalyco/opencode, commit 67aec2212); file:line references are relative to that tree.
++Another version may name them differently, so `version` defaults to that release.
++
+ OpenCode runs inside the task sandbox, so `api_base` must be reachable from there (see
+-harbor_agent's `harbor_model_base_url`). The agent writes no ATIF trajectory; for training the
+-tokens come from model-server capture, not from this agent.
++harbor_agent's `harbor_model_base_url`, e.g. the per-sandbox model tunnel). The agent writes no
++ATIF trajectory; for training the tokens come from model-server capture, not from this agent.
+ """
+ 
++import copy
+ import json
++import re
+ import shlex
++from pathlib import Path
+ from typing import Any
+ 
+ from harbor.agents.installed.base import ExecInput
+@@ -35,56 +49,241 @@ from harbor.agents.installed.opencode import OpenCode
+ 
+ PROVIDER_ID = "nemogym"
+ 
++# Release whose config schema, flags and CLI this adapter was checked against.
++DEFAULT_VERSION = "1.17.11"
++# Standalone Bun-compiled binary for glibc x86_64 without AVX2 requirements (no Node/npm needed).
++DEFAULT_ASSET = "opencode-linux-x64-baseline.tar.gz"
++RELEASE_URL = "https://github.com/anomalyco/opencode/releases/download/v{version}/{asset}"
++# sha256 of release archives as listed by the GitHub release API ("digest" of the asset).
++KNOWN_ARCHIVE_SHA256 = {
++    ("1.17.11", "opencode-linux-x64-baseline.tar.gz"): (
++        "36064327d5a3fba662264f5726f517eafa26d1aefb0d59bc95e66bddccf3497b"
++    ),
++}
++INSTALL_METHODS = ("binary", "npm")
++BINARY_INSTALL_TEMPLATE = Path(__file__).parent / "opencode_pod" / "install-opencode-binary.sh.j2"
++BINARY_INSTALL_DIR = "/usr/local/bin"
++
++# A fixed, non-default session title: OpenCode skips its title model call for such a session
++# (session/prompt.ts:204, `--title` -> cli/cmd/run.ts:186-189, 433-436, 501-504).
++SESSION_TITLE = "NeMo Gym"
++LOG_FILE = "/logs/agent/opencode.txt"
++# OpenCode's data dir (sqlite DB with sessions/messages, its log files) under the trial's agent
++# logs, so Harbor downloads it with /logs/agent (core/src/global.ts:11,23 via xdg-basedir).
++DATA_HOME = "/logs/agent/opencode-data"
++TIMEOUT_KILL_AFTER_SEC = 10
++
++_VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+-]*$")
++_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
++
++
++def deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
++    """`base` updated by `overlay`, recursing into dicts; a None value in `overlay` deletes the key."""
++    merged = copy.deepcopy(base)
++    for key, value in overlay.items():
++        if value is None:
++            merged.pop(key, None)
++        elif isinstance(value, dict) and isinstance(merged.get(key), dict):
++            merged[key] = deep_merge(merged[key], value)
++        else:
++            merged[key] = copy.deepcopy(value)
++    return merged
++
+ 
+ class OpenCodeNemoGym(OpenCode):
+-    def __init__(self, *args: Any, api_base: str | None = None, api_key: str = "EMPTY", **kwargs: Any) -> None:
++    def __init__(
++        self,
++        *args: Any,
++        api_base: str | None = None,
++        api_key: str = "EMPTY",
++        responses_create_params: dict[str, Any] | None = None,
++        max_turns: int | None = None,
++        model_info: dict[str, Any] | None = None,
++        opencode_config: dict[str, Any] | None = None,
++        opencode_timeout_sec: int | None = None,
++        opencode_debug: bool = False,
++        opencode_install: str = "binary",
++        opencode_sha256: str | None = None,
++        opencode_asset: str = DEFAULT_ASSET,
++        **kwargs: Any,
++    ) -> None:
++        # Harbor's base keeps `version` (the OpenCode release, or the npm version for "npm").
+         super().__init__(*args, **kwargs)
+         if not api_base:
+             raise ValueError("OpenCodeNemoGym needs api_base (harbor_agent passes the model server URL)")
++        if opencode_install not in INSTALL_METHODS:
++            raise ValueError(f"opencode_install must be one of {INSTALL_METHODS}, got {opencode_install!r}")
++        if opencode_timeout_sec is not None and int(opencode_timeout_sec) <= 0:
++            raise ValueError(f"opencode_timeout_sec must be positive, got {opencode_timeout_sec!r}")
++        if self._version is None:
++            self._version = DEFAULT_VERSION
++        if not _VERSION_RE.match(self._version):
++            raise ValueError(f"invalid OpenCode version {self._version!r}")
++        if opencode_sha256 is not None and not _SHA256_RE.match(opencode_sha256):
++            raise ValueError("opencode_sha256 must be 64 lowercase hex digits")
+         self._api_base = api_base
+         self._api_key = api_key
++        # Kept for reference; sampling values reach vLLM through vllm_model.sampling_overrides.
++        self._responses_create_params = responses_create_params or {}
++        self._max_turns = max_turns
++        self._model_info = model_info or {}
++        self._opencode_config_overlay = opencode_config or {}
++        self._timeout_sec = int(opencode_timeout_sec) if opencode_timeout_sec is not None else None
++        self._debug = bool(opencode_debug)
++        self._install_method = opencode_install
++        self._asset = opencode_asset
++        self._sha256 = opencode_sha256 or KNOWN_ARCHIVE_SHA256.get((self._version, opencode_asset))
+ 
+     @staticmethod
+     def name() -> str:
+         return "opencode-nemo-gym"
+ 
++    # --- install -------------------------------------------------------------------------------
++
++    @property
++    def _install_agent_template_path(self) -> Path:
++        if self._install_method == "npm":
++            return super()._install_agent_template_path  # Harbor's apt + nvm + `npm i -g opencode-ai@<v>`
++        return BINARY_INSTALL_TEMPLATE
++
++    @property
++    def _template_variables(self) -> dict[str, str]:
++        variables = dict(super()._template_variables)
++        if self._install_method == "binary":
++            variables.update(
++                url=shlex.quote(RELEASE_URL.format(version=self._version, asset=self._asset)),
++                sha256=shlex.quote(self._sha256 or ""),
++                install_dir=shlex.quote(BINARY_INSTALL_DIR),
++            )
++        return variables
++
++    # --- configuration -------------------------------------------------------------------------
++
+     def _opencode_model(self) -> str:
+         if not self.model_name:
+             raise ValueError("OpenCodeNemoGym needs a model name")
++        # parseModel splits on the first "/" only (provider/provider.ts:1974-1980)
+         return f"{PROVIDER_ID}/{self.model_name}"
+ 
++    def model_limits(self) -> dict[str, int] | None:
++        """OpenCode's model `limit` from Terminus-2-style `model_info` (None when unknown).
++
++        `max_input_tokens` is the whole context window in our overlays (max_total_sequence_length),
++        as for Terminus-2; the output limit is additionally capped by the request's max_output_tokens.
++        """
++        context = self._model_info.get("max_input_tokens") or self._model_info.get("max_tokens")
++        if not context:
++            return None
++        output = self._model_info.get("max_output_tokens") or context
++        request_cap = self._responses_create_params.get("max_output_tokens")
++        if request_cap:
++            output = min(int(output), int(request_cap))
++        # limit.context and limit.output are required, limit.input optional
++        # (core/src/v1/config/provider.ts:41-47)
++        return {"context": int(context), "input": int(context), "output": int(output)}
++
+     def opencode_config(self) -> dict[str, Any]:
+         model = self._opencode_model()
+-        return {
++        model_entry: dict[str, Any] = {"name": self.model_name}
++        limits = self.model_limits()
++        if limits:
++            model_entry["limit"] = limits
++        build_agent: dict[str, Any] = {}
++        if self._max_turns:
++            # steps: max agentic iterations, the last one without tools
++            # (core/src/v1/config/agent.ts:34-36; session/prompt.ts:1281-1282)
++            build_agent["steps"] = int(self._max_turns)
++        config: dict[str, Any] = {
+             "$schema": "https://opencode.ai/config.json",
++            # Top-level keys must all exist in the schema, unknown ones fail the config load
++            # (config/parse.ts:40-53; schema core/src/v1/config/config.ts:32-187).
++            "enabled_providers": [PROVIDER_ID],  # config.ts:71-73, provider/provider.ts:1358-1364
+             "provider": {
+                 PROVIDER_ID: {
+                     "npm": "@ai-sdk/openai-compatible",
+                     "name": "NeMo Gym model server",
+-                    "options": {"baseURL": self._api_base, "apiKey": self._api_key},
+-                    "models": {self.model_name: {"name": self.model_name}},
++                    "options": {
++                        "baseURL": self._api_base,
++                        "apiKey": self._api_key,
++                        # No request or header timeout: under stream replay the model server sends
++                        # no byte before generation ends, and a timed-out request is retried as a
++                        # new captured call. Both accept false (core/src/v1/config/provider.ts:95-110;
++                        # applied in provider/provider.ts:1704-1730, which also passes Bun's fetch
++                        # `timeout: false`). chunkTimeout takes only a positive int and is off when
++                        # unset (provider.ts:111-114, provider/provider.ts:1712).
++                        "timeout": False,
++                        "headerTimeout": False,
++                    },
++                    "models": {self.model_name: model_entry},
+                 }
+             },
+             "model": model,
+-            # Title generation and similar helper calls use small_model; keep them on the same
+-            # endpoint so no call leaves for a hosted provider.
++            # Helper calls (title, ...) use small_model; keep it on the same endpoint so no call
++            # leaves for a hosted provider (config.ts:77-79).
+             "small_model": model,
+-            "share": "disabled",
+-            "autoupdate": False,
++            "share": "disabled",  # config.ts:57-60
++            "autoupdate": False,  # config.ts:64-67; cli/upgrade.ts:10
++            # No git snapshots of the work tree per step (config.ts:52-55; session/summary.ts:115).
++            "snapshot": False,
++            # Compaction makes a summary call and starts a new chain; pruning rewrites old tool
++            # results so the next prompt no longer extends its parent (config.ts:146-165;
++            # session/overflow.ts:28, session/compaction.ts:248).
++            "compaction": {"auto": False, "prune": False},
++            "agent": {
++                # `disable` deletes the built-in title agent; ensureTitle then returns before any
++                # call (agent/agent.ts:234-249, 267-270; session/prompt.ts:220-221).
++                "title": {"disable": True},
++                **({"build": build_agent} if build_agent else {}),
++            },
++            # Last matching rule wins and user rules come after OpenCode's defaults, so "*" must be
++            # first (permission/index.ts:29-38; agent/agent.ts:119-151). A tool denied for pattern
++            # "*" is removed from the request's tool list (session/llm/request.ts:199-203,
++            # permission/index.ts:205-216): no sub-agents (separate roots), no web access, no todo
++            # list (prompt tokens only). Without "*": allow, `opencode run` auto-rejects every "ask"
++            # (e.g. doom_loop, external_directory) (cli/cmd/run.ts:779-797).
++            "permission": {
++                "*": "allow",
++                "task": "deny",
++                "webfetch": "deny",
++                "websearch": "deny",
++                "todowrite": "deny",
++            },
+         }
++        return deep_merge(config, self._opencode_config_overlay)
+ 
+-    def create_run_agent_commands(self, instruction: str) -> list[ExecInput]:
++    def opencode_env(self) -> dict[str, str]:
+         env = {
+             "OPENCODE_CONFIG_CONTENT": json.dumps(self.opencode_config()),
+-            # as in Harbor's OpenCode agent
++            "XDG_DATA_HOME": DATA_HOME,
++            # Boolean flags are true for "true" or "1" (core/src/flag/flag.ts:3-6).
++            "OPENCODE_DISABLE_MODELS_FETCH": "true",  # flag.ts:29; core/src/models-dev.ts:200, 233
++            "OPENCODE_DISABLE_AUTOUPDATE": "true",  # flag.ts:23; cli/upgrade.ts:10
++            # No opencode.json/.opencode from the task's work tree (flag.ts:54-56; config/config.ts:405).
++            "OPENCODE_DISABLE_PROJECT_CONFIG": "true",
++            # as in Harbor's OpenCode agent (flag.ts:31)
+             "OPENCODE_FAKE_VCS": "git",
+         }
+-        return [
+-            ExecInput(
+-                command=(
+-                    f"opencode --model {shlex.quote(self._opencode_model())} run --format=json "
+-                    f"{shlex.quote(instruction)} 2>&1 | tee /logs/agent/opencode.txt"
+-                ),
+-                env=env,
+-            )
+-        ]
++        limits = self.model_limits()
++        if limits:
++            # Caps max output tokens per request: min(limit.output, this), default 32000
++            # (effect/runtime-flags.ts:51; provider/transform.ts:18, 1307-1309).
++            env["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] = str(limits["output"])
++        return env
++
++    # --- run -----------------------------------------------------------------------------------
++
++    def create_run_agent_commands(self, instruction: str) -> list[ExecInput]:
++        argv: list[str] = []
++        if self._timeout_sec is not None:
++            # Ends OpenCode before Harbor's agent timeout so the command's return code is recorded.
++            argv += ["timeout", "-k", str(TIMEOUT_KILL_AFTER_SEC), str(self._timeout_sec)]
++        argv += ["opencode", "--model", self._opencode_model(), "run", "--format=json", "--title", SESSION_TITLE]
++        if self._debug:
++            argv += ["--print-logs", "--log-level", "DEBUG"]  # global options (index.ts:53-61)
++        # "--": an instruction starting with "-" stays the message (cli/cmd/run.ts:256, 271).
++        argv += ["--", instruction]
++        # stdin from /dev/null: with a non-TTY stdin `opencode run` reads it to EOF before doing
++        # anything (cli/cmd/run.ts:399), and the sandbox exec leaves it open. pipefail keeps
++        # OpenCode's exit status (e.g. 124 from timeout) instead of tee's.
++        command = f"set -o pipefail; {shlex.join(argv)} 2>&1 </dev/null | tee {LOG_FILE}"
++        return [ExecInput(command=command, env=self.opencode_env())]
+diff --git a/responses_api_agents/harbor_agent/custom_agents/opencode_pod/install-opencode-binary.sh.j2 b/responses_api_agents/harbor_agent/custom_agents/opencode_pod/install-opencode-binary.sh.j2
+new file mode 100644
+index 000000000..1b7b02e72
+--- /dev/null
++++ b/responses_api_agents/harbor_agent/custom_agents/opencode_pod/install-opencode-binary.sh.j2
+@@ -0,0 +1,66 @@
++#!/bin/bash
++# Installs the standalone OpenCode binary (Bun-compiled, no Node/npm) from its GitHub release.
++# Rendered by OpenCodeNemoGym (opencode_install: binary); url, sha256 and install_dir arrive
++# shell-quoted. Needs python3 (task images such as python:3.12-slim have no curl) or curl, and tar.
++set -euo pipefail
++
++version={{ version }}
++url={{ url }}
++sha256={{ sha256 }}
++install_dir={{ install_dir }}
++dest="$install_dir/opencode"
++
++if [ -x "$dest" ] && [ "$("$dest" --version 2>/dev/null || true)" = "$version" ]; then
++  echo "opencode $version already installed at $dest"
++  exit 0
++fi
++
++work=$(mktemp -d)
++trap 'rm -rf "$work"' EXIT
++archive="$work/opencode.tar.gz"
++
++if command -v python3 >/dev/null 2>&1; then
++  python3 - "$url" "$archive" "$sha256" <<'PY'
++import hashlib
++import sys
++import time
++import urllib.request
++
++url, out, want = sys.argv[1:4]
++for attempt in range(1, 4):
++    try:
++        digest = hashlib.sha256()
++        with urllib.request.urlopen(url, timeout=120) as response, open(out, "wb") as f:
++            while chunk := response.read(1 << 20):
++                f.write(chunk)
++                digest.update(chunk)
++        break
++    except Exception as e:  # network errors: retry, then fail the setup
++        if attempt == 3:
++            sys.exit(f"download of {url} failed: {e}")
++        print(f"download attempt {attempt} failed: {e}", file=sys.stderr)
++        time.sleep(5 * attempt)
++got = digest.hexdigest()
++print(f"downloaded {url} sha256 {got}")
++if want and got != want:
++    sys.exit(f"sha256 mismatch for {url}: expected {want}, got {got}")
++PY
++elif command -v curl >/dev/null 2>&1; then
++  curl -fsSL --retry 3 -o "$archive" "$url"
++  if [ -n "$sha256" ]; then
++    echo "$sha256  $archive" | sha256sum -c -
++  fi
++else
++  echo "installing opencode needs python3 or curl in the task image" >&2
++  exit 1
++fi
++
++tar -xzf "$archive" -C "$work" opencode
++mkdir -p "$install_dir"
++install -m 755 "$work/opencode" "$dest"
++actual=$("$dest" --version)
++if [ "$actual" != "$version" ]; then
++  echo "opencode version mismatch: wanted $version, $dest --version printed $actual" >&2
++  exit 1
++fi
++echo "installed opencode $actual at $dest"
+diff --git a/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
+index 8f1284bd6..c59dbdd34 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
+@@ -1,6 +1,25 @@
+ # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ # SPDX-License-Identifier: Apache-2.0
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++# http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++import hashlib
++import io
+ import json
++import os
++import shlex
++import shutil
++import subprocess
++import tarfile
+ from pathlib import Path
+ 
+ import pytest
+@@ -8,34 +27,323 @@ import pytest
+ 
+ pytest.importorskip("harbor")
+ 
+-from responses_api_agents.harbor_agent.custom_agents.opencode_nemo_gym import OpenCodeNemoGym  # noqa: E402
++from jinja2 import Environment  # noqa: E402
+ 
++from responses_api_agents.harbor_agent.custom_agents import opencode_nemo_gym as mod  # noqa: E402
++from responses_api_agents.harbor_agent.custom_agents.opencode_nemo_gym import OpenCodeNemoGym, deep_merge  # noqa: E402
+ 
+-API_BASE = "http://policy-host:9000/ng-rollout/3-1/training-token-capture/v1"
++
++API_BASE = "http://127.0.0.1:8000/ng-rollout/3-1/training-token-capture/v1"
++MODEL = "Qwen/Qwen3-4B-Instruct-2507"
++# Top-level keys of OpenCode's config schema at v1.17.11 (core/src/v1/config/config.ts:32-187);
++# config/parse.ts:40-53 rejects any other top-level key.
++OPENCODE_1_17_11_TOP_LEVEL_KEYS = {
++    "$schema", "shell", "logLevel", "server", "command", "skills", "references", "reference", "watcher",
++    "snapshot", "plugin", "share", "autoshare", "autoupdate", "disabled_providers", "enabled_providers",
++    "model", "small_model", "default_agent", "username", "mode", "agent", "provider", "mcp", "formatter",
++    "lsp", "instructions", "layout", "permission", "tools", "attachment", "enterprise", "tool_output",
++    "compaction", "experimental",
++}  # fmt: skip
++needs_bash = pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+ 
+ 
+ def _agent(tmp_path: Path, **kwargs) -> OpenCodeNemoGym:
+-    return OpenCodeNemoGym(logs_dir=tmp_path, model_name="Qwen/Qwen3-4B-Instruct-2507", api_base=API_BASE, **kwargs)
++    return OpenCodeNemoGym(logs_dir=tmp_path, model_name=MODEL, api_base=API_BASE, **kwargs)
++
++
++def _config(agent: OpenCodeNemoGym) -> dict:
++    (cmd,) = agent.create_run_agent_commands("x")
++    return json.loads(cmd.env["OPENCODE_CONFIG_CONTENT"])
+ 
+ 
+ def test_requires_api_base(tmp_path: Path) -> None:
+     with pytest.raises(ValueError, match="api_base"):
+-        OpenCodeNemoGym(logs_dir=tmp_path, model_name="Qwen/Qwen3-4B-Instruct-2507")
++        OpenCodeNemoGym(logs_dir=tmp_path, model_name=MODEL)
++
+ 
++# --- run command ---------------------------------------------------------------------------------
+ 
+-def test_run_command_points_opencode_at_the_model_server(tmp_path: Path) -> None:
++
++def test_run_command(tmp_path: Path) -> None:
+     (cmd,) = _agent(tmp_path).create_run_agent_commands("print 'hi' > /app/out.txt")
+-    assert cmd.command.startswith("opencode --model nemogym/Qwen/Qwen3-4B-Instruct-2507 run --format=json ")
+-    assert "'print '\"'\"'hi'\"'\"' > /app/out.txt'" in cmd.command
+-    config = json.loads(cmd.env["OPENCODE_CONFIG_CONTENT"])
++    assert cmd.command == (
++        f"set -o pipefail; opencode --model nemogym/{MODEL} run --format=json --title 'NeMo Gym' "
++        "-- 'print '\"'\"'hi'\"'\"' > /app/out.txt' 2>&1 </dev/null | tee /logs/agent/opencode.txt"
++    )
++    assert "timeout" not in cmd.command
++    assert "--print-logs" not in cmd.command
++
++
++def test_run_command_timeout_wrapper_and_debug_logs(tmp_path: Path) -> None:
++    (cmd,) = _agent(tmp_path, opencode_timeout_sec=870, opencode_debug=True).create_run_agent_commands("-x")
++    assert cmd.command.startswith(f"set -o pipefail; timeout -k 10 870 opencode --model nemogym/{MODEL} run ")
++    assert "--title 'NeMo Gym' --print-logs --log-level DEBUG -- -x 2>&1 </dev/null |" in cmd.command
++
++
++@pytest.mark.parametrize("bad", [0, -5])
++def test_rejects_non_positive_timeout(tmp_path: Path, bad: int) -> None:
++    with pytest.raises(ValueError, match="opencode_timeout_sec"):
++        _agent(tmp_path, opencode_timeout_sec=bad)
++
++
++@needs_bash
++@pytest.mark.parametrize("timeout_sec", [None, 30])
++def test_run_command_in_bash_closes_stdin_and_keeps_the_exit_status(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, timeout_sec: int | None
++) -> None:
++    if timeout_sec and shutil.which("timeout") is None:
++        pytest.skip("needs coreutils timeout")
++    log = tmp_path / "opencode.txt"
++    monkeypatch.setattr(mod, "LOG_FILE", str(log))
++    bin_dir = tmp_path / "bin"
++    bin_dir.mkdir()
++    # Stands in for `opencode run`: reads stdin to EOF as OpenCode does for a non-TTY stdin
++    # (cli/cmd/run.ts:399), prints its argv and exits 3.
++    fake = bin_dir / "opencode"
++    fake.write_text('#!/bin/bash\nstdin=$(cat)\nprintf "%s\\n" "$@"\necho "stdin=[$stdin]"\nexit 3\n')
++    fake.chmod(0o755)
++    (cmd,) = _agent(tmp_path, opencode_timeout_sec=timeout_sec).create_run_agent_commands("-fix it")
++    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
++    # stdin is a pipe whose write end stays open, like the sandbox exec's: without </dev/null the
++    # fake (like OpenCode) would block on it until the timeout below
++    read_end, write_end = os.pipe()
++    try:
++        proc = subprocess.run(
++            ["bash", "-c", cmd.command], stdin=read_end, capture_output=True, text=True, env=env, timeout=20
++        )
++    finally:
++        os.close(read_end)
++        os.close(write_end)
++    assert proc.returncode == 3  # opencode's status, not tee's 0
++    lines = log.read_text().splitlines()
++    assert lines == proc.stdout.splitlines()
++    assert lines[-3:] == ["--", "-fix it", "stdin=[]"]
++    assert lines[:5] == ["--model", f"nemogym/{MODEL}", "run", "--format=json", "--title"]
++
++
++# --- environment ---------------------------------------------------------------------------------
++
++
++def test_env(tmp_path: Path) -> None:
++    (cmd,) = _agent(
++        tmp_path, model_info={"max_input_tokens": 16384, "max_output_tokens": 4096}
++    ).create_run_agent_commands("x")
++    env = dict(cmd.env)
++    assert json.loads(env.pop("OPENCODE_CONFIG_CONTENT"))["model"] == f"nemogym/{MODEL}"
++    assert env == {
++        "XDG_DATA_HOME": "/logs/agent/opencode-data",
++        "OPENCODE_DISABLE_MODELS_FETCH": "true",
++        "OPENCODE_DISABLE_AUTOUPDATE": "true",
++        "OPENCODE_DISABLE_PROJECT_CONFIG": "true",
++        "OPENCODE_FAKE_VCS": "git",
++        "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": "4096",
++    }
++
++
++def test_no_output_token_env_without_model_info(tmp_path: Path) -> None:
++    (cmd,) = _agent(tmp_path).create_run_agent_commands("x")
++    assert "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX" not in cmd.env
++
++
++# --- config --------------------------------------------------------------------------------------
++
++
++def test_config(tmp_path: Path) -> None:
++    config = _config(
++        _agent(tmp_path, max_turns=20, model_info={"max_input_tokens": 16384, "max_output_tokens": 16384})
++    )
++    assert set(config) <= OPENCODE_1_17_11_TOP_LEVEL_KEYS
++    assert config["enabled_providers"] == ["nemogym"]
+     provider = config["provider"]["nemogym"]
+     assert provider["npm"] == "@ai-sdk/openai-compatible"
+-    assert provider["options"]["baseURL"] == API_BASE
+-    assert list(provider["models"]) == ["Qwen/Qwen3-4B-Instruct-2507"]
+-    assert config["model"] == config["small_model"] == "nemogym/Qwen/Qwen3-4B-Instruct-2507"
++    assert provider["options"] == {"baseURL": API_BASE, "apiKey": "EMPTY", "timeout": False, "headerTimeout": False}
++    assert "chunkTimeout" not in provider["options"]  # positive int only; unset = off
++    assert provider["models"] == {MODEL: {"name": MODEL, "limit": {"context": 16384, "input": 16384, "output": 16384}}}
++    assert config["model"] == config["small_model"] == f"nemogym/{MODEL}"
++    assert config["agent"] == {"title": {"disable": True}, "build": {"steps": 20}}
++    assert config["compaction"] == {"auto": False, "prune": False}
++    assert config["share"] == "disabled"
++    assert config["autoupdate"] is False
++    assert config["snapshot"] is False
++    assert config["permission"] == {
++        "*": "allow",
++        "task": "deny",
++        "webfetch": "deny",
++        "websearch": "deny",
++        "todowrite": "deny",
++    }
++    assert next(iter(config["permission"])) == "*"  # last match wins in OpenCode
++
++
++def test_no_limit_or_steps_when_unknown(tmp_path: Path) -> None:
++    config = _config(_agent(tmp_path))
++    assert config["provider"]["nemogym"]["models"] == {MODEL: {"name": MODEL}}
++    assert config["agent"] == {"title": {"disable": True}}
++
++
++def test_output_limit_capped_by_request_max_output_tokens(tmp_path: Path) -> None:
++    agent = _agent(
++        tmp_path,
++        model_info={"max_input_tokens": 16384, "max_output_tokens": 16384},
++        responses_create_params={"max_output_tokens": 2048, "temperature": 1.0},
++    )
++    assert agent.model_limits() == {"context": 16384, "input": 16384, "output": 2048}
++    assert _agent(tmp_path, model_info={"max_input_tokens": 8192}).model_limits() == {
++        "context": 8192,
++        "input": 8192,
++        "output": 8192,
++    }
++
++
++def test_opencode_config_overlay_is_deep_merged_last(tmp_path: Path) -> None:
++    overlay = {
++        "provider": {"nemogym": {"options": {"chunkTimeout": 900000}}},
++        "permission": {"bash": "allow", "todowrite": None},
++        "agent": {"build": {"prompt": "Solve the task."}},
++        "snapshot": None,
++        "instructions": ["/app/AGENTS.md"],
++    }
++    config = _config(_agent(tmp_path, max_turns=7, opencode_config=overlay))
++    options = config["provider"]["nemogym"]["options"]
++    assert options["chunkTimeout"] == 900000 and options["timeout"] is False and options["baseURL"] == API_BASE
++    assert list(config["permission"]) == ["*", "task", "webfetch", "websearch", "bash"]
++    assert config["agent"]["build"] == {"steps": 7, "prompt": "Solve the task."}
++    assert config["agent"]["title"] == {"disable": True}
++    assert "snapshot" not in config
++    assert config["instructions"] == ["/app/AGENTS.md"]
+ 
+ 
+-def test_ignores_harbor_agent_extra_kwargs(tmp_path: Path) -> None:
+-    # harbor_agent always passes these; the agent must accept and ignore them
+-    agent = _agent(tmp_path, responses_create_params={"temperature": 1.0}, temperature=1.0)
++def test_deep_merge_does_not_mutate_inputs() -> None:
++    base = {"a": {"b": 1}, "c": [1]}
++    overlay = {"a": {"d": 2}, "c": [2]}
++    assert deep_merge(base, overlay) == {"a": {"b": 1, "d": 2}, "c": [2]}
++    assert base == {"a": {"b": 1}, "c": [1]} and overlay == {"a": {"d": 2}, "c": [2]}
++
++
++def test_consumes_harbor_agent_kwargs(tmp_path: Path) -> None:
++    # harbor_agent passes these (plus Terminus-2 kwargs merged from the overlay); all must be accepted
++    agent = _agent(
++        tmp_path,
++        responses_create_params={"temperature": 1.0, "top_p": 1.0, "input": []},
++        temperature=1.0,
++        max_turns=3,
++        model_info={"max_input_tokens": 4096, "max_output_tokens": 1024},
++        interleaved_thinking=False,
++    )
++    assert agent._responses_create_params == {"temperature": 1.0, "top_p": 1.0, "input": []}
++    assert agent._max_turns == 3
++    assert agent.model_limits() == {"context": 4096, "input": 4096, "output": 1024}
+     assert agent.create_run_agent_commands("x")
++
++
++# --- install -------------------------------------------------------------------------------------
++
++
++def test_default_install_is_the_pinned_binary(tmp_path: Path) -> None:
++    agent = _agent(tmp_path)
++    assert agent.version() == "1.17.11"
++    assert agent._install_agent_template_path == mod.BINARY_INSTALL_TEMPLATE
++    assert agent._template_variables == {
++        "version": "1.17.11",
++        "url": "https://github.com/anomalyco/opencode/releases/download/v1.17.11/opencode-linux-x64-baseline.tar.gz",
++        "sha256": "36064327d5a3fba662264f5726f517eafa26d1aefb0d59bc95e66bddccf3497b",
++        "install_dir": "/usr/local/bin",
++    }
++
++
++def test_other_version_has_no_known_digest_unless_given(tmp_path: Path) -> None:
++    assert _agent(tmp_path, version="1.18.1")._template_variables["sha256"] == "''"
++    digest = "a" * 64
++    assert _agent(tmp_path, version="1.18.1", opencode_sha256=digest)._template_variables["sha256"] == digest
++
++
++def test_npm_install_uses_harbors_script(tmp_path: Path) -> None:
++    agent = _agent(tmp_path, opencode_install="npm", version="1.18.1")
++    path = agent._install_agent_template_path
++    assert path.name == "install-opencode.sh.j2" and path.exists()
++    assert agent._template_variables == {"version": "1.18.1"}
++    rendered = Environment().from_string(path.read_text()).render(**agent._template_variables)
++    assert "npm i -g opencode-ai@1.18.1" in rendered
++
++
++@pytest.mark.parametrize(
++    "kwargs, match",
++    [
++        ({"opencode_install": "docker"}, "opencode_install"),
++        ({"version": "1.17.11; rm -rf /"}, "version"),
++        ({"opencode_sha256": "XYZ"}, "opencode_sha256"),
++    ],
++)
++def test_rejects_bad_install_kwargs(tmp_path: Path, kwargs: dict, match: str) -> None:
++    with pytest.raises(ValueError, match=match):
++        _agent(tmp_path, **kwargs)
++
++
++def _release(tmp_path: Path, printed_version: str) -> tuple[str, str]:
++    """A fake release archive (file:// URL, sha256) whose `opencode` prints `printed_version`."""
++    script = f"#!/bin/sh\necho {printed_version}\n".encode()
++    buf = io.BytesIO()
++    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
++        info = tarfile.TarInfo("opencode")
++        info.size, info.mode = len(script), 0o755
++        tar.addfile(info, io.BytesIO(script))
++    archive = tmp_path / "release" / "opencode.tar.gz"
++    archive.parent.mkdir(parents=True, exist_ok=True)
++    archive.write_bytes(buf.getvalue())
++    return archive.as_uri(), hashlib.sha256(buf.getvalue()).hexdigest()
++
++
++def _run_install(tmp_path: Path, agent: OpenCodeNemoGym, url: str, sha256: str | None = None):
++    variables = {
++        **agent._template_variables,
++        "url": shlex.quote(url),
++        "install_dir": shlex.quote(str(tmp_path / "bin")),
++    }
++    if sha256 is not None:
++        variables["sha256"] = shlex.quote(sha256)
++    script = tmp_path / "install.sh"
++    script.write_text(Environment().from_string(agent._install_agent_template_path.read_text()).render(**variables))
++    return subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=60)
++
++
++needs_install_tools = pytest.mark.skipif(
++    any(shutil.which(tool) is None for tool in ("bash", "python3", "tar", "install")),
++    reason="needs bash, python3, tar and install",
++)
++
++
++@needs_install_tools
++def test_install_script_downloads_verifies_and_installs(tmp_path: Path) -> None:
++    url, digest = _release(tmp_path, "1.17.11")
++    result = _run_install(tmp_path, _agent(tmp_path), url, digest)
++    assert result.returncode == 0, result.stderr
++    installed = tmp_path / "bin" / "opencode"
++    assert subprocess.run([str(installed), "--version"], capture_output=True, text=True).stdout == "1.17.11\n"
++    assert f"sha256 {digest}" in result.stdout
++    # a second run finds the right version and downloads nothing
++    again = _run_install(tmp_path, _agent(tmp_path), "file:///nonexistent.tar.gz", digest)
++    assert again.returncode == 0 and "already installed" in again.stdout
++
++
++@needs_install_tools
++def test_install_script_without_digest_skips_the_check(tmp_path: Path) -> None:
++    url, _ = _release(tmp_path, "1.18.1")
++    result = _run_install(tmp_path, _agent(tmp_path, version="1.18.1"), url)
++    assert result.returncode == 0, result.stderr
++
++
++@needs_install_tools
++def test_install_script_rejects_a_wrong_digest(tmp_path: Path) -> None:
++    url, _ = _release(tmp_path, "1.17.11")
++    result = _run_install(tmp_path, _agent(tmp_path), url, "0" * 64)
++    assert result.returncode != 0
++    assert "sha256 mismatch" in result.stderr
++    assert not (tmp_path / "bin" / "opencode").exists()
++
++
++@needs_install_tools
++def test_install_script_rejects_a_wrong_version(tmp_path: Path) -> None:
++    url, digest = _release(tmp_path, "1.18.1")
++    result = _run_install(tmp_path, _agent(tmp_path), url, digest)
++    assert result.returncode != 0
++    assert "version mismatch" in result.stderr
+-- 
+2.56.0
+
