@@ -505,7 +505,9 @@ RUN=sft-harbor-micro-debug3 JOB_TIME=02:00:00 NEMO_RL_DIR=$HOME/projects/nemo-rl
 - Job 1210063: advantages from -2.47 to 2.47, loss 0.15 and 0.46. Validation 20/32 at step 0, 21/32 after step 2,
   each about 16 minutes; a step's 64 trials took about 16 minutes. Generation KL error 0.002.
 
-A run leaves the pods of its last batch behind until `sandbox_ttl_s` (1 h). To delete them, by the run's label:
+A run leaves the pods of its last batch behind until `sandbox_ttl_s` (1 h). To delete them, by the run's label
+(on HANGANG the Gym venvs are in `$HOME/.cache/nemo-rl-apertus2/gym-venvs` since `sites/hangang.env` moved them
+there, so use that instead of `$SCRATCH/nemo-rl-apertus2/gym-venvs`, and any server's venv):
 
 ```bash
 printf 'sandbox:\n  opensandbox:\n    connection:\n      domain: https://opensandbox-gvisor.breithorn.svc.cscs.ch\n      api_key_file: %s\n' \

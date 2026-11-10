@@ -44,5 +44,5 @@ fi
 # servers' `uv pip install` fails with "the current Python version (3.12.3) does not satisfy".
 { grep -rl --include=pyproject.toml 'requires-python = ">=3.13.14"' "${GYM_DIR}" || true; } \
     | xargs -r sed -i 's/requires-python = ">=3.13.14"/requires-python = ">=3.12"/'
-mkdir -p "${SCRATCH}/nemo-rl-apertus2/gym-venvs"
+mkdir -p "${GYM_VENV_DIR:-${SCRATCH}/nemo-rl-apertus2/gym-venvs}"
 echo "== Gym ready: $(git -C "${GYM_DIR}" log --oneline -1)"
