@@ -47,7 +47,10 @@ compose_cfg() {
            printf '  - %s\n' "$(realpath "${ROOT}/experiments/harbor-capture-sc/opencode-sc.yaml")" \
                "$(realpath "${ROOT}/experiments/harbor-capture-sc/tunnel-sc.yaml")" \
                "$(realpath "${HERE}/run-s-opencode.yaml")" >> "$2" ;;
-        *) echo "compose_cfg: run must be a, b, s or o" >&2; return 1 ;;
+        # W: run O on SWE-Lego (run-s.sh AGENT=opencode TASKS=swe-lego): + run-s-swe-lego.yaml
+        w) compose_cfg o "$2" || return 1
+           printf '  - %s\n' "$(realpath "${HERE}/run-s-swe-lego.yaml")" >> "$2" ;;
+        *) echo "compose_cfg: run must be a, b, s, o or w" >&2; return 1 ;;
     esac
 }
 

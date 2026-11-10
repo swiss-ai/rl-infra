@@ -1,0 +1,24 @@
+# Run S with OpenCode on SWE-Lego (run-s.sh AGENT=opencode TASKS=swe-lego). Merged last, after
+# run-s-opencode.yaml. Tasks: Ambroise's SWE-Lego v05 Harbor tasks
+# (/capstor/store/cscs/swissai/infra01/users/aborbely/swe_lego_v05/tasks, 1876 before filtering), turned
+# into $HARBOR_ROOT by ../../envs/prepare_swe_lego_tasks.py (keeps the tasks whose reference solution
+# scored 1 and whose empty run scored 0; rows `swe_lego::<task>`, the alias run-s-sft.yaml maps to
+# $HARBOR_TASKS_DIR). Images: public rl-registry project swe_lego_v05_1, about 1-1.4 GB each, one per task.
+# Read on Daint for task 0b01001001__spectree-64 (2026-11-10):
+# - repository in /testbed (tests/test.sh: `cd /testbed`), so OpenCode runs there instead of /app;
+# - task.toml: agent and verifier timeout_sec 3000, 4 CPUs, 4096 MB, 10 GB storage, network public;
+#   harbor_agent_max_timeout (1800, envs/harbor-osb-sft.yaml) caps the agent at 1800 s, so OpenCode
+#   is ended at 1740 s, before Harbor's agent timeout;
+# - grading: tests/test.sh applies the test patch and requires every FAIL_TO_PASS + PASS_TO_PASS test.
+# UNVERIFIED: test.sh puts /opt/conda/envs/testbed/bin on PATH itself; whether OpenCode's bash sees that
+# environment (the image's ENV) in an OpenSandbox exec is not known. The probe shows it (python missing
+# or without the repo's dependencies).
+env:
+  nemo_gym:
+    harbor_agent:
+      responses_api_agents:
+        harbor_agent:
+          harbor_agent_kwargs:
+            opencode_workdir: /testbed
+            # 60 s under the 1800 s agent cap; OPENCODE_TIMEOUT_SEC overrides
+            opencode_timeout_sec: ${oc.decode:${oc.env:OPENCODE_TIMEOUT_SEC,1740}}

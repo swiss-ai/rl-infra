@@ -23,6 +23,12 @@
 #   AGENT=opencode bash experiments/chonk-sc/run-s.sh grpo.num_prompts_per_step=2 \
 #       grpo.num_generations_per_prompt=8 grpo.max_num_steps=1 policy.train_global_batch_size=16
 #   OPENCODE_VERSION, OPENCODE_TIMEOUT_SEC, OPENCODE_DEBUG, CHISEL_DIR as ../harbor-capture-sc/run.sh.
+# TASKS=swe-lego (with AGENT=opencode): SWE-Lego v05 instead of the micro tasks, plus run-s-swe-lego.yaml
+# (OpenCode in /testbed, 1740 s). HARBOR_ROOT defaults to $SCRATCH/osb/swe_lego_v05; prepare it once:
+#   python3 envs/prepare_swe_lego_tasks.py /capstor/store/cscs/swissai/infra01/users/aborbely/swe_lego_v05/tasks \
+#       $SCRATCH/osb/swe_lego_v05
+# Probe (solve rate, context overflows, time per trial):
+#   AGENT=opencode TASKS=swe-lego bash experiments/chonk-sc/run-s.sh grpo.max_num_steps=1
 # Env: SFT_MODEL_SRC, SFT_EDF_NAME, ACCOUNT, PARTITION (default normal), JOB_TIME (default 03:00:00), RUN,
 # HARBOR_ROOT (default $SCRATCH/osb/harbor_micro), OPENSANDBOX_API_KEY_FILE (default ~/.opensandbox_token),
 # OVERLAY (extra overlays, merged after ours), DRIVER_RETRIES (default 0), everything else
@@ -35,9 +41,25 @@ APERTUS2_DIR="${ROOT}/backends/nemo-rl/apertus2"
 source "${ROOT}/sites/load.sh" && rl_infra_load "${APERTUS2_DIR}/env"
 source "${HERE}/common.sh"
 AGENT="${AGENT:-terminus}"
+TASKS="${TASKS:-micro}"
+# AGENTS=opencode was silently ignored once (job 5316090 ran Terminus-2)
+[[ -z "${AGENTS:-}" ]] || { echo "ERROR: AGENTS is set; the variable is AGENT" >&2; exit 1; }
+case "${TASKS}" in
+    micro) SUFFIX="" ;;
+    swe-lego)
+        [[ "${AGENT}" == opencode ]] || { echo "ERROR: TASKS=swe-lego needs AGENT=opencode" >&2; exit 1; }
+        SUFFIX="-swe"
+        export HARBOR_ROOT="${HARBOR_ROOT:-${SCRATCH}/osb/swe_lego_v05}"
+        [[ -s "${HARBOR_ROOT}/train.jsonl" && -d "${HARBOR_ROOT}/tasks" ]] || {
+            echo "ERROR: no SWE-Lego tasks in ${HARBOR_ROOT}; prepare them (see the header):" >&2
+            echo "  python3 ${ROOT}/envs/prepare_swe_lego_tasks.py /capstor/store/cscs/swissai/infra01/users/aborbely/swe_lego_v05/tasks ${HARBOR_ROOT}" >&2
+            exit 1; }
+        ;;
+    *) echo "ERROR: TASKS must be micro or swe-lego, not ${TASKS}" >&2; exit 1 ;;
+esac
 case "${AGENT}" in
     terminus) export RUN="${RUN:-chonk-sc-s-harbor-sft-$(date +%Y%m%d-%H%M%S)}" ;;
-    opencode) export RUN="${RUN:-chonk-sc-s-opencode-$(date +%Y%m%d-%H%M%S)}" ;;
+    opencode) export RUN="${RUN:-chonk-sc-s-opencode${SUFFIX}-$(date +%Y%m%d-%H%M%S)}" ;;
     *) echo "ERROR: AGENT must be terminus or opencode, not ${AGENT}" >&2; exit 1 ;;
 esac
 
@@ -91,6 +113,7 @@ if [[ "${AGENT}" == opencode ]]; then
     bash "${APERTUS2_DIR}/fetch-chisel.sh"
     CAPTURE_SC="${ROOT}/experiments/harbor-capture-sc"
     AGENT_OVERLAY=" ${CAPTURE_SC}/opencode-sc.yaml ${CAPTURE_SC}/tunnel-sc.yaml ${HERE}/run-s-opencode.yaml"
+    [[ "${TASKS}" != swe-lego ]] || AGENT_OVERLAY+=" ${HERE}/run-s-swe-lego.yaml"
     export NEMO_GYM_WORKLOAD="${NEMO_GYM_WORKLOAD:-chonk-opencode-sft-sc}"
 fi
 
@@ -100,7 +123,8 @@ export SCRIPT="${SC_SCRIPT}" RECIPE="${SFT_RECIPE}" TASK="${TASK_COPY}"
 export OVERLAY="${HERE}/run-b-harbor-sc.yaml ${HERE}/run-s-sft.yaml${AGENT_OVERLAY}${OVERLAY:+ ${OVERLAY}}"
 export PARTITION="${PARTITION:-normal}" DRIVER_RETRIES="${DRIVER_RETRIES:-0}"
 # ~10-15 min start-up (16k layout, Megatron import of the HF export) + 3 steps; worst case
-# 3 x rollout_timeout_s (50 min)
+# 3 x rollout_timeout_s (50 min); SWE-Lego trials can take the full 30 min agent cap each step
+[[ "${TASKS}" == swe-lego ]] && export JOB_TIME="${JOB_TIME:-04:00:00}"
 export JOB_TIME="${JOB_TIME:-03:00:00}"
 export NEMO_GYM_WORKLOAD="${NEMO_GYM_WORKLOAD:-chonk-harbor-sft-sc}"
 exec bash "${ROOT}/run-harbor-osb.sh" "$@"

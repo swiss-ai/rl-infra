@@ -226,6 +226,28 @@ per-turn prompt and generation lengths (model-call capture), context overflows (
 chat endpoint), and whether long generations survive the tunnel (OpenCode's `step_finish` ->
 `step_start` gaps in `agent/opencode.txt`).
 
+### Run S with OpenCode on SWE-Lego (`AGENT=opencode TASKS=swe-lego`)
+
+Harder tasks: Ambroise's SWE-Lego v05 Harbor tasks (real Python repositories, graded by the task's
+FAIL_TO_PASS + PASS_TO_PASS tests), instead of the micro tasks. `run-s-swe-lego.yaml` runs OpenCode in
+`/testbed` (where the tasks keep the repository) and ends it at 1740 s, under the 1800 s agent cap
+(the tasks allow 3000 s). `HARBOR_ROOT` defaults to `$SCRATCH/osb/swe_lego_v05`; `JOB_TIME` to 04:00:00.
+
+```bash
+# once: keep the tasks whose reference solution scores 1 and whose empty run scores 0
+python3 envs/prepare_swe_lego_tasks.py /capstor/store/cscs/swissai/infra01/users/aborbely/swe_lego_v05/tasks \
+    $SCRATCH/osb/swe_lego_v05
+RUNS=w bash experiments/chonk-sc/check.sh
+# probe: 8 tasks x 8, one step (solve rate, context overflows, time per trial)
+AGENT=opencode TASKS=swe-lego bash experiments/chonk-sc/run-s.sh grpo.max_num_steps=1
+```
+
+Watch: the solve rate (the SFT model scored 0.93 on the micro tasks); `maximum context length` 400s and
+`ContextLengthExceededError` trials (16384 tokens, first prompt about 5.6k); OpenCode exit 124 (time
+limit); whether OpenCode's `bash` finds the repository's Python (the tasks' `test.sh` puts
+`/opt/conda/envs/testbed/bin` on PATH itself; UNVERIFIED that the sandbox exec has it); sandbox start
+(one 1-1.4 GB image per task).
+
 ## Open risks (from the feasibility report, ranked)
 
 1. SC split-train path with Megatron EP32 + UCCL/DeepEP + CPU-offloaded distributed AdamW: first

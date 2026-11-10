@@ -352,8 +352,10 @@ else:
         expect("pod label run = NEMO_GYM_RUN_ID (the reaper's filter)", osb["attribution"].get("run"), os.environ.get("NEMO_GYM_RUN_ID"))
         expect("pod label user = NEMO_GYM_USER", osb["attribution"].get("user"), os.environ.get("NEMO_GYM_USER"))
         expect("dataset alias swe_lego (run B's rows)", "swe_lego" in hcfg["harbor_datasets"], True)
-        if EXPECT == "o":
-            # run-s.sh AGENT=opencode: OpenCode in the pod through the tunnel (run-s-opencode.yaml)
+        if EXPECT in ("o", "w"):
+            # run-s.sh AGENT=opencode: OpenCode in the pod through the tunnel (run-s-opencode.yaml);
+            # w: TASKS=swe-lego (run-s-swe-lego.yaml: /testbed, 1740 s under the 1800 s agent cap)
+            swe = EXPECT == "w"
             ng = mc.env["nemo_gym"]
             vm = ng["policy_model"]["responses_api_models"]["vllm_model"]
             tun = hcfg["harbor_environment_kwargs"].get("model_tunnel") or {}
@@ -362,8 +364,12 @@ else:
             expect("model URL is the tunnel's pod end", (hcfg.get("harbor_model_base_url"), tun.get("pod_port")),
                    ("http://127.0.0.1:8000", 8000))
             expect("OpenCode version / install", (kw.get("version"), kw.get("opencode_install")), ("1.17.11", "binary"))
-            expect("opencode_workdir", kw.get("opencode_workdir"), "/app")
-            expect("OpenCode timeout below the agent timeout", kw.get("opencode_timeout_sec"), 870)
+            expect("opencode_workdir", kw.get("opencode_workdir"), "/testbed" if swe else "/app")
+            expect("OpenCode timeout below the agent timeout", kw.get("opencode_timeout_sec"), 1740 if swe else 870)
+            expect("harbor agent / verifier max timeout",
+                   (hcfg.get("harbor_agent_max_timeout"), hcfg.get("harbor_verifier_max_timeout")), (1800, 1200))
+            if swe:
+                expect("tasks are SWE-Lego (HARBOR_ROOT)", "swe_lego_v05" in os.environ.get("HARBOR_ROOT", ""), True)
             expect("model_info (context, per-turn output)",
                    (kw["model_info"]["max_input_tokens"], kw["model_info"]["max_output_tokens"]), (16384, 6144))
             # OpenCode sends neither temperature nor top_p for this model id
