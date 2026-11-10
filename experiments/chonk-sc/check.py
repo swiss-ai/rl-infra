@@ -371,6 +371,8 @@ else:
                    dict(vm.get("sampling_overrides") or {}),
                    {"temperature": gen["temperature"], "top_p": gen["top_p"], "max_tokens": gen["max_new_tokens"]})
             expect("stop_token_ids travel with each request", (vm.get("extra_body") or {}).get("stop_token_ids"), [12])
+            # LIMITATION (run-s-opencode.yaml header): echoed thinking is dropped, not sent as `reasoning`
+            expect("uses_interleaved_reasoning (workaround, job 5316800)", vm.get("uses_interleaved_reasoning"), False)
             cap = str(ng.get("model_call_capture_dir") or "")
             expect("Gym model-call capture on, absolute dir",
                    (ng.get("observability_enabled"), cap.startswith("/")), (True, True))
