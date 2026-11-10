@@ -40,7 +40,7 @@ The previous smoke test (4 sandboxes, ~7 min) is still one command:
 | File | What |
 |---|---|
 | `terminus-sc.yaml` | task: micro-tasks via `harbor_agent` + Terminus-2, Single-Controller blocks, token capture |
-| `opencode-sc.yaml` | overlay: OpenCode (installed in the pod) instead of Terminus-2 |
+| `opencode-sc.yaml` | overlay (`AGENT=opencode`): OpenCode (pinned binary in the pod) instead of Terminus-2, model via the tunnel, `sampling_overrides` |
 | `mini-sc.yaml` | overlay (`AGENT=mini`): mini-swe-agent (installed in the pod) instead of Terminus-2, model via the tunnel |
 | `tunnel-sc.yaml` | overlay (`TUNNEL=1`): per-sandbox reverse tunnel, sandbox `127.0.0.1:8000` -> `policy_model` |
 | `run.sh` | `AGENT=terminus` (default), `AGENT=mini` or `AGENT=opencode`; calls `run-harbor-osb.sh` |
@@ -65,9 +65,10 @@ The previous smoke test (4 sandboxes, ~7 min) is still one command:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AGENT` | `terminus` | `terminus`: Terminus-2, loop on the node, commands in the pod (task `terminus-sc.yaml`). `mini`: mini-swe-agent installed and run in the pod, model through the tunnel (adds `mini-sc.yaml`, forces `TUNNEL=1`, needs patch 0015). `opencode`: OpenCode installed and run in the pod (adds overlay `opencode-sc.yaml`). Anything else is refused. |
-| `HARBOR_MODEL_BASE_URL` | none | `AGENT=opencode` only, required: the Gym model server as reachable from the pods, without `/v1`. `harbor_agent` appends the capture prefix and `/v1`. |
-| `OPENCODE_VERSION` | latest | `AGENT=opencode` only: `opencode-ai` npm version installed in each pod. |
+| `AGENT` | `terminus` | `terminus`: Terminus-2, loop on the node, commands in the pod (task `terminus-sc.yaml`). `mini`: mini-swe-agent installed and run in the pod, model through the tunnel (adds `mini-sc.yaml`, forces `TUNNEL=1`, needs patch 0015). `opencode`: OpenCode installed and run in the pod, model through the tunnel (adds `opencode-sc.yaml`, forces `TUNNEL=1`, needs patches 0020-0025). Anything else is refused. |
+| `OPENCODE_VERSION` | `1.17.11` | `AGENT=opencode` only: OpenCode release installed in each pod; patch 0023's config keys were checked against 1.17.11 (another version needs `opencode_sha256` and a re-check). |
+| `OPENCODE_TIMEOUT_SEC` | `870` | `AGENT=opencode` only: OpenCode's own time limit (`timeout`), below the agent timeout. |
+| `OPENCODE_DEBUG` | `false` | `AGENT=opencode` only: `true` writes OpenCode's debug log into `agent/opencode.txt`. |
 | `MSWEA_VERSION` | `8e8a515f...` (mini-sc.yaml) | `AGENT=mini` only: git ref of `li-boxuan/mini-swe-agent` (Harbor's install source) installed in each pod. |
 | `TUNNEL` | `0` | `1`: add `tunnel-sc.yaml` (needs patch 0013); fetches chisel into `CHISEL_DIR` (`$SCRATCH/chisel`) on the login node first. Run name gets `-tunnel`. |
 | `HARBOR_ROOT` | `$SCRATCH/osb/harbor_micro` | micro-task tree (`tasks/`, `train.jsonl`, `validation.jsonl`) |
@@ -175,7 +176,7 @@ build-essential, git; uv; `uv tool install git+https://github.com/li-boxuan/mini
 the pods have internet; Harbor allows 360 s for agent setup), then runs `mini` with the task. Every
 model call goes from the pod to `http://127.0.0.1:8000/ng-rollout/<id>/training-token-capture/v1`,
 through the per-sandbox tunnel to `policy_model`, which captures the tokens. litellm sends
-`stream: false`, so capture accepts it (OpenCode streams and gets 422).
+`stream: false`, so capture accepts it (OpenCode streams; patches 0020/0021 replay its calls as SSE).
 
 What patch 0015 changes against Harbor's own mini-swe-agent: the URL comes per run (Harbor's reads
 the node's global `OPENAI_API_BASE`); the rollout's `temperature`/`top_p`/`max_output_tokens`
@@ -209,27 +210,34 @@ the rerun: `exit_status` in `mini-swe-agent.trajectory.json` is `Submitted`/`Cal
 Likely first failures: agent setup over 360 s (apt-get under gVisor at 32 parallel); a litellm
 parameter the server rejects (shows in `mini-swe-agent.txt` as an `APIError`, not retried).
 
-## Step B with OpenCode (needs a model endpoint the pods can reach)
+## Step B with OpenCode in the sandbox, model through the tunnel (`AGENT=opencode`)
 
-    HARBOR_MODEL_BASE_URL=https://<reachable host>/<path> OPENCODE_VERSION=<x.y.z> \
-        AGENT=opencode bash experiments/harbor-capture-sc/run.sh
+    OPENCODE_DEBUG=true AGENT=opencode bash experiments/harbor-capture-sc/run.sh \
+        grpo.num_prompts_per_step=2 grpo.num_generations_per_prompt=2 grpo.max_num_steps=1 \
+        policy.train_global_batch_size=4                     # R1 smoke; JOB_TIME=01:00:00 is enough
+    AGENT=opencode bash experiments/harbor-capture-sc/run.sh  # R2: 8 x 4 x 3
 
-OpenCode is installed into every pod at setup (apt-get, nvm, `npm i -g opencode-ai`; the pods have
-internet) and calls `HARBOR_MODEL_BASE_URL` + `/ng-rollout/<id>/training-token-capture/v1` from
-inside the pod. OpenSandbox pods cannot reach CSCS-internal hosts, so this needs a proxy or tunnel
-that the pods can reach and that forwards, path unchanged, to Gym's `policy_model` server on the
-training node. Open points:
+Same path as mini (`TUNNEL=1` is forced): OpenCode runs in the pod and calls
+`http://127.0.0.1:8000/ng-rollout/<id>/training-token-capture/v1` through the per-sandbox tunnel.
+Needs Gym patches 0020-0025 (run.sh checks markers of 0021 and 0023):
 
-- `policy_model`'s host and port are chosen at start-up (port range 5000-5999, node IP); the
-  forwarding target is only known from the log. A fixed port, or a forwarder started inside the
-  job, still has to be worked out.
-- Authentication on the public side: the Gym model server itself has none.
-- OpenCode writes no ATIF trajectory at this Harbor pin, so `results/` and the Harbor trial show
-  no conversation; the ledger is the only record of the model calls (the Harbor trial still has
-  `agent/opencode.txt` and the verifier output).
-- OpenCode's helper calls (title generation, compaction) appear as extra call chains; the rebuild
-  keeps one chain per rollout and masks when it cannot attribute the final one.
+- OpenCode (AI SDK) always streams. With 0020/0021 (upstream backport) the model server makes the
+  engine call non-streaming, commits the tokens and replays the reply as SSE; nothing reaches the
+  pod before generation ends, so OpenCode's provider timeouts are off (0023).
+- Install: 0023 downloads the standalone `opencode-linux-x64-baseline` 1.17.11 binary from GitHub
+  releases in the pod (python3, sha256 built in; no apt/nvm/npm). `opencode_install: npm` is the old
+  path.
+- Extra conversations mask the rollout under capture (more than one root/chain). 0023 switches off
+  the title call, compaction/pruning and sub-agents (`task`), and denies `webfetch`/`websearch`/`todowrite`.
+- Sampling: OpenCode sends temperature 0.55 for "qwen" model ids and no top_p, which NeMo-RL's HTTP
+  server rejects; `opencode-sc.yaml` sets `sampling_overrides` with the train values.
+- `opencode run` reads a non-TTY stdin to EOF before starting (the silent job 5236016); the command
+  closes it (`</dev/null`). `OPENCODE_TIMEOUT_SEC` (870) ends OpenCode before Harbor's 900 s agent
+  timeout, so `command-0/return-code.txt` (124 on timeout) and `agent/opencode.txt` are written.
 
-Without `HARBOR_MODEL_BASE_URL` `run.sh` refuses to start. A first test of reachability alone:
-run Step B with a URL that does not forward anywhere, and check in `agent/opencode.txt` of a trial
-that the request left the pod (connection refused / timeout vs. DNS failure).
+Check per trial: `agent/setup/stdout.txt` ("installed opencode 1.17.11"), `agent/opencode.txt` (JSON
+events, no 422, no stream/timeout errors), `agent/opencode-data/opencode/log/`, `command-0/return-code.txt`
+(0 or 124). Per rollout in the capture metrics: roots 1, chains 1, unresolved_* 0. Note the first call's
+prompt length (OpenCode's system prompt + tool schemas, estimated 8-9k tokens of the 16384 context).
+OpenCode writes no ATIF trajectory at this Harbor pin, so the ledger is the only record of the model
+calls. OpenCode retries 5xx responses; each retry is an extra captured call.
