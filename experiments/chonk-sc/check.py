@@ -352,6 +352,28 @@ else:
         expect("pod label run = NEMO_GYM_RUN_ID (the reaper's filter)", osb["attribution"].get("run"), os.environ.get("NEMO_GYM_RUN_ID"))
         expect("pod label user = NEMO_GYM_USER", osb["attribution"].get("user"), os.environ.get("NEMO_GYM_USER"))
         expect("dataset alias swe_lego (run B's rows)", "swe_lego" in hcfg["harbor_datasets"], True)
+        if EXPECT == "o":
+            # run-s.sh AGENT=opencode: OpenCode in the pod through the tunnel (run-s-opencode.yaml)
+            ng = mc.env["nemo_gym"]
+            vm = ng["policy_model"]["responses_api_models"]["vllm_model"]
+            tun = hcfg["harbor_environment_kwargs"].get("model_tunnel") or {}
+            expect("agent", hcfg.get("harbor_agent_import_path", "").rsplit(":", 1)[-1], "OpenCodeNemoGym")
+            expect("harbor_agent_name null", hcfg.get("harbor_agent_name"), None)
+            expect("model URL is the tunnel's pod end", (hcfg.get("harbor_model_base_url"), tun.get("pod_port")),
+                   ("http://127.0.0.1:8000", 8000))
+            expect("OpenCode version / install", (kw.get("version"), kw.get("opencode_install")), ("1.17.11", "binary"))
+            expect("opencode_workdir", kw.get("opencode_workdir"), "/app")
+            expect("OpenCode timeout below the agent timeout", kw.get("opencode_timeout_sec"), 870)
+            expect("model_info (context, per-turn output)",
+                   (kw["model_info"]["max_input_tokens"], kw["model_info"]["max_output_tokens"]), (16384, 6144))
+            # OpenCode sends neither temperature nor top_p for this model id
+            expect("sampling_overrides = train profile",
+                   dict(vm.get("sampling_overrides") or {}),
+                   {"temperature": gen["temperature"], "top_p": gen["top_p"], "max_tokens": gen["max_new_tokens"]})
+            expect("stop_token_ids travel with each request", (vm.get("extra_body") or {}).get("stop_token_ids"), [12])
+            cap = str(ng.get("model_call_capture_dir") or "")
+            expect("Gym model-call capture on, absolute dir",
+                   (ng.get("observability_enabled"), cap.startswith("/")), (True, True))
     conc = hcfg["concurrency"]
     (ok if conc >= a.max_inflight_prompts * gens else fail)(
         f"harbor concurrency {conc} >= max_inflight_prompts x generations {a.max_inflight_prompts * gens}")

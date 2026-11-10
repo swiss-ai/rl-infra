@@ -12,7 +12,7 @@
 #       and prints the resolved values that matter; with yq, also launch.sh's preflight.sh.
 # Exits non-zero on any failure.
 #
-# Env: RUNS ("a b s", default), CHECK_PYTHON (a Python >= 3.12 with omegaconf, hydra-core, pydantic;
+# Env: RUNS ("a b s", default; "o" = run S with AGENT=opencode, check it without the smoke overrides), CHECK_PYTHON (a Python >= 3.12 with omegaconf, hydra-core, pydantic;
 # default: a venv in $SCRATCH/chonk-sc-check/venv, created on first use with pip from PyPI),
 # HARBOR_ROOT (default $SCRATCH/osb/harbor_micro). Packages the config code imports but the venv
 # lacks (torch, ray, vllm, ...) are stubbed by check.py and listed; for a check without stubs run
@@ -37,12 +37,14 @@ export RL_REGISTRY_USERNAME="${RL_REGISTRY_USERNAME:-anonymous}" RL_REGISTRY_PAS
 export OPENSANDBOX_API_KEY_FILE="${OPENSANDBOX_API_KEY_FILE:-${HOME}/.opensandbox_token}"
 export NEMO_GYM_USER="${NEMO_GYM_USER:-${USER}}" NEMO_GYM_WORKLOAD="${NEMO_GYM_WORKLOAD:-chonk-harbor-sft-sc}"
 export NEMO_GYM_RUN_ID="${NEMO_GYM_RUN_ID:-chonk-sc-check-s}"
+# run O (run S with AGENT=opencode): what run-s.sh exports for tunnel-sc.yaml
+export CHISEL_DIR="${CHISEL_DIR:-${SCRATCH}/chisel}"
 total=0
 
 echo "== (b) NeMo-RL clone"
 check_nemo_rl_clone; total=$((total + $?))
 
-if [[ " ${RUNS} " == *" b "* || " ${RUNS} " == *" s "* ]]; then
+if [[ " ${RUNS} " == *" b "* || " ${RUNS} " == *" s "* || " ${RUNS} " == *" o "* ]]; then
     echo "== (c) Gym checkout for runs B and S (token capture)"
     check_gym_capture; total=$((total + $?))
 fi
@@ -100,12 +102,12 @@ fi
 echo "== inputs on scratch (warnings only)"
 model="${SCRATCH}/models/apertus2-chonk-lc-iter3576"
 [[ -d "${model}" ]] && echo "  ok    model ${model}" || echo "  WARN  model ${model} missing (run.sh, i.e. run A, stages it; run B does not)"
-if [[ " ${RUNS} " == *" b "* || " ${RUNS} " == *" s "* ]]; then
+if [[ " ${RUNS} " == *" b "* || " ${RUNS} " == *" s "* || " ${RUNS} " == *" o "* ]]; then
     for f in "${HARBOR_ROOT}/train.jsonl" "${HARBOR_ROOT}/validation.jsonl" "${HARBOR_TASKS_DIR}"; do
         [[ -e "${f}" ]] && echo "  ok    ${f}" || echo "  WARN  ${f} missing (runs B and S need it)"
     done
 fi
-if [[ " ${RUNS} " == *" s "* ]]; then
+if [[ " ${RUNS} " == *" s "* || " ${RUNS} " == *" o "* ]]; then
     [[ -r "${SFT_MODEL_SRC}/config.json" && -r "${SFT_MODEL_SRC}/model.safetensors.index.json" ]] \
         && echo "  ok    SFT export ${SFT_MODEL_SRC}: $(find "${SFT_MODEL_SRC}/" -maxdepth 1 -name '*.safetensors' | wc -l) shards" \
         || echo "  WARN  SFT export ${SFT_MODEL_SRC}: no readable config.json + model.safetensors.index.json (run S needs it)"

@@ -32,6 +32,7 @@ sft_task_copy() {
 #      with TASK = envs/harbor-osb.yaml, OVERLAY = run-b-harbor-sc.yaml
 #   S: the same with RECIPE = SFT_RECIPE, TASK = sft_task_copy (written next to out.yaml as
 #      <out>-task.yaml), OVERLAY = run-b-harbor-sc.yaml run-s-sft.yaml
+#   O: S + ../harbor-capture-sc/opencode-sc.yaml tunnel-sc.yaml run-s-opencode.yaml (run-s.sh AGENT=opencode)
 compose_cfg() {
     case "$1" in
         a) printf 'defaults:\n  - %s\n  - %s\n' "$(realpath "${CHONK_RECIPE}")" "$(realpath "${HERE}/run-a-gsm8k.yaml")" > "$2" ;;
@@ -41,7 +42,12 @@ compose_cfg() {
            printf 'defaults:\n  - %s\n  - %s\n  - %s\n  - %s\n' "$(realpath "${SFT_RECIPE}")" \
                "$(realpath "${2%.yaml}-task.yaml")" "$(realpath "${HERE}/run-b-harbor-sc.yaml")" \
                "$(realpath "${HERE}/run-s-sft.yaml")" > "$2" ;;
-        *) echo "compose_cfg: run must be a, b or s" >&2; return 1 ;;
+        # O: run S with AGENT=opencode (run-s.sh): + opencode-sc.yaml tunnel-sc.yaml run-s-opencode.yaml
+        o) compose_cfg s "$2" || return 1
+           printf '  - %s\n' "$(realpath "${ROOT}/experiments/harbor-capture-sc/opencode-sc.yaml")" \
+               "$(realpath "${ROOT}/experiments/harbor-capture-sc/tunnel-sc.yaml")" \
+               "$(realpath "${HERE}/run-s-opencode.yaml")" >> "$2" ;;
+        *) echo "compose_cfg: run must be a, b, s or o" >&2; return 1 ;;
     esac
 }
 

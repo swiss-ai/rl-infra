@@ -16,6 +16,13 @@
 # Then ../../run-harbor-osb.sh with RECIPE ../../recipes/apertus2-chonk-sft-vllm-adamw-tools.yaml, TASK
 # a copy of ../../envs/harbor-osb-sft.yaml without its defaults/script lines, OVERLAY run-b-harbor-sc.yaml
 # run-s-sft.yaml, SCRIPT=examples/run_grpo_single_controller.py.
+# AGENT=opencode: OpenCode in each pod instead of Terminus-2, calling the model through the per-pod
+# tunnel (../harbor-capture-sc/opencode-sc.yaml + tunnel-sc.yaml, as R2 job 5314745 on Qwen) plus
+# run-s-opencode.yaml (Gym model-call capture of every request). Smoke (16 samples: the trainer's
+# data-parallel size is 16):
+#   AGENT=opencode bash experiments/chonk-sc/run-s.sh grpo.num_prompts_per_step=2 \
+#       grpo.num_generations_per_prompt=8 grpo.max_num_steps=1 policy.train_global_batch_size=16
+#   OPENCODE_VERSION, OPENCODE_TIMEOUT_SEC, OPENCODE_DEBUG, CHISEL_DIR as ../harbor-capture-sc/run.sh.
 # Env: SFT_MODEL_SRC, SFT_EDF_NAME, ACCOUNT, PARTITION (default normal), JOB_TIME (default 03:00:00), RUN,
 # HARBOR_ROOT (default $SCRATCH/osb/harbor_micro), OPENSANDBOX_API_KEY_FILE (default ~/.opensandbox_token),
 # OVERLAY (extra overlays, merged after ours), DRIVER_RETRIES (default 0), everything else
@@ -27,7 +34,12 @@ ROOT="$(cd "${HERE}/../.." && pwd)"
 APERTUS2_DIR="${ROOT}/backends/nemo-rl/apertus2"
 source "${ROOT}/sites/load.sh" && rl_infra_load "${APERTUS2_DIR}/env"
 source "${HERE}/common.sh"
-export RUN="${RUN:-chonk-sc-s-harbor-sft-$(date +%Y%m%d-%H%M%S)}"
+AGENT="${AGENT:-terminus}"
+case "${AGENT}" in
+    terminus) export RUN="${RUN:-chonk-sc-s-harbor-sft-$(date +%Y%m%d-%H%M%S)}" ;;
+    opencode) export RUN="${RUN:-chonk-sc-s-opencode-$(date +%Y%m%d-%H%M%S)}" ;;
+    *) echo "ERROR: AGENT must be terminus or opencode, not ${AGENT}" >&2; exit 1 ;;
+esac
 
 [[ -r "${SFT_MODEL_SRC}/config.json" && -r "${SFT_MODEL_SRC}/model.safetensors.index.json" ]] \
     || { echo "ERROR: ${SFT_MODEL_SRC} has no readable config.json + model.safetensors.index.json (an HF export)" >&2; exit 1; }
@@ -65,10 +77,27 @@ if ! out="$(check_nemo_rl_clone)"; then
     exit 1
 fi
 
+AGENT_OVERLAY=""
+if [[ "${AGENT}" == opencode ]]; then
+    # OpenCode in the pod, as ../harbor-capture-sc/run.sh AGENT=opencode (R2 job 5314745), on Chonk
+    GYM_DIR="${NEMO_RL_DIR}/3rdparty/Gym-workspace/Gym"
+    grep -q opencode_workdir "${GYM_DIR}/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py" 2>/dev/null \
+        && grep -q server_start_script "${GYM_DIR}/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/model_tunnel.py" 2>/dev/null \
+        || { echo "ERROR: AGENT=opencode needs Gym patches 0013-0014 (tunnel) and 0023-0026 (OpenCode) in ${GYM_DIR} (bash ${APERTUS2_DIR}/setup-gym.sh)" >&2; exit 1; }
+    for v in OPENCODE_VERSION OPENCODE_TIMEOUT_SEC OPENCODE_DEBUG; do
+        [[ -z "${!v:-}" ]] || export "${v}"
+    done
+    export CHISEL_VERSION="${CHISEL_VERSION:-1.12.0}" CHISEL_DIR="${CHISEL_DIR:-${SCRATCH}/chisel}"
+    bash "${APERTUS2_DIR}/fetch-chisel.sh"
+    CAPTURE_SC="${ROOT}/experiments/harbor-capture-sc"
+    AGENT_OVERLAY=" ${CAPTURE_SC}/opencode-sc.yaml ${CAPTURE_SC}/tunnel-sc.yaml ${HERE}/run-s-opencode.yaml"
+    export NEMO_GYM_WORKLOAD="${NEMO_GYM_WORKLOAD:-chonk-opencode-sft-sc}"
+fi
+
 TASK_COPY="${OUT}/configs/${RUN}-task.yaml"
 sft_task_copy "${TASK_COPY}"
 export SCRIPT="${SC_SCRIPT}" RECIPE="${SFT_RECIPE}" TASK="${TASK_COPY}"
-export OVERLAY="${HERE}/run-b-harbor-sc.yaml ${HERE}/run-s-sft.yaml${OVERLAY:+ ${OVERLAY}}"
+export OVERLAY="${HERE}/run-b-harbor-sc.yaml ${HERE}/run-s-sft.yaml${AGENT_OVERLAY}${OVERLAY:+ ${OVERLAY}}"
 export PARTITION="${PARTITION:-normal}" DRIVER_RETRIES="${DRIVER_RETRIES:-0}"
 # ~10-15 min start-up (16k layout, Megatron import of the HF export) + 3 steps; worst case
 # 3 x rollout_timeout_s (50 min)

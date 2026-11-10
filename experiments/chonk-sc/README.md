@@ -205,6 +205,27 @@ and the FP8 vLLM weight refit, memory at 16k on 12 GH200 nodes, a turn cut at `m
 without a closed reply frame (`extend_chat_prompt` asserts on the next call, HTTP 500 to Gym).
 Research report `2026-11-05-sft-checkpoint-for-harbor-runs.md` (workspace), sections 4 and 5.
 
+### Run S with OpenCode (`AGENT=opencode`)
+
+OpenCode 1.17.11 runs inside each pod and calls the model through the per-pod tunnel, as in
+`../harbor-capture-sc` (R2 job 5314745 on Qwen3-4B); run-s.sh adds `opencode-sc.yaml`, `tunnel-sc.yaml`
+and `run-s-opencode.yaml` (Gym model-call capture: every request and response body under
+`$HARBOR_ROOT/model-calls/<run>`). Needs Gym patches 0013-0014 and 0020-0026 (setup-gym.sh) and chisel
+(fetched to `CHISEL_DIR` on first use). Check B (job 5315873) encoded OpenCode's first request in the
+Apertus 2 format: 5587 tokens, so ~10.8k of 16384 remain for the trajectory.
+
+```bash
+RUNS=o bash experiments/chonk-sc/check.sh        # step 0 (without the smoke overrides)
+# smoke: 16 samples, the smallest batch (trainer data-parallel size 16)
+AGENT=opencode bash experiments/chonk-sc/run-s.sh grpo.num_prompts_per_step=2 \
+    grpo.num_generations_per_prompt=8 grpo.max_num_steps=1 policy.train_global_batch_size=16
+```
+
+What to look at: `train step 1/1`, 0 x 422 and 0 unresolved parents in ray-driver.log, masked rollouts,
+per-turn prompt and generation lengths (model-call capture), context overflows (HTTP 400 from the
+chat endpoint), and whether long generations survive the tunnel (OpenCode's `step_finish` ->
+`step_start` gaps in `agent/opencode.txt`).
+
 ## Open risks (from the feasibility report, ranked)
 
 1. SC split-train path with Megatron EP32 + UCCL/DeepEP + CPU-offloaded distributed AdamW: first

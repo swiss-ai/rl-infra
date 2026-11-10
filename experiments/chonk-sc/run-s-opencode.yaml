@@ -1,0 +1,22 @@
+# Run S with OpenCode in the pod (run-s.sh AGENT=opencode). Merged after run-s-sft.yaml,
+# ../harbor-capture-sc/opencode-sc.yaml and ../harbor-capture-sc/tunnel-sc.yaml. What those give on
+# Chonk, checked against OpenCode v1.17.11 and the Gym tree (alpernates research notes
+# 2026-11-10-opencode-first-request-reconstruction.md, check B job 5315873):
+# - first prompt 5587 tokens in the Apertus 2 format (OpenCode's system message becomes the frame's
+#   `behavior`, its 7 tools the frame's tools), so ~10.8k of 16384 are left for the whole trajectory;
+#   with up to 6144 new tokens per turn (thinking budget 4096) and the thinking kept in the token
+#   history, a few turns can fill the context. This run measures it.
+# - thinking: vllm_model_for_training.yaml's uses_reasoning_parser puts it in `content` as
+#   <think>...</think>; OpenCode echoes that as plain text (it parses <think> only for titles, which
+#   0023 switches off), so no `reasoning_content` reaches Gym's schema (HTTP 422, job 1209869), and
+#   the capture fingerprint strips the leading think block (Gym patch 0019).
+# - sampling: OpenCode sends no temperature and no top_p for this model id; opencode-sc.yaml's
+#   sampling_overrides set the train profile. envs/harbor-osb-sft.yaml's Terminus kwargs
+#   (interleaved_thinking) reach OpenCodeNemoGym, and Harbor's BaseAgent at the pin ignores them.
+env:
+  nemo_gym:
+    # Gym's model-call capture: every request and response body at the policy_model endpoint, per
+    # rollout (no headers). Gives OpenCode's real requests (check B used a reconstruction), the
+    # per-turn lengths and any 4xx bodies. Small: ~25 KB per first request.
+    observability_enabled: true
+    model_call_capture_dir: ${oc.env:HARBOR_ROOT}/model-calls/${oc.env:NEMO_GYM_RUN_ID}
