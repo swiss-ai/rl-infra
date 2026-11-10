@@ -1,0 +1,1206 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Pranav Prashant Thombre <pthombre@nvidia.com>
+Date: Wed, 16 Sep 2026 23:33:48 +0000
+Subject: [PATCH 21/22] Support buffered SSE with external token staging
+ (#3382)
+
+## What does this PR do?
+
+Capture-prefixed requests with `stream: true` returned HTTP 422 when
+external token staging was enabled. Allow Chat Completions, Responses,
+and Anthropic Messages clients to use Gym's existing buffered SSE replay
+with externally staged training tokens. The compaction Responses adapter
+is covered by the same integration tests.
+
+Keep worker requests non-streaming after request overrides and reject
+conflicting static or per-request streaming overrides. Convert Responses
+output before fingerprinting so reasoning and tool-call continuations
+resolve the correct captured parent. Generation completes before SSE
+replay, so this provides protocol compatibility without reducing time to
+first content. Training reconstruction reads the staged tokens.
+
+Add 27 route-level cases covering JSON/SSE requests, evaluation capture
+on/off, worker request enforcement, response IDs, internal-field
+stripping, token reconstruction, and two-call reasoning/tool
+continuations.
+
+## Validation
+
+- 826 relevant Gym tests passed, including all 27 new integration cases,
+the capture and streaming suites, and the vLLM and compaction adapter
+suites.
+- Real Qwen3-0.6B tool rollout through Gym HTTP, the NeMo-RL HTTP
+worker, vLLM, and TransferQueue passed (Slurm job `3747841`): two
+committed calls, answer `4`, reward `1.0`, and reconstruction of 234
+tokens including 27 training tokens with finite logprobs.
+- Full `pre-commit run --all-files` passed.
+- Fern check passed with zero errors and one warning.
+
+## Checklist
+
+- [x] I have read the [contributing
+guidelines](https://docs.nvidia.com/nemo/gym/latest/contribute/development-setup).
+- [x] The change is focused; unrelated changes are excluded.
+- [x] Relevant tests pass locally.
+- [x] Full pre-commit checks pass locally.
+- [x] The commit has DCO sign-off.
+
+---------
+
+Signed-off-by: Pranav Thombre <pthombre@nvidia.com>
+
+(cherry picked from commit 1c2dcc77354dea1bb2d3bf4772d0587b106b9059)
+Backport conflict: FINGERPRINT_VERSION. Upstream bumps 1 -> 2; this branch
+already uses 3 (empty-turn marker, think-wrapped reasoning), so it becomes 4.
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ .../pages/model-server/anthropic-messages.mdx |   4 +
+ .../pages/model-server/model-call-capture.mdx |  16 +
+ nemo_gym/base_responses_api_model.py          |  78 ++-
+ nemo_gym/chat_streaming.py                    |  16 +-
+ nemo_gym/responses_streaming.py               |  18 +-
+ nemo_gym/token_id_capture/fingerprint.py      |   9 +-
+ nemo_gym/token_id_capture/lineage.py          |   9 +-
+ responses_api_models/vllm_model/app.py        |   7 +
+ .../tests/test_external_capture_streaming.py  | 467 ++++++++++++++++++
+ .../vllm_model_with_compaction/app.py         |  29 +-
+ .../test_chat_completions_streaming.py        |  30 ++
+ tests/unit_tests/test_token_capture_ledger.py |  60 ++-
+ tests/unit_tests/test_token_id_capture.py     |  10 +
+ 13 files changed, 682 insertions(+), 71 deletions(-)
+ create mode 100644 responses_api_models/vllm_model/tests/test_external_capture_streaming.py
+
+diff --git a/fern/versions/latest/pages/model-server/anthropic-messages.mdx b/fern/versions/latest/pages/model-server/anthropic-messages.mdx
+index d9e727860..1413c0502 100644
+--- a/fern/versions/latest/pages/model-server/anthropic-messages.mdx
++++ b/fern/versions/latest/pages/model-server/anthropic-messages.mdx
+@@ -10,6 +10,10 @@ Every NeMo Gym model server speaks the [Anthropic Messages API](https://docs.ant
+ 
+ `SimpleResponsesAPIModel` registers `POST /v1/messages` on every model server by default. The handler maps the inbound Anthropic Messages request to Gym's native Responses schema, calls that server's own `responses()` implementation (whatever upstream the server is configured for), and maps the result back to an Anthropic Messages response. When the client sets `stream: true` (Claude Code always does), the complete response is re-emitted as a synthesized Anthropic SSE event stream.
+ 
++Buffered SSE also supports [external token staging](/model-server/model-call-capture#buffered-sse-with-external-token-staging).
++The inference worker stores training tokens separately, and Gym replays the completed answer as SSE.
++Generation completes before replay begins, so no content is delivered during generation.
++
+ ```mermaid
+ flowchart LR
+   CLI["Claude Code CLI"] -->|"POST /v1/messages"| MS["Gym model server"]
+diff --git a/fern/versions/latest/pages/model-server/model-call-capture.mdx b/fern/versions/latest/pages/model-server/model-call-capture.mdx
+index bdbfcb0ac..b4db1ae86 100644
+--- a/fern/versions/latest/pages/model-server/model-call-capture.mdx
++++ b/fern/versions/latest/pages/model-server/model-call-capture.mdx
+@@ -57,6 +57,22 @@ original request and response payloads.
+ 
+ ## What capture contains
+ 
++### Buffered SSE with external token staging
++
++With `token_id_capture.external_staging: true`, captured requests can use `stream: true`
++on Chat Completions, Responses (including the compaction adapter), and Anthropic Messages.
++Gym requests a complete, non-streaming answer from the inference worker. The worker stages
++training tokens before returning commit coordinates. Gym removes internal token fields,
++converts the answer to the client-visible API format, and serializes the SSE events before
++recording a successful capture and replaying the answer. Capture fingerprints preserve
++namespaced tool identity across the backend and client representations. Conversion or
++serialization failures leave no successful capture record, and capture failures are recorded
++before a terminal `response.failed` event is sent, including when observability is disabled.
++No content is delivered during generation, so buffered SSE does not reduce time to first content.
++
++Worker streaming with external capture remains unsupported. Training reconstruction reads
++the external staged tokens, not the SSE text.
++
+ ### Rollout-record attachment
+ 
+ `rollout_collection` attaches available model-call data to each rollout. This representative example
+diff --git a/nemo_gym/base_responses_api_model.py b/nemo_gym/base_responses_api_model.py
+index 86173a618..ef8fc0bf2 100644
+--- a/nemo_gym/base_responses_api_model.py
++++ b/nemo_gym/base_responses_api_model.py
+@@ -37,11 +37,11 @@ import time
+ from abc import abstractmethod
+ from contextlib import asynccontextmanager
+ from pathlib import Path
+-from typing import Any, Mapping, Optional
++from typing import Any, Iterable, Mapping, Optional
+ from uuid import uuid4
+ 
+ import orjson
+-from fastapi import Body, FastAPI, HTTPException, Request, Response
++from fastapi import Body, FastAPI, Request, Response
+ from fastapi.exceptions import RequestValidationError
+ from fastapi.responses import StreamingResponse
+ from pydantic import BaseModel, Field, ValidationError, model_validator
+@@ -56,6 +56,8 @@ from nemo_gym.openai_utils import (
+     NeMoGymResponseCreateParamsNonStreaming,
+ )
+ from nemo_gym.responses_streaming import (
++    NamespaceMap,
++    restore_namespace_tool_calls,
+     sanitize_streaming_responses_body,
+     synthesize_responses_failure_sse,
+     synthesize_responses_sse,
+@@ -95,16 +97,6 @@ from nemo_gym.token_id_capture.store import make_token_store
+ logger = logging.getLogger(__name__)
+ 
+ 
+-def _reject_external_capture_streaming(body: dict[str, Any]) -> None:
+-    """Reject streaming before sanitization can hide it from worker capture."""
+-    context = current_capture_context()
+-    if context is not None and context.external_staging and body.get("stream") is True:
+-        raise HTTPException(
+-            status_code=422,
+-            detail="worker-owned token capture does not support streaming requests",
+-        )
+-
+-
+ # Stateless; shared by every model server's default /v1/messages handler.
+ _ANTHROPIC_CONVERTER = AnthropicConverter()
+ 
+@@ -197,6 +189,15 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
+     async def _finalize_served_response(self, response: Any) -> None:
+         """Finalize capture after conversion to the response returned to the client."""
+ 
++    async def _stream_served_response(self, response: Any, events: Iterable[str | bytes]) -> StreamingResponse:
++        """Serialize buffered SSE before committing externally staged capture."""
++        context = current_capture_context()
++        if context is not None and context.external_staging:
++            # SSE generators serialize lazily. Finish that work before recording success.
++            events = [event.encode("utf-8") if isinstance(event, str) else event for event in events]
++            await self._finalize_served_response(response)
++        return StreamingResponse(iter(events), media_type="text/event-stream")
++
+     def setup_webserver(self) -> FastAPI:
+         app = FastAPI()
+ 
+@@ -255,7 +256,6 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
+         into a terminal ``response.failed`` event rather than an HTTP 500 (bad-request validation
+         still fails eagerly, before the stream is committed).
+         """
+-        _reject_external_capture_streaming(body)
+         if not body.get("stream"):
+             params = _validate_responses_params(body)
+             response = await self._invoke_responses(request, params)
+@@ -269,9 +269,17 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
+         except ValidationError as exc:
+             raise RequestValidationError([{**error, "loc": ("body", *error["loc"])} for error in exc.errors()])
+ 
++        return await self._stream_responses(request, params, ns_map)
++
++    async def _stream_responses(
++        self, request: Request, params: NeMoGymResponseCreateParamsNonStreaming, ns_map: NamespaceMap
++    ) -> StreamingResponse:
++        """Serve the same converted response to capture and Responses SSE clients."""
+         try:
+             response = await self._invoke_responses(request, params)
+             response_json = response.model_dump(mode="json") if isinstance(response, BaseModel) else dict(response)
++            response_json["output"] = restore_namespace_tool_calls(response_json.get("output") or [], ns_map)
++            return await self._stream_served_response(response_json, synthesize_responses_sse(response_json))
+         except Exception as exc:
+             # The streaming contract is already the response's shape, so a backend failure must be a
+             # terminal response.failed event, not an HTTP 500 the client would see as a broken stream.
+@@ -280,10 +288,6 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
+                 synthesize_responses_failure_sse(str(exc)),
+                 media_type="text/event-stream",
+             )
+-        return StreamingResponse(
+-            synthesize_responses_sse(response_json, ns_map),
+-            media_type="text/event-stream",
+-        )
+ 
+     async def chat_completions_dispatch(self, request: Request, body: dict = Body()):
+         """Default ``/v1/chat/completions`` entrypoint shared by every Gym model server.
+@@ -303,7 +307,6 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
+         (e.g. ``"false"`` or ``1``) stays on the strict non-streaming path, which rejects the
+         malformed ``stream`` with the same 422 as before.
+         """
+-        _reject_external_capture_streaming(body)
+         if body.get("stream") is not True:
+             params = _validate_chat_params(body)
+             response = await self._invoke_chat_completions(request, params)
+@@ -315,9 +318,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
+         params = _validate_chat_params(cleaned)
+         completion = await self._invoke_chat_completions(request, params)
+         completion_json = completion.model_dump(mode="json") if isinstance(completion, BaseModel) else dict(completion)
+-        return StreamingResponse(
++        return await self._stream_served_response(
++            completion_json,
+             synthesize_chat_completion_sse(completion_json, include_usage=include_usage),
+-            media_type="text/event-stream",
+         )
+ 
+     async def _invoke_chat_completions(
+@@ -353,15 +356,14 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
+         (the Claude Code CLI always does), the complete response is re-emitted as a synthesized
+         Anthropic SSE event stream. Servers may override this for native Messages handling.
+         """
+-        _reject_external_capture_streaming(body)
+         params = _ANTHROPIC_CONVERTER.anthropic_request_to_responses(body)
+         response = await self._invoke_responses(request, params)
+         model_name = body.get("model") or response.model
+         anthropic_response = _ANTHROPIC_CONVERTER.responses_to_anthropic_response(response, model=model_name)
+         if body.get("stream"):
+-            return StreamingResponse(
++            return await self._stream_served_response(
++                anthropic_response,
+                 _ANTHROPIC_CONVERTER.anthropic_response_to_sse(anthropic_response),
+-                media_type="text/event-stream",
+             )
+         dispatched = _orjson_dispatch_response(anthropic_response)
+         await self._finalize_served_response(anthropic_response)
+@@ -1066,6 +1068,7 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
+     """Rebuild a Chat Completions response from streamed chunks."""
+     content_parts: list[str] = []
+     reasoning_parts: list[str] = []
++    refusal_parts: list[str] = []
+     tool_calls: dict[int, dict[str, Any]] = {}
+     usage: Optional[dict[str, Any]] = None
+     model: Optional[str] = None
+@@ -1087,6 +1090,8 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
+             role = delta.get("role") or role
+             if delta.get("content"):
+                 content_parts.append(delta["content"])
++            if delta.get("refusal"):
++                refusal_parts.append(delta["refusal"])
+             reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+             if reasoning:
+                 reasoning_parts.append(reasoning)
+@@ -1108,6 +1113,8 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
+     message: dict[str, Any] = {"role": role, "content": "".join(content_parts) or None}
+     if reasoning_parts:
+         message["reasoning_content"] = "".join(reasoning_parts)
++    if refusal_parts:
++        message["refusal"] = "".join(refusal_parts)
+     if tool_calls:
+         message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
+     result: dict[str, Any] = {
+@@ -1248,8 +1255,8 @@ class _CaptureMiddleware:
+     downstream unchanged, so it composes with streaming (SSE) responses -- it never consumes or rewraps
+     the stream. SSE chunks are forwarded immediately except for the terminal event, which is released
+     after the capture is durable. Every chunk is also buffered for post-hoc reassembly, so a very long
+-    stream is held in memory until it completes. When ``store`` is None (capture disabled) it strips the
+-    prefix and forwards only.
++    stream is held in memory until it completes. When ``store`` is None it avoids buffering evaluation
++    records, while still persisting external capture failures before terminal events are forwarded.
+     """
+ 
+     def __init__(
+@@ -1355,10 +1362,26 @@ class _CaptureMiddleware:
+             sink_token = set_token_sink(capture_context)
+ 
+         # Training-only capture has no evaluation record.
+-        # Forward without buffering while the sink is active.
++        # Persist capture failure before forwarding a terminal event or finishing a JSON response.
+         if self._store is None:
++            streaming = False
++            sse_event_buffer = bytearray()
++
++            async def _send_training_only(message: dict[str, Any]) -> None:
++                nonlocal streaming
++                if message.get("type") == "http.response.start":
++                    streaming = _headers_content_type(message.get("headers") or []).startswith(b"text/event-stream")
++                elif message.get("type") == "http.response.body":
++                    terminal = None
++                    if streaming:
++                        sse_event_buffer.extend(message.get("body", b"") or b"")
++                        terminal = _consume_terminal_sse_event(sse_event_buffer, dialect)
++                    if terminal is not None or not message.get("more_body", False):
++                        await _fail_uncommitted_external_call(capture_context)
++                await send(message)
++
+             try:
+-                await self._app(scope, receive, send)
++                await self._app(scope, receive, _send_training_only)
+             finally:
+                 await _fail_uncommitted_external_call(capture_context)
+                 if sink_token is not None:
+@@ -1445,6 +1468,7 @@ class _CaptureMiddleware:
+             except Exception:
+                 logger.warning("Model-call capture finalization failed.", exc_info=True)
+             finally:
++                await _fail_uncommitted_external_call(capture_context)
+                 await _flush_deferred_response()
+             raise
+         finally:
+diff --git a/nemo_gym/chat_streaming.py b/nemo_gym/chat_streaming.py
+index ae9a48987..84d79377e 100644
+--- a/nemo_gym/chat_streaming.py
++++ b/nemo_gym/chat_streaming.py
+@@ -30,9 +30,9 @@ its existing non-streaming backend call and re-emitting it as an SSE stream. Thi
+ 
+ Only the SSE envelope is synthesized -- there is no true token-by-token streaming. The backend
+ call completes before the first byte is emitted, so the model server's retry and
+-error-normalization behavior is fully preserved on this path. This path is intended for eval-only
+-streaming clients: token ids and logprobs from the backend response are not carried in the
+-``chat.completion.chunk`` schema, and a client that does not set ``stream_options.include_usage``
++error-normalization behavior is fully preserved on this path. External staging stores training
++tokens separately; token ids and training logprobs are not carried in the ``chat.completion.chunk``
++schema. A client that does not set ``stream_options.include_usage``
+ gets no usage chunk, so a model-call record reconstructed from this stream will lack token counts.
+ """
+ 
+@@ -101,9 +101,9 @@ def _chunk(completion: dict[str, Any], choices: list[dict[str, Any]], usage: Any
+ def _choice_deltas(index: int, choice: dict[str, Any]) -> Iterator[dict[str, Any]]:
+     """Yield the ``chat.completion.chunk`` choice deltas for one completed choice.
+ 
+-    A role delta opens the choice; reasoning, content, and tool-call deltas follow (each emitted
++    A role delta opens the choice; reasoning, content, refusal, and tool-call deltas follow (each emitted
+     only when present); a terminal delta carries the ``finish_reason``. Splitting the message this
+-    way keeps every field a client tracks (role, reasoning, content, tool-call name/arguments,
++    way keeps every field a client tracks (role, reasoning, content, refusal, tool-call name/arguments,
+     finish reason) in the delta position that client expects, even though it is a single logical
+     chunk sequence rather than incremental tokens.
+     """
+@@ -120,6 +120,10 @@ def _choice_deltas(index: int, choice: dict[str, Any]) -> Iterator[dict[str, Any
+     if content:
+         yield {"index": index, "delta": {"content": content}, "finish_reason": None}
+ 
++    refusal = message.get("refusal")
++    if refusal:
++        yield {"index": index, "delta": {"refusal": refusal}, "finish_reason": None}
++
+     tool_calls = message.get("tool_calls")
+     if tool_calls:
+         delta_tool_calls = []
+@@ -141,7 +145,7 @@ def _choice_deltas(index: int, choice: dict[str, Any]) -> Iterator[dict[str, Any
+ def synthesize_chat_completion_sse(completion: dict[str, Any], include_usage: bool = False) -> Iterator[str]:
+     """Re-emit a complete Chat Completion object as a ``chat.completion.chunk`` SSE stream.
+ 
+-    Emits, per choice, a role chunk -> optional reasoning/content/tool-call chunks -> a terminal
++    Emits, per choice, a role chunk -> optional reasoning/content/refusal/tool-call chunks -> a terminal
+     chunk carrying ``finish_reason``. When ``include_usage`` is set and the completion reports
+     usage, a final ``choices: []`` chunk carries the usage block (OpenAI's contract). The stream
+     always ends with the ``data: [DONE]`` sentinel streaming clients treat as terminal.
+diff --git a/nemo_gym/responses_streaming.py b/nemo_gym/responses_streaming.py
+index d58f2a5ef..615b3996e 100644
+--- a/nemo_gym/responses_streaming.py
++++ b/nemo_gym/responses_streaming.py
+@@ -241,6 +241,17 @@ def _sse_event(payload: dict[str, Any]) -> str:
+     return f"event: {payload['type']}\ndata: {json.dumps(payload)}\n\n"
+ 
+ 
++def restore_namespace_tool_calls(items: list[dict], ns_map: NamespaceMap) -> list[dict]:
++    """Restore the client-visible tool names before capture finalization and SSE output."""
++    restored = []
++    for item in items:
++        if isinstance(item, dict) and item.get("type") == "function_call" and item.get("name") in ns_map:
++            namespace, name = ns_map[item["name"]]
++            item = {**item, "namespace": namespace, "name": name}
++        restored.append(item)
++    return restored
++
++
+ def synthesize_responses_sse(response_json: dict[str, Any], ns_map: Optional[NamespaceMap] = None) -> Iterator[str]:
+     """Re-emit a complete Responses API response object as an SSE event stream.
+ 
+@@ -249,12 +260,7 @@ def synthesize_responses_sse(response_json: dict[str, Any], ns_map: Optional[Nam
+     so those two are the required minimum; ``response.created`` is included for clients that wait
+     for an acknowledgement before reading items.
+     """
+-    output_items = []
+-    for item in response_json.get("output") or []:
+-        if ns_map and isinstance(item, dict) and item.get("type") == "function_call" and item.get("name") in ns_map:
+-            namespace, name = ns_map[item["name"]]
+-            item = {**item, "namespace": namespace, "name": name}
+-        output_items.append(item)
++    output_items = restore_namespace_tool_calls(response_json.get("output") or [], ns_map or {})
+ 
+     yield _sse_event(
+         {"type": "response.created", "response": {**response_json, "status": "in_progress", "output": []}}
+diff --git a/nemo_gym/token_id_capture/fingerprint.py b/nemo_gym/token_id_capture/fingerprint.py
+index dd7e200e7..75c1942e7 100644
+--- a/nemo_gym/token_id_capture/fingerprint.py
++++ b/nemo_gym/token_id_capture/fingerprint.py
+@@ -42,7 +42,7 @@ import orjson
+ 
+ # Increment when fingerprint canonicalization or hash layout changes.
+ # Resolvers ignore entries stamped with a different version.
+-FINGERPRINT_VERSION = 3
++FINGERPRINT_VERSION = 4
+ 
+ _FINGERPRINT_DOMAIN = b"nemo-gym-lineage"
+ _CONTEXT_DOMAIN = b"nemo-gym-lineage-context"
+@@ -230,10 +230,15 @@ def _tools_of(message: dict) -> list[tuple[str, str, str]]:
+     tools: list[tuple[str, str, str]] = []
+     # A Responses item is the tool call.
+     if message.get("type") == "function_call":
++        name = str(message.get("name", ""))
++        if message.get("namespace"):
++            # SSE separates these fields; the backend and echoed request sanitizer join them.
++            # Preserve the namespace so different tools with the same short name cannot match.
++            name = f"{message['namespace']}__{name}"
+         tools.append(
+             (
+                 str(message.get("call_id") or message.get("id") or ""),
+-                str(message.get("name", "")),
++                name,
+                 canonicalize_tool_arguments(message.get("arguments")),
+             )
+         )
+diff --git a/nemo_gym/token_id_capture/lineage.py b/nemo_gym/token_id_capture/lineage.py
+index cc230e486..d1e12283f 100644
+--- a/nemo_gym/token_id_capture/lineage.py
++++ b/nemo_gym/token_id_capture/lineage.py
+@@ -859,8 +859,13 @@ class FileLineageStore(IncrementalLineageStore):
+         if not fingerprint:
+             return None
+         with self._locked(rollout_id):
+-            # Failure rows carry no fingerprint and can never resolve as parents.
+-            records = [record for record in self._read(rollout_id) if record.get("fingerprint") == fingerprint]
++            # Failure rows and fingerprints from incompatible algorithms cannot resolve as parents.
++            records = [
++                record
++                for record in self._read(rollout_id)
++                if record.get("fingerprint") == fingerprint
++                and record.get("fingerprint_version") == FINGERPRINT_VERSION
++            ]
+         if len(records) != 1:
+             return None
+         record = records[0]
+diff --git a/responses_api_models/vllm_model/app.py b/responses_api_models/vllm_model/app.py
+index e692aca5f..3416bde30 100644
+--- a/responses_api_models/vllm_model/app.py
++++ b/responses_api_models/vllm_model/app.py
+@@ -367,6 +367,9 @@ class VLLMModel(SimpleResponsesAPIModel):
+             capture_config is not None and capture_config.token_id_capture.external_staging
+         )
+         if self._external_capture_enabled:
++            overrides = (self.config.extra_body or {}) | (self.config.sampling_overrides or {})
++            if overrides.get("stream"):
++                raise ValueError("external staging requires non-streaming backend requests")
+             if self.config.use_completions_api:
+                 raise ValueError("token_id_capture.external_staging does not support use_completions_api=true")
+             if self.config.is_responses_native:
+@@ -753,6 +756,10 @@ class VLLMModel(SimpleResponsesAPIModel):
+         context = current_capture_context()
+         if context is None or not context.external_staging:
+             return body_dict
++        if body_dict.get("stream"):
++            raise ValueError("external staging requires non-streaming backend requests")
++        body_dict["stream"] = False
++        body_dict.pop("stream_options", None)
+         admission = context.capture_admission
+         if admission is None:
+             return body_dict
+diff --git a/responses_api_models/vllm_model/tests/test_external_capture_streaming.py b/responses_api_models/vllm_model/tests/test_external_capture_streaming.py
+new file mode 100644
+index 000000000..23a0af703
+--- /dev/null
++++ b/responses_api_models/vllm_model/tests/test_external_capture_streaming.py
+@@ -0,0 +1,467 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++
++"""Buffered SSE through real model routes, worker staging, and a file ledger."""
++
++import asyncio
++import json
++from types import SimpleNamespace
++from unittest.mock import AsyncMock, MagicMock
++
++import pytest
++from fastapi.testclient import TestClient
++
++from nemo_gym import chat_streaming, responses_streaming
++from nemo_gym.anthropic_converter import AnthropicConverter
++from nemo_gym.base_responses_api_model import _reconstruct_streamed_response
++from nemo_gym.server_utils import ServerClient
++from nemo_gym.token_id_capture.adapters.vllm import VLLMCaptureAdapter
++from nemo_gym.token_id_capture.lineage import FileLineageStore
++from nemo_gym.token_id_capture.records import UNCOMMITTED_CALL_REASON
++from nemo_gym.token_id_capture.sink import current_capture_context
++from nemo_gym.token_id_capture.staging import resolve_terminal
++from nemo_gym.token_id_capture.staging.capture import RolloutTokenCapture
++from nemo_gym.token_id_capture.staging.rebuild import verify_and_linearize
++from nemo_gym.token_id_capture.staging.records import (
++    CaptureAdmission,
++    RolloutManifest,
++    RolloutReceipt,
++    StagedCallBaseSnapshot,
++    StageResult,
++)
++from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
++from responses_api_models.vllm_model_with_compaction.app import VLLMModelWithCompaction
++
++
++PREFIX = "/ng-rollout/r1/training-token-capture"
++DIALECTS = ["chat/completions", "responses", "messages", "compaction"]
++
++
++class _Worker:
++    def __init__(self):
++        self.records = {}
++        self.requests = []
++        self.context = None
++        self.tool_call = False
++        self.reasoning = False
++        self.refusal = False
++        self.capture = RolloutTokenCapture(sink=self, weight_version_fn=lambda: 7, adapter=VLLMCaptureAdapter())
++
++    def stage(self, record):
++        self.records[record.staging_key] = record
++        return StageResult(ok=True, staging_key=record.staging_key)
++
++    def fetch(self, keys):
++        return [
++            StagedCallBaseSnapshot.model_validate(self.records[key].model_dump(exclude={"extras"})) for key in keys
++        ]
++
++    async def create_chat_completion(self, **body):
++        self.requests.append(body)
++        self.context = current_capture_context()
++        turn = len(self.requests)
++        payload = {
++            "id": f"completion-{turn}",
++            "object": "chat.completion",
++            "created": 0,
++            "model": "test",
++            "choices": [
++                {
++                    "index": 0,
++                    "finish_reason": "stop",
++                    "message": {
++                        "role": "assistant",
++                        "content": f"answer {turn}",
++                    },
++                }
++            ],
++            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
++        }
++        if self.reasoning:
++            payload["choices"][0]["message"]["reasoning_content"] = "Check the requested calculation."
++        if self.refusal:
++            payload["choices"][0]["message"].update(content=None, refusal="I cannot help with that.")
++        if self.tool_call and turn == 1:
++            payload["choices"][0]["finish_reason"] = "tool_calls"
++            payload["choices"][0]["message"].update(
++                content=None,
++                tool_calls=[
++                    {
++                        "id": "call-1",
++                        "type": "function",
++                        "function": {
++                            "name": body["tools"][0]["function"]["name"],
++                            "arguments": '{"city":"Paris"}',
++                        },
++                    }
++                ],
++            )
++        if "ng_capture" not in body:
++            return payload
++        admission = CaptureAdmission.model_validate(body["ng_capture"])
++        prefix = [token for key in admission.staging_chain for token in self.records[key].token_ids_delta]
++        call = self.capture.begin_call(admission, prefix_token_ids=prefix, stream=body["stream"])
++        prompt = prefix + [turn * 10]
++        payload["choices"][0]["message"].update(
++            prompt_token_ids=prompt,
++            generation_token_ids=[turn * 10 + 1],
++            generation_log_probs=[-0.25],
++            routed_experts=[[[0]]] * (len(prompt) + 1),
++        )
++        coords = await asyncio.to_thread(self.capture.complete_call_from_response, call, payload)
++        payload["ng_commit_coords"] = coords.model_dump()
++        return payload
++
++
++@pytest.fixture
++def make_harness(tmp_path, monkeypatch):
++    def make(dialect="responses", evaluation=False, reasoning=False, **overrides):
++        root = tmp_path / dialect.replace("/", "-")
++        global_config = {
++            "token_id_capture": {
++                "enabled": True,
++                "external_staging": True,
++                "rebuild_response": False,
++                "lineage_store": "nemo_gym.token_id_capture.lineage:FileLineageStore",
++                "lineage_store_kwargs": {"root": str(root)},
++            }
++        }
++        if evaluation:
++            global_config.update(observability_enabled=True, model_call_capture_dir=str(root))
++        monkeypatch.setenv("NEMO_GYM_TOKEN_CAPTURE_CONTROL_TOKEN", "test-control-token")
++        cls = VLLMModelWithCompaction if dialect == "compaction" else VLLMModel
++        config = VLLMModelConfig(
++            host="localhost",
++            port=8080,
++            entrypoint="",
++            name="test",
++            model="test",
++            base_url="http://worker/v1",
++            api_key="unused",
++            return_token_id_information=False,
++            uses_reasoning_parser=reasoning,
++            **overrides,
++        )
++        model = cls(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict=global_config))
++        worker = _Worker()
++        worker.reasoning = reasoning
++        model._clients = [worker]
++        monkeypatch.setattr(model, "_finalize_external_capture", AsyncMock(wraps=model._finalize_external_capture))
++        return SimpleNamespace(model=model, worker=worker, app=model.setup_webserver(), ledger=FileLineageStore(root))
++
++    return make
++
++
++def _body(dialect, stream=True):
++    body = {"model": "test", "stream": stream}
++    body["messages" if dialect in ("chat/completions", "messages") else "input"] = [
++        {"role": "user", "content": "hello"}
++    ]
++    if dialect == "messages":
++        body["max_tokens"] = 32
++    if dialect == "chat/completions" and stream:
++        body["stream_options"] = {"include_usage": True}
++    return body
++
++
++def _path(dialect):
++    return PREFIX + "/v1/" + ("responses" if dialect == "compaction" else dialect)
++
++
++async def _request(app, path, body, send=None):
++    messages = []
++    received = False
++
++    async def receive():
++        nonlocal received
++        if not received:
++            received = True
++            return {"type": "http.request", "body": json.dumps(body).encode(), "more_body": False}
++        await asyncio.Event().wait()
++
++    async def collect(message):
++        if send is not None:
++            await send(message)
++        messages.append(message)
++
++    scope = {
++        "type": "http",
++        "asgi": {"version": "3.0", "spec_version": "2.4"},
++        "http_version": "1.1",
++        "method": "POST",
++        "scheme": "http",
++        "path": path,
++        "raw_path": path.encode(),
++        "query_string": b"",
++        "root_path": "",
++        "headers": [(b"content-type", b"application/json")],
++        "server": ("test", 80),
++        "client": ("test", 1),
++    }
++    await app(scope, receive, collect)
++    return messages
++
++
++def _events(messages):
++    raw = b"".join(message.get("body", b"") for message in messages).decode()
++    return [json.loads(line[6:]) for line in raw.splitlines() if line.startswith("data: {")]
++
++
++@pytest.mark.parametrize("dialect", DIALECTS)
++@pytest.mark.parametrize("stream", [False, True])
++@pytest.mark.parametrize("evaluation", [False, True])
++async def test_external_capture_routes(make_harness, dialect, stream, evaluation):
++    h = make_harness(dialect, evaluation)
++
++    async def check_send(message):
++        manifest = RolloutManifest.model_validate(await h.ledger.manifest("r1"))
++        assert len(manifest.records) == 1 and not manifest.failures
++        assert h.worker.context.committed
++
++    messages = await _request(h.app, _path(dialect), _body(dialect, stream), check_send)
++    assert h.model._finalize_external_capture.await_count == 1
++    assert messages[0]["status"] == 200
++    raw = b"".join(message.get("body", b"") for message in messages).decode()
++    assert "answer 1" in raw and "completion-1" in raw
++    for internal in (
++        "ng_commit_coords",
++        "prompt_token_ids",
++        "generation_token_ids",
++        "generation_log_probs",
++        "routed_experts",
++    ):
++        assert internal not in raw
++    assert h.worker.requests[0]["stream"] is False
++    assert "stream_options" not in h.worker.requests[0]
++    with TestClient(h.app) as client:
++        url = "/training-token-capture/control/rollouts/r1/manifest"
++        assert client.get(url).status_code == 401
++        manifest = client.get(url, headers={"Authorization": "Bearer test-control-token"}).json()
++    record = manifest["records"][0]
++    receipt = RolloutReceipt(
++        rollout_id="r1",
++        manifest=[record],
++        terminal_model_call_id=record["model_call_id"],
++        terminal_selection="declared",
++    )
++    row = verify_and_linearize(receipt, h.worker.fetch([record["staging_key"]]))
++    assert row.token_ids == [10, 11]
++    assert row.token_mask == [0.0, 1.0]
++    assert row.logprobs == [0.0, -0.25]
++    if stream:
++        assert dict(messages[0]["headers"])[b"content-type"].startswith(b"text/event-stream")
++        events = _events(messages)
++        if dialect in ("responses", "compaction"):
++            assert events[-1]["type"] == "response.completed"
++
++
++@pytest.mark.parametrize("override", ["extra_body", "sampling_overrides"])
++def test_static_streaming_override_rejected(make_harness, override):
++    with pytest.raises(ValueError, match="non-streaming backend"):
++        make_harness(**{override: {"stream": True}})
++
++
++@pytest.mark.parametrize("dialect", ["responses", "compaction"])
++@pytest.mark.parametrize("evaluation", [False, True])
++async def test_runtime_override_is_scoped_to_captured_calls(make_harness, dialect, evaluation):
++    h = make_harness(dialect, evaluation)
++    body = _body(dialect) | {"metadata": {"extra_body": json.dumps({"stream": True})}}
++    failures_at_send = []
++
++    async def check_send(message):
++        if b"event: response.failed" in message.get("body", b""):
++            manifest = await h.ledger.manifest("r1")
++            assert not manifest["records"]
++            assert len(manifest["failures"]) == len(failures_at_send) + 1
++            failures_at_send.append(manifest["failures"])
++
++    messages = await _request(h.app, _path(dialect), body, check_send)
++    assert not h.worker.requests
++    assert _events(messages)[-1]["type"] == "response.failed"
++    # Existing ledger rows make this unresolvable continuation unadmitted.
++    body["input"] += [{"role": "assistant", "content": "unrecorded"}, {"role": "user", "content": "continue"}]
++    messages = await _request(h.app, _path(dialect), body, check_send)
++    assert not h.worker.requests
++    assert _events(messages)[-1]["type"] == "response.failed"
++    assert len((await h.ledger.manifest("r1"))["failures"]) == 2
++    assert len(failures_at_send) == 2
++    await _request(h.app, "/v1/responses", body)
++    assert h.worker.requests[0]["stream"] is True
++
++
++@pytest.mark.parametrize(
++    "dialect,content_kind",
++    [(dialect, "reasoning") for dialect in DIALECTS] + [(dialect, "refusal") for dialect in DIALECTS],
++)
++@pytest.mark.parametrize("tool_call", [False, True])
++@pytest.mark.parametrize("evaluation", [False, True])
++async def test_two_call_continuation_from_served_sse(make_harness, dialect, content_kind, tool_call, evaluation):
++    h = make_harness(dialect, evaluation, reasoning=content_kind == "reasoning")
++    h.worker.tool_call = tool_call
++    h.worker.refusal = content_kind == "refusal"
++    body = _body(dialect)
++    if tool_call:
++        function = {
++            "name": "weather",
++            "strict": False,
++            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
++        }
++        if dialect == "messages":
++            body["tools"] = [{"name": "weather", "input_schema": function["parameters"]}]
++        elif dialect == "chat/completions":
++            body["tools"] = [{"type": "function", "function": function}]
++        else:
++            body["tools"] = [{"type": "namespace", "name": "functions", "tools": [{"type": "function", **function}]}]
++
++    async def complete():
++        messages = await _request(h.app, _path(dialect), body)
++        raw = b"".join(message.get("body", b"") for message in messages)
++        expected = b"I cannot help with that." if h.worker.refusal else b"Check the requested calculation."
++        assert expected in raw
++        wire_dialect = {"chat/completions": "chat_completions", "compaction": "responses"}.get(dialect, dialect)
++        response = _reconstruct_streamed_response(raw, wire_dialect)
++        if dialect == "chat/completions" and h.worker.refusal:
++            assert any(
++                choice["delta"].get("refusal") == expected.decode()
++                for event in _events(messages)
++                for choice in event.get("choices", [])
++            )
++            assert response["choices"][0]["message"]["refusal"] == expected.decode()
++        return response
++
++    first = await complete()
++    if dialect in ("responses", "compaction"):
++        body["input"].extend(first["output"])
++        body["input"].append(
++            {"type": "function_call_output", "call_id": "call-1", "output": "sunny"}
++            if tool_call
++            else {"role": "user", "content": "continue"}
++        )
++        if tool_call:
++            call = next(item for item in first["output"] if item["type"] == "function_call")
++            assert call["namespace"] == "functions"
++            assert call["name"] == "weather"
++            assert h.model._finalize_external_capture.await_args.args[0]["output"] == first["output"]
++            manifest = RolloutManifest.model_validate(await h.ledger.manifest("r1"))
++            # Neither a declaration nor an envelope ID may bypass content attribution.
++            attribution = resolve_terminal(manifest.records, {**first, "id": ""})
++            assert attribution.attributed and attribution.method == "content"
++            assert attribution.model_call_id == manifest.records[0].model_call_id
++            altered = {
++                **first,
++                "id": "",
++                "output": [{**item, "namespace": "other"} if item is call else item for item in first["output"]],
++            }
++            assert not resolve_terminal(manifest.records, altered).attributed
++    else:
++        assistant = (
++            first["choices"][0]["message"]
++            if dialect == "chat/completions"
++            else {"role": "assistant", "content": first["content"]}
++        )
++        body["messages"].append(assistant)
++        if tool_call and dialect == "chat/completions":
++            body["messages"].append({"role": "tool", "tool_call_id": "call-1", "content": "sunny"})
++        elif tool_call:
++            body["messages"].append(
++                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-1", "content": "sunny"}]}
++            )
++        else:
++            body["messages"].append({"role": "user", "content": "continue"})
++    second = await complete()
++    manifest = RolloutManifest.model_validate(await h.ledger.manifest("r1"))
++    assert not manifest.failures and len(manifest.records) == 2
++    parent, child = manifest.records
++    admission = h.worker.requests[1]["ng_capture"]
++    assert admission["parent_call_id"] == parent.model_call_id
++    assert admission["staging_chain"] == [parent.staging_key]
++    assert child.response_id == second["id"]
++    assert h.model._finalize_external_capture.await_count == 2
++    receipt = RolloutReceipt(
++        rollout_id="r1",
++        manifest=manifest.records,
++        terminal_model_call_id=child.model_call_id,
++        terminal_selection="declared",
++    )
++    row = verify_and_linearize(receipt, h.worker.fetch([record.staging_key for record in manifest.records]))
++    assert row.token_ids == [10, 11, 20, 21]
++    assert row.token_mask == [0.0, 1.0, 0.0, 1.0]
++    assert row.logprobs == [0.0, -0.25, 0.0, -0.25]
++
++
++@pytest.mark.parametrize("evaluation", [False, True])
++@pytest.mark.parametrize(
++    "dialect,failure,stream",
++    [(dialect, "conversion", True) for dialect in ("responses", "messages", "compaction")]
++    + [(dialect, "serialization", True) for dialect in DIALECTS]
++    + [("compaction", failure, False) for failure in ("conversion", "serialization")],
++)
++async def test_response_preparation_failure_does_not_commit(
++    make_harness, monkeypatch, dialect, failure, stream, evaluation
++):
++    h = make_harness(dialect, evaluation)
++
++    def fail_conversion(*args, **kwargs):
++        raise ValueError(f"injected {failure} failure")
++
++    if failure == "conversion":
++        if dialect == "messages":
++            monkeypatch.setattr(AnthropicConverter, "responses_to_anthropic_response", fail_conversion)
++        else:
++            monkeypatch.setattr(type(h.model._converter), "chat_completion_to_response", fail_conversion)
++    elif not stream:
++        monkeypatch.setattr(
++            "responses_api_models.vllm_model_with_compaction.app._orjson_dispatch_response", fail_conversion
++        )
++    elif dialect in ("responses", "compaction"):
++        original = responses_streaming._sse_event
++
++        def serialize(payload):
++            if payload["type"] == "response.output_item.done":
++                raise ValueError("injected serialization failure")
++            return original(payload)
++
++        monkeypatch.setattr(responses_streaming, "_sse_event", serialize)
++    elif dialect == "chat/completions":
++        original = chat_streaming._sse_data
++
++        def serialize(payload):
++            if any(choice["delta"].get("content") for choice in payload["choices"]):
++                raise ValueError("injected serialization failure")
++            return original(payload)
++
++        monkeypatch.setattr(chat_streaming, "_sse_data", serialize)
++    else:
++        original = AnthropicConverter._sse_event
++
++        def serialize(self, event, payload):
++            if event == "content_block_start":
++                raise ValueError("injected serialization failure")
++            return original(self, event, payload)
++
++        monkeypatch.setattr(AnthropicConverter, "_sse_event", serialize)
++
++    sent = []
++
++    async def check_send(message):
++        sent.append(message)
++        if b"event: response.failed" in message.get("body", b""):
++            manifest = await h.ledger.manifest("r1")
++            assert not manifest["records"]
++            assert any(row["reason"] == UNCOMMITTED_CALL_REASON for row in manifest["failures"])
++
++    if stream and dialect in ("responses", "compaction"):
++        await _request(h.app, _path(dialect), _body(dialect), check_send)
++        assert _events(sent)[-1]["type"] == "response.failed"
++        assert all(event["type"] != "response.output_item.done" for event in _events(sent))
++    else:
++        with pytest.raises(ValueError, match=f"injected {failure} failure"):
++            await _request(h.app, _path(dialect), _body(dialect, stream), check_send)
++        assert sent[0]["status"] == 500
++
++    assert len(h.worker.records) == 1, "the failure must occur after worker staging succeeds"
++    h.model._finalize_external_capture.assert_not_awaited()
++    manifest = await h.ledger.manifest("r1")
++    assert not manifest["records"]
++    assert any(row["reason"] == UNCOMMITTED_CALL_REASON for row in manifest["failures"])
++    assert b"ng_commit_coords" not in b"".join(message.get("body", b"") for message in sent)
+diff --git a/responses_api_models/vllm_model_with_compaction/app.py b/responses_api_models/vllm_model_with_compaction/app.py
+index 87c5f1484..c882e296c 100644
+--- a/responses_api_models/vllm_model_with_compaction/app.py
++++ b/responses_api_models/vllm_model_with_compaction/app.py
+@@ -8,19 +8,15 @@ from typing import Any, Dict, List, Optional
+ 
+ from fastapi import Body, Request
+ from fastapi.exceptions import RequestValidationError
+-from fastapi.responses import StreamingResponse
+-from pydantic import BaseModel, ValidationError
++from pydantic import ValidationError
+ 
++from nemo_gym.base_responses_api_model import _orjson_dispatch_response
+ from nemo_gym.openai_utils import (
+     NeMoGymChatCompletionCreateParamsNonStreaming,
+     NeMoGymResponse,
+     NeMoGymResponseCreateParamsNonStreaming,
+ )
+-from nemo_gym.responses_streaming import (
+-    sanitize_streaming_responses_body,
+-    synthesize_responses_failure_sse,
+-    synthesize_responses_sse,
+-)
++from nemo_gym.responses_streaming import sanitize_streaming_responses_body
+ from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
+ from responses_api_models.vllm_model.app import VLLMModel
+ 
+@@ -81,23 +77,14 @@ class VLLMModelWithCompaction(VLLMModel):
+ 
+         if not body.get("stream"):
+             params = _validate_context_compaction_params(body)
+-            return await self._invoke_responses(request, params)
++            response = await self._invoke_responses(request, params)
++            dispatched = _orjson_dispatch_response(response)
++            await self._finalize_served_response(response)
++            return dispatched
+ 
+         cleaned, namespace_map = sanitize_streaming_responses_body(body)
+         params = _validate_context_compaction_params(cleaned)
+-        try:
+-            response = await self._invoke_responses(request, params)
+-            response_json = response.model_dump(mode="json") if isinstance(response, BaseModel) else dict(response)
+-        except Exception as exc:
+-            LOG.exception("responses() failed while serving a streaming /v1/responses request")
+-            return StreamingResponse(
+-                synthesize_responses_failure_sse(str(exc)),
+-                media_type="text/event-stream",
+-            )
+-        return StreamingResponse(
+-            synthesize_responses_sse(response_json, namespace_map),
+-            media_type="text/event-stream",
+-        )
++        return await self._stream_responses(request, params, namespace_map)
+ 
+     async def tokenize(
+         self,
+diff --git a/tests/unit_tests/test_chat_completions_streaming.py b/tests/unit_tests/test_chat_completions_streaming.py
+index 4df00dc7f..6c9657412 100644
+--- a/tests/unit_tests/test_chat_completions_streaming.py
++++ b/tests/unit_tests/test_chat_completions_streaming.py
+@@ -54,6 +54,7 @@ def _completion(
+     content=None,
+     tool_calls=None,
+     reasoning=None,
++    refusal=None,
+     finish_reason="stop",
+     usage=None,
+     choices=None,
+@@ -62,6 +63,8 @@ def _completion(
+         message = {"role": "assistant", "content": content}
+         if reasoning:
+             message["reasoning_content"] = reasoning
++        if refusal is not None:
++            message["refusal"] = refusal
+         if tool_calls:
+             message["tool_calls"] = tool_calls
+         choices = [{"index": 0, "finish_reason": finish_reason, "message": message}]
+@@ -174,6 +177,33 @@ class TestSynthesizeChatSSE:
+         assert rebuilt["choices"][0]["message"]["reasoning_content"] == "let me think"
+         assert rebuilt["choices"][0]["message"]["content"] == "answer"
+ 
++    @pytest.mark.parametrize("content", [None, "Additional information."])
++    def test_refusal_delta_roundtrips(self, content) -> None:
++        refusal = "I cannot help with that."
++        completion = _completion(content=content, refusal=refusal).model_dump(mode="json")
++        text = "".join(synthesize_chat_completion_sse(completion))
++        events = _events(text)
++        assert any(event["choices"][0]["delta"] == {"refusal": refusal} for event in events)
++        assert events[-1]["choices"][0]["finish_reason"] == "stop"
++        assert text.endswith("data: [DONE]\n\n")
++        rebuilt = _reconstruct_chat_sse(_parse_sse_events(text.encode()))
++        assert rebuilt["choices"][0]["message"]["refusal"] == refusal
++        assert rebuilt["choices"][0]["message"]["content"] == content
++
++    def test_reconstructor_joins_refusal_fragments(self) -> None:
++        events = [
++            {"choices": [{"delta": {"role": "assistant"}}]},
++            {"choices": [{"delta": {"refusal": "I cannot "}}]},
++            {"choices": [{"delta": {"refusal": "help with that."}}]},
++            {"choices": [{"delta": {}, "finish_reason": "stop"}]},
++        ]
++        rebuilt = _reconstruct_chat_sse(events)
++        assert rebuilt["choices"][0]["message"] == {
++            "role": "assistant",
++            "content": None,
++            "refusal": "I cannot help with that.",
++        }
++
+     def test_tool_calls_roundtrip(self) -> None:
+         completion = _completion(content=None, tool_calls=[_TOOL_CALL], finish_reason="tool_calls").model_dump(
+             mode="json"
+diff --git a/tests/unit_tests/test_token_capture_ledger.py b/tests/unit_tests/test_token_capture_ledger.py
+index 3d5ed7214..539a181b6 100644
+--- a/tests/unit_tests/test_token_capture_ledger.py
++++ b/tests/unit_tests/test_token_capture_ledger.py
+@@ -12,9 +12,10 @@ from __future__ import annotations
+ 
+ import pytest
+ 
++from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION
+ from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore, _custody_columns
+ from nemo_gym.token_id_capture.protocols import CaptureLedger
+-from nemo_gym.token_id_capture.records import compute_digest
++from nemo_gym.token_id_capture.records import ParentResolutionStatus, compute_digest
+ from nemo_gym.token_id_capture.sink import (
+     UNRESOLVED_PARENT_REASON,
+     CaptureContext,
+@@ -70,6 +71,7 @@ def _call_record(
+         admitted_at=admitted_at,
+         chain_hash=chain_hash,
+         cumulative_hash=cumulative_hash,
++        fingerprint_version=FINGERPRINT_VERSION,
+     )
+ 
+ 
+@@ -380,6 +382,51 @@ async def test_file_store_cross_handle_visibility(tmp_path):
+     assert await reader.has_rows("r1")
+ 
+ 
++@pytest.mark.asyncio
++@pytest.mark.parametrize("version", [None, 0, FINGERPRINT_VERSION - 1, FINGERPRINT_VERSION, FINGERPRINT_VERSION + 1])
++async def test_file_store_requires_current_fingerprint_version(tmp_path, version):
++    import json
++
++    writer = FileLineageStore(tmp_path)
++    await _record_call_1(writer)
++    path = tmp_path / "r1.lineage.jsonl"
++    row = json.loads(path.read_text())
++    if version is None:
++        row.pop("fingerprint_version")
++    else:
++        row["fingerprint_version"] = version
++    # Keep the matching fingerprint and context; only the stored version differs.
++    path.write_text(json.dumps(row) + "\n")
++
++    reader = FileLineageStore(tmp_path)
++    resolution = await reader.resolve("r1", [USER_1, ASSISTANT_1, USER_2])
++    context = await _admit(reader, [USER_1, ASSISTANT_1, USER_2])
++    if version == FINGERPRINT_VERSION:
++        assert resolution.status == ParentResolutionStatus.RESOLVED
++        assert resolution.match.model_call_id == "c1"
++        assert context.capture_admission.staging_chain == ["r1/c1"]
++    else:
++        assert resolution.status == ParentResolutionStatus.UNRESOLVED
++        assert resolution.match is None
++        assert context.capture_admission is None
++        manifest = RolloutManifest.model_validate(await reader.manifest("r1"))
++        assert [failure.reason for failure in manifest.failures] == [UNRESOLVED_PARENT_REASON]
++
++
++@pytest.mark.asyncio
++async def test_file_store_ignores_old_version_when_current_match_is_appended(tmp_path):
++    writer = FileLineageStore(tmp_path)
++    reader = FileLineageStore(tmp_path)
++    old_record = _call_record("old").model_copy(update={"fingerprint_version": FINGERPRINT_VERSION - 1})
++    await writer.record(_commit(old_record, [USER_1], [ASSISTANT_1]))
++    assert (await reader.resolve("r1", [USER_1, ASSISTANT_1, USER_2])).match is None
++
++    await _record_call_1(writer)
++    match = (await reader.resolve("r1", [USER_1, ASSISTANT_1, USER_2])).match
++    assert match is not None and match.model_call_id == "c1"
++    assert match.staging_chain == ("r1/c1",)
++
++
+ @pytest.mark.asyncio
+ async def test_lineage_only_rows_do_not_enter_the_manifest(tmp_path):
+     """Local-capture rows (no custody columns) resolve but are not manifest rows."""
+@@ -390,6 +437,7 @@ async def test_lineage_only_rows_do_not_enter_the_manifest(tmp_path):
+     store = FileLineageStore(tmp_path)
+     lineage_only_row = {
+         "model_call_id": "c1",
++        "fingerprint_version": FINGERPRINT_VERSION,
+         "fingerprint": assistant_fingerprint([USER_1, ASSISTANT_1]),
+         "context_len": 1,
+         "context_digest": conversation_digest([USER_1]),
+@@ -430,8 +478,8 @@ async def test_custody_row_missing_a_chain_digest_poisons_the_manifest(tmp_path,
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_legacy_token_carrying_row_resolves_but_cannot_anchor_a_chain(tmp_path):
+-    """Pre-chain external rows stay readable; extending them fails closed."""
++async def test_unversioned_legacy_token_carrying_row_cannot_resolve_or_anchor_a_chain(tmp_path):
++    """Unversioned pre-chain external rows cannot supply a parent token prefix."""
+     import json
+ 
+     from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint, conversation_digest
+@@ -447,16 +495,14 @@ async def test_legacy_token_carrying_row_resolves_but_cannot_anchor_a_chain(tmp_
+         **{
+             key: value
+             for key, value in _custody_columns(_call_record("c1"), ("r1/c1",)).items()
+-            if key not in ("chain_hash", "cumulative_hash", "response_id")
++            if key not in ("chain_hash", "cumulative_hash", "response_id", "fingerprint_version")
+         },
+     }
+     path = tmp_path / "r1.lineage.jsonl"
+     path.write_text(json.dumps(legacy_row, sort_keys=True, separators=(",", ":")) + "\n")
+ 
+     match = (await store.resolve("r1", [USER_1, ASSISTANT_1, USER_2])).match
+-    assert match is not None
+-    assert list(match.cumulative_token_ids) == TOKENS_1
+-    assert match.chain_hash == ""
++    assert match is None
+ 
+     context = await _admit(store, [USER_1, ASSISTANT_1, USER_2])
+     assert context.capture_admission is None
+diff --git a/tests/unit_tests/test_token_id_capture.py b/tests/unit_tests/test_token_id_capture.py
+index 48a332a4c..55631fb13 100644
+--- a/tests/unit_tests/test_token_id_capture.py
++++ b/tests/unit_tests/test_token_id_capture.py
+@@ -1191,6 +1191,16 @@ def test_fingerprint_ignores_non_assistant_turns():
+     assert assistant_fingerprint([{"role": "user", "content": "q"}]) == ""
+ 
+ 
++@pytest.mark.parametrize("fingerprint", [assistant_fingerprint, conversation_digest])
++def test_fingerprint_preserves_namespaced_tool_identity(fingerprint):
++    call = {"type": "function_call", "call_id": "call-1", "name": "weather", "arguments": '{"city":"Paris"}'}
++    served = {**call, "namespace": "functions"}
++    backend = {**call, "name": "functions__weather"}
++    assert fingerprint([served]) == fingerprint([backend])
++    assert fingerprint([served]) != fingerprint([{**served, "namespace": "other"}])
++    assert fingerprint([served]) != fingerprint([call])
++
++
+ def test_fingerprint_survives_tool_argument_reserialization():
+     """Match tool arguments across equivalent JSON serializations."""
+     compact = [
+-- 
+2.56.0
+

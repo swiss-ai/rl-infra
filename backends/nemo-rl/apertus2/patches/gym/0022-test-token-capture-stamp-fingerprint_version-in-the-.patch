@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Tue, 10 Nov 2026 07:02:03 +0000
+Subject: [PATCH 22/22] test(token-capture): stamp fingerprint_version in the
+ _Ledger test helper
+
+Since the buffered-SSE backport, parent resolution only matches ledger rows
+whose fingerprint_version equals FINGERPRINT_VERSION (lineage.py), as the
+vllm_model commit hook already writes (app.py). The helper shared by the
+empty-assistant and think-reasoning tests committed rows without it, so their
+file-store cases could not resolve any parent.
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ tests/unit_tests/test_token_capture_empty_assistant.py | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/tests/unit_tests/test_token_capture_empty_assistant.py b/tests/unit_tests/test_token_capture_empty_assistant.py
+index c380d9d16..ff84ab016 100644
+--- a/tests/unit_tests/test_token_capture_empty_assistant.py
++++ b/tests/unit_tests/test_token_capture_empty_assistant.py
+@@ -44,7 +44,7 @@ from __future__ import annotations
+ 
+ import pytest
+ 
+-from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint
++from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, assistant_fingerprint
+ from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
+ from nemo_gym.token_id_capture.records import ParentResolutionStatus
+ from nemo_gym.token_id_capture.sink import (
+@@ -132,6 +132,7 @@ class _Ledger:
+             admitted_at=1.0,
+             chain_hash=self.chain_hash,
+             cumulative_hash=hash_token_ids(self.tokens),
++            fingerprint_version=FINGERPRINT_VERSION,
+         )
+         await self.store.record(
+             CaptureLedgerCommit(
+-- 
+2.56.0
+

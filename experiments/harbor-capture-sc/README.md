@@ -53,6 +53,9 @@ The previous smoke test (4 sandboxes, ~7 min) is still one command:
 | `../../backends/nemo-rl/apertus2/patches/gym/0017-*.patch` | fix after job 5255374: the `max_turns` call limit raises `CallLimitReached` (mini's `LimitsExceeded` made `mini` prompt on stdin -> `EOFError`) |
 | `../../backends/nemo-rl/apertus2/patches/gym/0018-*.patch` | fix after job 5256202 (Gym token capture, upstream code): an assistant reply with no text and no tool call added nothing to the lineage fingerprint, so the next call matched two ledger rows and its rollout was rejected `unresolved_parent` (62/192 rollouts with Chonk). Empty turns now hash a marker; `FINGERPRINT_VERSION` 2. Report `research/reports/2026-11-04-capture-unresolved-parent-fix.md` (alpernates workspace). |
 | `../../backends/nemo-rl/apertus2/patches/gym/0019-*.patch` | fix after job 5302914 (Gym token capture, upstream code): with a reasoning parser the model server folds the reply's reasoning into its text as `<think>...</think>` before capture fingerprints it; an agent that echoes only the visible text (Terminus-2, `interleaved_thinking: false`) matched no ledger row and the rollout was rejected `unresolved_parent` (173/192 rollouts on the SFT checkpoint). Leading think blocks of model-authored text are now stripped before hashing, so both echoes resolve; `FINGERPRINT_VERSION` 3. nemo-gym branch `capture-think-fix` 9f385f3f2. Report `research/reports/2026-11-09-job-5302914-run-s-sft.md` (alpernates workspace). |
+| `../../backends/nemo-rl/apertus2/patches/gym/0020-*.patch` | upstream Gym `295e2e681` (#3301), backport: the capture ledger records the response actually served to the client (needed by 0021). |
+| `../../backends/nemo-rl/apertus2/patches/gym/0021-*.patch` | upstream Gym `1c2dcc773` (#3382), backport, for agents that always stream (OpenCode): under worker-owned capture (`external_staging`) a `stream: true` request got 422 (`base_responses_api_model.py`); now the engine call is made non-streaming, committed to the ledger, and replayed to the client as SSE (`chat_streaming.py` / `responses_streaming.py`). No byte reaches the client before generation ends. Conflict: `FINGERPRINT_VERSION` 4 (ours was 3). nemo-gym branch `capture-stream-replay`. Design note `research/research_notes/2026-11-10-gym-stream-replay-design.md` (alpernates workspace). |
+| `../../backends/nemo-rl/apertus2/patches/gym/0022-*.patch` | test only: the `_Ledger` helper of the 0018/0019 tests stamps `fingerprint_version`, which parent resolution requires since 0021. |
 | `../../backends/nemo-rl/apertus2/fetch-chisel.sh` | chisel 1.12.0 (amd64 + arm64, pinned sha256) into `CHISEL_DIR` |
 
 ## Environment variables of `run.sh`
@@ -83,7 +86,8 @@ from that ledger (`RolloutReassembler`); the agent's own output carries no token
 1. **Gym with the patches.** `setup-gym.sh` puts every patch in `patches/gym/` on the pin's
    working tree: 0001-0005 (rubric judge, code-gen, from `main`), 0006-0009 (Kostas Pitas'
    OpenSandbox commits from `swissai/harbor_agent_osb_v0.7.0`, as rebuilt on the pin; main's
-   export), 0010 (from `main`: OpenSandbox `connection.api_key_file`), 0011-0019 (ours). One
+   export), 0010 (from `main`: OpenSandbox `connection.api_key_file`), 0011-0019 (ours), 0020-0021
+   (upstream Gym backports: streaming under worker-owned capture), 0022 (ours, test helper). One
    checkout serves every run; 0011 and 0012 are no-ops without `token_capture` (the URL
    is unchanged, masking as before), 0013 without `model_tunnel`. Re-running re-applies them when
    the patch set changed.
