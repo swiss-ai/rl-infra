@@ -59,13 +59,14 @@ The previous smoke test (4 sandboxes, ~7 min) is still one command:
 | `../../backends/nemo-rl/apertus2/patches/gym/0023-*.patch` | `OpenCodeNemoGym` for in-pod GRPO, OpenCode pinned 1.17.11 (keys checked against its source): run command `opencode ... run --format=json --title 'NeMo Gym' -- <instr> 2>&1 </dev/null \| tee` (stdin: `opencode run` reads a non-TTY stdin to EOF first, cli/cmd/run.ts:399 = the silent job 5236016), optional `timeout` wrapper (`opencode_timeout_sec`), `opencode_debug`; config: only provider `nemogym`, provider `timeout`/`headerTimeout` false (stream replay sends nothing until generation ends; a retry is an extra captured call), model `limit` from `model_info`, title/compaction/prune/snapshot off, `agent.build.steps` = `max_turns`, `task`/`webfetch`/`websearch`/`todowrite` denied, `opencode_config` deep-merged last; install: standalone binary from GitHub releases with built-in sha256 (`opencode_install: binary`, default) or npm. nemo-gym branch `opencode-adapter`. Note `research/research_notes/2026-11-10-opencode-adapter-patch.md` (alpernates workspace). |
 | `../../backends/nemo-rl/apertus2/patches/gym/0024-*.patch` | opt-in `harbor_mask_agent_timeout` (default false = unchanged): mask rollouts whose agent hit Harbor's agent timeout. |
 | `../../backends/nemo-rl/apertus2/patches/gym/0025-*.patch` | fix to 0023: `pipefail` only where the pod's shell supports it (a `set -o pipefail` error would end `/bin/sh` before OpenCode starts). |
+| `../../backends/nemo-rl/apertus2/patches/gym/0026-*.patch` | after job 5314432: `opencode_workdir` (absolute path, default unset): the command runs `mkdir -p <dir> && cd <dir>` first, so OpenCode's project is the task directory, not `/` (OpenCode warned `failed to initialize fff`). `opencode-sc.yaml` sets `/app`. |
 | `../../backends/nemo-rl/apertus2/fetch-chisel.sh` | chisel 1.12.0 (amd64 + arm64, pinned sha256) into `CHISEL_DIR` |
 
 ## Environment variables of `run.sh`
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AGENT` | `terminus` | `terminus`: Terminus-2, loop on the node, commands in the pod (task `terminus-sc.yaml`). `mini`: mini-swe-agent installed and run in the pod, model through the tunnel (adds `mini-sc.yaml`, forces `TUNNEL=1`, needs patch 0015). `opencode`: OpenCode installed and run in the pod, model through the tunnel (adds `opencode-sc.yaml`, forces `TUNNEL=1`, needs patches 0020-0025). Anything else is refused. |
+| `AGENT` | `terminus` | `terminus`: Terminus-2, loop on the node, commands in the pod (task `terminus-sc.yaml`). `mini`: mini-swe-agent installed and run in the pod, model through the tunnel (adds `mini-sc.yaml`, forces `TUNNEL=1`, needs patch 0015). `opencode`: OpenCode installed and run in the pod, model through the tunnel (adds `opencode-sc.yaml`, forces `TUNNEL=1`, needs patches 0020-0026). Anything else is refused. |
 | `OPENCODE_VERSION` | `1.17.11` | `AGENT=opencode` only: OpenCode release installed in each pod; patch 0023's config keys were checked against 1.17.11 (another version needs `opencode_sha256` and a re-check). |
 | `OPENCODE_TIMEOUT_SEC` | `870` | `AGENT=opencode` only: OpenCode's own time limit (`timeout`), below the agent timeout. |
 | `OPENCODE_DEBUG` | `false` | `AGENT=opencode` only: `true` writes OpenCode's debug log into `agent/opencode.txt`. |
@@ -91,7 +92,7 @@ from that ledger (`RolloutReassembler`); the agent's own output carries no token
    working tree: 0001-0005 (rubric judge, code-gen, from `main`), 0006-0009 (Kostas Pitas'
    OpenSandbox commits from `swissai/harbor_agent_osb_v0.7.0`, as rebuilt on the pin; main's
    export), 0010 (from `main`: OpenSandbox `connection.api_key_file`), 0011-0019 (ours), 0020-0021
-   (upstream Gym backports: streaming under worker-owned capture), 0022-0025 (ours). One
+   (upstream Gym backports: streaming under worker-owned capture), 0022-0026 (ours). One
    checkout serves every run; 0011 and 0012 are no-ops without `token_capture` (the URL
    is unchanged, masking as before), 0013 without `model_tunnel`. Re-running re-applies them when
    the patch set changed.
@@ -219,7 +220,7 @@ parameter the server rejects (shows in `mini-swe-agent.txt` as an `APIError`, no
 
 Same path as mini (`TUNNEL=1` is forced): OpenCode runs in the pod and calls
 `http://127.0.0.1:8000/ng-rollout/<id>/training-token-capture/v1` through the per-sandbox tunnel.
-Needs Gym patches 0020-0025 (run.sh checks markers of 0021 and 0023):
+Needs Gym patches 0020-0026 (run.sh checks markers of 0021 and 0026):
 
 - OpenCode (AI SDK) always streams. With 0020/0021 (upstream backport) the model server makes the
   engine call non-streaming, commits the tokens and replays the reply as SSE; nothing reaches the
@@ -234,6 +235,7 @@ Needs Gym patches 0020-0025 (run.sh checks markers of 0021 and 0023):
 - `opencode run` reads a non-TTY stdin to EOF before starting (the silent job 5236016); the command
   closes it (`</dev/null`). `OPENCODE_TIMEOUT_SEC` (870) ends OpenCode before Harbor's 900 s agent
   timeout, so `command-0/return-code.txt` (124 on timeout) and `agent/opencode.txt` are written.
+- OpenCode runs in `/app` (`opencode_workdir`, 0026), created if missing.
 
 Check per trial: `agent/setup/stdout.txt` ("installed opencode 1.17.11"), `agent/opencode.txt` (JSON
 events, no 422, no stream/timeout errors), `agent/opencode-data/opencode/log/`, `command-0/return-code.txt`
