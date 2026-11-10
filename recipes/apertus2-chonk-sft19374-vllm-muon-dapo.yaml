@@ -1,0 +1,13 @@
+# DAPO-Math recipe on SFT checkpoint iter_0019374 with Muon (md_decoupling): the Muon counterpart of
+# apertus2-chonk-sft19374-vllm-adamw-dapo.yaml. Muon needs 16 trainer nodes; generation keeps the
+# AdamW recipe's 8 vLLM nodes, so the run takes 24 nodes. Learning rates as in the earlier Muon runs.
+defaults: apertus2-chonk-sft-vllm-muon-dapo.yaml
+
+sft_export: ../hanint05/hf-exports/bridge/chonk-lc-16k-v0.1-ep1-iter_0019374
+
+# 16 trainer nodes and 8 vLLM nodes.
+cluster:
+  num_nodes: 24
+
+policy:
+  model_name: ${oc.env:SCRATCH}/models/chonk-lc-16k-v0.1-ep1-iter_0019374
