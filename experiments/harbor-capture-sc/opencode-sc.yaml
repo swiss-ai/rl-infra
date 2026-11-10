@@ -1,15 +1,24 @@
-# Task overlay: terminus-sc.yaml with OpenCode instead of Terminus-2 (run.sh: AGENT=opencode).
+# Task overlay: terminus-sc.yaml with OpenCode instead of Terminus-2 (run.sh: AGENT=opencode, always
+# together with tunnel-sc.yaml). OpenCode runs INSIDE the task sandbox and calls the model through the
+# per-sandbox reverse tunnel, sandbox 127.0.0.1:8000 -> policy_model (Gym patches 0013+0014), like
+# mini-sc.yaml.
 #
-# OpenCode is a Harbor *installed* agent: Harbor installs it into every task pod at setup
-# (apt-get, nvm, `npm i -g opencode-ai`; the pods have internet) and runs `opencode run` there.
-# Its model calls therefore start inside the pod and must reach the Gym model server (policy_model)
-# on the training node. OpenSandbox pods cannot reach CSCS-internal hosts, so this only works once
-# HARBOR_MODEL_BASE_URL names an address the pods can reach that forwards to policy_model (proxy,
-# tunnel). harbor_agent appends the rollout's capture prefix and /v1 to it (Gym patch 0011).
+# Gym patches used (run.sh checks markers of 0021 and 0023):
+#   0011/0012  per-rollout capture URL; capture-aware masking
+#   0020/0021  upstream backport: OpenCode (AI SDK) always streams; under worker-owned capture the
+#              engine call is made non-streaming, committed, and replayed to OpenCode as SSE. No byte
+#              reaches OpenCode before generation ends, so its provider timeouts must stay off (0023).
+#   0023-0025  OpenCodeNemoGym: pinned standalone binary (1.17.11, sha256 built in, downloaded by the
+#              pod from GitHub releases), `opencode run ... </dev/null` (job 5236016 hung reading stdin),
+#              no title / compaction / sub-agent calls (each extra conversation masks the rollout),
+#              model limits from model_info. Keys verified against OpenCode v1.17.11; keep that version.
+# Note: research/research_notes/2026-11-10-opencode-adapter-patch.md (alpernates workspace).
 #
-# Gym patch 0012 provides the agent class (Harbor's own OpenCode agent at this pin knows only
-# hosted providers) and stops masking its rollouts for having no ATIF trajectory: the tokens come
-# from the capture ledger, as with every other agent under token_capture.
+# Env (run.sh exports them when set):
+#   OPENCODE_VERSION      default 1.17.11; another version needs opencode_sha256 and re-checked keys
+#   OPENCODE_TIMEOUT_SEC  default 870: OpenCode is ended with exit 124 before Harbor's agent timeout
+#                         (900 s micro tasks), so return-code.txt and opencode.txt are written
+#   OPENCODE_DEBUG        true: --print-logs --log-level DEBUG into agent/opencode.txt (use for R1)
 
 env:
   nemo_gym:
@@ -18,10 +27,31 @@ env:
         harbor_agent:
           harbor_agent_name: null
           harbor_agent_import_path: "responses_api_agents.harbor_agent.custom_agents.opencode_nemo_gym:OpenCodeNemoGym"
-          # what the in-pod OpenCode calls; required, run.sh refuses to start without it
-          harbor_model_base_url: ${oc.env:HARBOR_MODEL_BASE_URL}
-          # Terminus-2's kwargs (max_turns, model_info, ...) are merged in as well; Harbor's agent base
-          # class ignores unknown kwargs, and a nested _override_ is not honoured by NeMo-RL's loader.
+          # the tunnel's sandbox end (tunnel-sc.yaml pod_port); harbor_agent appends /ng-rollout/<id>/...
+          harbor_model_base_url: http://127.0.0.1:8000
+          # merged with terminus-sc.yaml's kwargs (max_turns -> agent.build.steps)
           harbor_agent_kwargs:
-            # opencode-ai npm version; unset installs the latest at every sandbox start
-            version: ${oc.env:OPENCODE_VERSION,null}
+            version: ${oc.env:OPENCODE_VERSION,1.17.11}
+            opencode_install: binary
+            # oc.decode: oc.env returns strings, and bool("false") is True
+            opencode_timeout_sec: ${oc.decode:${oc.env:OPENCODE_TIMEOUT_SEC,870}}
+            opencode_debug: ${oc.decode:${oc.env:OPENCODE_DEBUG,false}}
+            # terminus-sc.yaml gives max_output_tokens = the whole context; OpenCode's limit.output (and
+            # OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX) should be the per-turn generation limit
+            model_info:
+              max_input_tokens: ${policy.max_total_sequence_length}
+              max_output_tokens: ${policy.generation.max_new_tokens}
+            # deep-merged last into OpenCode's config, e.g. {agent: {build: {prompt: "..."}}}; unknown
+            # top-level keys make OpenCode reject the whole config (config/parse.ts:40-53 @ v1.17.11)
+            opencode_config: {}
+    policy_model:
+      responses_api_models:
+        vllm_model:
+          # REQUIRED: OpenCode sends no top_p and temperature 0.55 for model ids containing "qwen"
+          # (provider/transform.ts:482,500 @ v1.17.11); NeMo-RL's HTTP server asserts the train profile
+          # (vllm_worker_async.py). Gym applies these last to every engine request (vllm_model/app.py).
+          # Validation is off in terminus-sc.yaml (val_period 0), so no val profile is needed here.
+          sampling_overrides:
+            temperature: ${policy.generation.temperature}
+            top_p: ${policy.generation.top_p}
+            max_tokens: ${policy.generation.max_new_tokens}

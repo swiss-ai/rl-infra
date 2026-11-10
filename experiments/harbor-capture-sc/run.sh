@@ -4,10 +4,12 @@
 #   bash experiments/harbor-capture-sc/run.sh [overrides...]
 # Env:
 #   AGENT                  terminus (default), mini (mini-swe-agent in the sandbox, implies TUNNEL=1; Gym
-#                          patch 0015, mini-sc.yaml) or opencode
+#                          patch 0015, mini-sc.yaml) or opencode (OpenCode in the sandbox, implies TUNNEL=1;
+#                          Gym patches 0021+0023, opencode-sc.yaml)
 #   MSWEA_VERSION          mini only: li-boxuan/mini-swe-agent git ref (default: the commit pinned in mini-sc.yaml)
-#   HARBOR_MODEL_BASE_URL  opencode only: model-server URL as reachable from the pods (required)
-#   OPENCODE_VERSION       opencode only: opencode-ai npm version (default: latest)
+#   OPENCODE_VERSION       opencode only: default 1.17.11 (the version whose keys 0023 was checked against)
+#   OPENCODE_TIMEOUT_SEC   opencode only: OpenCode's own time limit, below the agent timeout (default 870)
+#   OPENCODE_DEBUG         opencode only: true = OpenCode debug logs in agent/opencode.txt (default false)
 #   TUNNEL                 1: per-sandbox reverse tunnel sandbox 127.0.0.1:8000 -> policy_model (Gym patch
 #                          0013, tunnel-sc.yaml); every trial checks GET /health through it before starting.
 #                          With terminus the agent still calls the model from the node (step A: the tunnel
@@ -43,16 +45,25 @@ case "${AGENT}" in
         export OVERLAY="${HERE}/mini-sc.yaml"
         ;;
     opencode)
-        [[ -n "${HARBOR_MODEL_BASE_URL:-}" ]] || {
-            echo "ERROR: AGENT=opencode needs HARBOR_MODEL_BASE_URL (model server as reachable from the pods)" >&2
+        grep -q opencode_timeout_sec \
+            "${GYM_DIR}/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py" 2>/dev/null || {
+            echo "ERROR: AGENT=opencode needs Gym patches 0023-0025 (OpenCode adapter) in ${GYM_DIR}; re-run setup-gym.sh as above" >&2
             exit 1
         }
-        export HARBOR_MODEL_BASE_URL
+        # OpenCode always streams: without 0021 every call gets 422 under token capture
+        grep -q "def _stream_served_response" "${GYM_DIR}/nemo_gym/base_responses_api_model.py" 2>/dev/null || {
+            echo "ERROR: AGENT=opencode needs Gym patches 0020-0021 (streaming under capture) in ${GYM_DIR}; re-run setup-gym.sh as above" >&2
+            exit 1
+        }
+        # the agent calls the model from inside the sandbox: only through the tunnel
+        TUNNEL=1
         export OVERLAY="${HERE}/opencode-sc.yaml"
         ;;
     *) echo "ERROR: AGENT must be terminus, mini or opencode, not ${AGENT}" >&2; exit 1 ;;
 esac
-[[ -z "${OPENCODE_VERSION:-}" ]] || export OPENCODE_VERSION
+for v in OPENCODE_VERSION OPENCODE_TIMEOUT_SEC OPENCODE_DEBUG; do
+    [[ -z "${!v:-}" ]] || export "${v}"
+done
 [[ -z "${MSWEA_VERSION:-}" ]] || export MSWEA_VERSION
 
 if [[ "${TUNNEL:-0}" == 1 ]]; then
