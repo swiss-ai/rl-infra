@@ -121,7 +121,8 @@ check_nemo_rl_clone() {
 # Gym patch 0011 (harbor_agent hands the agent the rollout-prefixed model URL, base_url_for_run;
 # without it capture records nothing and every row is rejected, job 5236016) and 0012
 # (_should_mask: under capture empty output is not masked, failed trials still are). Same marker
-# as ../harbor-capture-sc/run.sh; and 0019 (capture ignores think-wrapped reasoning, needed by run S).
+# as ../harbor-capture-sc/run.sh; 0019 (capture ignores think-wrapped reasoning, needed by run S); and
+# 0021 (streaming under capture, needed by OpenCode).
 # Returns the number of failures.
 check_gym_capture() {
     local g="${NEMO_RL_DIR}/3rdparty/Gym-workspace/Gym" fails=0 stamp
@@ -146,6 +147,10 @@ check_gym_capture() {
     grep -q "def _strip_leading_reasoning" "${g}/nemo_gym/token_id_capture/fingerprint.py" 2>/dev/null \
         && ok "Gym patch 0019: capture fingerprints ignore think-wrapped reasoning" \
         || bad "Gym patch 0019 missing (_strip_leading_reasoning in token_id_capture/fingerprint.py)"
+    # 0021: streaming clients (OpenCode) under worker-owned capture; without it they get 422
+    grep -q "def _stream_served_response" "${g}/nemo_gym/base_responses_api_model.py" 2>/dev/null \
+        && ok "Gym patch 0021: streaming requests are replayed as SSE under capture" \
+        || bad "Gym patch 0021 missing (_stream_served_response in nemo_gym/base_responses_api_model.py)"
     for f in nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
              responses_api_agents/harbor_agent/configs/harbor_agent_opensandbox_training.yaml; do
         [[ -f "${g}/${f}" ]] && ok "${f} present" || bad "${f} missing (OpenSandbox commits, setup-gym.sh)"
