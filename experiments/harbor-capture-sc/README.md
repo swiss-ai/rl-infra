@@ -230,8 +230,9 @@ Needs Gym patches 0020-0026 (run.sh checks markers of 0021 and 0026):
   path.
 - Extra conversations mask the rollout under capture (more than one root/chain). 0023 switches off
   the title call, compaction/pruning and sub-agents (`task`), and denies `webfetch`/`websearch`/`todowrite`.
-- Sampling: OpenCode sends temperature 0.55 for "qwen" model ids and no top_p, which NeMo-RL's HTTP
-  server rejects; `opencode-sc.yaml` sets `sampling_overrides` with the train values.
+- Sampling: OpenCode sends no temperature (a model it does not know has the temperature capability
+  off), and top_p 1 only for "qwen" model ids, so the request does not carry the train profile that
+  NeMo-RL's HTTP server asserts; `opencode-sc.yaml` sets `sampling_overrides` with the train values.
 - `opencode run` reads a non-TTY stdin to EOF before starting (the silent job 5236016); the command
   closes it (`</dev/null`). `OPENCODE_TIMEOUT_SEC` (870) ends OpenCode before Harbor's 900 s agent
   timeout, so `command-0/return-code.txt` (124 on timeout) and `agent/opencode.txt` are written.
