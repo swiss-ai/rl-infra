@@ -101,6 +101,9 @@ check_nemo_rl_clone() {
     grep -q "NRL_LOGPROB_DUMP_DIR" "${d}/nemo_rl/algorithms/loss/logprob_dump.py" 2>/dev/null \
         && ok "NeMo-RL patch 0034: nemo_rl/algorithms/loss/logprob_dump.py" \
         || bad "NeMo-RL patch 0034 missing (nemo_rl/algorithms/loss/logprob_dump.py); run backends/nemo-rl/apertus2/setup.sh"
+    grep -q "def _invalid_apertus2_history" "${d}/nemo_rl/models/generation/vllm/vllm_worker_async.py" 2>/dev/null \
+        && ok "NeMo-RL patch 0035: an unencodable Apertus 2 chat history gets HTTP 400" \
+        || bad "NeMo-RL patch 0035 missing (_invalid_apertus2_history in vllm_worker_async.py); run backends/nemo-rl/apertus2/setup.sh"
     for f in "${SC_SCRIPT}" nemo_rl/algorithms/single_controller.py nemo_rl/algorithms/single_controller_utils/config.py; do
         [[ -f "${d}/${f}" ]] && ok "${f} present" || bad "${f} missing"
     done
