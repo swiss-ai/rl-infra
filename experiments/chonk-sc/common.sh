@@ -153,6 +153,11 @@ check_gym_capture() {
     grep -q "def _strip_leading_reasoning" "${g}/nemo_gym/token_id_capture/fingerprint.py" 2>/dev/null \
         && ok "Gym patch 0019: capture fingerprints ignore think-wrapped reasoning" \
         || bad "Gym patch 0019 missing (_strip_leading_reasoning in token_id_capture/fingerprint.py)"
+    # 0027: without it a tool call with unparseable arguments (OpenCode echoes it as `invalid`) poisons the
+    # rest of the rollout (job 5316800)
+    grep -q "def _repaired_tool_name" "${g}/nemo_gym/token_id_capture/fingerprint.py" 2>/dev/null \
+        && ok "Gym patch 0027: capture lineage survives a tool call with unparseable arguments" \
+        || bad "Gym patch 0027 missing (_repaired_tool_name in token_id_capture/fingerprint.py)"
     # 0021: streaming clients (OpenCode) under worker-owned capture; without it they get 422
     grep -q "def _stream_served_response" "${g}/nemo_gym/base_responses_api_model.py" 2>/dev/null \
         && ok "Gym patch 0021: streaming requests are replayed as SSE under capture" \
