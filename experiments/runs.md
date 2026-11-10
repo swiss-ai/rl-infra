@@ -561,3 +561,46 @@ These runs had a thinking budget of 4096 per turn. Their `train/policy_kl_error`
 to e^-34 (from the per-token dumps `train_data_step*.jsonl`). The coding run with a budget of 6144,
 `sft-code-full-128x16-wandb`, reads up to 5e11 for the same reason. The IS weight of such a token is about 0, so
 training was not affected. The task file has no budget since.
+
+## SFT, Harbor verified tasks
+
+The verified Harbor tasks of `harbor_verified_tasks` (982 SWE and terminal tasks from 15 campaigns, port of
+swiss-ai/nemo-rl-development), Terminus-2 through Gym's `harbor_agent` on Harbor 0.25.0, which verifies most of them
+in a second pod of their own (`envs/harbor-verified-sft.yaml`, Gym patches 0011 to 0013). Iter_0019374 on the tools
+layout, 12 nodes (8 trainer, 4 vLLM). The HANGANG copy of the store has no `tasks.csv`, so the collector takes every
+task (`--include-unverified`); the campaigns ship fewer than 100 tasks each, so the dropped ones look removed already:
+
+```bash
+COLLECT_ARGS=--include-unverified bash envs/prepare_harbor_verified_tasks.sh \
+    ~/projects/harbor_verified_tasks/capstor/store/cscs/swissai/infra01/datasets/swe_and_agentic_gym_datasets/harbor_verified_tasks \
+    ~/projects/task_datasets/harbor_verified
+```
+
+That writes 966 training and 16 validation rows, 1.4 GB and 79,501 files. Harbor 0.25.0 loads all 982 tasks. The 39
+tasks of `sample100_HF_ML_Tasksmith` ask for `network_mode = "no-network"`, which OpenSandbox pods cannot enforce,
+so Harbor rejects them before any pod starts and their rollouts are masked.
+
+Debug run of 2 steps, 8x8 trials, no weights saved:
+
+```bash
+RUN=sft19374-harbor-verified-debug3 JOB_TIME=02:00:00 WANDB_PROJECT=grpo-dev WANDB_ENTITY=apertus \
+RECIPE=recipes/apertus2-chonk-sft19374-vllm-adamw-tools.yaml bash run.sh envs/harbor-verified-sft.yaml \
+    grpo.max_num_steps=2 \
+    checkpointing.enabled=false \
+    harbor_data_dir=$HOME/projects/task_datasets/harbor_verified \
+    registry_cred_file=$HOME/.rl_registry_cred \
+    env.nemo_gym.sandbox.opensandbox.connection.api_key_file=$HOME/.opensandbox_token \
+    env.nemo_gym.harbor_agent.responses_api_agents.harbor_agent.harbor_jobs_dir=$HOME/harbor-jobs/$RUN
+```
+
+- Jobs 1254871 and 1254945: the group's `/scratch` file quota (5M files, shared by in0138) ran out at start-up, first
+  in vLLM's DeepGEMM JIT cache, then in the Gym venv build, which is about 150k files with its uv cache. The venvs and
+  the job's uv cache are in home since (`sites/hangang.env`), and a half-built venv has to be deleted by hand:
+  `skip_venv_if_present` would reuse it.
+- Job 1254979: passed, 1 h 39 min. Validation 8/64 at step 0 and 3/64 after step 2 (16 tasks, 4 trials each, within
+  noise); training reward 0.078 and 0.281, loss 0.030 and 0.013, generation KL error 0.0012 and 0.0013. 382 Harbor
+  trials, 39 with reward 1, 373 without an exception (5 cancelled at shutdown, 2 agent timeouts, 2 runtime errors);
+  15 rollouts masked. Steps took 413 s and 2885 s, validation 1102 s and 1746 s: the sandboxes set the pace, and vLLM
+  stayed idle 50 to 80% of the time with at most 9 requests in flight per engine. Many trials end at the 16k
+  context (about 570 `ContextLengthExceededError` log lines for 382 trials), so a longer context is the first thing
+  to try.

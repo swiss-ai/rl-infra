@@ -1,0 +1,193 @@
+# Task file: the verified Harbor tasks (SWE and terminal tasks from 15 campaigns, each checked against
+# its own solution patch) on an SFT checkpoint. Same agent as envs/harbor-osb-sft.yaml: Gym's
+# harbor_agent runs Terminus-2 against a fresh OpenSandbox pod per trial, and the task's tests give the
+# reward. These tasks verify in a second pod of their own ([verifier] environment_mode = "separate"),
+# which needs Harbor 0.25.0 (Gym patches 0011 and 0012), and their images are in a private registry
+# project, so every create sends its credentials (Gym patch 0013). Port of swiss-ai/nemo-rl-development's
+# grpo_math_qwen30ba3b_megatron_harbor_agent_osb.yaml. Both files are given at launch: HOME inside the
+# container is not yours, and the registry file holds one line, username:password (chmod 600):
+#   COLLECT_ARGS=--include-unverified bash envs/prepare_harbor_verified_tasks.sh \
+#       ~/projects/harbor_verified_tasks/capstor/store/cscs/swissai/infra01/datasets/swe_and_agentic_gym_datasets/harbor_verified_tasks \
+#       ~/projects/task_datasets/harbor_verified
+#   RECIPE=recipes/apertus2-chonk-sft19374-vllm-adamw-tools.yaml RUN=<run> bash run.sh envs/harbor-verified-sft.yaml \
+#       harbor_data_dir=$HOME/projects/task_datasets/harbor_verified \
+#       registry_cred_file=$HOME/.rl_registry_cred \
+#       env.nemo_gym.sandbox.opensandbox.connection.api_key_file=$HOME/.opensandbox_token \
+#       env.nemo_gym.harbor_agent.responses_api_agents.harbor_agent.harbor_jobs_dir=$HOME/harbor-jobs/<run>
+# On HANGANG, harbor_jobs_dir goes to home: Harbor writes about 35 files per trial, and the group's
+# /scratch file quota (5M, shared by in0138) is close to full. The recipe above is the SFT checkpoint
+# of the run in experiments/runs.md; the default one (iter_0008075) works too.
+# A recipe on an SFT checkpoint needs swiss-ai/apertus-common, a private repository that setup.sh
+# clones over HTTPS when its checkout is missing or behind the pin. Without HTTPS credentials for
+# GitHub on the login node that fails with "could not read Username". Either run `gh auth setup-git`
+# once, or, if SSH to GitHub works, prefix the launch with
+#   GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:swiss-ai/apertus-common.git.insteadOf \
+#       GIT_CONFIG_VALUE_0=https://github.com/swiss-ai/apertus-common.git
+# The pods of a run carry the labels user=rl-infra and run=<run name> and live at most sandbox_ttl_s;
+# to delete the ones a run leaves behind, see experiments/runs.md.
+defaults: ../recipes/apertus2-chonk-sft-vllm-adamw-tools.yaml
+script: examples/nemo_gym/run_grpo_nemo_gym.py
+
+# train.jsonl, validation.jsonl and tasks/, as envs/prepare_harbor_verified_tasks.sh writes them.
+harbor_data_dir: ???
+# username:password for the registry that holds the task images (rl-registry.swissai.svc.cscs.ch).
+registry_cred_file: ???
+
+grpo:
+  # 64 trials, so 64 task pods (and up to 64 verifier pods), in flight.
+  num_prompts_per_step: 8
+  num_generations_per_prompt: 8
+  max_num_steps: 20
+  max_num_epochs: 100
+  val_period: 10
+  val_at_start: true
+  val_at_end: true
+  # The Gym entrypoint refuses any other value and validates on the whole validation file.
+  max_val_samples: null
+  val_batch_size: null
+  # 16 validation tasks, 4 trials each.
+  val_num_generations_per_prompt: 4
+  # A trajectory that runs out of context keeps its reward (usually 0) instead of being dropped.
+  overlong_filtering: false
+  # The DAPO layout's math settings: the Gym entrypoint refuses reward shaping, and the runs on Gym do
+  # not skip groups.
+  reward_shaping:
+    enabled: false
+  skip_zero_advantage_groups: false
+
+checkpointing:
+  save_period: 10
+
+policy:
+  # One optimizer step per step.
+  train_global_batch_size: 64
+  generation:
+    # Per agent turn. policy.max_total_sequence_length limits the whole trajectory.
+    max_new_tokens: 6144
+    # No thinking budget, as in envs/harbor-osb-sft.yaml (vLLM reports the forced think-close token with
+    # logprob 0, which blows up train/policy_kl_error, and a budget slows generation).
+    thinking_token_budget: null
+    output_format: apertus2
+    system_prompt_file: ${oc.env:RL_INFRA_DIR}/envs/apertus2-system.json
+    stop_token_ids: [12]
+    stop_strings: null
+    vllm_cfg:
+      max_model_len: ${policy.max_total_sequence_length}
+      async_engine: true
+      expose_http_server: true
+      # The checkpoint's tokenizer has no chat template, and the HTTP server does not use
+      # policy.tokenizer.chat_template on its own.
+      http_server_serving_chat_kwargs:
+        chat_template: ${policy.tokenizer.chat_template}
+    vllm_kwargs:
+      # Chonk's hybrid Mamba layers need it.
+      enable_chunked_prefill: true
+
+data:
+  max_input_seq_length: null
+  shuffle: true
+  num_workers: 0
+  # The data block below replaces the recipe's, and grpo.setup() indexes this key.
+  use_multiple_dataloader: false
+  train:
+    dataset_name: NemoGymDataset
+    data_path: ${harbor_data_dir}/train.jsonl
+  validation:
+    dataset_name: NemoGymDataset
+    data_path: ${harbor_data_dir}/validation.jsonl
+  default:
+    dataset_name: NemoGymDataset
+    env_name: nemo_gym
+    prompt_file: null
+    system_prompt_file: null
+    processor: nemo_gym_data_processor
+  _override_: true
+
+env:
+  should_use_nemo_gym: true
+  # False writes train_data_step*.jsonl, with the token IDs and the loss mask of each rollout.
+  should_log_nemo_gym_responses: false
+  # Zeroes the loss of a rollout Gym flags, such as one whose pod never came up.
+  should_mask_flagged_samples: true
+  # Full results of every rollout, next to the weights. Never in W&B.
+  rollout_dir: ${checkpointing.checkpoint_dir}/rollouts
+  nemo_gym:
+    skip_venv_if_present: true
+    port_range_low: 5000
+    port_range_high: 5999
+    is_trajectory_collection: false
+    # Gym's servers live on several Ray nodes and must advertise the node IP.
+    use_absolute_ip: true
+    # A rollout that produced no tokens becomes a zero-weight sample instead of aborting the step
+    # (NeMo-RL patch 0031).
+    mask_degenerate_rollouts: true
+    # The training config also starts an environment_servers/legacy_agent wrapper, which does not
+    # exist at our Gym pin; the data rows name harbor_agent directly.
+    harbor_agent_environment_server: null
+    config_paths:
+    - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+    # Defines `sandbox`, which the harbor_agent config references.
+    - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+    - responses_api_agents/harbor_agent/configs/harbor_agent_opensandbox_training.yaml
+    policy_model:
+      responses_api_models:
+        vllm_model:
+          # NeMo-RL clears its own stop settings for Gym, so they travel with each request.
+          extra_body:
+            stop: []
+            stop_token_ids: [12]
+    sandbox:
+      opensandbox:
+        connection:
+          domain: https://opensandbox-gvisor.breithorn.svc.cscs.ch
+          api_key: null
+          # Given at launch: HOME inside the container is not yours.
+          api_key_file: ???
+          transport_backend: httpx
+        # Labels on every pod. The driver sees neither $USER nor Slurm's variables in the container, so
+        # the run name tells a run's pods apart.
+        attribution:
+          user: rl-infra
+          workload: harbor-verified
+          run: ${logger.wandb.name}
+    harbor_agent:
+      responses_api_agents:
+        harbor_agent:
+          # One trial, and one pod, per in-flight rollout.
+          concurrency: ${mul:${grpo.num_prompts_per_step},${grpo.num_generations_per_prompt}}
+          harbor_datasets:
+            # The alias is the left half of every row's instance_id.
+            verified:
+              local_dataset_path: ${harbor_data_dir}/tasks
+          harbor_agent_kwargs:
+            # SWE tasks need more steps than the micro-tasks; the context is the real bound.
+            max_turns: 30
+            # The history carries each reply without its thinking: Gym's schema refuses an assistant message
+            # with reasoning_content (HTTP 422, job 1209869).
+            interleaved_thinking: false
+            model_info:
+              # Terminus-2's context limit: the whole trajectory, as in policy.max_total_sequence_length.
+              max_input_tokens: ${policy.max_total_sequence_length}
+              max_output_tokens: ${policy.generation.max_new_tokens}
+          harbor_environment_kwargs:
+            sandbox_metadata:
+              harbor-dataset: verified
+            sandbox_provider_options:
+              # The cluster rejects every create without it.
+              secure_access: true
+              # The task images are in a private registry project and the OpenSandbox cluster has no
+              # pull secret for it (Gym patch 0013 reads username:password from this file).
+              image_auth_file: ${registry_cred_file}
+            # A pod lives at most this long, also when a run dies; above the two caps below.
+            sandbox_ttl_s: 3600
+          # Caps, not overrides: these tasks declare 3000 s for both, and a step lasts as long as its
+          # slowest rollout.
+          harbor_agent_max_timeout: 1800
+          harbor_verifier_max_timeout: 1200
+          # Harbor's trial directories (trajectories, test output) next to the weights. The harbor_agent
+          # server reads them back, so they must be on a shared filesystem.
+          harbor_jobs_dir: ${checkpointing.checkpoint_dir}/harbor-jobs
+  _override_: true
+
+logger:
+  tensorboard_enabled: true

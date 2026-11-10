@@ -1,0 +1,369 @@
+From: Konstantinos Pitas <cwstas2007@hotmail.com>
+Subject: [PATCH] harbor_agent: Harbor 0.25.0 job creation, agent options and exec user
+
+Port of swiss-ai/nemo-gym 005ecbd6. Harbor 0.25.0 builds a Job through the async Job.create()
+(the constructor now raises), validates agent kwargs against options_model with extra=forbid
+(so Terminus2NemoGymOptions declares responses_create_params and nemo_model_server_timeout_sec),
+and passes a per-command user to exec (root for the tmux install, hooks and verification).
+---
+ responses_api_agents/harbor_agent/app.py           |   6 +-
+ .../custom_agents/terminus_2_nemo_gym.py           |  25 +++-
+ .../custom_envs/nemo_gym_sandbox/environment.py    |   6 +
+ .../harbor_agent/tests/test_app.py                 | 158 +++++++++++++++++++++
+ .../harbor_agent/tests/test_environment.py         |  89 ++++++++++++
+ 5 files changed, 282 insertions(+), 2 deletions(-)
+
+diff --git a/responses_api_agents/harbor_agent/app.py b/responses_api_agents/harbor_agent/app.py
+index 4f66a81e..71d3b851 100644
+--- a/responses_api_agents/harbor_agent/app.py
++++ b/responses_api_agents/harbor_agent/app.py
+@@ -165,10 +165,14 @@ async def run_harbor_job(job_config_dict: dict) -> str:
+     from harbor.models.job.config import JobConfig
+ 
+     config = JobConfig(**job_config_dict)
+-    job = Job(config)
+ 
+     job_error = None
+     try:
++        # harbor >=0.20 moved task/metric resolution out of the constructor
++        # into this async factory; direct instantiation now raises. Both calls
++        # sit inside the try so a resolution failure still gets the
++        # trial-directory recovery below, as it did when run() resolved.
++        job = await Job.create(config)
+         await job.run()
+     except Exception as e:
+         job_error = e
+diff --git a/responses_api_agents/harbor_agent/custom_agents/terminus_2_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/terminus_2_nemo_gym.py
+index c97b66aa..91c24d84 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/terminus_2_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/terminus_2_nemo_gym.py
+@@ -16,18 +16,41 @@ import json
+ from pathlib import Path
+ from typing import Any, Literal
+ 
+-from harbor.agents.terminus_2.terminus_2 import Terminus2
++from harbor.agents.terminus_2.terminus_2 import Terminus2, Terminus2Options
+ from harbor.environments.base import BaseEnvironment
+ from harbor.llms.base import BaseLLM
+ from harbor.models.agent.context import AgentContext
++from pydantic import Field
+ 
+ from responses_api_agents.harbor_agent.custom_agents.llms.nemo_gym_llm import NemoGymLLM
+ from responses_api_agents.harbor_agent.custom_envs.singularity.singularity import MemoryLimitExceededError
+ 
+ 
++class Terminus2NemoGymOptions(Terminus2Options):
++    """Terminus2's options plus the two this subclass adds.
++
++    harbor >=0.20 validates agent kwargs against ``options_model`` rather than
++    the constructor signature, and AgentOptions sets ``extra="forbid"``, so a
++    kwarg that only exists in ``__init__`` is rejected before the agent is ever
++    built. Declaring them here is what keeps them accepted.
++    """
++
++    responses_create_params: dict[str, Any] | None = Field(
++        default=None,
++        description="Extra params merged into each NeMo Gym responses request.",
++    )
++    nemo_model_server_timeout_sec: float = Field(
++        default=120.0,
++        description="Per-request timeout for the NeMo Gym model server.",
++    )
++
++
+ class Terminus2NemoGym(Terminus2):
+     """Terminus2 variant that uses a NeMo Gym model server-compatible BaseLLM."""
+ 
++    options_model = Terminus2NemoGymOptions
++    options: Terminus2NemoGymOptions
++
+     @staticmethod
+     def name() -> str:
+         return "terminus-2-nemo-gym"
+diff --git a/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/environment.py b/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/environment.py
+index 2a6b95cf..90792d0e 100644
+--- a/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/environment.py
++++ b/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/environment.py
+@@ -292,6 +292,7 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
+         cwd: str | None = None,
+         env: dict[str, str] | None = None,
+         timeout_sec: int | None = None,
++        user: str | int | None = None,
+     ) -> ExecResult:
+         timeout_s = timeout_sec if timeout_sec is not None else self._default_exec_timeout_s
+         # Harbor's docker/daytona backends use an interactive bash, so
+@@ -307,6 +308,11 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
+             cwd=cwd,
+             env=env,
+             timeout_s=timeout_s,
++            # harbor >=0.20 threads a per-command user through exec (it calls
++            # exec(..., user="root") to escalate for tmux install, collect
++            # hooks and verification). _resolve_user applies the environment's
++            # default_user when the caller passes None.
++            user=self._resolve_user(user),
+         )
+         return ExecResult(
+             stdout=result.stdout,
+diff --git a/responses_api_agents/harbor_agent/tests/test_app.py b/responses_api_agents/harbor_agent/tests/test_app.py
+index 71bb7e11..a8f0ffee 100644
+--- a/responses_api_agents/harbor_agent/tests/test_app.py
++++ b/responses_api_agents/harbor_agent/tests/test_app.py
+@@ -863,3 +863,161 @@ class TestLLMClientTeardown:
+         # Idempotent: a second close is a no-op (no underlying client to touch).
+         await llm.aclose()
+         client.aclose.assert_awaited_once()
++
++
++class _FakeJob:
++    """Stand-in for harbor.job.Job that keeps the real construction contract.
++
++    harbor >=0.20 resolves tasks and metrics in an async factory and makes the
++    constructor raise, so a stub that happily accepts ``Job(config)`` would
++    hide exactly the breakage this mirrors.
++    """
++
++    created_with: Optional[Any] = None
++    ran = False
++
++    def __init__(self, *args: Any, **kwargs: Any) -> None:
++        raise ValueError("Instantiating Job directly is deprecated. Use `await Job.create(config)` instead.")
++
++    @classmethod
++    async def create(cls, config: Any) -> "_FakeJob":
++        job = cls.__new__(cls)
++        cls.created_with = config
++        return job
++
++    async def run(self) -> None:
++        type(self).ran = True
++
++
++class _FailingJob(_FakeJob):
++    @classmethod
++    async def create(cls, config: Any) -> "_FakeJob":
++        raise RuntimeError("no tasks resolved")
++
++
++def _write_trial_result(jobs_dir: Path, job_name: str) -> Path:
++    trial_dir = jobs_dir / job_name / "trial-0"
++    trial_dir.mkdir(parents=True)
++    (trial_dir / "result.json").write_text("{}")
++    return trial_dir
++
++
++class TestRunHarborJob:
++    """run_harbor_job must drive Harbor through its async factory."""
++
++    @staticmethod
++    def _config_dict(jobs_dir: Path) -> Dict[str, Any]:
++        from harbor.models.job.config import JobConfig
++
++        return JobConfig(job_name="job", jobs_dir=jobs_dir).model_dump(mode="json")
++
++    async def test_constructs_job_via_async_factory(self, tmp_path):
++        from responses_api_agents.harbor_agent.app import run_harbor_job
++
++        _FakeJob.created_with = None
++        _FakeJob.ran = False
++        trial_dir = _write_trial_result(tmp_path, "job")
++
++        with patch("harbor.job.Job", _FakeJob):
++            result = await run_harbor_job(self._config_dict(tmp_path))
++
++        # Direct instantiation would have raised out of run_harbor_job.
++        assert _FakeJob.created_with is not None
++        assert _FakeJob.ran is True
++        assert result == str(trial_dir.resolve())
++
++    async def test_returns_absolute_path(self, tmp_path):
++        from responses_api_agents.harbor_agent.app import run_harbor_job
++
++        _write_trial_result(tmp_path, "job")
++
++        with patch("harbor.job.Job", _FakeJob):
++            result = await run_harbor_job(self._config_dict(tmp_path))
++
++        assert Path(result).is_absolute()
++
++    async def test_recovers_trial_dir_when_create_fails(self, tmp_path):
++        """Resolution failures must still surrender a written trial directory."""
++        from responses_api_agents.harbor_agent.app import run_harbor_job
++
++        trial_dir = _write_trial_result(tmp_path, "job")
++
++        with patch("harbor.job.Job", _FailingJob):
++            result = await run_harbor_job(self._config_dict(tmp_path))
++
++        assert result == str(trial_dir.resolve())
++
++    async def test_reraises_when_no_trial_dir(self, tmp_path):
++        from responses_api_agents.harbor_agent.app import run_harbor_job
++
++        with patch("harbor.job.Job", _FailingJob):
++            with pytest.raises(RuntimeError, match="no tasks resolved"):
++                await run_harbor_job(self._config_dict(tmp_path))
++
++
++# ===========================================================================
++#  Agent options schema (harbor validates kwargs against options_model)
++# ===========================================================================
++
++
++class TestAgentOptionsSchema:
++    """harbor >=0.20 validates agent kwargs against ``options_model``, not the
++    constructor signature, and AgentOptions sets ``extra="forbid"``. Kwargs this
++    subclass adds must therefore be declared on its options model, or every
++    rollout dies in Job.create's agent preflight before a sandbox is created."""
++
++    def _parse(self, **overrides):
++        pytest.importorskip("harbor")
++        from responses_api_agents.harbor_agent.custom_agents.terminus_2_nemo_gym import Terminus2NemoGym
++
++        kwargs = {
++            "api_base": "http://127.0.0.1:8000/v1",
++            "responses_create_params": {"temperature": 1.0},
++            "temperature": 1.0,
++            "max_turns": 30,
++            "model_info": {"max_input_tokens": 32768},
++            "nemo_model_server_timeout_sec": 600.0,
++        }
++        kwargs.update(overrides)
++        return Terminus2NemoGym.parse_options(kwargs)
++
++    def test_accepts_nemo_gym_specific_kwargs(self) -> None:
++        options = self._parse()
++        assert options.responses_create_params == {"temperature": 1.0}
++        assert options.nemo_model_server_timeout_sec == 600.0
++
++    def test_nemo_gym_kwargs_have_defaults(self) -> None:
++        pytest.importorskip("harbor")
++        from responses_api_agents.harbor_agent.custom_agents.terminus_2_nemo_gym import Terminus2NemoGym
++
++        options = Terminus2NemoGym.parse_options({})
++        assert options.responses_create_params is None
++        assert options.nemo_model_server_timeout_sec == 120.0
++
++    def test_inherited_terminus2_kwargs_still_accepted(self) -> None:
++        options = self._parse(collect_rollout_details=True)
++        assert options.max_turns == 30
++        assert options.collect_rollout_details is True
++
++    def test_unknown_kwarg_is_still_rejected(self) -> None:
++        """The schema must stay strict: typos should fail loudly, not be ignored."""
++        with pytest.raises(ValueError, match="definitely_not_an_option"):
++            self._parse(definitely_not_an_option=1)
++
++    def test_preflight_accepts_our_agent_config(self) -> None:
++        """End-to-end over harbor's real preflight, the call that was failing."""
++        pytest.importorskip("harbor")
++        from harbor.agents.factory import AgentFactory
++        from harbor.models.trial.config import AgentConfig
++
++        config = AgentConfig(
++            import_path=("responses_api_agents.harbor_agent.custom_agents.terminus_2_nemo_gym:Terminus2NemoGym"),
++            model_name="Qwen/Qwen2.5-1.5B-Instruct",
++            kwargs={
++                "api_base": "http://127.0.0.1:8000/v1",
++                "responses_create_params": {"temperature": 1.0},
++                "max_turns": 30,
++                "nemo_model_server_timeout_sec": 600.0,
++            },
++        )
++        AgentFactory.run_preflight(config, skip_credential_checks=True)
+diff --git a/responses_api_agents/harbor_agent/tests/test_environment.py b/responses_api_agents/harbor_agent/tests/test_environment.py
+index 03c75582..9cfcbb6b 100644
+--- a/responses_api_agents/harbor_agent/tests/test_environment.py
++++ b/responses_api_agents/harbor_agent/tests/test_environment.py
+@@ -449,3 +449,92 @@ class TestFileTransfer:
+         target = tmp_path / "verifier-out"
+         await env.download_dir("/logs/verifier", target)
+         assert (target / "reward.txt").read_bytes() == b"1.0"
++
++
++class TestExecUser:
++    """harbor >=0.20 threads a per-command ``user`` through BaseEnvironment.exec.
++
++    Harbor escalates with ``exec(..., user="root")`` to install tmux, run collect
++    hooks and run the verifier. An override that omits the parameter raises
++    TypeError and fails every trial during agent setup.
++    """
++
++    @pytest.mark.asyncio
++    async def test_exec_accepts_and_forwards_user(self, tmp_path):
++        env = _make_environment(tmp_path, exec_shell=None)
++        await env.start(force_build=False)
++
++        await env.exec("tmux -V", user="root")
++
++        assert _provider().exec_calls[-1]["user"] == "root"
++
++    @pytest.mark.asyncio
++    async def test_exec_defaults_user_to_none(self, tmp_path):
++        """None must stay None so the sandbox client can reuse its default session."""
++        env = _make_environment(tmp_path, exec_shell=None)
++        await env.start(force_build=False)
++
++        await env.exec("true")
++
++        assert _provider().exec_calls[-1]["user"] is None
++
++    @pytest.mark.asyncio
++    async def test_exec_applies_environment_default_user(self, tmp_path):
++        """Harbor sets default_user so agents need not thread it through each call."""
++        env = _make_environment(tmp_path, exec_shell=None)
++        await env.start(force_build=False)
++        env.default_user = "agent"
++
++        await env.exec("true")
++
++        assert _provider().exec_calls[-1]["user"] == "agent"
++
++    @pytest.mark.asyncio
++    async def test_explicit_user_overrides_default_user(self, tmp_path):
++        env = _make_environment(tmp_path, exec_shell=None)
++        await env.start(force_build=False)
++        env.default_user = "agent"
++
++        await env.exec("true", user="root")
++
++        assert _provider().exec_calls[-1]["user"] == "root"
++
++
++class TestBaseEnvironmentSignatureDrift:
++    """Guard against harbor widening a BaseEnvironment method we override.
++
++    Every harbor bump so far has broken this integration by adding a parameter
++    to a method we override (``exec`` gained ``user`` in 0.20). Such breaks are
++    invisible until a rollout crashes mid-run, so compare signatures directly.
++    """
++
++    def test_no_override_drops_a_base_parameter(self):
++        import inspect
++
++        from harbor.environments.base import BaseEnvironment
++
++        drifted: dict[str, list[str]] = {}
++        for name in dir(BaseEnvironment):
++            if name.startswith("__"):
++                continue
++            base_attr = getattr(BaseEnvironment, name, None)
++            our_attr = getattr(NemoGymSandboxEnvironment, name, None)
++            # Only methods we actually override can drift.
++            if not callable(base_attr) or our_attr is base_attr:
++                continue
++            try:
++                base_params = inspect.signature(base_attr).parameters
++                our_params = inspect.signature(our_attr).parameters
++            except (TypeError, ValueError):
++                continue
++            if any(p.kind is p.VAR_KEYWORD for p in our_params.values()):
++                continue
++            missing = [p for p in base_params if p not in our_params and p != "self"]
++            if missing:
++                drifted[name] = missing
++
++        assert not drifted, (
++            "Overrides are missing parameters that harbor's BaseEnvironment now passes: "
++            f"{drifted}. Add them (forwarding to the sandbox client) or harbor will "
++            "raise TypeError at rollout time."
++        )
