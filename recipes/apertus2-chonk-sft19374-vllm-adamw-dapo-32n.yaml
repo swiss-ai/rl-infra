@@ -2,6 +2,11 @@
 # and 16 vLLM nodes. Same algorithm and batch as the 16-node recipe; only throughput changes.
 defaults: apertus2-chonk-sft19374-vllm-adamw-dapo.yaml
 
+# run.sh reads sft_export and cluster.num_nodes from this file only, not from its defaults.
+# The 19374 export moved from hanint05's scratch to /appsdata/hanint06 on 2026-11-11; this view
+# links to it, as the pass-rate runs use.
+sft_export: nemo-rl/passrate/sft-export-view/chonk-lc-16k-v0.1-ep1-iter_0019374
+
 cluster:
   num_nodes: 32
 
