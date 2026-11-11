@@ -54,3 +54,19 @@ print("; ".join("%s... pushed %s tags %s" % (a.get("digest", "")[:19], a.get("pu
     fi
 done <<< "${projects}"
 [[ "${found}" == 1 ]] || echo "   in none of them"
+
+# 3. a successor under other names: repositories per project (the v05 set had 1876 tasks) and
+#    Harbor's search for a part of the task name
+SEARCH="${SEARCH:-$(sed -E 's/^[^_]+__//; s/-[0-9]+$//' <<< "${REPO}")}"   # adamchainz__time-machine-298 -> time-machine
+echo "3. repositories per project:"
+body "$(get GET "${API}/projects?page_size=100")" | python3 -c '
+import json, sys
+for p in sorted(json.load(sys.stdin), key=lambda p: -(p.get("repo_count") or 0)):
+    print("   %6s  %s  (created %s, updated %s)" % (p.get("repo_count"), p["name"], (p.get("creation_time") or "")[:10], (p.get("update_time") or "")[:10]))'
+r="$(get GET "${API}/search?q=${SEARCH}")"
+echo "4. Harbor search for '${SEARCH}' -> HTTP $(code "${r}"):"
+body "${r}" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+repos = d.get("repository") or []
+print("\n".join("   %s (artifacts %s)" % (r.get("repository_name"), r.get("artifact_count")) for r in repos[:30]) or "   no repositories")' 2>/dev/null
