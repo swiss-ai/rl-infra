@@ -35,6 +35,8 @@ if [[ " ${RUNS} " == *" w "* ]]; then export HARBOR_ROOT="${HARBOR_ROOT:-${SCRAT
 export HARBOR_ROOT="${HARBOR_ROOT:-${SCRATCH}/osb/harbor_micro}"
 export HARBOR_TASKS_DIR="${HARBOR_TASKS_DIR:-${HARBOR_ROOT}/tasks}"
 export RL_REGISTRY_USERNAME="${RL_REGISTRY_USERNAME:-anonymous}" RL_REGISTRY_PASSWORD="${RL_REGISTRY_PASSWORD:-unused}"
+# run S: run-s.sh exports the path (never read here)
+export RL_REGISTRY_CRED_FILE="$(realpath -m "${RL_REGISTRY_CRED_FILE:-${HOME}/.rl_registry_cred}")"
 # run S: what run-s.sh and run-harbor-osb.sh export (paths and labels only; the key is never read here)
 export OPENSANDBOX_API_KEY_FILE="${OPENSANDBOX_API_KEY_FILE:-${HOME}/.opensandbox_token}"
 export NEMO_GYM_USER="${NEMO_GYM_USER:-${USER}}" NEMO_GYM_WORKLOAD="${NEMO_GYM_WORKLOAD:-chonk-harbor-sft-sc}"

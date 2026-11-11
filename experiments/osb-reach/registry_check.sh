@@ -4,7 +4,9 @@
 # "HEAD .../manifests/sha256:...: 401 Unauthorized" on the Breithorn node.
 # Does what a pull does: HEAD the manifest (a registry answers 401 + a token URL even for public
 # projects), get a token from that URL (A: anonymous, B: anonymous/unused as run-harbor-osb.sh
-# sends), HEAD the manifest again with the token. Tokens are not printed.
+# sends), C: the robot account in RL_REGISTRY_CRED_FILE (default ~/.rl_registry_cred, `name:password`,
+# what run-s.sh passes to Gym patch 0028; handed to curl on stdin, not on the command line), HEAD the
+# manifest again with the token. Tokens and passwords are not printed.
 #   bash experiments/osb-reach/registry_check.sh [image@sha256:...]
 # Result lines: "manifest with token -> HTTP 200" = pull allowed, 401/403/404 = not.
 set -uo pipefail
@@ -25,17 +27,28 @@ realm="$(sed -nE 's/.*realm="([^"]+)".*/\1/p' <<< "${www}")"
 service="$(sed -nE 's/.*service="([^"]+)".*/\1/p' <<< "${www}")"
 [[ -n "${realm}" ]] || { echo "no token URL; stop"; exit 1; }
 
-try() {  # $1 label, rest: extra curl args for the token request
-    local label="$1"; shift
+try() {  # $1 label, $2 curl config text for the token request (stdin), rest: extra curl args
+    local label="$1" conf="$2"; shift 2
     local body code token
-    body="$(curl -sS -m 30 -G -w '\n%{http_code}' "$@" "${realm}" \
+    body="$(curl -sS -m 30 -G -w '\n%{http_code}' -K - "$@" "${realm}" <<< "${conf}" \
         --data-urlencode "service=${service}" --data-urlencode "scope=repository:${REPO}:pull" 2>&1)"
     code="$(tail -n1 <<< "${body}")"
     token="$(head -n -1 <<< "${body}" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("token") or d.get("access_token") or "")' 2>/dev/null)"
     echo "${label}: token request -> HTTP ${code}, token $([[ -n "${token}" ]] && echo received || echo none)"
     [[ "${code}" == 200 && -n "${token}" ]] || { head -n -1 <<< "${body}" | head -c 300; echo; return; }
-    echo "${label}: manifest with token -> HTTP $(curl -sS -m 30 -o /dev/null -I -w '%{http_code}' \
-        -H "${ACCEPT}" -H "Authorization: Bearer ${token}" "${URL}")"
+    echo "${label}: manifest with token -> HTTP $(curl -sS -m 30 -o /dev/null -I -w '%{http_code}' -K - \
+        -H "${ACCEPT}" "${URL}" <<< "header = \"Authorization: Bearer ${token}\"")"
 }
-try "2. A anonymous"
-try "3. B anonymous/unused (the run's image_auth)" -u "${RL_REGISTRY_USERNAME:-anonymous}:${RL_REGISTRY_PASSWORD:-unused}"
+try "2. A anonymous" ""
+try "3. B anonymous/unused (the old placeholder image_auth)" \
+    "user = \"${RL_REGISTRY_USERNAME:-anonymous}:${RL_REGISTRY_PASSWORD:-unused}\""
+cred_file="${RL_REGISTRY_CRED_FILE:-${HOME}/.rl_registry_cred}"
+if [[ -r "${cred_file}" ]]; then
+    cred="$(head -n1 "${cred_file}" | tr -d '\r\n')"
+    [[ "${cred}" == ?*:?* ]] || { echo "4. C ${cred_file}: not one name:password line"; exit 1; }
+    cred="${cred//\\/\\\\}"; cred="${cred//\"/\\\"}"   # curl config quoting
+    try "4. C robot account (${cred_file}, name ${cred%%:*})" "user = \"${cred}\""
+    unset cred
+else
+    echo "4. C no ${cred_file}"
+fi

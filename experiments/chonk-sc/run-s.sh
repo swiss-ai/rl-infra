@@ -31,6 +31,7 @@
 #   AGENT=opencode TASKS=swe-lego bash experiments/chonk-sc/run-s.sh grpo.max_num_steps=1
 # Env: SFT_MODEL_SRC, SFT_EDF_NAME, ACCOUNT, PARTITION (default normal), JOB_TIME (default 03:00:00), RUN,
 # HARBOR_ROOT (default $SCRATCH/osb/harbor_micro), OPENSANDBOX_API_KEY_FILE (default ~/.opensandbox_token),
+# RL_REGISTRY_CRED_FILE (default ~/.rl_registry_cred, `name:password` of a robot account; TASKS=swe-lego needs it),
 # OVERLAY (extra overlays, merged after ours), DRIVER_RETRIES (default 0), everything else
 # run-harbor-osb.sh reads.
 set -euo pipefail
@@ -66,6 +67,14 @@ esac
 [[ -r "${SFT_MODEL_SRC}/config.json" && -r "${SFT_MODEL_SRC}/model.safetensors.index.json" ]] \
     || { echo "ERROR: ${SFT_MODEL_SRC} has no readable config.json + model.safetensors.index.json (an HF export)" >&2; exit 1; }
 OPENSANDBOX_API_KEY_FILE="$(realpath "${OPENSANDBOX_API_KEY_FILE:-${HOME}/.opensandbox_token}")"
+# pull credentials for rl-registry (run-s-sft.yaml image_auth): one `name:password` line, read by Gym in
+# the job; the SWE-Lego project is private, the micro tasks' Docker Hub image never gets them
+RL_REGISTRY_CRED_FILE="$(realpath -m "${RL_REGISTRY_CRED_FILE:-${HOME}/.rl_registry_cred}")"
+export RL_REGISTRY_CRED_FILE
+if [[ "${TASKS}" == swe-lego ]]; then
+    grep -q '^[^:]\+:.' "${RL_REGISTRY_CRED_FILE}" 2>/dev/null \
+        || { echo "ERROR: TASKS=swe-lego needs pull credentials for rl-registry (swe_lego_v05_1 is private): ${RL_REGISTRY_CRED_FILE} with one name:password line (RL_REGISTRY_CRED_FILE)" >&2; exit 1; }
+fi
 [[ -r "${OPENSANDBOX_API_KEY_FILE}" ]] || { echo "ERROR: no OpenSandbox key file ${OPENSANDBOX_API_KEY_FILE}" >&2; exit 1; }
 export OPENSANDBOX_API_KEY_FILE
 

@@ -79,9 +79,12 @@ env:
               local_dataset_path: ${oc.env:HARBOR_TASKS_DIR}
           harbor_environment_kwargs:
             sandbox_provider_options:
-              # as run B: the provider sends image_auth; the public project ignores the placeholder
+              # swe_lego_v05_1 is no longer public (pull 401 since about 2026-10-29, job 5317993): a robot
+              # account's `name:password` file (run-s.sh: RL_REGISTRY_CRED_FILE, default ~/.rl_registry_cred),
+              # read by Gym patch 0028 at create time, so the password is not in this config (NeMo-RL prints
+              # and saves it in full). `registry`: only images from there get it, not Docker Hub (micro tasks).
               image_auth:
-                username: ${oc.env:RL_REGISTRY_USERNAME}
-                password: ${oc.env:RL_REGISTRY_PASSWORD}
+                credentials_file: ${oc.env:RL_REGISTRY_CRED_FILE}
+                registry: rl-registry.swissai.svc.cscs.ch
           # as run B, where the trial directories are downloaded from (the task file: next to the weights)
           harbor_jobs_dir: ${oc.env:HARBOR_ROOT}/jobs

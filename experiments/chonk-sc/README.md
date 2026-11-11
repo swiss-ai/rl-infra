@@ -233,6 +233,14 @@ FAIL_TO_PASS + PASS_TO_PASS tests), instead of the micro tasks. `run-s-swe-lego.
 `/testbed` (where the tasks keep the repository) and ends it at 1740 s, under the 1800 s agent cap
 (the tasks allow 3000 s). `HARBOR_ROOT` defaults to `$SCRATCH/osb/swe_lego_v05`; `JOB_TIME` to 04:00:00.
 
+**Pull credentials.** The image project `swe_lego_v05_1` is no longer public: since about 2026-10-29, every
+anonymous pull gets a 401 (job 5317993: all pods Pending). run-s.sh therefore needs `RL_REGISTRY_CRED_FILE`
+(default `~/.rl_registry_cred`), a Harbor robot account with pull access as a single `name:password` line, chmod 600.
+Gym patch 0028 reads that file when it creates a sandbox, and sends the credentials only to `rl-registry.swissai.svc.cscs.ch`.
+So the password is neither in the config nor in the logs, and never goes to Docker Hub.
+Check the account first: `bash experiments/osb-reach/registry_check.sh`. Its line `4. C ... manifest with token -> HTTP 200`
+means the account can pull. The token request returns 200 even for wrong credentials.
+
 ```bash
 # once: keep the tasks whose reference solution scores 1 and whose empty run scores 0
 python3 envs/prepare_swe_lego_tasks.py /capstor/store/cscs/swissai/infra01/users/aborbely/swe_lego_v05/tasks \

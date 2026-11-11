@@ -164,6 +164,10 @@ check_gym_capture() {
     grep -q "def _repaired_tool_name" "${g}/nemo_gym/token_id_capture/fingerprint.py" 2>/dev/null \
         && ok "Gym patch 0027: capture lineage survives a tool call with unparseable arguments" \
         || bad "Gym patch 0027 missing (_repaired_tool_name in token_id_capture/fingerprint.py)"
+    # 0028: image_auth from a credentials file, for one registry (swe_lego_v05_1 is private)
+    grep -q "def _image_registry" "${g}/nemo_gym/sandbox/providers/opensandbox/provider.py" 2>/dev/null \
+        && ok "Gym patch 0028: image_auth credentials_file + registry" \
+        || bad "Gym patch 0028 missing (_image_registry in sandbox/providers/opensandbox/provider.py)"
     # 0021: streaming clients (OpenCode) under worker-owned capture; without it they get 422
     grep -q "def _stream_served_response" "${g}/nemo_gym/base_responses_api_model.py" 2>/dev/null \
         && ok "Gym patch 0021: streaming requests are replayed as SSE under capture" \
