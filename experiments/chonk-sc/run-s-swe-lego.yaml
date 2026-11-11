@@ -22,3 +22,7 @@ env:
             opencode_workdir: /testbed
             # 60 s under the 1800 s agent cap; OPENCODE_TIMEOUT_SEC overrides
             opencode_timeout_sec: ${oc.decode:${oc.env:OPENCODE_TIMEOUT_SEC,1740}}
+          harbor_environment_kwargs:
+            sandbox_metadata:
+              # the task file labels pods `micro` (job 5317993 did); kubectl -l harbor-dataset=swe-lego
+              harbor-dataset: swe-lego

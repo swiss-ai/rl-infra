@@ -370,6 +370,9 @@ else:
                    (hcfg.get("harbor_agent_max_timeout"), hcfg.get("harbor_verifier_max_timeout")), (1800, 1200))
             if swe:
                 expect("tasks are SWE-Lego (HARBOR_ROOT)", "swe_lego_v05" in os.environ.get("HARBOR_ROOT", ""), True)
+                expect("pod label harbor-dataset",
+                       (hcfg["harbor_environment_kwargs"].get("sandbox_metadata") or {}).get("harbor-dataset"),
+                       "swe-lego")
             expect("model_info (context, per-turn output)",
                    (kw["model_info"]["max_input_tokens"], kw["model_info"]["max_output_tokens"]), (16384, 6144))
             # OpenCode sends neither temperature nor top_p for this model id
