@@ -178,6 +178,9 @@ env:
               # The task images are in a private registry project and the OpenSandbox cluster has no
               # pull secret for it (Gym patch 0013 reads username:password from this file).
               image_auth_file: ${registry_cred_file}
+              # Only images from this registry get the credentials (Gym patch 0031); without it the
+              # OpenSandbox server builds a pull secret for whatever registry an image names.
+              image_auth_registry: rl-registry.swissai.svc.cscs.ch
             # A pod lives at most this long, also when a run dies; above the two caps below.
             sandbox_ttl_s: 3600
           # Caps, not overrides: these tasks declare 3000 s for both, and a step lasts as long as its
