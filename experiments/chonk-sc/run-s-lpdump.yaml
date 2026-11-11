@@ -1,4 +1,4 @@
-# Run S + the logprob outlier dump (NeMo-RL patch 0034). Merged after run-s-sft.yaml:
+# Run S + the logprob outlier dump (NeMo-RL patch 0035). Merged after run-s-sft.yaml:
 #   OVERLAY=experiments/chonk-sc/run-s-lpdump.yaml bash experiments/chonk-sc/run-s.sh
 # For the token_mult_prob_error that grows with every refit (job 5304373: 1.03 / 6.97 / 26.5, clean at step
 # 1): every ClippedPGLossFn call on the Megatron policy workers appends the tokens whose generation and

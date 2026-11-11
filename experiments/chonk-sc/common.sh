@@ -95,18 +95,18 @@ check_nemo_rl_clone() {
     [[ -f "${d}/nemo_rl/weight_sync/collective_weight_synchronizer.py" ]] \
         && ok "nemo_rl/weight_sync/collective_weight_synchronizer.py present" \
         || bad "nemo_rl/weight_sync/collective_weight_synchronizer.py missing"
-    # NeMo-RL patch 0033: a continuation after a truncated Apertus 2 burst gets the context-length 400
+    # NeMo-RL patch 0034: a continuation after a truncated Apertus 2 burst gets the context-length 400
     # (without it: assert -> HTTP 500 retried by Gym, job 5303503); run S needs it
     grep -q "class TruncatedBurstError" "${d}/nemo_rl/data/apertus2_format.py" 2>/dev/null \
-        && ok "NeMo-RL patch 0033: TruncatedBurstError in apertus2_format.py" \
-        || bad "NeMo-RL patch 0033 missing (TruncatedBurstError in nemo_rl/data/apertus2_format.py); run backends/nemo-rl/apertus2/setup.sh"
-    # NeMo-RL patch 0034: logprob outlier dump (off unless run-s-lpdump.yaml sets NRL_LOGPROB_DUMP_DIR)
+        && ok "NeMo-RL patch 0034: TruncatedBurstError in apertus2_format.py" \
+        || bad "NeMo-RL patch 0034 missing (TruncatedBurstError in nemo_rl/data/apertus2_format.py); run backends/nemo-rl/apertus2/setup.sh"
+    # NeMo-RL patch 0035: logprob outlier dump (off unless run-s-lpdump.yaml sets NRL_LOGPROB_DUMP_DIR)
     grep -q "NRL_LOGPROB_DUMP_DIR" "${d}/nemo_rl/algorithms/loss/logprob_dump.py" 2>/dev/null \
-        && ok "NeMo-RL patch 0034: nemo_rl/algorithms/loss/logprob_dump.py" \
-        || bad "NeMo-RL patch 0034 missing (nemo_rl/algorithms/loss/logprob_dump.py); run backends/nemo-rl/apertus2/setup.sh"
+        && ok "NeMo-RL patch 0035: nemo_rl/algorithms/loss/logprob_dump.py" \
+        || bad "NeMo-RL patch 0035 missing (nemo_rl/algorithms/loss/logprob_dump.py); run backends/nemo-rl/apertus2/setup.sh"
     grep -q "def _invalid_apertus2_history" "${d}/nemo_rl/models/generation/vllm/vllm_worker_async.py" 2>/dev/null \
-        && ok "NeMo-RL patch 0035: an unencodable Apertus 2 chat history gets HTTP 400" \
-        || bad "NeMo-RL patch 0035 missing (_invalid_apertus2_history in vllm_worker_async.py); run backends/nemo-rl/apertus2/setup.sh"
+        && ok "NeMo-RL patch 0036: an unencodable Apertus 2 chat history gets HTTP 400" \
+        || bad "NeMo-RL patch 0036 missing (_invalid_apertus2_history in vllm_worker_async.py); run backends/nemo-rl/apertus2/setup.sh"
     for f in "${SC_SCRIPT}" nemo_rl/algorithms/single_controller.py nemo_rl/algorithms/single_controller_utils/config.py; do
         [[ -f "${d}/${f}" ]] && ok "${f} present" || bad "${f} missing"
     done

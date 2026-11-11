@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarise the logprob outlier dump of NeMo-RL patch 0034 (run-s-lpdump.yaml).
+"""Summarise the logprob outlier dump of NeMo-RL patch 0035 (run-s-lpdump.yaml).
 
   python3 lp_dump_summary.py <log_dir>/logprob_dump [--tokenizer <model>/tokenizer.json] [--top 40]
 

@@ -17,7 +17,7 @@
 #   vllm_model then strips a leading <think>..</think> from each echoed assistant message and drops it,
 #   instead of moving it into `reasoning_content` + `reasoning` (app.py:622-652). Needed because when a
 #   history is encoded again (no token-in prefix: the parent was not resolved), apertus-common's from_openai
-#   refuses the `reasoning` field (AdapterError -> NeMo-RL 0035 answers 400, Gym's middleware turns it into
+#   refuses the `reasoning` field (AdapterError -> NeMo-RL 0036 answers 400, Gym's middleware turns it into
 #   500, OpenCode retries until its timeout). Consequences: (1) a re-encoded history carries no earlier
 #   thinking, so that prompt differs from what the model saw (the rollout is already poisoned in that case,
 #   only the agent run continues); (2) the token-in path is unaffected (it extends the generated tokens and
