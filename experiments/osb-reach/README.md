@@ -110,3 +110,23 @@ Needs patches 0013+0014 in the NeMo-RL clone's Gym (`setup-gym.sh`, see `harbor-
     OLD_START=1 bash experiments/osb-reach/run.sh     # 0013's fire-and-forget start, for comparison
 
 If `OLD_START=1` fails and the default passes, the race with the exec service was the cause of 5245999.
+
+## Why do pods stay Pending? (`pending.py`, no kubectl needed)
+
+Job 5317993 (SWE-Lego): all 512 creates ended in `HTTP 504 KUBERNETES::POD_READY_TIMEOUT`, Pending after
+600 s; the server deletes the sandbox when its ready wait fails. `pending.py` reads the state while it waits,
+with the tenant API key only: one sandbox per case, `GET /v1/sandboxes/{id}` (state, reason, message) and the
+Kubernetes events (`GET /v1/sandboxes/{id}/diagnostics/events`) every 5 s, then delete. Standard library only;
+runs on the login node (or any node that reaches the API), at most WAIT_S (900 s) + a few seconds.
+
+    cd ~/rl-infra && python3 experiments/osb-reach/pending.py      # task.toml default: $SCRATCH/osb/swe_lego_v05/tasks/adamchainz__time-machine-298
+
+| Case | Image | Resources | |
+|---|---|---|---|
+| `small` | `python:3.12-slim` | 1 CPU, 1024 MiB, 2 GiB | as the micro tasks (they run) |
+| `swe-small` | the task's SWE-Lego image | 1 CPU, 1024 MiB, 2 GiB | does the image start? |
+| `swe-full` | the task's SWE-Lego image | 4 CPU, 4096 MiB, 10 GiB | as job 5317993 |
+
+`swe-small` Running and `swe-full` Pending: scheduling or quota (the events say `FailedScheduling` /
+`Insufficient ...`). Both Pending: the image (events `Pulling` / `ErrImagePull` / `ImagePullBackOff`).
+`small` Pending too: the tenant or the cluster. `--cases` picks cases, `--task-toml` another task.
