@@ -5,7 +5,7 @@
 # Does what a pull does: HEAD the manifest (a registry answers 401 + a token URL even for public
 # projects), get a token from that URL (A: anonymous, B: anonymous/unused as run-harbor-osb.sh
 # sends), C: the robot account in RL_REGISTRY_CRED_FILE (default ~/.rl_registry_cred, `name:password`,
-# what run-s.sh passes to Gym patch 0028; handed to curl on stdin, not on the command line), HEAD the
+# what run-s.sh passes to Gym patches 0013/0031; handed to curl on stdin, not on the command line), HEAD the
 # manifest again with the token. Tokens and passwords are not printed.
 #   bash experiments/osb-reach/registry_check.sh [image@sha256:...]
 # Result lines: "manifest with token -> HTTP 200" = pull allowed, 401/403/404 = not. The token is issued even

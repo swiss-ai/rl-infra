@@ -130,11 +130,11 @@ check_nemo_rl_clone() {
 
 # check_gym_capture: the shared Gym checkout of this clone has what run B needs: setup-gym.sh
 # applied the current patches/gym set (its stamp, a hash of all patches, matches), with rl-infra
-# Gym patch 0011 (harbor_agent hands the agent the rollout-prefixed model URL, base_url_for_run;
-# without it capture records nothing and every row is rejected, job 5236016) and 0012
+# Gym patch 0014 (harbor_agent hands the agent the rollout-prefixed model URL, base_url_for_run;
+# without it capture records nothing and every row is rejected, job 5236016) and 0015
 # (_should_mask: under capture empty output is not masked, failed trials still are). Same marker
-# as ../harbor-capture-sc/run.sh; 0019 (capture ignores think-wrapped reasoning, needed by run S); and
-# 0021 (streaming under capture, needed by OpenCode).
+# as ../harbor-capture-sc/run.sh; 0022 (capture ignores think-wrapped reasoning, needed by run S); and
+# 0024 (streaming under capture, needed by OpenCode).
 # Returns the number of failures.
 check_gym_capture() {
     local g="${NEMO_RL_DIR}/3rdparty/Gym-workspace/Gym" fails=0 stamp
@@ -148,30 +148,30 @@ check_gym_capture() {
         && ok "Gym patches: the current patches/gym set is applied" \
         || bad "Gym patches: the checkout does not carry the current patches/gym set (setup-gym.sh not re-run)"
     grep -q harbor_model_base_url "${app}" 2>/dev/null && grep -q "base_url_for_run(" "${app}" \
-        && ok "Gym patch 0011: harbor_agent routes model calls through the rollout URL" \
-        || bad "Gym patch 0011 missing (harbor_model_base_url / base_url_for_run in harbor_agent/app.py)"
+        && ok "Gym patch 0014: harbor_agent routes model calls through the rollout URL" \
+        || bad "Gym patch 0014 missing (harbor_model_base_url / base_url_for_run in harbor_agent/app.py)"
     grep -q "def _should_mask" "${app}" 2>/dev/null \
-        && ok "Gym patch 0012: capture-aware _should_mask" \
-        || bad "Gym patch 0012 missing (_should_mask in harbor_agent/app.py)"
+        && ok "Gym patch 0015: capture-aware _should_mask" \
+        || bad "Gym patch 0015 missing (_should_mask in harbor_agent/app.py)"
     [[ -d "${g}/nemo_gym/token_id_capture" ]] && ok "nemo_gym/token_id_capture present" \
         || bad "nemo_gym/token_id_capture missing from the Gym checkout"
-    # 0019: without it every rollout whose model reasons is rejected unresolved_parent (job 5302914)
+    # 0022: without it every rollout whose model reasons is rejected unresolved_parent (job 5302914)
     grep -q "def _strip_leading_reasoning" "${g}/nemo_gym/token_id_capture/fingerprint.py" 2>/dev/null \
-        && ok "Gym patch 0019: capture fingerprints ignore think-wrapped reasoning" \
-        || bad "Gym patch 0019 missing (_strip_leading_reasoning in token_id_capture/fingerprint.py)"
-    # 0027: without it a tool call with unparseable arguments (OpenCode echoes it as `invalid`) poisons the
+        && ok "Gym patch 0022: capture fingerprints ignore think-wrapped reasoning" \
+        || bad "Gym patch 0022 missing (_strip_leading_reasoning in token_id_capture/fingerprint.py)"
+    # 0030: without it a tool call with unparseable arguments (OpenCode echoes it as `invalid`) poisons the
     # rest of the rollout (job 5316800)
     grep -q "def _repaired_tool_name" "${g}/nemo_gym/token_id_capture/fingerprint.py" 2>/dev/null \
-        && ok "Gym patch 0027: capture lineage survives a tool call with unparseable arguments" \
-        || bad "Gym patch 0027 missing (_repaired_tool_name in token_id_capture/fingerprint.py)"
-    # 0028: image_auth from a credentials file, for one registry (swe_lego_v05_1 is private)
+        && ok "Gym patch 0030: capture lineage survives a tool call with unparseable arguments" \
+        || bad "Gym patch 0030 missing (_repaired_tool_name in token_id_capture/fingerprint.py)"
+    # 0031: image_auth (from image_auth_file, Kostas' 0013) only for one registry, not Docker Hub
     grep -q "def _image_registry" "${g}/nemo_gym/sandbox/providers/opensandbox/provider.py" 2>/dev/null \
-        && ok "Gym patch 0028: image_auth credentials_file + registry" \
-        || bad "Gym patch 0028 missing (_image_registry in sandbox/providers/opensandbox/provider.py)"
-    # 0021: streaming clients (OpenCode) under worker-owned capture; without it they get 422
+        && ok "Gym patch 0031: image_auth_registry" \
+        || bad "Gym patch 0031 missing (_image_registry in sandbox/providers/opensandbox/provider.py)"
+    # 0024: streaming clients (OpenCode) under worker-owned capture; without it they get 422
     grep -q "def _stream_served_response" "${g}/nemo_gym/base_responses_api_model.py" 2>/dev/null \
-        && ok "Gym patch 0021: streaming requests are replayed as SSE under capture" \
-        || bad "Gym patch 0021 missing (_stream_served_response in nemo_gym/base_responses_api_model.py)"
+        && ok "Gym patch 0024: streaming requests are replayed as SSE under capture" \
+        || bad "Gym patch 0024 missing (_stream_served_response in nemo_gym/base_responses_api_model.py)"
     for f in nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
              responses_api_agents/harbor_agent/configs/harbor_agent_opensandbox_training.yaml; do
         [[ -f "${g}/${f}" ]] && ok "${f} present" || bad "${f} missing (OpenSandbox commits, setup-gym.sh)"

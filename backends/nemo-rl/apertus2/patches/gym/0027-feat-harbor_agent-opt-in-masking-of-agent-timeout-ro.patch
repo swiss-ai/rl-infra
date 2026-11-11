@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 9fff3ae6421a283771e87c69f215dd1d767af76b Mon Sep 17 00:00:00 2001
 From: Philip Mueller <claude@philipmueller.ch>
 Date: Tue, 10 Nov 2026 07:24:45 +0000
-Subject: [PATCH 24/25] feat(harbor_agent): opt-in masking of agent-timeout
+Subject: [PATCH 27/31] feat(harbor_agent): opt-in masking of agent-timeout
  rollouts
 
 New config field harbor_mask_agent_timeout (default false): when set,
@@ -16,7 +16,7 @@ Signed-off-by: Philip Mueller <claude@philipmueller.ch>
  2 files changed, 27 insertions(+), 3 deletions(-)
 
 diff --git a/responses_api_agents/harbor_agent/app.py b/responses_api_agents/harbor_agent/app.py
-index a1e506d64..a52fb013a 100644
+index 0672a2d06..56593d450 100644
 --- a/responses_api_agents/harbor_agent/app.py
 +++ b/responses_api_agents/harbor_agent/app.py
 @@ -106,6 +106,9 @@ class HarborAgentConfig(BaseResponsesAPIAgentConfig):
@@ -41,7 +41,7 @@ index a1e506d64..a52fb013a 100644
  def _find_trial_dir_with_result(job_dir: Path) -> Optional[Path]:
      if not job_dir.exists():
          return None
-@@ -387,9 +395,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
+@@ -391,9 +399,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
                  instance_config={"mask_sample": self._should_mask(trial_result, output_items)},
                  context_length_exceeded_error=int(agent_error_flags.get("context_length_exceeded", False)),
                  memory_limit_exceeded_error=int(agent_error_flags.get("memory_limit_exceeded", False)),
@@ -52,7 +52,7 @@ index a1e506d64..a52fb013a 100644
              )
  
              # Save result to disk (folder = run_id, file = task name)
-@@ -460,7 +466,10 @@ class HarborAgent(SimpleResponsesAPIAgent):
+@@ -464,7 +470,10 @@ class HarborAgent(SimpleResponsesAPIAgent):
          (and masks it itself when no call chain was captured); agents such as OpenCode write no ATIF
          trajectory at all, so empty output is expected there. The rollout is still masked when the
          trial failed or the verifier never produced a result, since its reward then means nothing.
@@ -64,7 +64,7 @@ index a1e506d64..a52fb013a 100644
              return not output_items
          return trial_result is None or not trial_result.get("verifier_result")
 diff --git a/responses_api_agents/harbor_agent/tests/test_app.py b/responses_api_agents/harbor_agent/tests/test_app.py
-index ab63debcd..23f2e14a6 100644
+index ff5dd40c6..7e6aaf664 100644
 --- a/responses_api_agents/harbor_agent/tests/test_app.py
 +++ b/responses_api_agents/harbor_agent/tests/test_app.py
 @@ -507,6 +507,21 @@ class TestApp:

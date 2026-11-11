@@ -2,7 +2,7 @@
 #
 # OpenSandbox pods cannot open connections to the compute nodes (osb-reach jobs 5238624, 5238974,
 # 5244154), but the node reaches every pod through the OpenSandbox server proxy, WebSocket included
-# (job 5244154). Gym patch 0013 uses that: NemoGymSandboxEnvironment uploads chisel into each sandbox,
+# (job 5244154). Gym patch 0016 uses that: NemoGymSandboxEnvironment uploads chisel into each sandbox,
 # starts `chisel server --reverse` there and `chisel client` in the Harbor process on the node, and
 # before the trial starts checks GET /health on policy_model from inside the sandbox through the
 # tunnel; a trial whose tunnel fails fails in environment setup (an infra failure, retried).

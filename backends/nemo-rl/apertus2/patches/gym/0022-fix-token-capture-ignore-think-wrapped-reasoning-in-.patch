@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From e9c4fe79a11b49618ffd5c7e6cd8c78040e597cc Mon Sep 17 00:00:00 2001
 From: Philip Mueller <claude@philipmueller.ch>
 Date: Mon, 9 Nov 2026 09:19:12 +0000
-Subject: [PATCH] fix(token-capture): ignore think-wrapped reasoning in
+Subject: [PATCH 22/31] fix(token-capture): ignore think-wrapped reasoning in
  assistant fingerprints
 
 With uses_reasoning_parser: true the vLLM model server folds the parsed

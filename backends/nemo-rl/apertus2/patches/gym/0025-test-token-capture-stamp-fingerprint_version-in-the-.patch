@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From f4d69d9940d37ae6cfbd82f8bd56a7842e878495 Mon Sep 17 00:00:00 2001
 From: Philip Mueller <claude@philipmueller.ch>
 Date: Tue, 10 Nov 2026 07:02:03 +0000
-Subject: [PATCH 22/22] test(token-capture): stamp fingerprint_version in the
+Subject: [PATCH 25/31] test(token-capture): stamp fingerprint_version in the
  _Ledger test helper
 
 Since the buffered-SSE backport, parent resolution only matches ledger rows

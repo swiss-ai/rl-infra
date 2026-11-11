@@ -1,8 +1,8 @@
-From c895367d39da913a690efdad2968e8e72e3f6414 Mon Sep 17 00:00:00 2001
+From 5a32f6d9260ea8ffc7ad6cc9e0c97116860c2b9a Mon Sep 17 00:00:00 2001
 From: Philip Mueller <claude@philipmueller.ch>
 Date: Tue, 3 Nov 2026 13:42:08 +0000
-Subject: [PATCH] fix(harbor_agent): model tunnel waits until the sandbox-side
- server listens
+Subject: [PATCH 17/31] fix(harbor_agent): model tunnel waits until the
+ sandbox-side server listens
 
 Job 5245999: all 32 tunnels failed with the client getting 'websocket: close
 1011' from the OpenSandbox proxy, i.e. nothing listened on the server port in
@@ -236,5 +236,5 @@ index b2877294c..ab6342f0a 100644
 +        res = subprocess.run(["sh", "-c", server_start_script(cfg, wait_s=1)], capture_output=True, timeout=20)
 +        assert res.returncode == 1
 -- 
-2.55.0
+2.56.0
 

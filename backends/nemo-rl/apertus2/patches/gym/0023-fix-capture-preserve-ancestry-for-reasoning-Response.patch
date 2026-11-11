@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 25a991277911a26645fa2da4573235669f1f0c58 Mon Sep 17 00:00:00 2001
 From: aroshanghias-nvd <aroshanghias@nvidia.com>
 Date: Tue, 15 Sep 2026 23:18:18 +0000
-Subject: [PATCH 20/22] fix(capture): preserve ancestry for reasoning Responses
+Subject: [PATCH 23/31] fix(capture): preserve ancestry for reasoning Responses
  (#3301)
 
 ## What does this PR do?

@@ -1,8 +1,8 @@
-From b333d0e8e2d97cb7e67f98e2d6511694e7870eca Mon Sep 17 00:00:00 2001
+From a8d13fdbe4cc45b619dc812703680bf99607c955 Mon Sep 17 00:00:00 2001
 From: Philip Mueller <claude@philipmueller.ch>
 Date: Mon, 2 Nov 2026 09:12:04 +0000
-Subject: [PATCH 1/2] feat(harbor_agent): route model calls through the rollout
- capture prefix
+Subject: [PATCH 14/31] feat(harbor_agent): route model calls through the
+ rollout capture prefix
 
 Build the Harbor agent's api_base with base_url_for_run, so with
 token_id_capture enabled (run-level enabled + agent opt-in) every model call
@@ -22,7 +22,7 @@ Signed-off-by: Philip Mueller <claude@philipmueller.ch>
  2 files changed, 67 insertions(+), 9 deletions(-)
 
 diff --git a/responses_api_agents/harbor_agent/app.py b/responses_api_agents/harbor_agent/app.py
-index 2c866a540..d5837df33 100644
+index 71d3b8510..05003c18b 100644
 --- a/responses_api_agents/harbor_agent/app.py
 +++ b/responses_api_agents/harbor_agent/app.py
 @@ -116,6 +116,12 @@ class HarborAgentConfig(BaseResponsesAPIAgentConfig):
@@ -38,7 +38,7 @@ index 2c866a540..d5837df33 100644
  
  
  class HarborRunRequest(BaseRunRequest):
-@@ -271,7 +277,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
+@@ -275,7 +281,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
              global_config_dict = get_global_config_dict()
  
              policy_model_name = global_config_dict["policy_model_name"]
@@ -47,7 +47,7 @@ index 2c866a540..d5837df33 100644
              run_timestamp = datetime.now(timezone.utc)
              run_id = self._build_run_id(run_timestamp)
  
-@@ -443,14 +449,23 @@ class HarborAgent(SimpleResponsesAPIAgent):
+@@ -447,14 +453,23 @@ class HarborAgent(SimpleResponsesAPIAgent):
          sanitized = sanitized.strip("._")
          return sanitized or "unknown"
  
@@ -80,7 +80,7 @@ index 2c866a540..d5837df33 100644
      def _build_job_config(
          self,
 diff --git a/responses_api_agents/harbor_agent/tests/test_app.py b/responses_api_agents/harbor_agent/tests/test_app.py
-index 71bb7e11f..bcfa0947e 100644
+index a8f0ffeed..0f8f62e54 100644
 --- a/responses_api_agents/harbor_agent/tests/test_app.py
 +++ b/responses_api_agents/harbor_agent/tests/test_app.py
 @@ -470,6 +470,49 @@ class TestApp:
@@ -134,5 +134,5 @@ index 71bb7e11f..bcfa0947e 100644
          pytest.importorskip("harbor")
          server = _make_server(
 -- 
-2.55.0
+2.56.0
 

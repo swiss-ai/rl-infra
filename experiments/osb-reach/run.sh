@@ -5,7 +5,7 @@
 #   REACH_TESTS="tcp ws tunnel" bash experiments/osb-reach/run.sh
 # tests: tcp = pod -> node TCP; ws = node -> pod HTTP/WebSocket via the OpenSandbox proxy;
 #        tunnel = chisel reverse tunnel per sandbox, pod 127.0.0.1:8000 -> node (standalone scripts);
-#        gymtunnel = the same through Gym's model_tunnel.py (patch 0013 in the NeMo-RL clone's Gym).
+#        gymtunnel = the same through Gym's model_tunnel.py (patch 0016 in the NeMo-RL clone's Gym).
 # Env: ACCOUNT (infra01), PARTITION (debug), JOB_TIME (00:20:00), REACH_PORT, EXTRA_TARGETS ("host:port ..."),
 #      TUNNELS (tunnel 4, gymtunnel 32), STREAM_S, IDLE_S, GYM_TUNNEL_TIMEOUT_S (900), OPENSANDBOX_DOMAIN, OPENSANDBOX_API_KEY (else ~/.opensandbox_token).
 set -euo pipefail
@@ -38,7 +38,7 @@ export CHISEL_VERSION="${CHISEL_VERSION:-1.12.0}" CHISEL_DIR="${CHISEL_DIR:-${SC
 if [[ " ${REACH_TESTS} " == *" gymtunnel "* ]]; then
     grep -q server_start_script \
         "${NEMO_RL_DIR}/3rdparty/Gym-workspace/Gym/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/model_tunnel.py" \
-        2>/dev/null || { echo "ERROR: gymtunnel needs Gym patches 0013+0014 in the NeMo-RL clone; run setup-gym.sh" \
+        2>/dev/null || { echo "ERROR: gymtunnel needs Gym patches 0016+0017 in the NeMo-RL clone; run setup-gym.sh" \
                               "(see experiments/harbor-capture-sc/README.md)" >&2; exit 1; }
 fi
 mkdir -p "${OUT}"

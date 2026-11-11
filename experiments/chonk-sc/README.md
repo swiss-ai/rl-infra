@@ -50,8 +50,8 @@ bash experiments/chonk-sc/check.sh             # RUNS="a" or RUNS="b" for one ru
   `resolve_distributed_executor_backend` (`uni` for EP > TP) with its inline choice (`mp`); the
   legacy Chonk runs (5184052) ran with the same code.
 - **(c) Gym checkout** (run B): `setup-gym.sh` has applied the current `patches/gym` set (its stamp
-  matches), Gym patch 0011 (`harbor_model_base_url` / `base_url_for_run`: without it capture records
-  nothing and every row is rejected, job 5236016), 0012 (`_should_mask`, capture-aware masking),
+  matches), Gym patch 0014 (`harbor_model_base_url` / `base_url_for_run`: without it capture records
+  nothing and every row is rejected, job 5236016), 0015 (`_should_mask`, capture-aware masking),
   `nemo_gym/token_id_capture`, the OpenSandbox configs (patches 0006-0009). Fix:
   ```bash
   bash backends/nemo-rl/apertus2/setup-gym.sh
@@ -210,7 +210,7 @@ Research report `2026-11-05-sft-checkpoint-for-harbor-runs.md` (workspace), sect
 OpenCode 1.17.11 runs inside each pod and calls the model through the per-pod tunnel, as in
 `../harbor-capture-sc` (R2 job 5314745 on Qwen3-4B); run-s.sh adds `opencode-sc.yaml`, `tunnel-sc.yaml`
 and `run-s-opencode.yaml` (Gym model-call capture: every request and response body under
-`$HARBOR_ROOT/model-calls/<run>`). Needs Gym patches 0013-0014 and 0020-0026 (setup-gym.sh) and chisel
+`$HARBOR_ROOT/model-calls/<run>`). Needs Gym patches 0016-0017 and 0023-0029 (setup-gym.sh) and chisel
 (fetched to `CHISEL_DIR` on first use). Check B (job 5315873) encoded OpenCode's first request in the
 Apertus 2 format: 5587 tokens, so ~10.8k of 16384 remain for the trajectory.
 
@@ -236,7 +236,7 @@ FAIL_TO_PASS + PASS_TO_PASS tests), instead of the micro tasks. `run-s-swe-lego.
 **Pull credentials.** The image project `swe_lego_v05_1` is no longer public: since about 2026-10-29, every
 anonymous pull gets a 401 (job 5317993: all pods Pending). run-s.sh therefore needs `RL_REGISTRY_CRED_FILE`
 (default `~/.rl_registry_cred`), a Harbor robot account with pull access as a single `name:password` line, chmod 600.
-Gym patch 0028 reads that file when it creates a sandbox, and sends the credentials only to `rl-registry.swissai.svc.cscs.ch`.
+Gym patch 0013 (`image_auth_file`) reads that file when it creates a sandbox, and 0031 (`image_auth_registry`) sends the credentials only to `rl-registry.swissai.svc.cscs.ch`.
 So the password is neither in the config nor in the logs, and never goes to Docker Hub.
 Check the account first: `bash experiments/osb-reach/registry_check.sh`. Its line `4. C ... manifest with token -> HTTP 200`
 means the account can pull. The token request returns 200 even for wrong credentials.

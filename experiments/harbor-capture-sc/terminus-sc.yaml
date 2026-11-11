@@ -5,7 +5,7 @@
 # Agent: Terminus-2 (Gym's Terminus2NemoGym wrapper). Its loop runs in the Gym process on the
 # training node and drives tmux in the pod, so only node -> OpenSandbox traffic is needed. This
 # variant checks the capture path itself: harbor_agent hands Terminus-2 the rollout-prefixed model
-# URL (Gym patch 0011), NeMo-RL records every call at the model endpoint and rebuilds the rows from
+# URL (Gym patch 0014), NeMo-RL records every call at the model endpoint and rebuilds the rows from
 # that ledger. opencode-sc.yaml swaps in an agent that runs inside the pod.
 #
 # Data and Harbor settings follow envs/harbor-osb.yaml (alias swe_lego, Rob's micro-tasks under

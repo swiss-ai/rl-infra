@@ -1,10 +1,10 @@
 # Task overlay: terminus-sc.yaml with mini-swe-agent instead of Terminus-2 (run.sh: AGENT=mini,
 # always together with tunnel-sc.yaml). Step B: the agent runs INSIDE the task sandbox and calls the
 # model through the per-sandbox reverse tunnel, sandbox 127.0.0.1:8000 -> policy_model (Gym patches
-# 0013+0014).
+# 0016+0017).
 #
 # Harbor installs mini-swe-agent into every sandbox at setup (apt-get, uv, `uv tool install` from
-# git; the pods have internet). Gym patch 0015 provides the agent class: each run gets its own
+# git; the pods have internet). Gym patch 0018 provides the agent class: each run gets its own
 # api_base (http://127.0.0.1:8000 + the rollout's capture prefix + /v1), the rollout's sampling
 # parameters (mini's default config has temperature 0.0), no litellm cost lookup and a model-call
 # limit of max_turns (from terminus-sc.yaml). litellm does not stream, so worker-owned token capture

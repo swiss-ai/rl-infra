@@ -1,8 +1,8 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 0528db5e08b3286f565149a3186b03ba48c7c038 Mon Sep 17 00:00:00 2001
 From: Philip Mueller <claude@philipmueller.ch>
 Date: Wed, 4 Nov 2026 14:36:57 +0000
-Subject: [PATCH] fix(token-capture): hash empty assistant turns so their calls
- stay resolvable
+Subject: [PATCH 21/31] fix(token-capture): hash empty assistant turns so their
+ calls stay resolvable
 
 assistant_fingerprint hashed only the content parts and tool calls of
 model-authored items, and _content_of drops empty text. A reply with no
@@ -524,5 +524,5 @@ index 7f6171be9..3d5ed7214 100644
  async def test_staging_chain_grows_across_external_calls(store):
      await _record_call_1(store)
 -- 
-2.55.0
+2.56.0
 

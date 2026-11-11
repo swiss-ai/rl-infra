@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 1b7a947f90e8dc606bc4b0ffa366662fd6669416 Mon Sep 17 00:00:00 2001
 From: Philip Mueller <claude@philipmueller.ch>
 Date: Tue, 10 Nov 2026 08:45:12 +0000
-Subject: [PATCH] feat(harbor_agent): OpenCode can run in a task working
+Subject: [PATCH 29/31] feat(harbor_agent): OpenCode can run in a task working
  directory
 
 New kwarg opencode_workdir (absolute path, default unset = the exec's cwd).
@@ -18,10 +18,10 @@ Signed-off-by: Philip Mueller <claude@philipmueller.ch>
  2 files changed, 37 insertions(+)
 
 diff --git a/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py
-index 4a0498209..f3009235d 100644
+index 98d5489dd..61e4d5cfe 100644
 --- a/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py
 +++ b/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py
-@@ -111,6 +111,7 @@ class OpenCodeNemoGym(OpenCode):
+@@ -125,6 +125,7 @@ class OpenCodeNemoGym(OpenCode):
          opencode_install: str = "binary",
          opencode_sha256: str | None = None,
          opencode_asset: str = DEFAULT_ASSET,
@@ -29,7 +29,7 @@ index 4a0498209..f3009235d 100644
          **kwargs: Any,
      ) -> None:
          # Harbor's base keeps `version` (the OpenCode release, or the npm version for "npm").
-@@ -127,6 +128,8 @@ class OpenCodeNemoGym(OpenCode):
+@@ -141,6 +142,8 @@ class OpenCodeNemoGym(OpenCode):
              raise ValueError(f"invalid OpenCode version {self._version!r}")
          if opencode_sha256 is not None and not _SHA256_RE.match(opencode_sha256):
              raise ValueError("opencode_sha256 must be 64 lowercase hex digits")
@@ -38,7 +38,7 @@ index 4a0498209..f3009235d 100644
          self._api_base = api_base
          self._api_key = api_key
          # Kept for reference; sampling values reach vLLM through vllm_model.sampling_overrides.
-@@ -138,6 +141,7 @@ class OpenCodeNemoGym(OpenCode):
+@@ -152,6 +155,7 @@ class OpenCodeNemoGym(OpenCode):
          self._debug = bool(opencode_debug)
          self._install_method = opencode_install
          self._asset = opencode_asset
@@ -46,7 +46,7 @@ index 4a0498209..f3009235d 100644
          self._sha256 = opencode_sha256 or KNOWN_ARCHIVE_SHA256.get((self._version, opencode_asset))
  
      @staticmethod
-@@ -292,4 +296,11 @@ class OpenCodeNemoGym(OpenCode):
+@@ -306,6 +310,13 @@ class OpenCodeNemoGym(OpenCode):
          # anything (cli/cmd/run.ts:399), and the sandbox exec leaves it open. pipefail keeps
          # OpenCode's exit status (e.g. 124 from timeout) instead of tee's.
          command = f"{PIPEFAIL_IF_SUPPORTED}{shlex.join(argv)} 2>&1 </dev/null | tee {LOG_FILE}"
@@ -57,9 +57,11 @@ index 4a0498209..f3009235d 100644
 +            # directory, so create it; if that fails, OpenCode still runs in the exec's cwd.
 +            workdir = shlex.quote(self._workdir)
 +            command = f"mkdir -p {workdir} && cd {workdir}; {command}"
+         if self._install_method == "npm":
+             command = f"{NVM_PREFIX}{command}"
          return [ExecInput(command=command, env=self.opencode_env())]
 diff --git a/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
-index 3accc5219..556d046fb 100644
+index 58b9f1a3f..dff7aa247 100644
 --- a/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
 +++ b/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
 @@ -145,6 +145,32 @@ def test_run_command_starts_opencode_in_a_posix_sh(

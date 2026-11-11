@@ -1,7 +1,7 @@
-From 2f7f4afcffceee6688785d86e5ba086e353d8502 Mon Sep 17 00:00:00 2001
+From 51d6a0759debc0e819f1583b690e0f2c4f22e0bd Mon Sep 17 00:00:00 2001
 From: Philip Mueller <claude@philipmueller.ch>
 Date: Tue, 10 Nov 2026 13:52:45 +0000
-Subject: [PATCH] fix(token-capture): keep lineage after a tool call with
+Subject: [PATCH 30/31] fix(token-capture): keep lineage after a tool call with
  unparseable arguments
 
 OpenCode (AI SDK tool-call repair) does not echo a tool call whose

@@ -114,7 +114,7 @@ if [[ "${AGENT}" == opencode ]]; then
     GYM_DIR="${NEMO_RL_DIR}/3rdparty/Gym-workspace/Gym"
     grep -q opencode_workdir "${GYM_DIR}/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py" 2>/dev/null \
         && grep -q server_start_script "${GYM_DIR}/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/model_tunnel.py" 2>/dev/null \
-        || { echo "ERROR: AGENT=opencode needs Gym patches 0013-0014 (tunnel) and 0023-0026 (OpenCode) in ${GYM_DIR} (bash ${APERTUS2_DIR}/setup-gym.sh)" >&2; exit 1; }
+        || { echo "ERROR: AGENT=opencode needs Gym patches 0016-0017 (tunnel) and 0026-0029 (OpenCode) in ${GYM_DIR} (bash ${APERTUS2_DIR}/setup-gym.sh)" >&2; exit 1; }
     for v in OPENCODE_VERSION OPENCODE_TIMEOUT_SEC OPENCODE_DEBUG; do
         [[ -z "${!v:-}" ]] || export "${v}"
     done

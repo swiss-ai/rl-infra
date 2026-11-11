@@ -1,8 +1,8 @@
-From d9dff707369f11090918ce50fd73ecfac7f3431d Mon Sep 17 00:00:00 2001
+From 6a9fc777860ff0f916b441acdcaf6d8ca876b198 Mon Sep 17 00:00:00 2001
 From: Philip Mueller <claude@philipmueller.ch>
 Date: Wed, 4 Nov 2026 09:03:38 +0000
-Subject: [PATCH] feat(harbor_agent): mini-swe-agent on the Gym model server
- (in-sandbox, non-streaming)
+Subject: [PATCH 18/31] feat(harbor_agent): mini-swe-agent on the Gym model
+ server (in-sandbox, non-streaming)
 
 MiniSweAgentNemoGym subclasses Harbor's installed mini-swe-agent and points
 every run at its own api_base (harbor_agent's rollout URL, capture prefix
@@ -21,22 +21,34 @@ in NEMO_GYM_MINI:
 litellm calls without streaming, so this works under worker-owned token
 capture, which rejects stream: true (OpenCode always streams).
 
+Harbor 0.25: the run goes through installed_compat (see the OpenCode
+adapter), and the shared harbor_agent kwargs are dropped before Harbor's
+options validation. Harbor 0.25's MiniSweAgent installs mini-swe-agent 2.x
+from PyPI as `mini-swe-agent==<version>` (harbor
+agents/installed/mini_swe_agent.py:756-791); our `version` is a commit of the
+li-boxuan fork (mini-swe-agent 1.14.4, `mini --model-class`), which Harbor
+0.1.x installed with `uv tool install git+...@<version>`. `install()` keeps
+that, with Harbor 0.25's system-package step, and the run command puts
+~/.local/bin on PATH itself. Harbor 0.25's ATIF conversion still reads the
+1.x trajectory (messages, observations, token usage) but no longer turns its
+bash blocks into tool calls.
+
 Signed-off-by: Philip Mueller <claude@philipmueller.ch>
 ---
- .../custom_agents/mini_swe_agent_nemo_gym.py  |  94 ++++++++++
- .../mini_swe_agent_pod/nemo_gym_mini.py       |  53 ++++++
- .../test_mini_swe_agent_nemo_gym.py           | 176 ++++++++++++++++++
- 3 files changed, 323 insertions(+)
+ .../custom_agents/mini_swe_agent_nemo_gym.py  | 136 +++++++++++
+ .../mini_swe_agent_pod/nemo_gym_mini.py       |  53 ++++
+ .../test_mini_swe_agent_nemo_gym.py           | 231 ++++++++++++++++++
+ 3 files changed, 420 insertions(+)
  create mode 100644 responses_api_agents/harbor_agent/custom_agents/mini_swe_agent_nemo_gym.py
  create mode 100644 responses_api_agents/harbor_agent/custom_agents/mini_swe_agent_pod/nemo_gym_mini.py
  create mode 100644 responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py
 
 diff --git a/responses_api_agents/harbor_agent/custom_agents/mini_swe_agent_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/mini_swe_agent_nemo_gym.py
 new file mode 100644
-index 000000000..f7e10d227
+index 000000000..480bf8360
 --- /dev/null
 +++ b/responses_api_agents/harbor_agent/custom_agents/mini_swe_agent_nemo_gym.py
-@@ -0,0 +1,94 @@
+@@ -0,0 +1,136 @@
 +# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 +# SPDX-License-Identifier: Apache-2.0
 +#
@@ -63,7 +75,14 @@ index 000000000..f7e10d227
 +mini-swe-agent runs inside the task sandbox and calls the model with litellm, without streaming,
 +so it works with worker-owned token capture (which rejects ``stream: true``). ``api_base`` must be
 +reachable from the sandbox (harbor_agent's ``harbor_model_base_url``, e.g. the per-sandbox model
-+tunnel at http://127.0.0.1:8000). Harbor's install script and ATIF conversion are inherited.
++tunnel at http://127.0.0.1:8000). Harbor's ATIF conversion is inherited.
++
++On Harbor 0.25 the run goes through ``installed_compat`` (one recorded command, no failure on a non-zero
++exit, as on Harbor 0.1.x). Harbor 0.25 installs mini-swe-agent 2.x from PyPI (``mini-swe-agent==<version>``,
++harbor agents/installed/mini_swe_agent.py:756-791); ``version`` here is a commit of the li-boxuan fork
++(mini-swe-agent 1.x with the ``mini`` CLI and ``--model-class``), which Harbor 0.1.x installed from git, so
++``install`` keeps doing that. Harbor 0.25's ATIF conversion reads the 1.x trajectory (messages, observations,
++token usage) but no longer turns its ``bash`` blocks into tool calls.
 +"""
 +
 +import json
@@ -71,12 +90,26 @@ index 000000000..f7e10d227
 +from pathlib import Path
 +from typing import Any
 +
-+from harbor.agents.installed.base import ExecInput
++from harbor.agents.installed.base import with_prompt_template
 +from harbor.agents.installed.mini_swe_agent import MiniSweAgent
++from harbor.environments.base import BaseEnvironment
++from harbor.models.agent.context import AgentContext
++
++from responses_api_agents.harbor_agent.custom_agents.installed_compat import (
++    ExecInput,
++    drop_shared_kwargs,
++    run_commands,
++)
 +
 +
 +POD_MODULE = Path(__file__).parent / "mini_swe_agent_pod" / "nemo_gym_mini.py"
 +POD_DIR = "/tmp/nemo-gym-mini"
++# Harbor 0.1.x's install-mini-swe-agent.sh.j2: `uv tool install git+<this>@<version>`
++MINI_GIT_URL = "git+https://github.com/li-boxuan/mini-swe-agent.git"
++# where `uv tool install` puts `mini`; Harbor 0.1.x relied on the interactive shell's .bashrc for it
++LOCAL_BIN_PATH = 'export PATH="$HOME/.local/bin:$PATH"; '
++# mini-swe-agent's own Python, as Harbor 0.25 (mini_swe_agent.py:50); the fork needs >= 3.10
++MINI_PYTHON = "3.12"
 +
 +# Responses API names -> chat-completions names (litellm). Unset ones are not sent.
 +SAMPLING_KEYS = {"temperature": "temperature", "top_p": "top_p", "max_output_tokens": "max_tokens"}
@@ -92,7 +125,7 @@ index 000000000..f7e10d227
 +        max_turns: int | None = None,
 +        **kwargs: Any,
 +    ) -> None:
-+        super().__init__(*args, **kwargs)
++        super().__init__(*args, **drop_shared_kwargs(kwargs))
 +        if not api_base:
 +            raise ValueError("MiniSweAgentNemoGym needs api_base (harbor_agent passes the model server URL)")
 +        self._api_base = api_base
@@ -103,6 +136,23 @@ index 000000000..f7e10d227
 +    @staticmethod
 +    def name() -> str:
 +        return "mini-swe-agent-nemo-gym"
++
++    def install_command(self) -> str:
++        spec = f"{MINI_GIT_URL}@{self._version}" if self._version else MINI_GIT_URL
++        python = shlex.quote(MINI_PYTHON)
++        return (
++            "set -euo pipefail; "
++            "if ! command -v uv >/dev/null 2>&1; then curl -LsSf https://astral.sh/uv/install.sh | sh; fi && "
++            'if ! grep -q \'export PATH="$HOME/.local/bin:$PATH"\' "$HOME/.bashrc" 2>/dev/null; then '
++            'echo \'export PATH="$HOME/.local/bin:$PATH"\' >> "$HOME/.bashrc"; fi && '
++            f"{LOCAL_BIN_PATH}"
++            f"uv python install {python} && uv tool install --python {python} {shlex.quote(spec)}"
++        )
++
++    async def install(self, environment: BaseEnvironment) -> None:
++        # system packages as Harbor 0.25's MiniSweAgent.install (as root, per package manager), then the fork
++        await self.ensure_system_dependencies(environment, ("curl", "bash", "build_tools", "git"))
++        await self.exec_as_agent(environment, command=self.install_command())
 +
 +    def _litellm_model(self) -> str:
 +        if not self.model_name:
@@ -121,7 +171,7 @@ index 000000000..f7e10d227
 +        module = shlex.quote(POD_MODULE.read_text())
 +        command = (
 +            f"mkdir -p {POD_DIR} && printf '%s' {module} > {POD_DIR}/nemo_gym_mini.py && "
-+            f"PYTHONPATH={POD_DIR} mini -m {shlex.quote(self._litellm_model())} "
++            f"{LOCAL_BIN_PATH}PYTHONPATH={POD_DIR} mini -m {shlex.quote(self._litellm_model())} "
 +            f"--model-class nemo_gym_mini.NemoGymModel -t {shlex.quote(instruction)} -y "
 +            f"-o {self._mini_swe_agent_trajectory_path} -l 0 --exit-immediately "
 +            f"2>&1 </dev/null | tee /logs/agent/mini-swe-agent.txt"
@@ -131,6 +181,10 @@ index 000000000..f7e10d227
 +            "NEMO_GYM_MINI": json.dumps(self.mini_settings()),
 +        }
 +        return [ExecInput(command=command, env=env)]
++
++    @with_prompt_template
++    async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
++        await run_commands(self, environment, self.create_run_agent_commands(instruction))
 diff --git a/responses_api_agents/harbor_agent/custom_agents/mini_swe_agent_pod/nemo_gym_mini.py b/responses_api_agents/harbor_agent/custom_agents/mini_swe_agent_pod/nemo_gym_mini.py
 new file mode 100644
 index 000000000..3d876cbc9
@@ -192,10 +246,10 @@ index 000000000..3d876cbc9
 +        return super().query(messages, **kwargs)
 diff --git a/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py
 new file mode 100644
-index 000000000..d9296a6fa
+index 000000000..150bf772d
 --- /dev/null
 +++ b/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py
-@@ -0,0 +1,176 @@
+@@ -0,0 +1,231 @@
 +# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 +# SPDX-License-Identifier: Apache-2.0
 +#
@@ -275,10 +329,65 @@ index 000000000..d9296a6fa
 +
 +
 +def test_ignores_harbor_agent_extra_kwargs(tmp_path: Path) -> None:
-+    # harbor_agent passes Terminus-2's kwargs too (temperature, model_info); they must be accepted
-+    agent = _agent(tmp_path, temperature=1.0, model_info={"max_input_tokens": 1}, version="abc123")
++    # harbor_agent passes Terminus-2's kwargs too (temperature, model_info); they must be accepted, and on
++    # Harbor 0.25 kept away from its options validation
++    agent = _agent(
++        tmp_path, temperature=1.0, model_info={"max_input_tokens": 1}, interleaved_thinking=False, version="abc123"
++    )
 +    assert agent.create_run_agent_commands("x")
 +    assert agent._version == "abc123"
++
++
++def test_unknown_kwargs_still_fail(tmp_path: Path) -> None:
++    with pytest.raises(ValueError, match="Unknown option 'bogus'"):
++        _agent(tmp_path, bogus=1)
++
++
++def test_install_command_installs_the_pinned_fork_commit(tmp_path: Path) -> None:
++    command = _agent(tmp_path, version="8e8a515fdcecf3a8e45c3909f7f196bfe18ca89a").install_command()
++    assert command.endswith(
++        f"uv tool install --python {mod.MINI_PYTHON} "
++        "git+https://github.com/li-boxuan/mini-swe-agent.git@8e8a515fdcecf3a8e45c3909f7f196bfe18ca89a"
++    )
++    assert "mini-swe-agent==" not in command  # not Harbor 0.25's PyPI install
++    if shutil.which("bash"):
++        assert subprocess.run(["bash", "-n", "-c", command]).returncode == 0
++
++
++class _Env:
++    def __init__(self, return_code: int = 0) -> None:
++        self.calls: list[dict] = []
++        self.return_code = return_code
++        self.default_user = None
++
++    async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
++        from harbor.environments.base import ExecResult
++
++        self.calls.append({"command": command, "env": env, "user": user})
++        return ExecResult(stdout="", stderr=None, return_code=self.return_code)
++
++
++@pytest.mark.asyncio
++async def test_install_runs_the_fork_install_as_the_agent(tmp_path: Path) -> None:
++    agent = _agent(tmp_path, version="abc123")
++    env = _Env()
++    await agent.install(env)
++    last = env.calls[-1]
++    assert last["user"] is None
++    assert last["command"].endswith(agent.install_command())
++
++
++@pytest.mark.asyncio
++async def test_run_records_the_command_and_a_failed_exit_without_raising(tmp_path: Path) -> None:
++    from harbor.models.agent.context import AgentContext
++
++    agent = _agent(tmp_path, max_turns=3)
++    env = _Env(return_code=1)
++    await agent.run("do it", env, AgentContext())
++    (call,) = env.calls
++    assert call["command"] == agent.create_run_agent_commands("do it")[0].command
++    assert json.loads(call["env"]["NEMO_GYM_MINI"])["max_calls"] == 3
++    assert (tmp_path / "command-0" / "return-code.txt").read_text() == "1"
 +
 +
 +# Stubs of the two packages nemo_gym_mini.py imports, shaped like mini-swe-agent 1.x / litellm.
@@ -373,5 +482,5 @@ index 000000000..d9296a6fa
 +    assert result["cost"] == 0.0
 +    assert (logs / "agent" / "mini-swe-agent.txt").read_text() == res.stdout
 -- 
-2.55.0
+2.56.0
 

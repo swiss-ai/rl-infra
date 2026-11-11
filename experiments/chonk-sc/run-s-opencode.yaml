@@ -8,8 +8,8 @@
 #   history, a few turns can fill the context. This run measures it.
 # - thinking: vllm_model_for_training.yaml's uses_reasoning_parser puts it in `content` as
 #   <think>...</think>; OpenCode echoes that as plain text (it parses <think> only for titles, which
-#   0023 switches off), so no `reasoning_content` reaches Gym's schema (HTTP 422, job 1209869), and
-#   the capture fingerprint strips the leading think block (Gym patch 0019).
+#   0026 switches off), so no `reasoning_content` reaches Gym's schema (HTTP 422, job 1209869), and
+#   the capture fingerprint strips the leading think block (Gym patch 0022).
 # - sampling: OpenCode sends no temperature and no top_p for this model id; opencode-sc.yaml's
 #   sampling_overrides set the train profile. envs/harbor-osb-sft.yaml's Terminus kwargs
 #   (interleaved_thinking) reach OpenCodeNemoGym, and Harbor's BaseAgent at the pin ignores them.
@@ -22,7 +22,7 @@
 #   thinking, so that prompt differs from what the model saw (the rollout is already poisoned in that case,
 #   only the agent run continues); (2) the token-in path is unaffected (it extends the generated tokens and
 #   reads only the messages after the last burst), and capture fingerprints strip think blocks anyway (Gym
-#   0019). Remove once Gym passes non-overflow 400s through as 400 or apertus-common accepts reasoning.
+#   0022). Remove once Gym passes non-overflow 400s through as 400 or apertus-common accepts reasoning.
 env:
   nemo_gym:
     policy_model:

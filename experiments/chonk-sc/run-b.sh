@@ -23,7 +23,7 @@ source "${HERE}/common.sh"
 # and #2517 / f196 refit code in the clone (check.sh (b) and (c)).
 if ! out="$(check_gym_capture)"; then
     grep -v '^  ok' <<< "${out}" >&2
-    echo "ERROR: the Gym checkout lacks the capture patches; without 0011 capture records nothing and every row is rejected" >&2
+    echo "ERROR: the Gym checkout lacks the capture patches; without 0014 capture records nothing and every row is rejected" >&2
     exit 1
 fi
 if ! out="$(check_nemo_rl_clone)"; then

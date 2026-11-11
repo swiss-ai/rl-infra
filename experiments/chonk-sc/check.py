@@ -335,11 +335,10 @@ else:
         # envs/harbor-osb-sft.yaml) with run-s-sft.yaml on top
         osb = mc.env["nemo_gym"]["sandbox"]["opensandbox"]
         kw = hcfg["harbor_agent_kwargs"]
-        ia = dict(hcfg["harbor_environment_kwargs"]["sandbox_provider_options"]["image_auth"])
+        spo = hcfg["harbor_environment_kwargs"]["sandbox_provider_options"]
         expect("image_auth: credentials file for rl-registry only, no password in the config",
-               (sorted(ia), ia.get("registry"), ia.get("credentials_file")),
-               (["credentials_file", "registry"], "rl-registry.swissai.svc.cscs.ch",
-                os.environ.get("RL_REGISTRY_CRED_FILE")))
+               ("image_auth" in spo, spo.get("image_auth_file"), spo.get("image_auth_registry")),
+               (False, os.environ.get("RL_REGISTRY_CRED_FILE"), "rl-registry.swissai.svc.cscs.ch"))
         expect("trainer PP/EP", (mg.get("pipeline_model_parallel_size"), mg.get("expert_model_parallel_size")), (2, 16))
         expect("vLLM precision", vl.get("precision"), "fp8")
         expect("max_total_sequence_length", p["max_total_sequence_length"], 16384)

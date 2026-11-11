@@ -1,8 +1,8 @@
-From a830f20c31cb49a7014f082d7ec2ce3bb650a7f8 Mon Sep 17 00:00:00 2001
+From 31569ee7837a6f09f2e6c1021fd7e9d2a033152e Mon Sep 17 00:00:00 2001
 From: Philip Mueller <claude@philipmueller.ch>
 Date: Wed, 4 Nov 2026 12:13:27 +0000
-Subject: [PATCH] fix(harbor_agent): mini-swe-agent call limit ends the run
- instead of prompting
+Subject: [PATCH 20/31] fix(harbor_agent): mini-swe-agent call limit ends the
+ run instead of prompting
 
 `mini` runs InteractiveAgent, whose query() catches LimitsExceeded and asks
 for a new step/cost limit on stdin. With stdin /dev/null that raises
@@ -66,10 +66,10 @@ index c2abafa73..a1d15b391 100644
          sent = [{"role": m["role"], "content": m["content"]} for m in messages]
          return super().query(sent, **kwargs)
 diff --git a/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py
-index bf2bc0911..5d078f149 100644
+index 2e1460b07..763f7c2a8 100644
 --- a/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py
 +++ b/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py
-@@ -126,7 +126,7 @@ _FAKE_MINI = textwrap.dedent(
+@@ -181,7 +181,7 @@ _FAKE_MINI = textwrap.dedent(
      Model = getattr(importlib.import_module(module), cls)
      m = Model(model_name=args[args.index("-m") + 1], model_kwargs={{"temperature": 0.0, "drop_params": True}})
      out = []
@@ -78,7 +78,7 @@ index bf2bc0911..5d078f149 100644
      # mini's history: assistant replies carry `extra` (the raw response), as in DefaultAgent.add_message
      history = [{{"role": "system", "content": "sys"}}, {{"role": "user", "content": "task"}}]
      for _ in range(3):
-@@ -135,8 +135,10 @@ _FAKE_MINI = textwrap.dedent(
+@@ -190,8 +190,10 @@ _FAKE_MINI = textwrap.dedent(
              out.append(reply)
              history += [{{"role": "assistant", "content": reply["content"], "extra": {{"response": {{}}}}}},
                          {{"role": "user", "content": "observation"}}]
@@ -91,7 +91,7 @@ index bf2bc0911..5d078f149 100644
      print(json.dumps({{"task": args[args.index("-t") + 1], "out": out, "cost": m.cost}}))
      """
  )
-@@ -184,6 +186,6 @@ def test_run_command_in_bash_loads_the_model_class(tmp_path: Path) -> None:
+@@ -239,6 +241,6 @@ def test_run_command_in_bash_loads_the_model_class(tmp_path: Path) -> None:
      # which rejects unknown message fields with 422 (job 5253837: every second call failed)
      assert second["sent"][2] == {"role": "assistant", "content": "call 1"}
      assert all(set(msg) == {"role", "content"} for msg in second["sent"])
@@ -100,5 +100,5 @@ index bf2bc0911..5d078f149 100644
      assert result["cost"] == 0.0
      assert (logs / "agent" / "mini-swe-agent.txt").read_text() == res.stdout
 -- 
-2.55.0
+2.56.0
 

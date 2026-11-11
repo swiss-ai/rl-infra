@@ -1,18 +1,18 @@
 # Task overlay: terminus-sc.yaml with OpenCode instead of Terminus-2 (run.sh: AGENT=opencode, always
 # together with tunnel-sc.yaml). OpenCode runs INSIDE the task sandbox and calls the model through the
-# per-sandbox reverse tunnel, sandbox 127.0.0.1:8000 -> policy_model (Gym patches 0013+0014), like
+# per-sandbox reverse tunnel, sandbox 127.0.0.1:8000 -> policy_model (Gym patches 0016+0017), like
 # mini-sc.yaml.
 #
-# Gym patches used (run.sh checks markers of 0021 and 0026):
-#   0011/0012  per-rollout capture URL; capture-aware masking
-#   0020/0021  upstream backport: OpenCode (AI SDK) always streams; under worker-owned capture the
+# Gym patches used (run.sh checks markers of 0024 and 0029):
+#   0014/0015  per-rollout capture URL; capture-aware masking
+#   0023/0024  upstream backport: OpenCode (AI SDK) always streams; under worker-owned capture the
 #              engine call is made non-streaming, committed, and replayed to OpenCode as SSE. No byte
-#              reaches OpenCode before generation ends, so its provider timeouts must stay off (0023).
-#   0023-0025  OpenCodeNemoGym: pinned standalone binary (1.17.11, sha256 built in, downloaded by the
+#              reaches OpenCode before generation ends, so its provider timeouts must stay off (0026).
+#   0026-0028  OpenCodeNemoGym: pinned standalone binary (1.17.11, sha256 built in, downloaded by the
 #              pod from GitHub releases), `opencode run ... </dev/null` (job 5236016 hung reading stdin),
 #              no title / compaction / sub-agent calls (each extra conversation masks the rollout),
 #              model limits from model_info. Keys verified against OpenCode v1.17.11; keep that version.
-#   0026       opencode_workdir: OpenCode runs in the task directory (created if missing).
+#   0029       opencode_workdir: OpenCode runs in the task directory (created if missing).
 # Note: research/research_notes/2026-11-10-opencode-adapter-patch.md (alpernates workspace).
 #
 # Env (run.sh exports them when set):

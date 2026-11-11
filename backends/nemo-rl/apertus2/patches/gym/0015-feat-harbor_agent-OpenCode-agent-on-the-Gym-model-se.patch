@@ -1,0 +1,447 @@
+From 8fcd5c1a1bde8adc846710b57b3583ac27c5a76a Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Mon, 2 Nov 2026 09:17:53 +0000
+Subject: [PATCH 15/31] feat(harbor_agent): OpenCode agent on the Gym model
+ server; capture-aware masking
+
+custom_agents/opencode_nemo_gym.py: OpenCodeNemoGym subclasses Harbor's
+installed OpenCode agent (Harbor 9dddd797 knows only hosted providers) and
+declares one @ai-sdk/openai-compatible provider whose baseURL is harbor_agent's
+api_base, passed via OPENCODE_CONFIG_CONTENT; small_model uses the same
+endpoint. OpenCode runs in the sandbox, so api_base must be reachable from
+there (harbor_model_base_url).
+
+app.py: with training-token capture enabled, an empty output list no longer
+masks the rollout (OpenCode writes no ATIF; the model server holds the tokens
+and masks on its own when no call chain was captured). Failed trials and trials
+without a verifier result stay masked.
+
+Harbor 0.25: installed agents no longer return `ExecInput` lists from
+`create_run_agent_commands` for the base class to run; they implement
+`install()`/`run()` themselves, and `exec_as_agent` raises on a non-zero exit
+(harbor agents/installed/base.py:999-1083). New `installed_compat.py` keeps
+the old contract for our adapters: `ExecInput`, `run_commands` (one recorded
+command under command-<i>/, exit status recorded, not raised) and
+`install_from_template`. Harbor 0.25 also rejects agent kwargs its
+options_model lacks (agents/base.py:283-305), so the kwargs harbor_agent gives
+every agent (`responses_create_params`, `temperature`) and the Terminus-2
+options of the shared harbor_agent_kwargs (`interleaved_thinking`,
+`max_turns`, `model_info`) are dropped before Harbor sees them. Harbor 0.25's
+OpenCode would write an ATIF trajectory from opencode.txt; this agent keeps
+writing none. The npm install is Harbor 0.25's, so the run command sources nvm
+first as Harbor's own OpenCode run does.
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ responses_api_agents/harbor_agent/app.py      |  15 ++-
+ .../custom_agents/installed_compat.py         | 113 ++++++++++++++++++
+ .../custom_agents/opencode_nemo_gym.py        | 112 +++++++++++++++++
+ .../custom_agents/test_opencode_nemo_gym.py   |  94 +++++++++++++++
+ .../harbor_agent/tests/test_app.py            |  18 +++
+ 5 files changed, 351 insertions(+), 1 deletion(-)
+ create mode 100644 responses_api_agents/harbor_agent/custom_agents/installed_compat.py
+ create mode 100644 responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py
+ create mode 100644 responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
+
+diff --git a/responses_api_agents/harbor_agent/app.py b/responses_api_agents/harbor_agent/app.py
+index 05003c18b..4c375c83d 100644
+--- a/responses_api_agents/harbor_agent/app.py
++++ b/responses_api_agents/harbor_agent/app.py
+@@ -385,7 +385,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
+                 # the trainer can drop it from the gradient instead; NeMo-RL
+                 # reads this exact path (instance_config.mask_sample), which is
+                 # also how anyswe_agent reports sandbox failures.
+-                instance_config={"mask_sample": not output_items},
++                instance_config={"mask_sample": self._should_mask(trial_result, output_items)},
+                 context_length_exceeded_error=int(agent_error_flags.get("context_length_exceeded", False)),
+                 memory_limit_exceeded_error=int(agent_error_flags.get("memory_limit_exceeded", False)),
+                 agent_timeout_error=int(
+@@ -453,6 +453,19 @@ class HarborAgent(SimpleResponsesAPIAgent):
+         sanitized = sanitized.strip("._")
+         return sanitized or "unknown"
+ 
++    def _should_mask(self, trial_result: Optional[dict], output_items: list) -> bool:
++        """Whether the trainer should drop this rollout from the gradient.
++
++        Without training-token capture the tokens come from the output items, so a rollout without
++        any is untrainable. With capture the model server holds the tokens and rebuilds the rollout
++        (and masks it itself when no call chain was captured); agents such as OpenCode write no ATIF
++        trajectory at all, so empty output is expected there. The rollout is still masked when the
++        trial failed or the verifier never produced a result, since its reward then means nothing.
++        """
++        if not self._token_id_capture_enabled():
++            return not output_items
++        return trial_result is None or not trial_result.get("verifier_result")
++
+     def _resolve_model_base_url(self, global_config_dict: Any, body: Optional[HarborRunRequest] = None) -> str:
+         """Resolve the model base URL handed to the Harbor agent.
+ 
+diff --git a/responses_api_agents/harbor_agent/custom_agents/installed_compat.py b/responses_api_agents/harbor_agent/custom_agents/installed_compat.py
+new file mode 100644
+index 000000000..a6b4b4720
+--- /dev/null
++++ b/responses_api_agents/harbor_agent/custom_agents/installed_compat.py
+@@ -0,0 +1,113 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++# http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""Command-list helpers for our installed agents (OpenCode, mini-swe-agent) on Harbor 0.25.
++
++Harbor up to 0.1.x had installed agents return their run commands as a list of ``ExecInput`` and ran
++them in ``BaseInstalledAgent.run``, recording each command, its return code and output under
++``<agent logs>/command-<i>/`` without failing on a non-zero exit; setup rendered a Jinja install
++script and ran it. Harbor 0.25 dropped both: agents implement ``install()`` and ``run()`` themselves,
++and its ``exec_as_agent`` prefixes every command with ``set -o pipefail;`` and raises on a non-zero
++exit (harbor agents/installed/base.py:999-1083). Our adapters keep the old contract with these
++helpers, so their commands, logs and exit handling stay as they were validated (e.g. OpenCode's own
++``timeout`` exit status is recorded, the verifier still runs).
++
++Harbor 0.25 also validates every agent kwarg it does not consume against the agent's
++``options_model``, which forbids unknown keys (agents/base.py:191, 283-305; agents/options.py:53);
++Harbor 0.1.x ignored them. harbor_agent passes the same kwargs to every agent (app.py
++``_build_job_config``: ``responses_create_params``, ``temperature``), and the Terminus-2 configs'
++``harbor_agent_kwargs`` carry options other agents do not have; see ``drop_shared_kwargs``.
++"""
++
++from pathlib import Path
++from typing import Any, Iterable, Mapping
++
++from harbor.agents.base import BaseAgent
++from harbor.environments.base import BaseEnvironment
++from jinja2 import Environment
++from pydantic import BaseModel
++
++
++# kwargs that harbor_agent or the shared Terminus-2 harbor_agent_kwargs give to whichever agent runs
++SHARED_AGENT_KWARGS = ("responses_create_params", "temperature", "interleaved_thinking", "max_turns", "model_info")
++
++
++def drop_shared_kwargs(kwargs: dict[str, Any], keep: Iterable[str] = ()) -> dict[str, Any]:
++    """``kwargs`` without the SHARED_AGENT_KWARGS this agent does not use (``keep`` lists those it does)."""
++    unused = set(SHARED_AGENT_KWARGS) - set(keep)
++    return {key: value for key, value in kwargs.items() if key not in unused}
++
++
++class ExecInput(BaseModel):
++    """One command of an installed agent's run (Harbor 0.1.x ``harbor.agents.installed.base.ExecInput``)."""
++
++    command: str
++    cwd: str | None = None
++    env: dict[str, str] | None = None
++    timeout_sec: int | None = None
++
++
++async def run_commands(agent: BaseAgent, environment: BaseEnvironment, commands: Iterable[ExecInput]) -> None:
++    """Run ``commands`` in order as the environment's default user, as Harbor 0.1.x's installed-agent ``run``.
++
++    Each command, its return code and its output go to ``<agent logs>/command-<i>/``. A non-zero exit is
++    recorded, not raised. Harbor 0.25's Trial calls ``populate_context_post_run`` itself after it has
++    downloaded the agent logs (harbor trial/trial.py ``_sync_agent_output``), so this does not.
++    """
++    for i, exec_input in enumerate(commands):
++        command_dir = agent.logs_dir / f"command-{i}"
++        command_dir.mkdir(parents=True, exist_ok=True)
++        (command_dir / "command.txt").write_text(exec_input.command)
++        result = await environment.exec(
++            command=exec_input.command,
++            cwd=exec_input.cwd,
++            env=exec_input.env,
++            timeout_sec=exec_input.timeout_sec,
++        )
++        (command_dir / "return-code.txt").write_text(str(result.return_code))
++        if result.stdout:
++            (command_dir / "stdout.txt").write_text(result.stdout)
++        if result.stderr:
++            (command_dir / "stderr.txt").write_text(result.stderr)
++
++
++async def install_from_template(
++    agent: BaseAgent,
++    environment: BaseEnvironment,
++    template_path: Path,
++    variables: Mapping[str, Any],
++    user: str | int | None = "root",
++) -> None:
++    """Render a Jinja install script, upload it and run it, as Harbor 0.1.x's installed-agent ``setup``.
++
++    Harbor 0.1.x ran it without a user (the sandbox's default, root in the task images); Harbor 0.25's
++    agents install system packages with ``exec_as_root``, so root is the default here as well. The
++    script's return code and output go to ``<agent logs>/setup/``; a non-zero exit raises.
++    """
++    if not template_path.exists():
++        raise FileNotFoundError(f"Install agent template file not found: {template_path}")
++    script_path = agent.logs_dir / "install.sh"
++    script_path.write_text(Environment().from_string(template_path.read_text()).render(**variables))
++    await environment.upload_file(source_path=script_path, target_path="/installed-agent/install.sh")
++    result = await environment.exec(command="bash /installed-agent/install.sh", user=user)
++
++    setup_dir = agent.logs_dir / "setup"
++    setup_dir.mkdir(parents=True, exist_ok=True)
++    (setup_dir / "return-code.txt").write_text(str(result.return_code))
++    if result.stdout:
++        (setup_dir / "stdout.txt").write_text(result.stdout)
++    if result.stderr:
++        (setup_dir / "stderr.txt").write_text(result.stderr)
++    if result.return_code != 0:
++        raise RuntimeError(f"Agent setup failed with exit code {result.return_code}. See logs in {setup_dir}")
+diff --git a/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py
+new file mode 100644
+index 000000000..fc4a49cf0
+--- /dev/null
++++ b/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py
+@@ -0,0 +1,112 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++# http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""Harbor's installed OpenCode agent, pointed at a NeMo Gym model server.
++
++Harbor's own OpenCode agent (at the Gym pin) only knows hosted providers selected by the
++`provider/model` prefix of the model name and their API-key environment variables. This subclass
++declares one OpenAI-compatible provider whose base URL is the `api_base` that harbor_agent passes
++(the model server, with the rollout's capture prefix when token capture is on), so every call of
++the in-sandbox OpenCode reaches the Gym model server and can be attributed to its rollout.
++
++OpenCode runs inside the task sandbox, so `api_base` must be reachable from there (see
++harbor_agent's `harbor_model_base_url`). The agent writes no ATIF trajectory; for training the
++tokens come from model-server capture, not from this agent.
++
++On Harbor 0.25 the run goes through `installed_compat` (one recorded command, no failure on a
++non-zero exit, as on Harbor 0.1.x) and Harbor's ATIF conversion of `opencode.txt` stays off.
++"""
++
++import json
++import shlex
++from typing import Any
++
++from harbor.agents.installed.base import with_prompt_template
++from harbor.agents.installed.opencode import OpenCode
++from harbor.environments.base import BaseEnvironment
++from harbor.models.agent.context import AgentContext
++
++from responses_api_agents.harbor_agent.custom_agents.installed_compat import (
++    ExecInput,
++    drop_shared_kwargs,
++    run_commands,
++)
++
++
++PROVIDER_ID = "nemogym"
++# Harbor 0.25 installs OpenCode with npm under nvm and sources it before running (opencode.py:913)
++NVM_PREFIX = "[ -f ~/.nvm/nvm.sh ] && . ~/.nvm/nvm.sh; "
++
++
++class OpenCodeNemoGym(OpenCode):
++    def __init__(self, *args: Any, api_base: str | None = None, api_key: str = "EMPTY", **kwargs: Any) -> None:
++        super().__init__(*args, **drop_shared_kwargs(kwargs))
++        if not api_base:
++            raise ValueError("OpenCodeNemoGym needs api_base (harbor_agent passes the model server URL)")
++        self._api_base = api_base
++        self._api_key = api_key
++
++    @staticmethod
++    def name() -> str:
++        return "opencode-nemo-gym"
++
++    def _opencode_model(self) -> str:
++        if not self.model_name:
++            raise ValueError("OpenCodeNemoGym needs a model name")
++        return f"{PROVIDER_ID}/{self.model_name}"
++
++    def opencode_config(self) -> dict[str, Any]:
++        model = self._opencode_model()
++        return {
++            "$schema": "https://opencode.ai/config.json",
++            "provider": {
++                PROVIDER_ID: {
++                    "npm": "@ai-sdk/openai-compatible",
++                    "name": "NeMo Gym model server",
++                    "options": {"baseURL": self._api_base, "apiKey": self._api_key},
++                    "models": {self.model_name: {"name": self.model_name}},
++                }
++            },
++            "model": model,
++            # Title generation and similar helper calls use small_model; keep them on the same
++            # endpoint so no call leaves for a hosted provider.
++            "small_model": model,
++            "share": "disabled",
++            "autoupdate": False,
++        }
++
++    def create_run_agent_commands(self, instruction: str) -> list[ExecInput]:
++        env = {
++            "OPENCODE_CONFIG_CONTENT": json.dumps(self.opencode_config()),
++            # as in Harbor's OpenCode agent
++            "OPENCODE_FAKE_VCS": "git",
++        }
++        return [
++            ExecInput(
++                command=(
++                    f"{NVM_PREFIX}opencode --model {shlex.quote(self._opencode_model())} run --format=json "
++                    f"{shlex.quote(instruction)} 2>&1 | tee /logs/agent/opencode.txt"
++                ),
++                env=env,
++            )
++        ]
++
++    @with_prompt_template
++    async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
++        await run_commands(self, environment, self.create_run_agent_commands(instruction))
++
++    def populate_context_post_run(self, context: AgentContext) -> None:
++        # Harbor 0.25's OpenCode converts opencode.txt into an ATIF trajectory.json, which harbor_agent
++        # would turn into output items; Harbor 0.1.x's wrote none and this adapter keeps it that way.
++        pass
+diff --git a/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
+new file mode 100644
+index 000000000..3a2ace76f
+--- /dev/null
++++ b/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
+@@ -0,0 +1,94 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++import json
++from pathlib import Path
++
++import pytest
++
++
++pytest.importorskip("harbor")
++
++from responses_api_agents.harbor_agent.custom_agents.opencode_nemo_gym import NVM_PREFIX, OpenCodeNemoGym  # noqa: E402
++
++
++API_BASE = "http://policy-host:9000/ng-rollout/3-1/training-token-capture/v1"
++
++
++def _agent(tmp_path: Path, **kwargs) -> OpenCodeNemoGym:
++    return OpenCodeNemoGym(logs_dir=tmp_path, model_name="Qwen/Qwen3-4B-Instruct-2507", api_base=API_BASE, **kwargs)
++
++
++def test_requires_api_base(tmp_path: Path) -> None:
++    with pytest.raises(ValueError, match="api_base"):
++        OpenCodeNemoGym(logs_dir=tmp_path, model_name="Qwen/Qwen3-4B-Instruct-2507")
++
++
++def test_run_command_points_opencode_at_the_model_server(tmp_path: Path) -> None:
++    (cmd,) = _agent(tmp_path).create_run_agent_commands("print 'hi' > /app/out.txt")
++    assert cmd.command.startswith(
++        NVM_PREFIX + "opencode --model nemogym/Qwen/Qwen3-4B-Instruct-2507 run --format=json "
++    )
++    assert "'print '\"'\"'hi'\"'\"' > /app/out.txt'" in cmd.command
++    config = json.loads(cmd.env["OPENCODE_CONFIG_CONTENT"])
++    provider = config["provider"]["nemogym"]
++    assert provider["npm"] == "@ai-sdk/openai-compatible"
++    assert provider["options"]["baseURL"] == API_BASE
++    assert list(provider["models"]) == ["Qwen/Qwen3-4B-Instruct-2507"]
++    assert config["model"] == config["small_model"] == "nemogym/Qwen/Qwen3-4B-Instruct-2507"
++
++
++def test_ignores_harbor_agent_extra_kwargs(tmp_path: Path) -> None:
++    # harbor_agent always passes these; the agent must accept and ignore them
++    # (Harbor 0.25 rejects agent kwargs its options model lacks, so they must not reach it), as must the
++    # Terminus-2 options of the shared harbor_agent_kwargs
++    agent = _agent(
++        tmp_path,
++        responses_create_params={"temperature": 1.0},
++        temperature=1.0,
++        interleaved_thinking=False,
++        max_turns=30,
++        model_info={"max_input_tokens": 1000},
++    )
++    assert agent.create_run_agent_commands("x")
++
++
++def test_unknown_kwargs_still_fail(tmp_path: Path) -> None:
++    with pytest.raises(ValueError, match="Unknown option 'bogus'"):
++        _agent(tmp_path, bogus=1)
++
++
++class _Env:
++    def __init__(self, return_code: int = 0) -> None:
++        self.calls: list[dict] = []
++        self.return_code = return_code
++
++    async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
++        from harbor.environments.base import ExecResult
++
++        self.calls.append({"command": command, "cwd": cwd, "env": env, "timeout_sec": timeout_sec, "user": user})
++        return ExecResult(stdout="out", stderr=None, return_code=self.return_code)
++
++
++@pytest.mark.asyncio
++async def test_run_records_the_command_and_a_failed_exit_without_raising(tmp_path: Path) -> None:
++    from harbor.models.agent.context import AgentContext
++
++    agent = _agent(tmp_path)
++    env = _Env(return_code=124)
++    await agent.run("do it", env, AgentContext())
++    (call,) = env.calls
++    assert call["command"] == agent.create_run_agent_commands("do it")[0].command
++    assert call["user"] is None  # the environment's default user, as Harbor 0.1.x ran it
++    assert json.loads(call["env"]["OPENCODE_CONFIG_CONTENT"])["model"] == "nemogym/Qwen/Qwen3-4B-Instruct-2507"
++    assert (tmp_path / "command-0" / "return-code.txt").read_text() == "124"
++    assert (tmp_path / "command-0" / "stdout.txt").read_text() == "out"
++
++
++def test_writes_no_atif_trajectory(tmp_path: Path) -> None:
++    from harbor.models.agent.context import AgentContext
++
++    (tmp_path / "opencode.txt").write_text('{"type": "text", "part": {"type": "text", "text": "hi"}}\n')
++    context = AgentContext()
++    _agent(tmp_path).populate_context_post_run(context)
++    assert not (tmp_path / "trajectory.json").exists()
++    assert context.is_empty()
+diff --git a/responses_api_agents/harbor_agent/tests/test_app.py b/responses_api_agents/harbor_agent/tests/test_app.py
+index 0f8f62e54..fa0222ecb 100644
+--- a/responses_api_agents/harbor_agent/tests/test_app.py
++++ b/responses_api_agents/harbor_agent/tests/test_app.py
+@@ -490,6 +490,24 @@ class TestApp:
+             == "http://policy-host:9000/ng-rollout/3-1/training-token-capture/v1"
+         )
+ 
++    def test_mask_without_capture_follows_output_items(self) -> None:
++        server = _make_server()
++        server.server_client.global_config_dict = {}
++        verified = {"verifier_result": {"rewards": {"reward": 1.0}}}
++        assert server._should_mask(verified, []) is True
++        assert server._should_mask(verified, [{"type": "message"}]) is False
++
++    def test_mask_with_capture_ignores_empty_output_but_not_failed_trials(self) -> None:
++        server = _make_server(token_id_capture=True)
++        server.server_client.global_config_dict = {"token_id_capture": {"enabled": True}}
++        verified = {"verifier_result": {"rewards": {"reward": 0.0}}}
++        # OpenCode writes no ATIF: empty output, tokens come from the capture ledger
++        assert server._should_mask(verified, []) is False
++        # run() fell into its except branch
++        assert server._should_mask(None, []) is True
++        # trial ended without a verifier result (setup or agent crash)
++        assert server._should_mask({"verifier_result": None}, [{"type": "message"}]) is True
++
+     def test_model_base_url_capture_needs_agent_opt_in(self) -> None:
+         server = _make_server()
+         server.server_client.global_config_dict = {"token_id_capture": {"enabled": True}}
+-- 
+2.56.0
+

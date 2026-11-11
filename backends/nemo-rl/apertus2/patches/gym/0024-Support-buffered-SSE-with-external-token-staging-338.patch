@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 12e23a16faa00c7bc2695e5b33f10a121e8d05c4 Mon Sep 17 00:00:00 2001
 From: Pranav Prashant Thombre <pthombre@nvidia.com>
 Date: Wed, 16 Sep 2026 23:33:48 +0000
-Subject: [PATCH 21/22] Support buffered SSE with external token staging
+Subject: [PATCH 24/31] Support buffered SSE with external token staging
  (#3382)
 
 ## What does this PR do?

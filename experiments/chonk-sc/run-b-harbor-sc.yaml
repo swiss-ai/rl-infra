@@ -5,7 +5,7 @@
 # turn, train_global_batch_size 64). Launched by run-b.sh.
 #
 # Adds what SC needs and turns on token capture at the model endpoint (needs the Gym checkout
-# the current patches/gym set incl. rl-infra Gym patches 0011 + 0012; run-b.sh checks it). Plan: research
+# the current patches/gym set incl. rl-infra Gym patches 0014 + 0015; run-b.sh checks it). Plan: research
 # report 2026-11-04-chonk-single-controller-feasibility.md, sections 1 and 5 (run 2).
 
 grpo:

@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 02434289bf7fc67e37a4b402812c4278c6f7744b Mon Sep 17 00:00:00 2001
 From: Philip Mueller <claude@philipmueller.ch>
 Date: Tue, 10 Nov 2026 07:24:45 +0000
-Subject: [PATCH 23/25] feat(harbor_agent): OpenCode adapter for in-pod GRPO
+Subject: [PATCH 26/31] feat(harbor_agent): OpenCode adapter for in-pod GRPO
  runs (pinned 1.17.11)
 
 OpenCodeNemoGym gets the run command, environment, configuration and
@@ -48,19 +48,29 @@ responses_create_params, max_turns and model_info are now explicit
 kwargs. Sampling values are still not sent by OpenCode; set them with
 vllm_model.sampling_overrides.
 
+Harbor 0.25: no `_install_agent_template_path`/`_template_variables` hooks
+any more (installed agents implement `install()`). The binary install renders
+the same script with `install_variables()` and runs it as root through
+installed_compat.install_from_template (it writes /usr/local/bin);
+`opencode_install: npm` calls Harbor 0.25's own OpenCode.install (system
+packages, Node, `npm i -g opencode-ai@<version>`, harbor
+agents/installed/opencode.py:410-432) and its run command sources nvm first,
+as Harbor's run does (opencode.py:913). Our `opencode_config` overlay is
+taken before Harbor's own `opencode_config` option sees it, as before.
+
 Signed-off-by: Philip Mueller <claude@philipmueller.ch>
 ---
- .../custom_agents/opencode_nemo_gym.py        | 241 +++++++++++--
- .../install-opencode-binary.sh.j2             |  66 ++++
- .../custom_agents/test_opencode_nemo_gym.py   | 336 +++++++++++++++++-
- 3 files changed, 608 insertions(+), 35 deletions(-)
+ .../custom_agents/opencode_nemo_gym.py        | 244 ++++++++++-
+ .../install-opencode-binary.sh.j2             |  66 +++
+ .../custom_agents/test_opencode_nemo_gym.py   | 378 ++++++++++++++++--
+ 3 files changed, 641 insertions(+), 47 deletions(-)
  create mode 100644 responses_api_agents/harbor_agent/custom_agents/opencode_pod/install-opencode-binary.sh.j2
 
 diff --git a/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py
-index cdb898701..237817475 100644
+index fc4a49cf0..d2a95b878 100644
 --- a/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py
 +++ b/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py
-@@ -20,13 +20,27 @@ declares one OpenAI-compatible provider whose base URL is the `api_base` that ha
+@@ -20,16 +20,30 @@ declares one OpenAI-compatible provider whose base URL is the `api_base` that ha
  (the model server, with the rollout's capture prefix when token capture is on), so every call of
  the in-sandbox OpenCode reaches the Gym model server and can be attributed to its rollout.
  
@@ -80,6 +90,9 @@ index cdb898701..237817475 100644
 -tokens come from model-server capture, not from this agent.
 +harbor_agent's `harbor_model_base_url`, e.g. the per-sandbox model tunnel). The agent writes no
 +ATIF trajectory; for training the tokens come from model-server capture, not from this agent.
+ 
+ On Harbor 0.25 the run goes through `installed_compat` (one recorded command, no failure on a
+ non-zero exit, as on Harbor 0.1.x) and Harbor's ATIF conversion of `opencode.txt` stays off.
  """
  
 +import copy
@@ -89,11 +102,18 @@ index cdb898701..237817475 100644
 +from pathlib import Path
  from typing import Any
  
- from harbor.agents.installed.base import ExecInput
-@@ -35,56 +49,241 @@ from harbor.agents.installed.opencode import OpenCode
+ from harbor.agents.installed.base import with_prompt_template
+@@ -40,67 +54,255 @@ from harbor.models.agent.context import AgentContext
+ from responses_api_agents.harbor_agent.custom_agents.installed_compat import (
+     ExecInput,
+     drop_shared_kwargs,
++    install_from_template,
+     run_commands,
+ )
+ 
  
  PROVIDER_ID = "nemogym"
- 
++
 +# Release whose config schema, flags and CLI this adapter was checked against.
 +DEFAULT_VERSION = "1.17.11"
 +# Standalone Bun-compiled binary for glibc x86_64 without AVX2 requirements (no Node/npm needed).
@@ -108,7 +128,9 @@ index cdb898701..237817475 100644
 +INSTALL_METHODS = ("binary", "npm")
 +BINARY_INSTALL_TEMPLATE = Path(__file__).parent / "opencode_pod" / "install-opencode-binary.sh.j2"
 +BINARY_INSTALL_DIR = "/usr/local/bin"
-+
+ # Harbor 0.25 installs OpenCode with npm under nvm and sources it before running (opencode.py:913)
+ NVM_PREFIX = "[ -f ~/.nvm/nvm.sh ] && . ~/.nvm/nvm.sh; "
+ 
 +# A fixed, non-default session title: OpenCode skips its title model call for such a session
 +# (session/prompt.ts:204, `--title` -> cli/cmd/run.ts:186-189, 433-436, 501-504).
 +SESSION_TITLE = "NeMo Gym"
@@ -154,7 +176,7 @@ index cdb898701..237817475 100644
 +        **kwargs: Any,
 +    ) -> None:
 +        # Harbor's base keeps `version` (the OpenCode release, or the npm version for "npm").
-         super().__init__(*args, **kwargs)
+         super().__init__(*args, **drop_shared_kwargs(kwargs))
          if not api_base:
              raise ValueError("OpenCodeNemoGym needs api_base (harbor_agent passes the model server URL)")
 +        if opencode_install not in INSTALL_METHODS:
@@ -186,22 +208,22 @@ index cdb898701..237817475 100644
  
 +    # --- install -------------------------------------------------------------------------------
 +
-+    @property
-+    def _install_agent_template_path(self) -> Path:
-+        if self._install_method == "npm":
-+            return super()._install_agent_template_path  # Harbor's apt + nvm + `npm i -g opencode-ai@<v>`
-+        return BINARY_INSTALL_TEMPLATE
++    def install_variables(self) -> dict[str, str]:
++        """Variables of the binary install script (BINARY_INSTALL_TEMPLATE)."""
++        return {
++            "version": self._version,
++            "url": shlex.quote(RELEASE_URL.format(version=self._version, asset=self._asset)),
++            "sha256": shlex.quote(self._sha256 or ""),
++            "install_dir": shlex.quote(BINARY_INSTALL_DIR),
++        }
 +
-+    @property
-+    def _template_variables(self) -> dict[str, str]:
-+        variables = dict(super()._template_variables)
-+        if self._install_method == "binary":
-+            variables.update(
-+                url=shlex.quote(RELEASE_URL.format(version=self._version, asset=self._asset)),
-+                sha256=shlex.quote(self._sha256 or ""),
-+                install_dir=shlex.quote(BINARY_INSTALL_DIR),
-+            )
-+        return variables
++    async def install(self, environment: BaseEnvironment) -> None:
++        if self._install_method == "npm":
++            # Harbor's: system packages, Node (nvm, or the packaged one on musl), `npm i -g opencode-ai@<v>`
++            await super().install(environment)
++            return
++        # as root: it writes to BINARY_INSTALL_DIR
++        await install_from_template(self, environment, BINARY_INSTALL_TEMPLATE, self.install_variables())
 +
 +    # --- configuration -------------------------------------------------------------------------
 +
@@ -321,7 +343,7 @@ index cdb898701..237817475 100644
 -        return [
 -            ExecInput(
 -                command=(
--                    f"opencode --model {shlex.quote(self._opencode_model())} run --format=json "
+-                    f"{NVM_PREFIX}opencode --model {shlex.quote(self._opencode_model())} run --format=json "
 -                    f"{shlex.quote(instruction)} 2>&1 | tee /logs/agent/opencode.txt"
 -                ),
 -                env=env,
@@ -350,7 +372,12 @@ index cdb898701..237817475 100644
 +        # anything (cli/cmd/run.ts:399), and the sandbox exec leaves it open. pipefail keeps
 +        # OpenCode's exit status (e.g. 124 from timeout) instead of tee's.
 +        command = f"set -o pipefail; {shlex.join(argv)} 2>&1 </dev/null | tee {LOG_FILE}"
++        if self._install_method == "npm":
++            command = f"{NVM_PREFIX}{command}"
 +        return [ExecInput(command=command, env=self.opencode_env())]
+ 
+     @with_prompt_template
+     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
 diff --git a/responses_api_agents/harbor_agent/custom_agents/opencode_pod/install-opencode-binary.sh.j2 b/responses_api_agents/harbor_agent/custom_agents/opencode_pod/install-opencode-binary.sh.j2
 new file mode 100644
 index 000000000..1b7b02e72
@@ -424,7 +451,7 @@ index 000000000..1b7b02e72
 +fi
 +echo "installed opencode $actual at $dest"
 diff --git a/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
-index 8f1284bd6..c59dbdd34 100644
+index 3a2ace76f..df0371250 100644
 --- a/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
 +++ b/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
 @@ -1,6 +1,25 @@
@@ -453,11 +480,11 @@ index 8f1284bd6..c59dbdd34 100644
  from pathlib import Path
  
  import pytest
-@@ -8,34 +27,323 @@ import pytest
+@@ -8,59 +27,243 @@ import pytest
  
  pytest.importorskip("harbor")
  
--from responses_api_agents.harbor_agent.custom_agents.opencode_nemo_gym import OpenCodeNemoGym  # noqa: E402
+-from responses_api_agents.harbor_agent.custom_agents.opencode_nemo_gym import NVM_PREFIX, OpenCodeNemoGym  # noqa: E402
 +from jinja2 import Environment  # noqa: E402
  
 +from responses_api_agents.harbor_agent.custom_agents import opencode_nemo_gym as mod  # noqa: E402
@@ -494,16 +521,15 @@ index 8f1284bd6..c59dbdd34 100644
 -        OpenCodeNemoGym(logs_dir=tmp_path, model_name="Qwen/Qwen3-4B-Instruct-2507")
 +        OpenCodeNemoGym(logs_dir=tmp_path, model_name=MODEL)
 +
- 
++
 +# --- run command ---------------------------------------------------------------------------------
  
+ 
 -def test_run_command_points_opencode_at_the_model_server(tmp_path: Path) -> None:
-+
 +def test_run_command(tmp_path: Path) -> None:
      (cmd,) = _agent(tmp_path).create_run_agent_commands("print 'hi' > /app/out.txt")
--    assert cmd.command.startswith("opencode --model nemogym/Qwen/Qwen3-4B-Instruct-2507 run --format=json ")
--    assert "'print '\"'\"'hi'\"'\"' > /app/out.txt'" in cmd.command
--    config = json.loads(cmd.env["OPENCODE_CONFIG_CONTENT"])
+-    assert cmd.command.startswith(
+-        NVM_PREFIX + "opencode --model nemogym/Qwen/Qwen3-4B-Instruct-2507 run --format=json "
 +    assert cmd.command == (
 +        f"set -o pipefail; opencode --model nemogym/{MODEL} run --format=json --title 'NeMo Gym' "
 +        "-- 'print '\"'\"'hi'\"'\"' > /app/out.txt' 2>&1 </dev/null | tee /logs/agent/opencode.txt"
@@ -589,7 +615,9 @@ index 8f1284bd6..c59dbdd34 100644
 +def test_config(tmp_path: Path) -> None:
 +    config = _config(
 +        _agent(tmp_path, max_turns=20, model_info={"max_input_tokens": 16384, "max_output_tokens": 16384})
-+    )
+     )
+-    assert "'print '\"'\"'hi'\"'\"' > /app/out.txt'" in cmd.command
+-    config = json.loads(cmd.env["OPENCODE_CONFIG_CONTENT"])
 +    assert set(config) <= OPENCODE_1_17_11_TOP_LEVEL_KEYS
 +    assert config["enabled_providers"] == ["nemogym"]
      provider = config["provider"]["nemogym"]
@@ -620,11 +648,16 @@ index 8f1284bd6..c59dbdd34 100644
 +    config = _config(_agent(tmp_path))
 +    assert config["provider"]["nemogym"]["models"] == {MODEL: {"name": MODEL}}
 +    assert config["agent"] == {"title": {"disable": True}}
-+
-+
+ 
+ 
+-def test_ignores_harbor_agent_extra_kwargs(tmp_path: Path) -> None:
+-    # harbor_agent always passes these; the agent must accept and ignore them
+-    # (Harbor 0.25 rejects agent kwargs its options model lacks, so they must not reach it), as must the
+-    # Terminus-2 options of the shared harbor_agent_kwargs
 +def test_output_limit_capped_by_request_max_output_tokens(tmp_path: Path) -> None:
-+    agent = _agent(
-+        tmp_path,
+     agent = _agent(
+         tmp_path,
+-        responses_create_params={"temperature": 1.0},
 +        model_info={"max_input_tokens": 16384, "max_output_tokens": 16384},
 +        responses_create_params={"max_output_tokens": 2048, "temperature": 1.0},
 +    )
@@ -652,11 +685,8 @@ index 8f1284bd6..c59dbdd34 100644
 +    assert config["agent"]["title"] == {"disable": True}
 +    assert "snapshot" not in config
 +    assert config["instructions"] == ["/app/AGENTS.md"]
- 
- 
--def test_ignores_harbor_agent_extra_kwargs(tmp_path: Path) -> None:
--    # harbor_agent always passes these; the agent must accept and ignore them
--    agent = _agent(tmp_path, responses_create_params={"temperature": 1.0}, temperature=1.0)
++
++
 +def test_deep_merge_does_not_mutate_inputs() -> None:
 +    base = {"a": {"b": 1}, "c": [1]}
 +    overlay = {"a": {"d": 2}, "c": [2]}
@@ -669,25 +699,29 @@ index 8f1284bd6..c59dbdd34 100644
 +    agent = _agent(
 +        tmp_path,
 +        responses_create_params={"temperature": 1.0, "top_p": 1.0, "input": []},
-+        temperature=1.0,
+         temperature=1.0,
 +        max_turns=3,
 +        model_info={"max_input_tokens": 4096, "max_output_tokens": 1024},
-+        interleaved_thinking=False,
-+    )
+         interleaved_thinking=False,
+-        max_turns=30,
+-        model_info={"max_input_tokens": 1000},
+     )
 +    assert agent._responses_create_params == {"temperature": 1.0, "top_p": 1.0, "input": []}
 +    assert agent._max_turns == 3
 +    assert agent.model_limits() == {"context": 4096, "input": 4096, "output": 1024}
      assert agent.create_run_agent_commands("x")
-+
-+
+ 
+ 
+-def test_unknown_kwargs_still_fail(tmp_path: Path) -> None:
+-    with pytest.raises(ValueError, match="Unknown option 'bogus'"):
+-        _agent(tmp_path, bogus=1)
 +# --- install -------------------------------------------------------------------------------------
 +
 +
 +def test_default_install_is_the_pinned_binary(tmp_path: Path) -> None:
 +    agent = _agent(tmp_path)
 +    assert agent.version() == "1.17.11"
-+    assert agent._install_agent_template_path == mod.BINARY_INSTALL_TEMPLATE
-+    assert agent._template_variables == {
++    assert agent.install_variables() == {
 +        "version": "1.17.11",
 +        "url": "https://github.com/anomalyco/opencode/releases/download/v1.17.11/opencode-linux-x64-baseline.tar.gz",
 +        "sha256": "36064327d5a3fba662264f5726f517eafa26d1aefb0d59bc95e66bddccf3497b",
@@ -696,18 +730,61 @@ index 8f1284bd6..c59dbdd34 100644
 +
 +
 +def test_other_version_has_no_known_digest_unless_given(tmp_path: Path) -> None:
-+    assert _agent(tmp_path, version="1.18.1")._template_variables["sha256"] == "''"
++    assert _agent(tmp_path, version="1.18.1").install_variables()["sha256"] == "''"
 +    digest = "a" * 64
-+    assert _agent(tmp_path, version="1.18.1", opencode_sha256=digest)._template_variables["sha256"] == digest
++    assert _agent(tmp_path, version="1.18.1", opencode_sha256=digest).install_variables()["sha256"] == digest
+ 
+ 
+ class _Env:
++    """Records exec/upload calls; every command exits with return_code."""
++
+     def __init__(self, return_code: int = 0) -> None:
+         self.calls: list[dict] = []
++        self.uploads: list[tuple[str, str]] = []
+         self.return_code = return_code
++        self.default_user = None
+ 
+     async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+         from harbor.environments.base import ExecResult
+@@ -68,20 +271,143 @@ class _Env:
+         self.calls.append({"command": command, "cwd": cwd, "env": env, "timeout_sec": timeout_sec, "user": user})
+         return ExecResult(stdout="out", stderr=None, return_code=self.return_code)
+ 
++    async def upload_file(self, source_path, target_path):
++        self.uploads.append((Path(source_path).read_text(), target_path))
 +
 +
-+def test_npm_install_uses_harbors_script(tmp_path: Path) -> None:
++@pytest.mark.asyncio
++async def test_binary_install_renders_and_runs_the_script_as_root(tmp_path: Path) -> None:
++    agent = _agent(tmp_path)
++    env = _Env()
++    await agent.install(env)
++    ((script, target),) = env.uploads
++    assert target == "/installed-agent/install.sh"
++    assert script == Environment().from_string(mod.BINARY_INSTALL_TEMPLATE.read_text()).render(
++        **agent.install_variables()
++    )
++    assert env.calls == [
++        {"command": "bash /installed-agent/install.sh", "cwd": None, "env": None, "timeout_sec": None, "user": "root"}
++    ]
++    assert (tmp_path / "setup" / "return-code.txt").read_text() == "0"
++
++
++@pytest.mark.asyncio
++async def test_failed_binary_install_fails_setup(tmp_path: Path) -> None:
++    with pytest.raises(RuntimeError, match="exit code 1"):
++        await _agent(tmp_path).install(_Env(return_code=1))
++
++
++@pytest.mark.asyncio
++async def test_npm_install_is_harbors(tmp_path: Path) -> None:
 +    agent = _agent(tmp_path, opencode_install="npm", version="1.18.1")
-+    path = agent._install_agent_template_path
-+    assert path.name == "install-opencode.sh.j2" and path.exists()
-+    assert agent._template_variables == {"version": "1.18.1"}
-+    rendered = Environment().from_string(path.read_text()).render(**agent._template_variables)
-+    assert "npm i -g opencode-ai@1.18.1" in rendered
++    env = _Env()
++    await agent.install(env)
++    assert env.uploads == []
++    assert "npm i -g opencode-ai@1.18.1" in env.calls[-1]["command"]
++    (cmd,) = agent.create_run_agent_commands("x")
++    assert cmd.command.startswith(mod.NVM_PREFIX)
 +
 +
 +@pytest.mark.parametrize(
@@ -739,14 +816,14 @@ index 8f1284bd6..c59dbdd34 100644
 +
 +def _run_install(tmp_path: Path, agent: OpenCodeNemoGym, url: str, sha256: str | None = None):
 +    variables = {
-+        **agent._template_variables,
++        **agent.install_variables(),
 +        "url": shlex.quote(url),
 +        "install_dir": shlex.quote(str(tmp_path / "bin")),
 +    }
 +    if sha256 is not None:
 +        variables["sha256"] = shlex.quote(sha256)
 +    script = tmp_path / "install.sh"
-+    script.write_text(Environment().from_string(agent._install_agent_template_path.read_text()).render(**variables))
++    script.write_text(Environment().from_string(mod.BINARY_INSTALL_TEMPLATE.read_text()).render(**variables))
 +    return subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=60)
 +
 +
@@ -791,6 +868,32 @@ index 8f1284bd6..c59dbdd34 100644
 +    result = _run_install(tmp_path, _agent(tmp_path), url, digest)
 +    assert result.returncode != 0
 +    assert "version mismatch" in result.stderr
++
++
++def test_unknown_kwargs_still_fail(tmp_path: Path) -> None:
++    with pytest.raises(ValueError, match="Unknown option 'bogus'"):
++        _agent(tmp_path, bogus=1)
++
+ 
+ @pytest.mark.asyncio
+ async def test_run_records_the_command_and_a_failed_exit_without_raising(tmp_path: Path) -> None:
+     from harbor.models.agent.context import AgentContext
+ 
+-    agent = _agent(tmp_path)
++    agent = _agent(tmp_path, opencode_timeout_sec=870)
+     env = _Env(return_code=124)
+     await agent.run("do it", env, AgentContext())
+     (call,) = env.calls
+-    assert call["command"] == agent.create_run_agent_commands("do it")[0].command
++    (expected,) = agent.create_run_agent_commands("do it")
++    assert call["command"] == expected.command and call["env"] == expected.env
+     assert call["user"] is None  # the environment's default user, as Harbor 0.1.x ran it
+-    assert json.loads(call["env"]["OPENCODE_CONFIG_CONTENT"])["model"] == "nemogym/Qwen/Qwen3-4B-Instruct-2507"
+     assert (tmp_path / "command-0" / "return-code.txt").read_text() == "124"
+-    assert (tmp_path / "command-0" / "stdout.txt").read_text() == "out"
+ 
+ 
+ def test_writes_no_atif_trajectory(tmp_path: Path) -> None:
 -- 
 2.56.0
 

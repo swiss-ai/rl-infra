@@ -44,34 +44,37 @@ The previous smoke test (4 sandboxes, ~7 min) is still one command:
 | `mini-sc.yaml` | overlay (`AGENT=mini`): mini-swe-agent (installed in the pod) instead of Terminus-2, model via the tunnel |
 | `tunnel-sc.yaml` | overlay (`TUNNEL=1`): per-sandbox reverse tunnel, sandbox `127.0.0.1:8000` -> `policy_model` |
 | `run.sh` | `AGENT=terminus` (default), `AGENT=mini` or `AGENT=opencode`; calls `run-harbor-osb.sh` |
-| `../../backends/nemo-rl/apertus2/patches/gym/0011-*.patch` | `harbor_agent` builds the agent's model URL with `base_url_for_run` (rollout capture prefix); new `harbor_model_base_url` |
-| `../../backends/nemo-rl/apertus2/patches/gym/0012-*.patch` | `OpenCodeNemoGym` agent; no masking of empty-output rollouts under capture |
-| `../../backends/nemo-rl/apertus2/patches/gym/0013-*.patch` | `harbor_environment_kwargs.model_tunnel`: chisel tunnel per sandbox, opened in `NemoGymSandboxEnvironment.start()` |
-| `../../backends/nemo-rl/apertus2/patches/gym/0014-*.patch` | tunnel fix after job 5245999: server start waits for `Listening on`; pod-side log in errors |
-| `../../backends/nemo-rl/apertus2/patches/gym/0015-*.patch` | `MiniSweAgentNemoGym` agent: per-run `api_base`, rollout sampling params, no litellm cost lookup, `max_turns` call limit |
-| `../../backends/nemo-rl/apertus2/patches/gym/0016-*.patch` | fix after job 5253837: mini-swe-agent sends messages with `role`/`content` only (its `extra` field got 422 on every second call) |
-| `../../backends/nemo-rl/apertus2/patches/gym/0017-*.patch` | fix after job 5255374: the `max_turns` call limit raises `CallLimitReached` (mini's `LimitsExceeded` made `mini` prompt on stdin -> `EOFError`) |
-| `../../backends/nemo-rl/apertus2/patches/gym/0018-*.patch` | fix after job 5256202 (Gym token capture, upstream code): an assistant reply with no text and no tool call added nothing to the lineage fingerprint, so the next call matched two ledger rows and its rollout was rejected `unresolved_parent` (62/192 rollouts with Chonk). Empty turns now hash a marker; `FINGERPRINT_VERSION` 2. Report `research/reports/2026-11-04-capture-unresolved-parent-fix.md` (alpernates workspace). |
-| `../../backends/nemo-rl/apertus2/patches/gym/0019-*.patch` | fix after job 5302914 (Gym token capture, upstream code): with a reasoning parser the model server folds the reply's reasoning into its text as `<think>...</think>` before capture fingerprints it; an agent that echoes only the visible text (Terminus-2, `interleaved_thinking: false`) matched no ledger row and the rollout was rejected `unresolved_parent` (173/192 rollouts on the SFT checkpoint). Leading think blocks of model-authored text are now stripped before hashing, so both echoes resolve; `FINGERPRINT_VERSION` 3. nemo-gym branch `capture-think-fix` 9f385f3f2. Report `research/reports/2026-11-09-job-5302914-run-s-sft.md` (alpernates workspace). |
-| `../../backends/nemo-rl/apertus2/patches/gym/0020-*.patch` | upstream Gym `295e2e681` (#3301), backport: the capture ledger records the response actually served to the client (needed by 0021). |
-| `../../backends/nemo-rl/apertus2/patches/gym/0021-*.patch` | upstream Gym `1c2dcc773` (#3382), backport, for agents that always stream (OpenCode): under worker-owned capture (`external_staging`) a `stream: true` request got 422 (`base_responses_api_model.py`); now the engine call is made non-streaming, committed to the ledger, and replayed to the client as SSE (`chat_streaming.py` / `responses_streaming.py`). No byte reaches the client before generation ends. Conflict: `FINGERPRINT_VERSION` 4 (ours was 3). nemo-gym branch `capture-stream-replay`. Design note `research/research_notes/2026-11-10-gym-stream-replay-design.md` (alpernates workspace). |
-| `../../backends/nemo-rl/apertus2/patches/gym/0022-*.patch` | test only: the `_Ledger` helper of the 0018/0019 tests stamps `fingerprint_version`, which parent resolution requires since 0021. |
-| `../../backends/nemo-rl/apertus2/patches/gym/0023-*.patch` | `OpenCodeNemoGym` for in-pod GRPO, OpenCode pinned 1.17.11 (keys checked against its source): run command `opencode ... run --format=json --title 'NeMo Gym' -- <instr> 2>&1 </dev/null \| tee` (stdin: `opencode run` reads a non-TTY stdin to EOF first, cli/cmd/run.ts:399 = the silent job 5236016), optional `timeout` wrapper (`opencode_timeout_sec`), `opencode_debug`; config: only provider `nemogym`, provider `timeout`/`headerTimeout` false (stream replay sends nothing until generation ends; a retry is an extra captured call), model `limit` from `model_info`, title/compaction/prune/snapshot off, `agent.build.steps` = `max_turns`, `task`/`webfetch`/`websearch`/`todowrite` denied, `opencode_config` deep-merged last; install: standalone binary from GitHub releases with built-in sha256 (`opencode_install: binary`, default) or npm. nemo-gym branch `opencode-adapter`. Note `research/research_notes/2026-11-10-opencode-adapter-patch.md` (alpernates workspace). |
-| `../../backends/nemo-rl/apertus2/patches/gym/0024-*.patch` | opt-in `harbor_mask_agent_timeout` (default false = unchanged): mask rollouts whose agent hit Harbor's agent timeout. |
-| `../../backends/nemo-rl/apertus2/patches/gym/0025-*.patch` | fix to 0023: `pipefail` only where the pod's shell supports it (a `set -o pipefail` error would end `/bin/sh` before OpenCode starts). |
-| `../../backends/nemo-rl/apertus2/patches/gym/0026-*.patch` | after job 5314432: `opencode_workdir` (absolute path, default unset): the command runs `mkdir -p <dir> && cd <dir>` first, so OpenCode's project is the task directory, not `/` (OpenCode warned `failed to initialize fff`). `opencode-sc.yaml` sets `/app`. |
+| `../../backends/nemo-rl/apertus2/patches/gym/0011-0013` | Kostas Pitas (from `main`'s Harbor 0.25.0 port): Harbor 0.25.0 (separate verifier environments), its job options and exec user, `image_auth_file`. 0014-0031 are ported onto them (`research/reports/2026-11-11-gym-patches-on-harbor-0.25.md` in the workspace, not in this repo) |
+| `../../backends/nemo-rl/apertus2/patches/gym/0014-*.patch` | `harbor_agent` builds the agent's model URL with `base_url_for_run` (rollout capture prefix); new `harbor_model_base_url` |
+| `../../backends/nemo-rl/apertus2/patches/gym/0015-*.patch` | `OpenCodeNemoGym` agent; no masking of empty-output rollouts under capture |
+| `../../backends/nemo-rl/apertus2/patches/gym/0016-*.patch` | `harbor_environment_kwargs.model_tunnel`: chisel tunnel per sandbox, opened in `NemoGymSandboxEnvironment.start()` |
+| `../../backends/nemo-rl/apertus2/patches/gym/0017-*.patch` | tunnel fix after job 5245999: server start waits for `Listening on`; pod-side log in errors |
+| `../../backends/nemo-rl/apertus2/patches/gym/0018-*.patch` | `MiniSweAgentNemoGym` agent: per-run `api_base`, rollout sampling params, no litellm cost lookup, `max_turns` call limit |
+| `../../backends/nemo-rl/apertus2/patches/gym/0019-*.patch` | fix after job 5253837: mini-swe-agent sends messages with `role`/`content` only (its `extra` field got 422 on every second call) |
+| `../../backends/nemo-rl/apertus2/patches/gym/0020-*.patch` | fix after job 5255374: the `max_turns` call limit raises `CallLimitReached` (mini's `LimitsExceeded` made `mini` prompt on stdin -> `EOFError`) |
+| `../../backends/nemo-rl/apertus2/patches/gym/0021-*.patch` | fix after job 5256202 (Gym token capture, upstream code): an assistant reply with no text and no tool call added nothing to the lineage fingerprint, so the next call matched two ledger rows and its rollout was rejected `unresolved_parent` (62/192 rollouts with Chonk). Empty turns now hash a marker; `FINGERPRINT_VERSION` 2. Report `research/reports/2026-11-04-capture-unresolved-parent-fix.md` (alpernates workspace). |
+| `../../backends/nemo-rl/apertus2/patches/gym/0022-*.patch` | fix after job 5302914 (Gym token capture, upstream code): with a reasoning parser the model server folds the reply's reasoning into its text as `<think>...</think>` before capture fingerprints it; an agent that echoes only the visible text (Terminus-2, `interleaved_thinking: false`) matched no ledger row and the rollout was rejected `unresolved_parent` (173/192 rollouts on the SFT checkpoint). Leading think blocks of model-authored text are now stripped before hashing, so both echoes resolve; `FINGERPRINT_VERSION` 3. nemo-gym branch `capture-think-fix` 9f385f3f2. Report `research/reports/2026-11-09-job-5302914-run-s-sft.md` (alpernates workspace). |
+| `../../backends/nemo-rl/apertus2/patches/gym/0023-*.patch` | upstream Gym `295e2e681` (#3301), backport: the capture ledger records the response actually served to the client (needed by 0024). |
+| `../../backends/nemo-rl/apertus2/patches/gym/0024-*.patch` | upstream Gym `1c2dcc773` (#3382), backport, for agents that always stream (OpenCode): under worker-owned capture (`external_staging`) a `stream: true` request got 422 (`base_responses_api_model.py`); now the engine call is made non-streaming, committed to the ledger, and replayed to the client as SSE (`chat_streaming.py` / `responses_streaming.py`). No byte reaches the client before generation ends. Conflict: `FINGERPRINT_VERSION` 4 (ours was 3). nemo-gym branch `capture-stream-replay`. Design note `research/research_notes/2026-11-10-gym-stream-replay-design.md` (alpernates workspace). |
+| `../../backends/nemo-rl/apertus2/patches/gym/0025-*.patch` | test only: the `_Ledger` helper of the 0021/0022 tests stamps `fingerprint_version`, which parent resolution requires since 0024. |
+| `../../backends/nemo-rl/apertus2/patches/gym/0026-*.patch` | `OpenCodeNemoGym` for in-pod GRPO, OpenCode pinned 1.17.11 (keys checked against its source): run command `opencode ... run --format=json --title 'NeMo Gym' -- <instr> 2>&1 </dev/null \| tee` (stdin: `opencode run` reads a non-TTY stdin to EOF first, cli/cmd/run.ts:399 = the silent job 5236016), optional `timeout` wrapper (`opencode_timeout_sec`), `opencode_debug`; config: only provider `nemogym`, provider `timeout`/`headerTimeout` false (stream replay sends nothing until generation ends; a retry is an extra captured call), model `limit` from `model_info`, title/compaction/prune/snapshot off, `agent.build.steps` = `max_turns`, `task`/`webfetch`/`websearch`/`todowrite` denied, `opencode_config` deep-merged last; install: standalone binary from GitHub releases with built-in sha256 (`opencode_install: binary`, default) or npm. nemo-gym branch `opencode-adapter`. Note `research/research_notes/2026-11-10-opencode-adapter-patch.md` (alpernates workspace). |
+| `../../backends/nemo-rl/apertus2/patches/gym/0027-*.patch` | opt-in `harbor_mask_agent_timeout` (default false = unchanged): mask rollouts whose agent hit Harbor's agent timeout. |
+| `../../backends/nemo-rl/apertus2/patches/gym/0028-*.patch` | fix to 0026: `pipefail` only where the pod's shell supports it (a `set -o pipefail` error would end `/bin/sh` before OpenCode starts). |
+| `../../backends/nemo-rl/apertus2/patches/gym/0029-*.patch` | after job 5314432: `opencode_workdir` (absolute path, default unset): the command runs `mkdir -p <dir> && cd <dir>` first, so OpenCode's project is the task directory, not `/` (OpenCode warned `failed to initialize fff`). `opencode-sc.yaml` sets `/app`. |
+| `../../backends/nemo-rl/apertus2/patches/gym/0030-*.patch` | fix after job 5316800 (token capture): a tool call with unparseable arguments (OpenCode echoes it as `invalid`) keeps the lineage |
+| `../../backends/nemo-rl/apertus2/patches/gym/0031-*.patch` | `sandbox_provider_options.image_auth_registry`: the credentials of `image_auth` / `image_auth_file` (0013) go only to images from that registry host, not to Docker Hub |
 | `../../backends/nemo-rl/apertus2/fetch-chisel.sh` | chisel 1.12.0 (amd64 + arm64, pinned sha256) into `CHISEL_DIR` |
 
 ## Environment variables of `run.sh`
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AGENT` | `terminus` | `terminus`: Terminus-2, loop on the node, commands in the pod (task `terminus-sc.yaml`). `mini`: mini-swe-agent installed and run in the pod, model through the tunnel (adds `mini-sc.yaml`, forces `TUNNEL=1`, needs patch 0015). `opencode`: OpenCode installed and run in the pod, model through the tunnel (adds `opencode-sc.yaml`, forces `TUNNEL=1`, needs patches 0020-0026). Anything else is refused. |
-| `OPENCODE_VERSION` | `1.17.11` | `AGENT=opencode` only: OpenCode release installed in each pod; patch 0023's config keys were checked against 1.17.11 (another version needs `opencode_sha256` and a re-check). |
+| `AGENT` | `terminus` | `terminus`: Terminus-2, loop on the node, commands in the pod (task `terminus-sc.yaml`). `mini`: mini-swe-agent installed and run in the pod, model through the tunnel (adds `mini-sc.yaml`, forces `TUNNEL=1`, needs patch 0018). `opencode`: OpenCode installed and run in the pod, model through the tunnel (adds `opencode-sc.yaml`, forces `TUNNEL=1`, needs patches 0023-0029). Anything else is refused. |
+| `OPENCODE_VERSION` | `1.17.11` | `AGENT=opencode` only: OpenCode release installed in each pod; patch 0026's config keys were checked against 1.17.11 (another version needs `opencode_sha256` and a re-check). |
 | `OPENCODE_TIMEOUT_SEC` | `870` | `AGENT=opencode` only: OpenCode's own time limit (`timeout`), below the agent timeout. |
 | `OPENCODE_DEBUG` | `false` | `AGENT=opencode` only: `true` writes OpenCode's debug log into `agent/opencode.txt`. |
 | `MSWEA_VERSION` | `8e8a515f...` (mini-sc.yaml) | `AGENT=mini` only: git ref of `li-boxuan/mini-swe-agent` (Harbor's install source) installed in each pod. |
-| `TUNNEL` | `0` | `1`: add `tunnel-sc.yaml` (needs patch 0013); fetches chisel into `CHISEL_DIR` (`$SCRATCH/chisel`) on the login node first. Run name gets `-tunnel`. |
+| `TUNNEL` | `0` | `1`: add `tunnel-sc.yaml` (needs patch 0016); fetches chisel into `CHISEL_DIR` (`$SCRATCH/chisel`) on the login node first. Run name gets `-tunnel`. |
 | `HARBOR_ROOT` | `$SCRATCH/osb/harbor_micro` | micro-task tree (`tasks/`, `train.jsonl`, `validation.jsonl`) |
 | `RUN` | `harbor-sc-<AGENT>-<date>` | run name (logs, sandbox labels) |
 | `JOB_TIME` | `02:00:00` | Slurm time limit |
@@ -91,10 +94,11 @@ from that ledger (`RolloutReassembler`); the agent's own output carries no token
 1. **Gym with the patches.** `setup-gym.sh` puts every patch in `patches/gym/` on the pin's
    working tree: 0001-0005 (rubric judge, code-gen, from `main`), 0006-0009 (Kostas Pitas'
    OpenSandbox commits from `swissai/harbor_agent_osb_v0.7.0`, as rebuilt on the pin; main's
-   export), 0010 (from `main`: OpenSandbox `connection.api_key_file`), 0011-0019 (ours), 0020-0021
-   (upstream Gym backports: streaming under worker-owned capture), 0022-0026 (ours). One
-   checkout serves every run; 0011 and 0012 are no-ops without `token_capture` (the URL
-   is unchanged, masking as before), 0013 without `model_tunnel`. Re-running re-applies them when
+   export), 0010 (from `main`: OpenSandbox `connection.api_key_file`), 0011-0013 (Kostas Pitas: Harbor
+   0.25.0, its job options, `image_auth_file`), 0014-0022 (ours), 0023-0024 (upstream Gym backports:
+   streaming under worker-owned capture), 0025-0031 (ours, ported to Harbor 0.25.0). One
+   checkout serves every run; 0014 and 0015 are no-ops without `token_capture` (the URL
+   is unchanged, masking as before), 0016 without `model_tunnel`. Re-running re-applies them when
    the patch set changed.
 
        cd ~/rl-infra
@@ -135,7 +139,7 @@ If every group is still uniform (all 1 or all 0), raise the group size, e.g.
 |---|---|
 | `SC run complete`, a training step in TensorBoard | captured tokens reached the trainer through `harbor_agent` |
 | `grad_norm=0.0` in every step, `advantages/*` 0 | rewards uniform within every group; no pipeline fault (see above) |
-| model calls to `/v1/chat/completions` without `/ng-rollout/` | Gym patch 0011 is not in the checkout (step 1) |
+| model calls to `/v1/chat/completions` without `/ng-rollout/` | Gym patch 0014 is not in the checkout (step 1) |
 | rebuild / lineage error, rollouts all masked | capture ran but the call chain could not be proven; see the ledgers |
 | `import transfer_queue` fails, setup raises on a config key | Single-Controller stack problem before any rollout |
 
@@ -143,7 +147,7 @@ If every group is still uniform (all 1 or all 0), raise the group size, e.g.
 
     TUNNEL=1 bash experiments/harbor-capture-sc/run.sh
 
-Same training as step A, plus a reverse tunnel per sandbox (Gym patch 0013): after creating the
+Same training as step A, plus a reverse tunnel per sandbox (Gym patch 0016): after creating the
 sandbox, `NemoGymSandboxEnvironment` uploads chisel (amd64, 11 MiB), starts
 `chisel server --reverse` in the pod and `chisel client` in the Harbor Ray task on the node (through
 the OpenSandbox proxy, `provider.endpoint(8765)`), then GETs `policy_model`'s `/health` from inside
@@ -151,7 +155,7 @@ the pod through `127.0.0.1:8000`. A failure there fails the trial in environment
 failure, retried up to `max_infra_attempts_per_prompt`). Terminus-2 still calls the model from the
 node, so the training itself does not depend on the tunnel; the run tests the tunnel's lifecycle at
 32 concurrent sandboxes against the real `policy_model`. Before the first run, re-run step 1 of
-"Before the first run" (it applies patch 0013).
+"Before the first run" (it applies patch 0016).
 
 Expected: the same training result as step A; one `model_tunnel ... up in <s>` line per trial in its
 `trial.log`; no trial that failed in environment setup with a `model_tunnel` error (Harbor records it
@@ -171,21 +175,21 @@ flags; its own per-sandbox password goes through `AUTH`).
 
     AGENT=mini bash experiments/harbor-capture-sc/run.sh
 
-Before the first run, re-run step 1 of "Before the first run" (applies patches 0015-0017). The agent loop runs
+Before the first run, re-run step 1 of "Before the first run" (applies patches 0018-0020). The agent loop runs
 inside the task sandbox: Harbor installs mini-swe-agent there at agent setup (apt-get curl,
 build-essential, git; uv; `uv tool install git+https://github.com/li-boxuan/mini-swe-agent@<ref>`;
 the pods have internet; Harbor allows 360 s for agent setup), then runs `mini` with the task. Every
 model call goes from the pod to `http://127.0.0.1:8000/ng-rollout/<id>/training-token-capture/v1`,
 through the per-sandbox tunnel to `policy_model`, which captures the tokens. litellm sends
-`stream: false`, so capture accepts it (OpenCode streams; patches 0020/0021 replay its calls as SSE).
+`stream: false`, so capture accepts it (OpenCode streams; patches 0023/0024 replay its calls as SSE).
 
-What patch 0015 changes against Harbor's own mini-swe-agent: the URL comes per run (Harbor's reads
+What patch 0018 changes against Harbor's own mini-swe-agent: the URL comes per run (Harbor's reads
 the node's global `OPENAI_API_BASE`); the rollout's `temperature`/`top_p`/`max_output_tokens`
 replace mini's default config (`temperature: 0.0`; `vllm_model` pins no sampling here, so 0.0 would
 reach vLLM and make all GRPO samples of a prompt alike); litellm's cost lookup is disabled (mini
 re-raises it for every model litellm does not know); after `max_turns` (20) model calls the run ends
-with `CallLimitReached` (patch 0017; mini's own step limit is unlimited, and its `LimitsExceeded`
-makes `mini` prompt on stdin, which ended as `EOFError` before 0017). It does this with a model class
+with `CallLimitReached` (patch 0020; mini's own step limit is unlimited, and its `LimitsExceeded`
+makes `mini` prompt on stdin, which ended as `EOFError` before 0020). It does this with a model class
 written into the pod and loaded through `mini --model-class`; settings in `NEMO_GYM_MINI` (JSON).
 
 Expected: trials reach the verifier with rewards mixing 0 and 1 and `grad_norm > 0`, as in job
@@ -198,14 +202,14 @@ OpenSandbox key):
     tail -n 30 $T/agent/mini-swe-agent.txt         # the run; litellm errors show up here
     grep -c '"role": "assistant"' $T/agent/mini-swe-agent.trajectory.json   # model calls (<= 20)
 
-Job 5255374 (2026-11-04, with 0016): works end to end, 3/3 steps, reward 0.72/0.53/0.69, ~500 response
+Job 5255374 (2026-11-04, with 0019): works end to end, 3/3 steps, reward 0.72/0.53/0.69, ~500 response
 tokens per rollout, capture exactly matches mini's calls (report
 `research/reports/2026-11-04-job-5255374-mini-rerun.md`); 26/96 hit the 20-call cap as `EOFError` (fixed
-by 0017); 327 format errors in 90/96 trials (submit echo outside a code block).
+by 0020); 327 format errors in 90/96 trials (submit echo outside a code block).
 
-Job 5253837 (2026-11-04, without 0016): every trial stopped after one model call, `RetryError` from
-422 `extra_forbidden` on the second call (mini's `extra` message field); 0016 fixes it. Check after
-the rerun: `exit_status` in `mini-swe-agent.trajectory.json` is `Submitted`/`CallLimitReached` (`EOFError` without 0017), not
+Job 5253837 (2026-11-04, without 0019): every trial stopped after one model call, `RetryError` from
+422 `extra_forbidden` on the second call (mini's `extra` message field); 0019 fixes it. Check after
+the rerun: `exit_status` in `mini-swe-agent.trajectory.json` is `Submitted`/`CallLimitReached` (`EOFError` without 0020), not
 `RetryError`, and more than one assistant message per trial.
 
 Likely first failures: agent setup over 360 s (apt-get under gVisor at 32 parallel); a litellm
@@ -220,15 +224,15 @@ parameter the server rejects (shows in `mini-swe-agent.txt` as an `APIError`, no
 
 Same path as mini (`TUNNEL=1` is forced): OpenCode runs in the pod and calls
 `http://127.0.0.1:8000/ng-rollout/<id>/training-token-capture/v1` through the per-sandbox tunnel.
-Needs Gym patches 0020-0026 (run.sh checks markers of 0021 and 0026):
+Needs Gym patches 0023-0029 (run.sh checks markers of 0024 and 0029):
 
-- OpenCode (AI SDK) always streams. With 0020/0021 (upstream backport) the model server makes the
+- OpenCode (AI SDK) always streams. With 0023/0024 (upstream backport) the model server makes the
   engine call non-streaming, commits the tokens and replays the reply as SSE; nothing reaches the
-  pod before generation ends, so OpenCode's provider timeouts are off (0023).
-- Install: 0023 downloads the standalone `opencode-linux-x64-baseline` 1.17.11 binary from GitHub
+  pod before generation ends, so OpenCode's provider timeouts are off (0026).
+- Install: 0026 downloads the standalone `opencode-linux-x64-baseline` 1.17.11 binary from GitHub
   releases in the pod (python3, sha256 built in; no apt/nvm/npm). `opencode_install: npm` is the old
   path.
-- Extra conversations mask the rollout under capture (more than one root/chain). 0023 switches off
+- Extra conversations mask the rollout under capture (more than one root/chain). 0026 switches off
   the title call, compaction/pruning and sub-agents (`task`), and denies `webfetch`/`websearch`/`todowrite`.
 - Sampling: OpenCode sends no temperature (a model it does not know has the temperature capability
   off), and top_p 1 only for "qwen" model ids, so the request does not carry the train profile that
@@ -236,7 +240,7 @@ Needs Gym patches 0020-0026 (run.sh checks markers of 0021 and 0026):
 - `opencode run` reads a non-TTY stdin to EOF before starting (the silent job 5236016); the command
   closes it (`</dev/null`). `OPENCODE_TIMEOUT_SEC` (870) ends OpenCode before Harbor's 900 s agent
   timeout, so `command-0/return-code.txt` (124 on timeout) and `agent/opencode.txt` are written.
-- OpenCode runs in `/app` (`opencode_workdir`, 0026), created if missing.
+- OpenCode runs in `/app` (`opencode_workdir`, 0029), created if missing.
 
 Check per trial: `agent/setup/stdout.txt` ("installed opencode 1.17.11"), `agent/opencode.txt` (JSON
 events, no 422, no stream/timeout errors), `agent/opencode-data/opencode/log/`, `command-0/return-code.txt`
