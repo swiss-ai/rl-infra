@@ -7,11 +7,15 @@ deletes a sandbox when its ready wait fails, so its state has to be read while i
 
 Creates one sandbox per case, at the same time, then polls GET /v1/sandboxes/{id} and the
 Kubernetes events (GET /v1/sandboxes/{id}/diagnostics/events) until it runs or the wait ends,
-and deletes it. The cases tell the two causes apart:
-  small      python:3.12-slim, 1 CPU / 1024 MiB / 2 GiB (as the micro tasks, which run)
-  swe-small  the SWE-Lego image, the micro tasks' resources        -> does the image start?
-  swe-full   the SWE-Lego image, the task's 4 CPU / 4096 MiB / 10 GiB -> do the resources fit?
-swe-small runs, swe-full stays Pending: scheduling/quota. Both stay Pending: the image (pull).
+and deletes it. Every case sends the run's placeholder registry credentials (image_auth, as
+run-s-sft.yaml) unless it says noauth. The cases tell the causes apart:
+  small           python:3.12-slim, 1 CPU / 1024 MiB / 2 GiB (as the micro tasks, which run)
+  swe-small       the SWE-Lego image, the micro tasks' resources            -> does the image start?
+  swe-full        the SWE-Lego image, the task's 4 CPU / 4096 MiB / 10 GiB  -> exactly job 5317993's pods
+  swe-req         as swe-full, requests 0.5 CPU / 512 MiB (Gym's upstream training config; ours drops it)
+  swe-full-noauth as swe-full without image_auth                            -> do the placeholder creds hurt?
+swe-small runs, swe-full stays Pending: scheduling/quota (swe-req running = the fix). Both stay Pending:
+the image (pull); swe-full-noauth running = the credentials.
 
 Standard library only; the API key is read from a file and never printed.
   python3 experiments/osb-reach/pending.py [--task-toml $SCRATCH/osb/swe_lego_v05/tasks/<task>/task.toml]
@@ -58,7 +62,7 @@ def short(text, n=600):
     return text if len(text) <= n else text[:n] + " ..."
 
 
-def run_case(name, image, cpu, mem_mib, disk_gib, key, tag, wait_s, results):
+def run_case(name, image, cpu, mem_mib, disk_gib, requests, auth, key, tag, wait_s, results):
     body = {
         "image": {"uri": image},
         "entrypoint": ["tail", "-f", "/dev/null"],
@@ -67,7 +71,15 @@ def run_case(name, image, cpu, mem_mib, disk_gib, key, tag, wait_s, results):
         "timeout": wait_s + 600,  # lifetime; a backstop if this script dies
         "metadata": {"probe": tag, "probe-case": name},
     }
-    log(name, f"create {image} cpu={cpu} memory={mem_mib}Mi ephemeral-storage={disk_gib}Gi")
+    if requests:
+        body["resourceRequests"] = {"cpu": requests[0], "memory": f"{requests[1]}Mi"}
+    if auth:
+        body["image"]["auth"] = {
+            "username": os.environ.get("RL_REGISTRY_USERNAME", "anonymous"),
+            "password": os.environ.get("RL_REGISTRY_PASSWORD", "unused"),
+        }
+    log(name, f"create {image} cpu={cpu} memory={mem_mib}Mi ephemeral-storage={disk_gib}Gi "
+              f"requests={requests} image_auth={'yes' if auth else 'no'}")
     created = {}
 
     def create():
@@ -133,7 +145,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     scratch = os.environ.get("SCRATCH", "")
     p.add_argument("--task-toml", default=f"{scratch}/osb/swe_lego_v05/tasks/{SWE_DEFAULT_TASK}/task.toml")
-    p.add_argument("--cases", default="small,swe-small,swe-full")
+    p.add_argument("--cases", default="small,swe-small,swe-full,swe-req,swe-full-noauth")
     a = p.parse_args()
 
     key_file = os.path.expanduser(os.environ.get("OPENSANDBOX_API_KEY_FILE", "~/.opensandbox_token"))
@@ -149,9 +161,12 @@ def main():
     code, text = api("GET", API[: -len("/v1")] + "/version", key)  # outside /v1, no auth upstream
     print(f"API {API}; /version -> HTTP {code}: {short(text, 200)}; probe label {tag}; wait {wait_s}s", flush=True)
     cases = {
-        "small": ("python:3.12-slim", "1", 1024, 2),
-        "swe-small": (swe_image, "1", 1024, 2),
-        "swe-full": (swe_image, "4", 4096, 10),
+        # image, cpu limit, memory MiB, disk GiB, (cpu, memory MiB) requests, image_auth
+        "small": ("python:3.12-slim", "1", 1024, 2, None, True),
+        "swe-small": (swe_image, "1", 1024, 2, None, True),
+        "swe-full": (swe_image, "4", 4096, 10, None, True),
+        "swe-req": (swe_image, "4", 4096, 10, ("0.5", 512), True),
+        "swe-full-noauth": (swe_image, "4", 4096, 10, None, False),
     }
     results = {}
     threads = [
@@ -164,7 +179,7 @@ def main():
         t.join()
     print("== summary")
     for c in a.cases.split(","):
-        print(f"  {c:10s} {results.get(c)}")
+        print(f"  {c:16s} {results.get(c)}")
 
 
 API = os.environ.get("OPENSANDBOX_DOMAIN", "https://opensandbox-gvisor.breithorn.svc.cscs.ch").rstrip("/") + "/v1"

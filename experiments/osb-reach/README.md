@@ -121,12 +121,18 @@ runs on the login node (or any node that reaches the API), at most WAIT_S (900 s
 
     cd ~/rl-infra && python3 experiments/osb-reach/pending.py      # task.toml default: $SCRATCH/osb/swe_lego_v05/tasks/adamchainz__time-machine-298
 
+Every case sends the run's placeholder registry credentials (`image_auth` anonymous/unused, as run-s-sft.yaml)
+unless it says noauth.
+
 | Case | Image | Resources | |
 |---|---|---|---|
 | `small` | `python:3.12-slim` | 1 CPU, 1024 MiB, 2 GiB | as the micro tasks (they run) |
 | `swe-small` | the task's SWE-Lego image | 1 CPU, 1024 MiB, 2 GiB | does the image start? |
-| `swe-full` | the task's SWE-Lego image | 4 CPU, 4096 MiB, 10 GiB | as job 5317993 |
+| `swe-full` | the task's SWE-Lego image | 4 CPU, 4096 MiB, 10 GiB | exactly job 5317993's pods |
+| `swe-req` | the task's SWE-Lego image | limits as swe-full, requests 0.5 CPU / 512 MiB | Gym's upstream `harbor_agent_opensandbox_training.yaml` requests, which our `envs/harbor-osb-sft.yaml` (`_override_`) drops |
+| `swe-full-noauth` | the task's SWE-Lego image | as swe-full, no `image_auth` | do the placeholder credentials hurt? |
 
 `swe-small` Running and `swe-full` Pending: scheduling or quota (the events say `FailedScheduling` /
-`Insufficient ...`). Both Pending: the image (events `Pulling` / `ErrImagePull` / `ImagePullBackOff`).
+`Insufficient ...`); `swe-req` Running means the fix is the requests. Both Pending: the image (events
+`Pulling` / `ErrImagePull` / `ImagePullBackOff`); `swe-full-noauth` Running means the credentials.
 `small` Pending too: the tenant or the cluster. `--cases` picks cases, `--task-toml` another task.
