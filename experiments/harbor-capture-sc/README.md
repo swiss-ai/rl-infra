@@ -63,6 +63,7 @@ The previous smoke test (4 sandboxes, ~7 min) is still one command:
 | `../../backends/nemo-rl/apertus2/patches/gym/0029-*.patch` | after job 5314432: `opencode_workdir` (absolute path, default unset): the command runs `mkdir -p <dir> && cd <dir>` first, so OpenCode's project is the task directory, not `/` (OpenCode warned `failed to initialize fff`). `opencode-sc.yaml` sets `/app`. |
 | `../../backends/nemo-rl/apertus2/patches/gym/0030-*.patch` | fix after job 5316800 (token capture): a tool call with unparseable arguments (OpenCode echoes it as `invalid`) keeps the lineage |
 | `../../backends/nemo-rl/apertus2/patches/gym/0031-*.patch` | `sandbox_provider_options.image_auth_registry`: the credentials of `image_auth` / `image_auth_file` (0013) go only to images from that registry host, not to Docker Hub |
+| `../../backends/nemo-rl/apertus2/patches/gym/0032-*.patch` | fix after job 5329860 (Harbor 0.25): `Job.create` validates the agent kwargs (`preflight`) before any trial; the OpenCode and mini-swe-agent adapters now hand it only what their `__init__` passes on, otherwise every kwarg is an "Unknown option" and every rollout is empty |
 | `../../backends/nemo-rl/apertus2/fetch-chisel.sh` | chisel 1.12.0 (amd64 + arm64, pinned sha256) into `CHISEL_DIR` |
 
 ## Environment variables of `run.sh`
@@ -96,7 +97,7 @@ from that ledger (`RolloutReassembler`); the agent's own output carries no token
    OpenSandbox commits from `swissai/harbor_agent_osb_v0.7.0`, as rebuilt on the pin; main's
    export), 0010 (from `main`: OpenSandbox `connection.api_key_file`), 0011-0013 (Kostas Pitas: Harbor
    0.25.0, its job options, `image_auth_file`), 0014-0022 (ours), 0023-0024 (upstream Gym backports:
-   streaming under worker-owned capture), 0025-0031 (ours, ported to Harbor 0.25.0). One
+   streaming under worker-owned capture), 0025-0032 (ours, ported to Harbor 0.25.0). One
    checkout serves every run; 0014 and 0015 are no-ops without `token_capture` (the URL
    is unchanged, masking as before), 0016 without `model_tunnel`. Re-running re-applies them when
    the patch set changed.

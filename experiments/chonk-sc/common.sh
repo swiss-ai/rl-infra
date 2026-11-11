@@ -164,6 +164,11 @@ check_gym_capture() {
     grep -q "def _repaired_tool_name" "${g}/nemo_gym/token_id_capture/fingerprint.py" 2>/dev/null \
         && ok "Gym patch 0030: capture lineage survives a tool call with unparseable arguments" \
         || bad "Gym patch 0030 missing (_repaired_tool_name in token_id_capture/fingerprint.py)"
+    # 0032: Harbor 0.25's Job.create preflight accepts the OpenCode/mini adapters' own kwargs; without it no
+    # trial runs and every rollout is empty (job 5329860)
+    grep -q "def kwargs_for_harbor_options" "${g}/responses_api_agents/harbor_agent/custom_agents/installed_compat.py" 2>/dev/null \
+        && ok "Gym patch 0032: Harbor 0.25 preflight accepts our agents' kwargs" \
+        || bad "Gym patch 0032 missing (kwargs_for_harbor_options in harbor_agent/custom_agents/installed_compat.py)"
     # 0031: image_auth (from image_auth_file, Kostas' 0013) only for one registry, not Docker Hub
     grep -q "def _image_registry" "${g}/nemo_gym/sandbox/providers/opensandbox/provider.py" 2>/dev/null \
         && ok "Gym patch 0031: image_auth_registry" \
