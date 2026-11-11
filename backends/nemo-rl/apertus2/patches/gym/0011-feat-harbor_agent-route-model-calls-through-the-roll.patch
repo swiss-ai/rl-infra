@@ -1,0 +1,138 @@
+From b333d0e8e2d97cb7e67f98e2d6511694e7870eca Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Mon, 2 Nov 2026 09:12:04 +0000
+Subject: [PATCH 1/2] feat(harbor_agent): route model calls through the rollout
+ capture prefix
+
+Build the Harbor agent's api_base with base_url_for_run, so with
+token_id_capture enabled (run-level enabled + agent opt-in) every model call
+of a rollout goes to <model server>/ng-rollout/<id>/training-token-capture/v1
+and the model server / NeMo-RL token capture can attribute it. Without capture
+the URL is unchanged.
+
+Add harbor_model_base_url to override the root URL the agent uses, for agents
+whose model calls originate where the model server's host:port is not
+reachable (installed agents inside a remote sandbox behind a proxy). The
+capture prefix is appended to it as well.
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ responses_api_agents/harbor_agent/app.py      | 33 ++++++++++----
+ .../harbor_agent/tests/test_app.py            | 43 +++++++++++++++++++
+ 2 files changed, 67 insertions(+), 9 deletions(-)
+
+diff --git a/responses_api_agents/harbor_agent/app.py b/responses_api_agents/harbor_agent/app.py
+index 2c866a540..d5837df33 100644
+--- a/responses_api_agents/harbor_agent/app.py
++++ b/responses_api_agents/harbor_agent/app.py
+@@ -116,6 +116,12 @@ class HarborAgentConfig(BaseResponsesAPIAgentConfig):
+     # --- Model routing ---
+     # NeMo Gym model server reference used to resolve Harbor model base URL.
+     model_server: ModelServerRef
++    # Root URL (without "/v1") under which the Harbor agent reaches that model server. Defaults to
++    # http://<host>:<port> of `model_server`. Set it when the agent's model calls originate somewhere
++    # that cannot reach that address, e.g. an installed agent running inside a remote sandbox that
++    # reaches the model server only through a proxy. The rollout's capture prefix
++    # (/ng-rollout/<id>[/training-token-capture]) is appended to it either way.
++    harbor_model_base_url: Optional[str] = None
+ 
+ 
+ class HarborRunRequest(BaseRunRequest):
+@@ -271,7 +277,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
+             global_config_dict = get_global_config_dict()
+ 
+             policy_model_name = global_config_dict["policy_model_name"]
+-            base_url = self._resolve_model_base_url(global_config_dict)
++            base_url = self._resolve_model_base_url(global_config_dict, body)
+             run_timestamp = datetime.now(timezone.utc)
+             run_id = self._build_run_id(run_timestamp)
+ 
+@@ -443,14 +449,23 @@ class HarborAgent(SimpleResponsesAPIAgent):
+         sanitized = sanitized.strip("._")
+         return sanitized or "unknown"
+ 
+-    def _resolve_model_base_url(self, global_config_dict: Any) -> str:
+-        """Resolve model base URL from required model_server reference."""
+-        server_name = self.config.model_server.name
+-        model_server_config = get_first_server_config_dict(
+-            global_config_dict,
+-            server_name,
+-        )
+-        return f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
++    def _resolve_model_base_url(self, global_config_dict: Any, body: Optional[HarborRunRequest] = None) -> str:
++        """Resolve the model base URL handed to the Harbor agent.
++
++        The root is `harbor_model_base_url` or the model_server's host:port. When model-call or
++        training-token capture is enabled, the run's rollout prefix is inserted before "/v1" so
++        the model server can attribute every call of this rollout (see base_url_for_run).
++        """
++        if self.config.harbor_model_base_url:
++            root = self.config.harbor_model_base_url.rstrip("/").removesuffix("/v1")
++        else:
++            server_name = self.config.model_server.name
++            model_server_config = get_first_server_config_dict(
++                global_config_dict,
++                server_name,
++            )
++            root = f"http://{model_server_config['host']}:{model_server_config['port']}"
++        return f"{self.base_url_for_run(root, body)}/v1"
+ 
+     def _build_job_config(
+         self,
+diff --git a/responses_api_agents/harbor_agent/tests/test_app.py b/responses_api_agents/harbor_agent/tests/test_app.py
+index 71bb7e11f..bcfa0947e 100644
+--- a/responses_api_agents/harbor_agent/tests/test_app.py
++++ b/responses_api_agents/harbor_agent/tests/test_app.py
+@@ -470,6 +470,49 @@ class TestApp:
+         assert server._get_jobs_output_dir("deepseek-ai/DeepSeek-V3.2", "scientific", ts).parts[-3] == "20260210"
+         assert server._get_results_output_dir("my-plain-model", "scientific", ts).parts[-1] == "my-plain-model"
+ 
++    def test_model_base_url_without_capture_is_plain(self) -> None:
++        server = _make_server()
++        server.server_client.global_config_dict = {}
++        body = HarborRunRequest.model_validate(
++            {"instance_id": "scientific::t", "responses_create_params": {"input": []}, "_ng_rollout_id": "3-1"}
++        )
++        assert server._resolve_model_base_url(_GLOBAL_CONFIG, body) == "http://policy-host:9000/v1"
++        assert server._resolve_model_base_url(_GLOBAL_CONFIG) == "http://policy-host:9000/v1"
++
++    def test_model_base_url_with_training_capture_carries_rollout_prefix(self) -> None:
++        server = _make_server(token_id_capture=True)
++        server.server_client.global_config_dict = {"token_id_capture": {"enabled": True}}
++        body = HarborRunRequest.model_validate(
++            {"instance_id": "scientific::t", "responses_create_params": {"input": []}, "_ng_rollout_id": "3-1"}
++        )
++        assert (
++            server._resolve_model_base_url(_GLOBAL_CONFIG, body)
++            == "http://policy-host:9000/ng-rollout/3-1/training-token-capture/v1"
++        )
++
++    def test_model_base_url_capture_needs_agent_opt_in(self) -> None:
++        server = _make_server()
++        server.server_client.global_config_dict = {"token_id_capture": {"enabled": True}}
++        body = HarborRunRequest.model_validate(
++            {"instance_id": "scientific::t", "responses_create_params": {"input": []}, "_ng_rollout_id": "3-1"}
++        )
++        assert server._resolve_model_base_url(_GLOBAL_CONFIG, body) == "http://policy-host:9000/v1"
++
++    @pytest.mark.parametrize(
++        "override",
++        ["https://proxy.example.org/gym", "https://proxy.example.org/gym/", "https://proxy.example.org/gym/v1"],
++    )
++    def test_model_base_url_override_keeps_capture_prefix(self, override: str) -> None:
++        server = _make_server(token_id_capture=True, harbor_model_base_url=override)
++        server.server_client.global_config_dict = {"token_id_capture": {"enabled": True}}
++        body = HarborRunRequest.model_validate(
++            {"instance_id": "scientific::t", "responses_create_params": {"input": []}, "_ng_rollout_id": "3-1"}
++        )
++        assert (
++            server._resolve_model_base_url(_GLOBAL_CONFIG, body)
++            == "https://proxy.example.org/gym/ng-rollout/3-1/training-token-capture/v1"
++        )
++
+     def test_build_job_config_uses_daytona_type_when_import_path_is_clear(self) -> None:
+         pytest.importorskip("harbor")
+         server = _make_server(
+-- 
+2.55.0
+

@@ -1,0 +1,330 @@
+From fec8ea64837e9b4fbbc96055111b069303d97f34 Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Tue, 10 Nov 2026 13:59:14 +0000
+Subject: [PATCH] fix(apertus2): answer an unencodable chat history with HTTP
+ 400, not 500
+
+Cause: with output_format apertus2, a call without a token prefix encodes
+the full chat history again through encode_chat_prompt, and apertus-common's
+from_openai refuses messages it cannot map, such as an assistant message
+with Gym's "reasoning" field (AdapterError: "openai message 14: unsupported
+fields: ['reasoning']"). The error was not caught, so the HTTP handler's
+catch-all turned it into HTTP 500, which Gym and the agent retry. The
+token-in path had the same gap: extend_chat_prompt's ValueError for a
+message that cannot follow the last burst (a role other than tool or user,
+a result for an unknown call) also became a 500.
+
+Fix: encode_chat_prompt raises a ValueError with apertus-common's message
+for an AdapterError. preprocess_chat maps a ValueError from
+encode_chat_prompt, and one from extend_chat_prompt other than
+TruncatedBurstError, to VLLMValidationError(parameter="messages") with
+"The request's chat history cannot be encoded as an Apertus 2 prompt: ..."
+or "... cannot continue the Apertus 2 conversation: ...", so the handler
+answers HTTP 400 invalid_request_error. The message does not say
+"context length": this is not an overflow, and Gym must not end the
+trajectory as one. The call fails before begin_call, so nothing is staged.
+TruncatedBurstError keeps its context-length 400, and a prefix that does not
+end at <|wait|> still fails the assert.
+
+Gym's vllm_model does not retry a 400 (only 429/500/502/503/504/520), so
+each request reaches vLLM once instead of three times.
+
+Production evidence: job 5316800 logged 27 such AdapterErrors for one
+rollout, which Gym retried 3x and OpenCode retried for ~13 min.
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ nemo_rl/data/apertus2_format.py               |  28 +++--
+ .../generation/vllm/vllm_worker_async.py      |  30 ++++-
+ tests/unit/data/test_apertus2_format.py       |  15 +++
+ .../models/generation/test_vllm_generation.py | 105 +++++++++++++++++-
+ 4 files changed, 161 insertions(+), 17 deletions(-)
+
+diff --git a/nemo_rl/data/apertus2_format.py b/nemo_rl/data/apertus2_format.py
+index 8d9262eb3..a92d3c0ef 100644
+--- a/nemo_rl/data/apertus2_format.py
++++ b/nemo_rl/data/apertus2_format.py
+@@ -131,22 +131,32 @@ def encode_chat_prompt(
+ 
+     Returns:
+         The prompt's token IDs.
++
++    Raises:
++        ValueError: If apertus-common cannot map the messages, such as a message
++            with a field it does not know.
+     """
+     # apertus-common is an optional dependency, needed only by this format.
+     from apertus_common import MappingPolicy, from_openai
++    from apertus_common.errors import AdapterError
+ 
+     defaults = json.loads(system_prompt)
+     if tools and defaults.get("tools") == []:
+         del defaults["tools"]
+-    mapped = from_openai(
+-        messages,
+-        # vLLM's request model adds fields of its own, which from_openai refuses.
+-        tools=[{"type": tool["type"], "function": tool["function"]} for tool in tools]
+-        if tools
+-        else None,
+-        system_defaults=defaults,
+-        policy=MappingPolicy(merge_system_messages=True),
+-    )
++    try:
++        mapped = from_openai(
++            messages,
++            # vLLM's request model adds fields of its own, which from_openai refuses.
++            tools=[
++                {"type": tool["type"], "function": tool["function"]} for tool in tools
++            ]
++            if tools
++            else None,
++            system_defaults=defaults,
++            policy=MappingPolicy(merge_system_messages=True),
++        )
++    except AdapterError as error:
++        raise ValueError(str(error)) from error
+     return _get_encoding(tokenizer_path).encode_conversation(mapped.value)
+ 
+ 
+diff --git a/nemo_rl/models/generation/vllm/vllm_worker_async.py b/nemo_rl/models/generation/vllm/vllm_worker_async.py
+index d2c1f9125..b084a2783 100644
+--- a/nemo_rl/models/generation/vllm/vllm_worker_async.py
++++ b/nemo_rl/models/generation/vllm/vllm_worker_async.py
+@@ -840,6 +840,15 @@ class VllmAsyncGenerationWorkerImpl(
+ 
+                 return super().model_post_init(context)
+ 
++        def _invalid_apertus2_history(problem, error):
++            """A request whose messages the format refuses: the client's error.
++
++            HTTP 400 is not retried, unlike the 500 an uncaught error becomes.
++            """
++            message = f"The request's chat history {problem}: {error}"
++            LOGGER.warning("Invalid Apertus 2 chat history: %s", message)
++            return VLLMValidationError(message, parameter="messages")
++
+         class NeMoRLOpenAIServingMixin:
+             @staticmethod
+             def _set_max_tokens(request, max_tokens: int) -> None:
+@@ -965,12 +974,17 @@ class VllmAsyncGenerationWorkerImpl(
+                     or request.required_prefix_token_ids is None
+                 ):
+                     if worker_self.is_apertus2:
+-                        res[1][0]["prompt_token_ids"] = encode_chat_prompt(
+-                            worker_self.model_name,
+-                            system_prompt=worker_self.apertus2_system_prompt,
+-                            messages=messages_for_replace_prefix_tokens,
+-                            tools=apertus2_tool_dicts,
+-                        )
++                        try:
++                            res[1][0]["prompt_token_ids"] = encode_chat_prompt(
++                                worker_self.model_name,
++                                system_prompt=worker_self.apertus2_system_prompt,
++                                messages=messages_for_replace_prefix_tokens,
++                                tools=apertus2_tool_dicts,
++                            )
++                        except ValueError as error:
++                            raise _invalid_apertus2_history(
++                                "cannot be encoded as an Apertus 2 prompt", error
++                            ) from error
+                     # Clamp the request's max output tokens so that input + output <= max_model_len.
+                     # Apertus 2 replaced the prompt vLLM checked, so this always runs.
+                     self._clamp_max_tokens(
+@@ -1010,6 +1024,10 @@ class VllmAsyncGenerationWorkerImpl(
+                             parameter="input_tokens",
+                             value=len(model_prefix_token_ids),
+                         ) from error
++                    except ValueError as error:
++                        raise _invalid_apertus2_history(
++                            "cannot continue the Apertus 2 conversation", error
++                        ) from error
+                 else:
+                     # Token-in splice path — shared by staging_chain and direct prefix.
+                     last_assistant_message_idx = None
+diff --git a/tests/unit/data/test_apertus2_format.py b/tests/unit/data/test_apertus2_format.py
+index aebc2fc4c..7ce2e8714 100644
+--- a/tests/unit/data/test_apertus2_format.py
++++ b/tests/unit/data/test_apertus2_format.py
+@@ -188,6 +188,21 @@ def test_chat_prompt_merges_system_and_developer_messages():
+     assert prompt[0] == load_encoding(TOKENIZER).bos_token_id
+ 
+ 
++def test_a_message_apertus_common_refuses_fails_with_a_value_error():
++    """The worker answers a ValueError with HTTP 400 (job 5316800: ``reasoning``)."""
++    with pytest.raises(ValueError, match=r"unsupported fields: \['reasoning'\]"):
++        encode_chat_prompt(
++            TOKENIZER,
++            system_prompt=SYSTEM_PROMPT,
++            messages=[
++                {"role": "user", "content": "Hi"},
++                {"role": "assistant", "content": "Hello.", "reasoning": "Hm."},
++                {"role": "user", "content": "Weather?"},
++            ],
++            tools=None,
++        )
++
++
+ def _assistant(*call_ids):
+     calls = [
+         {
+diff --git a/tests/unit/models/generation/test_vllm_generation.py b/tests/unit/models/generation/test_vllm_generation.py
+index d8a33e575..eb684f17c 100644
+--- a/tests/unit/models/generation/test_vllm_generation.py
++++ b/tests/unit/models/generation/test_vllm_generation.py
+@@ -994,6 +994,22 @@ _APERTUS2_WAIT = 12
+ _APERTUS2_PROMPT = [1, 2, 3, _APERTUS2_INPUT_END]
+ 
+ 
++class _FakeAdapterError(Exception):
++    """Stands in for apertus_common.errors.AdapterError; not a ValueError on purpose."""
++
++
++def _fake_from_openai(messages, **kwargs):
++    """Like apertus-common's from_openai: it refuses message fields it does not know."""
++    known = {"role", "content", "tool_calls", "tool_call_id", "name"}
++    for index, message in enumerate(messages):
++        unsupported = sorted(set(message) - known)
++        if unsupported:
++            raise _FakeAdapterError(
++                f"openai message {index}: unsupported fields: {unsupported}"
++            )
++    return types.SimpleNamespace(value="conversation")
++
++
+ def _apertus2_http_worker(monkeypatch, *, max_model_len):
+     """An Apertus 2 HTTP server in token-in mode, on fake vLLM and apertus-common."""
+     from nemo_rl.data import apertus2_format
+@@ -1021,13 +1037,21 @@ def _apertus2_http_worker(monkeypatch, *, max_model_len):
+             Reply=object,
+             Think=object,
+             StreamParseError=Exception,
++            MappingPolicy=lambda **kwargs: None,
++            from_openai=_fake_from_openai,
+         ),
+     )
++    monkeypatch.setitem(
++        sys.modules,
++        "apertus_common.errors",
++        types.SimpleNamespace(AdapterError=_FakeAdapterError),
++    )
+     encoding = types.SimpleNamespace(
+         controls=types.SimpleNamespace(
+             wait=_APERTUS2_WAIT, input_end=_APERTUS2_INPUT_END
+         ),
+         encode_items=lambda items: [5, 6, _APERTUS2_INPUT_END] * len(items),
++        encode_conversation=lambda conversation: list(_APERTUS2_PROMPT),
+         output_parser=lambda: types.SimpleNamespace(
+             push_tokens=lambda tokens: None,
+             finish=lambda: types.SimpleNamespace(items=[]),
+@@ -1051,6 +1075,7 @@ def _apertus2_http_worker(monkeypatch, *, max_model_len):
+     )
+     worker.is_apertus2 = True
+     worker.model_name = "apertus2-tokenizer"
++    worker.apertus2_system_prompt = '{"thinking":"medium","tools":[]}'
+     worker.allowed_token_ids = None
+     worker.thinking_token_budget = None
+     # Token capture in token-in mode: the ledger admitted the call with the prefix.
+@@ -1088,7 +1113,7 @@ def _apertus2_http_worker(monkeypatch, *, max_model_len):
+ 
+     serving_chat.create_chat_completion = create_chat_completion
+ 
+-    async def post(prefix):
++    async def post(prefix, messages=None):
+         admission_prefix["ids"] = prefix
+         request = types.SimpleNamespace(
+             top_k=-1,
+@@ -1098,7 +1123,8 @@ def _apertus2_http_worker(monkeypatch, *, max_model_len):
+             max_completion_tokens=None,
+             required_prefix_token_ids=None,
+             stream=False,
+-            messages=[
++            messages=messages
++            or [
+                 {"role": "user", "content": "Task"},
+                 {"role": "assistant", "content": "Working."},
+                 {"role": "user", "content": "Go on."},
+@@ -1185,6 +1211,81 @@ async def test_apertus2_continuation_after_a_malformed_prefix_still_fails(
+     }
+ 
+ 
++def _assert_invalid_history_400(worker, request, response, original_error):
++    response_content = response.body.decode()
++    assert response.status_code == 400
++    assert original_error in json.loads(response_content)["error"]["message"]
++    # Not a context overflow: Gym must not end the trajectory as one.
++    assert "context length" not in response_content
++    assert not _nemo_gym_recognizes_context_overflow(
++        status=response.status_code, response_content=response_content
++    )
++    error = json.loads(response_content)["error"]
++    assert error["type"] == "invalid_request_error"
++    assert error["param"] == "messages"
++    # The call failed before the capture began it: nothing is staged or committed.
++    worker._abort_request_capture.assert_called_once()
++    worker.token_capture.begin_call.assert_not_called()
++    worker.token_capture.complete_call_from_response.assert_not_called()
++    assert worker._capture_calls == {}
++
++
++def _apertus2_http_worker_without_prefix(monkeypatch):
++    """The admitted call has no token prefix, so the full history is encoded again."""
++    worker, served, post = _apertus2_http_worker(monkeypatch, max_model_len=128)
++    worker._resolve_admission_prefix = lambda admission: None
++    return worker, served, post
++
++
++@pytest.mark.asyncio
++async def test_apertus2_history_without_prefix_is_encoded_again(monkeypatch):
++    worker, served, post = _apertus2_http_worker_without_prefix(monkeypatch)
++    await post(None)
++    assert served["prompt_token_ids"] == _APERTUS2_PROMPT
++    worker.token_capture.begin_call.assert_called_once()
++
++
++@pytest.mark.asyncio
++async def test_apertus2_history_that_cannot_be_encoded_returns_http_400(
++    monkeypatch,
++):
++    """Production job 5316800: from_openai refused Gym's ``reasoning`` field on
++    an assistant message; the AdapterError became HTTP 500, which is retried."""
++    worker, _, post = _apertus2_http_worker_without_prefix(monkeypatch)
++    request, response = await post(
++        None,
++        messages=[
++            {"role": "user", "content": "Task"},
++            {"role": "assistant", "content": "Working.", "reasoning": "Hm."},
++            {"role": "user", "content": "Go on."},
++        ],
++    )
++    _assert_invalid_history_400(
++        worker,
++        request,
++        response,
++        "openai message 1: unsupported fields: ['reasoning']",
++    )
++
++
++@pytest.mark.asyncio
++async def test_apertus2_continuation_that_cannot_be_encoded_returns_http_400(
++    monkeypatch,
++):
++    worker, _, post = _apertus2_http_worker(monkeypatch, max_model_len=128)
++    request, response = await post(
++        _APERTUS2_PROMPT + [10, 1000, 11, _APERTUS2_WAIT],
++        messages=[
++            {"role": "user", "content": "Task"},
++            {"role": "assistant", "content": "Working."},
++            {"role": "system", "content": "Be brief."},
++        ],
++    )
++    _assert_invalid_history_400(
++        worker, request, response, "with a 'system' message: expected tool or user"
++    )
++
++
+ def test_nano_v3_reasoning_parser_swaps_reasoning_when_thinking_disabled(
+     monkeypatch,
+ ):
+-- 
+2.56.0
+

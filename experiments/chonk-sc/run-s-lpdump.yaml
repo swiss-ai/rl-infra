@@ -1,0 +1,16 @@
+# Run S + the logprob outlier dump (NeMo-RL patch 0034). Merged after run-s-sft.yaml:
+#   OVERLAY=experiments/chonk-sc/run-s-lpdump.yaml bash experiments/chonk-sc/run-s.sh
+# For the token_mult_prob_error that grows with every refit (job 5304373: 1.03 / 6.97 / 26.5, clean at step
+# 1): every ClippedPGLossFn call on the Megatron policy workers appends the tokens whose generation and
+# trainer logprobs differ by >= NRL_LOGPROB_DUMP_MIN_NATS to <log_dir>/logprob_dump/logprob-<host>-<pid>.jsonl.
+# Summarise (stdlib; tokens decoded with the model's tokenizer.json when the tokenizers package is there):
+#   python3 experiments/chonk-sc/lp_dump_summary.py <log_dir>/logprob_dump [--tokenizer <model>/tokenizer.json]
+# Cost: one GPU->CPU copy of the rows that have such a token; nothing is written for clean rows but one
+# call record per loss call.
+policy:
+  megatron_cfg:
+    env_vars:
+      NRL_LOGPROB_DUMP_DIR: ${logger.log_dir}/logprob_dump
+      NRL_LOGPROB_DUMP_MIN_NATS: "3"
+      NRL_LOGPROB_DUMP_MAX_TOKENS: "32"
+      NRL_LOGPROB_DUMP_WINDOW: "8"

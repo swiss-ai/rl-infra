@@ -1,0 +1,25 @@
+# Task overlay: terminus-sc.yaml with mini-swe-agent instead of Terminus-2 (run.sh: AGENT=mini,
+# always together with tunnel-sc.yaml). Step B: the agent runs INSIDE the task sandbox and calls the
+# model through the per-sandbox reverse tunnel, sandbox 127.0.0.1:8000 -> policy_model (Gym patches
+# 0013+0014).
+#
+# Harbor installs mini-swe-agent into every sandbox at setup (apt-get, uv, `uv tool install` from
+# git; the pods have internet). Gym patch 0015 provides the agent class: each run gets its own
+# api_base (http://127.0.0.1:8000 + the rollout's capture prefix + /v1), the rollout's sampling
+# parameters (mini's default config has temperature 0.0), no litellm cost lookup and a model-call
+# limit of max_turns (from terminus-sc.yaml). litellm does not stream, so worker-owned token capture
+# accepts the calls (OpenCode always streams and gets 422).
+
+env:
+  nemo_gym:
+    harbor_agent:
+      responses_api_agents:
+        harbor_agent:
+          harbor_agent_name: null
+          harbor_agent_import_path: "responses_api_agents.harbor_agent.custom_agents.mini_swe_agent_nemo_gym:MiniSweAgentNemoGym"
+          # the tunnel's sandbox end (tunnel-sc.yaml pod_port); harbor_agent appends /ng-rollout/<id>/...
+          harbor_model_base_url: http://127.0.0.1:8000
+          # merged with terminus-sc.yaml's kwargs (max_turns -> model-call limit; the rest is ignored)
+          harbor_agent_kwargs:
+            # li-boxuan/mini-swe-agent (Harbor's install source) commit, 2025-10-30; unset = branch head
+            version: ${oc.env:MSWEA_VERSION,8e8a515fdcecf3a8e45c3909f7f196bfe18ca89a}

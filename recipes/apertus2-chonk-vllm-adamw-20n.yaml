@@ -1,0 +1,22 @@
+# The 12-node recipe grown to 20 nodes: 16 trainer nodes (EP64) + 4 vLLM nodes, for longer contexts.
+# EP64 puts 4 of the 256 experts on each GPU instead of 8, which frees the memory 8192-token contexts need:
+# on 12 nodes they ran out of GPU memory (KISTI jobs 1171416, 1171418). Validated on KISTI: 5/5 steps of
+# micro-tasks at 4096 (job 1172834) and of SWE-Lego at 8192 with 2048 tokens per turn (job 1172935).
+# Not validated by the Apertus 2 blueprint.
+defaults: apertus2-chonk-vllm-adamw.yaml
+
+cluster:
+  num_nodes: 20
+
+policy:
+  # Without it every trainer process died silently in the first log-probability pass of step 1, at 4096
+  # tokens too (jobs 1172611, 1172612, 1172726). From David's experiments/grpo-chonk/trainer-16n-ep64-md-decoupling.yaml.
+  offload_optimizer_for_logprob: true
+  megatron_cfg:
+    expert_model_parallel_size: 64
+    env_vars:
+      # UCCL/DeepEP need nvl_recv_tokens / rdma_ranks > max(rdma_send, nvl_send). The EP32 values
+      # (24,40,512,32,512 and 24,7,512,32,512) give 512 / 16 nodes = 32, which fails with "Assertion error
+      # internode.cu:3106" (jobs 1171912, 1171915); 1024 gives 64.
+      UCCL_EP_DISPATCH_CONFIG: "24,40,1024,32,512"
+      UCCL_EP_COMBINE_CONFIG: "24,7,1024,32,512"

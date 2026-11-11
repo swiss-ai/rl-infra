@@ -1,0 +1,794 @@
+From d4775b57e99531a1cf1136e4770538c2df677670 Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Tue, 3 Nov 2026 12:35:27 +0000
+Subject: [PATCH] feat(harbor_agent): per-sandbox reverse tunnel from the
+ sandbox to the model server
+
+For clusters where sandboxes cannot open connections to the training nodes but
+the node reaches the sandbox through the provider's service endpoint (OpenSandbox
+server proxy, WebSocket). harbor_environment_kwargs.model_tunnel makes
+NemoGymSandboxEnvironment upload chisel into every sandbox, run
+'chisel server --reverse' there and 'chisel client' on the node, so the sandbox
+reaches the model server at 127.0.0.1:<pod_port>. Optional health check GETs
+/health through the tunnel before the trial starts. harbor_agent fills
+model_tunnel.target with the model server host:port per run. The per-sandbox
+chisel credential goes through AUTH, not argv; the provider headers still go
+through --header (chisel has no other way).
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ responses_api_agents/harbor_agent/app.py      |  32 ++-
+ .../nemo_gym_sandbox/environment.py           |  23 ++
+ .../nemo_gym_sandbox/model_tunnel.py          | 238 +++++++++++++++++
+ .../harbor_agent/tests/test_app.py            |  36 +++
+ .../harbor_agent/tests/test_environment.py    |  63 +++++
+ .../harbor_agent/tests/test_model_tunnel.py   | 239 ++++++++++++++++++
+ 6 files changed, 625 insertions(+), 6 deletions(-)
+ create mode 100644 responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/model_tunnel.py
+ create mode 100644 responses_api_agents/harbor_agent/tests/test_model_tunnel.py
+
+diff --git a/responses_api_agents/harbor_agent/app.py b/responses_api_agents/harbor_agent/app.py
+index e4d5871a5..a1e506d64 100644
+--- a/responses_api_agents/harbor_agent/app.py
++++ b/responses_api_agents/harbor_agent/app.py
+@@ -20,6 +20,7 @@ from asyncio import Semaphore
+ from datetime import datetime, timezone
+ from pathlib import Path
+ from typing import Any, Callable, Optional
++from urllib.parse import urlsplit
+ from uuid import uuid4
+ 
+ import ray
+@@ -278,6 +279,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
+ 
+             policy_model_name = global_config_dict["policy_model_name"]
+             base_url = self._resolve_model_base_url(global_config_dict, body)
++            model_tunnel = self._model_tunnel_kwargs(global_config_dict)
+             run_timestamp = datetime.now(timezone.utc)
+             run_id = self._build_run_id(run_timestamp)
+ 
+@@ -301,6 +303,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
+                 job_name=job_name,
+                 jobs_dir=jobs_dir,
+                 responses_create_params=responses_create_params,
++                model_tunnel=model_tunnel,
+             )
+ 
+             try:
+@@ -472,14 +475,27 @@ class HarborAgent(SimpleResponsesAPIAgent):
+         if self.config.harbor_model_base_url:
+             root = self.config.harbor_model_base_url.rstrip("/").removesuffix("/v1")
+         else:
+-            server_name = self.config.model_server.name
+-            model_server_config = get_first_server_config_dict(
+-                global_config_dict,
+-                server_name,
+-            )
+-            root = f"http://{model_server_config['host']}:{model_server_config['port']}"
++            root = self._model_server_root(global_config_dict)
+         return f"{self.base_url_for_run(root, body)}/v1"
+ 
++    def _model_server_root(self, global_config_dict: Any) -> str:
++        model_server_config = get_first_server_config_dict(global_config_dict, self.config.model_server.name)
++        return f"http://{model_server_config['host']}:{model_server_config['port']}"
++
++    def _model_tunnel_kwargs(self, global_config_dict: Any) -> Optional[dict[str, Any]]:
++        """``harbor_environment_kwargs.model_tunnel`` with ``target`` defaulted to the model server.
++
++        The model server's port is only known at run time, so the environment (which opens the tunnel
++        from the Harbor process to that host:port) gets it from here.
++        """
++        raw = (self.config.harbor_environment_kwargs or {}).get("model_tunnel")
++        if not raw:
++            return None
++        tunnel = dict(raw)
++        if not tunnel.get("target"):
++            tunnel["target"] = urlsplit(self._model_server_root(global_config_dict)).netloc
++        return tunnel
++
+     def _build_job_config(
+         self,
+         dataset_alias: str,
+@@ -489,6 +505,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
+         job_name: str,
+         jobs_dir: Path,
+         responses_create_params: Optional[dict[str, Any]] = None,
++        model_tunnel: Optional[dict[str, Any]] = None,
+     ) -> dict:
+         """Build a Harbor JobConfig dict for a single task."""
+         from harbor.models.job.config import (
+@@ -551,6 +568,9 @@ class HarborAgent(SimpleResponsesAPIAgent):
+         # Dataset alias-level workdir overrides global harbor_environment_kwargs.workdir.
+         if dataset_source.workdir is not None:
+             environment_kwargs["workdir"] = dataset_source.workdir
++        # resolved per run (target = model server), replaces the static copy from harbor_environment_kwargs
++        if model_tunnel is not None:
++            environment_kwargs["model_tunnel"] = model_tunnel
+ 
+         environment_config = EnvironmentConfig(
+             type=self.config.harbor_environment_type if not self.config.harbor_environment_import_path else None,
+diff --git a/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/environment.py b/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/environment.py
+index 601c5254c..a63574a3c 100644
+--- a/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/environment.py
++++ b/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/environment.py
+@@ -47,6 +47,10 @@ from nemo_gym.sandbox import (
+     rewrite_image,
+ )
+ from nemo_gym.sandbox.utils import cpu_cap_env
++from responses_api_agents.harbor_agent.custom_envs.nemo_gym_sandbox.model_tunnel import (
++    ModelTunnel,
++    ModelTunnelConfig,
++)
+ 
+ 
+ # The sandbox-side scratch directory used for tar-based directory transfer.
+@@ -119,6 +123,11 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
+             ``allow_internet = false`` even though this environment cannot
+             enforce network isolation (default False). Each affected trial
+             logs a prominent warning.
++        model_tunnel: Open a per-sandbox reverse tunnel so code inside the
++            sandbox reaches the model server at ``127.0.0.1:<pod_port>``
++            (for clusters where sandboxes cannot reach the training nodes).
++            See ``model_tunnel.ModelTunnelConfig``; harbor_agent fills
++            ``target`` with the model server. Unset: no tunnel.
+     """
+ 
+     def __init__(
+@@ -137,6 +146,7 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
+         image_rewrites: Optional[list[Mapping[str, str]]] = None,
+         workdir: Optional[str] = None,
+         allow_unenforced_internet_isolation: bool = False,
++        model_tunnel: Optional[Mapping[str, Any]] = None,
+         **kwargs,
+     ):
+         # Set before super().__init__: the base constructor runs the
+@@ -155,6 +165,8 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
+         self._workdir = workdir
+         self._allow_unenforced_internet_isolation = allow_unenforced_internet_isolation
+         self._sandbox: Optional[AsyncSandbox] = None
++        self._model_tunnel_config = ModelTunnelConfig.from_mapping(model_tunnel) if model_tunnel else None
++        self._model_tunnel: Optional[ModelTunnel] = None
+ 
+         super().__init__(*args, **kwargs)
+ 
+@@ -230,6 +242,8 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
+             env={**(cpu_cap_env(resources.get("cpu")) if self._derive_cpu_env else {}), **self._sandbox_env},
+             metadata=metadata,
+             resources=resources,
++            # declared so sandbox.endpoint() resolves the tunnel's server port
++            ports=(self._model_tunnel_config.server_port,) if self._model_tunnel_config else (),
+             provider_options=dict(self._sandbox_provider_options),
+         )
+ 
+@@ -262,12 +276,21 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
+                 f"Failed to create log directories in sandbox: {result.stderr or result.stdout or '<no output>'}"
+             )
+ 
++        if self._model_tunnel_config is not None:
++            # On failure the tunnel cleans up after itself; stop() still deletes the sandbox.
++            tunnel = ModelTunnel(sandbox, self._model_tunnel_config, self.logger, label=f" [{self.session_id}]")
++            await tunnel.open()
++            self._model_tunnel = tunnel
++
+     def _require_sandbox(self) -> AsyncSandbox:
+         if self._sandbox is None:
+             raise RuntimeError("Sandbox is not running; call start() first.")
+         return self._sandbox
+ 
+     async def stop(self, delete: bool):
++        tunnel, self._model_tunnel = self._model_tunnel, None
++        if tunnel is not None:
++            await tunnel.close()
+         if self._sandbox is None:
+             return
+         if not delete:
+diff --git a/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/model_tunnel.py b/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/model_tunnel.py
+new file mode 100644
+index 000000000..cc1c441e5
+--- /dev/null
++++ b/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/model_tunnel.py
+@@ -0,0 +1,238 @@
++# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""Per-sandbox reverse tunnel from the sandbox to a model server next to the Harbor process.
++
++For clusters where sandboxes cannot open connections to the training nodes, but the node can reach
++the sandbox through the provider's service endpoint (e.g. OpenSandbox's server proxy, which carries
++WebSockets). The node opens the tunnel, the sandbox uses it:
++
++    in sandbox:  127.0.0.1:<pod_port>  ->  chisel server --reverse  (on <server_port>)
++                     <= WebSocket opened by the node via sandbox.endpoint(<server_port>) =>
++    on node:     chisel client  ->  <target> (the model server host:port)
++
++`chisel <https://github.com/jpillora/chisel>`_ binaries are not shipped: ``chisel_dir`` must
++hold ``chisel_<version>_linux_<arch>`` for the node and for the sandbox architecture (amd64,
++arm64), as released (gunzipped). The sandbox copy is uploaded at every start, so the task image
++needs no internet and no preinstalled tool, only ``uname``, ``setsid``/``nohup`` and, for the
++health check, ``bash``.
++"""
++
++import asyncio
++import os
++import platform
++import secrets
++import shlex
++import time
++from collections import deque
++from dataclasses import dataclass, fields
++from pathlib import Path
++from typing import Any, Mapping, Optional
++
++
++_ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
++_CONNECTED_MARKER = "Connected (Latency"
++
++
++@dataclass(frozen=True)
++class ModelTunnelConfig:
++    """``harbor_environment_kwargs.model_tunnel``.
++
++    target: ``host:port`` the node-side client dials; harbor_agent fills it with the model server
++        when unset.
++    chisel_dir: directory with ``chisel_<chisel_version>_linux_{amd64,arm64}``.
++    pod_port: loopback port in the sandbox that forwards to ``target``.
++    server_port: sandbox port of the chisel server (reached through ``sandbox.endpoint``).
++    connect_timeout_s: bound on the client's first ``Connected``.
++    health_path: when set, one HTTP GET from inside the sandbox through the tunnel must answer
++        2xx before the trial starts (e.g. ``/health`` of a Gym server).
++    tls_skip_verify: skip certificate checks on the endpoint's TLS.
++    max_retry_count: client reconnect attempts after a drop.
++    """
++
++    chisel_dir: str
++    target: Optional[str] = None
++    chisel_version: str = "1.12.0"
++    pod_port: int = 8000
++    server_port: int = 8765
++    connect_timeout_s: float = 60.0
++    health_path: Optional[str] = "/health"
++    tls_skip_verify: bool = False
++    max_retry_count: int = 10
++    pod_binary: str = "/tmp/.nemo-gym-chisel"
++
++    @classmethod
++    def from_mapping(cls, raw: Mapping[str, Any]) -> "ModelTunnelConfig":
++        known = {f.name for f in fields(cls)}
++        unknown = sorted(set(raw) - known)
++        if unknown:
++            raise ValueError(f"Unknown model_tunnel keys {unknown}; known: {sorted(known)}")
++        if not raw.get("chisel_dir"):
++            raise ValueError("model_tunnel.chisel_dir is required")
++        return cls(**dict(raw))
++
++    def binary(self, arch: str) -> Path:
++        return Path(self.chisel_dir) / f"chisel_{self.chisel_version}_linux_{arch}"
++
++
++def health_check_script(pod_port: int, path: str, attempts: int = 40) -> str:
++    """bash: GET ``path`` on 127.0.0.1:``pod_port`` (retried while the reverse listener comes up),
++    print the status line, exit 0 on any answer."""
++    request = f"GET {path} HTTP/1.0\\r\\nHost: 127.0.0.1\\r\\n\\r\\n"
++    return (
++        f"for i in $(seq 1 {attempts}); do "
++        f'r=$( (exec 3<>/dev/tcp/127.0.0.1/{pod_port} && printf "{request}" >&3 && head -n1 <&3) 2>/dev/null ); '
++        'if [ -n "$r" ]; then echo "$r"; exit 0; fi; sleep 0.5; done; '
++        f"echo 'no answer on 127.0.0.1:{pod_port}'; exit 1"
++    )
++
++
++class ModelTunnel:
++    """One tunnel for one sandbox: :meth:`open` after the sandbox started, :meth:`close` before it stops."""
++
++    def __init__(self, sandbox: Any, config: ModelTunnelConfig, logger: Any, label: str = "") -> None:
++        self._sandbox = sandbox
++        self._config = config
++        self._logger = logger
++        self._label = label
++        self._proc: Optional[asyncio.subprocess.Process] = None
++        self._reader: Optional[asyncio.Task] = None
++        self._connected = asyncio.Event()
++        self._tail: deque[str] = deque(maxlen=40)
++
++    @property
++    def client_log_tail(self) -> list[str]:
++        return list(self._tail)
++
++    async def _exec(self, command: str, *, env: Optional[dict[str, str]] = None, timeout_s: float = 60) -> Any:
++        return await self._sandbox.exec(command, env=env, timeout_s=timeout_s)
++
++    async def open(self) -> None:
++        """Start both ends and wait until the sandbox reaches the target; on any failure nothing is left running
++        on the node (the sandbox side goes with the sandbox)."""
++        t0 = time.monotonic()
++        try:
++            status = await self._open()
++        except BaseException:
++            await self.close()
++            raise
++        cfg = self._config
++        self._logger.info(
++            "model_tunnel%s: sandbox 127.0.0.1:%s -> %s up in %.1fs (%s)",
++            self._label,
++            cfg.pod_port,
++            cfg.target,
++            time.monotonic() - t0,
++            status,
++        )
++
++    async def _open(self) -> str:
++        """Returns the health check's status line, or "no health check"."""
++        cfg = self._config
++        if not cfg.target:
++            raise ValueError("model_tunnel.target is not set (harbor_agent sets it to the model server)")
++        node_arch = _ARCH.get(platform.machine())
++        res = await self._exec("uname -m", timeout_s=30)
++        pod_arch = _ARCH.get((res.stdout or "").strip())
++        if node_arch is None or pod_arch is None:
++            raise RuntimeError(
++                f"model_tunnel: unsupported architecture (node {platform.machine()!r}, sandbox {res.stdout!r})"
++            )
++        node_bin, pod_bin = cfg.binary(node_arch), cfg.binary(pod_arch)
++        for path in {node_bin, pod_bin}:
++            if not path.is_file():
++                raise FileNotFoundError(f"model_tunnel: chisel binary {path} not found")
++
++        await self._sandbox.upload(pod_bin, cfg.pod_binary)
++        # One credential per sandbox: the endpoint is reachable by every holder of the provider API key.
++        # Passed as AUTH (chisel reads it from the environment), so it stays out of argv on both sides.
++        auth = f"nemo-gym:{secrets.token_hex(16)}"
++        b = shlex.quote(cfg.pod_binary)
++        start = (
++            f"chmod +x {b} && (setsid nohup {b} server --host 0.0.0.0 --port {cfg.server_port} --reverse "
++            f"> {b}.log 2>&1 &)"
++        )
++        res = await self._exec(start, env={"AUTH": auth}, timeout_s=60)
++        if res.return_code != 0:
++            raise RuntimeError(f"model_tunnel: chisel server start failed: {res.stdout!r} {res.stderr!r}")
++
++        endpoint = await self._sandbox.endpoint(cfg.server_port)
++        args = [str(node_bin), "client", "--max-retry-count", str(cfg.max_retry_count), "--max-retry-interval", "10s"]
++        if cfg.tls_skip_verify:
++            args.append("--tls-skip-verify")
++        # chisel takes extra handshake headers only as flags; they carry the provider's auth headers.
++        for key, value in endpoint.headers.items():
++            args += ["--header", f"{key}: {value}"]
++        args += [endpoint.endpoint.rstrip("/"), f"R:127.0.0.1:{cfg.pod_port}:{cfg.target}"]
++        self._proc = await asyncio.create_subprocess_exec(
++            *args,
++            stdout=asyncio.subprocess.PIPE,
++            stderr=asyncio.subprocess.STDOUT,
++            env={**os.environ, "AUTH": auth},
++            start_new_session=True,
++        )
++        self._reader = asyncio.create_task(self._read_client_output())
++
++        exited = asyncio.ensure_future(self._proc.wait())
++        connected = asyncio.ensure_future(self._connected.wait())
++        try:
++            await asyncio.wait({exited, connected}, timeout=cfg.connect_timeout_s, return_when=asyncio.FIRST_COMPLETED)
++        finally:
++            for fut in (exited, connected):
++                if not fut.done():
++                    fut.cancel()
++        if not self._connected.is_set():
++            raise RuntimeError(
++                f"model_tunnel{self._label}: chisel client did not connect within {cfg.connect_timeout_s}s; "
++                f"client output: {self.client_log_tail[-10:]}"
++            )
++        self._logger.debug(
++            "model_tunnel%s: connected, sandbox 127.0.0.1:%s -> %s", self._label, cfg.pod_port, cfg.target
++        )
++
++        if cfg.health_path:
++            script = health_check_script(cfg.pod_port, cfg.health_path)
++            res = await self._exec(f"bash -c {shlex.quote(script)}", timeout_s=60)
++            status_line = (res.stdout or "").strip()
++            parts = status_line.split()
++            if res.return_code != 0 or len(parts) < 2 or not parts[1].startswith("2"):
++                raise RuntimeError(
++                    f"model_tunnel{self._label}: health check GET {cfg.health_path} through the tunnel failed: "
++                    f"rc={res.return_code} {status_line!r} {res.stderr!r}"
++                )
++            return f"GET {cfg.health_path}: {status_line}"
++        return "no health check"
++
++    async def _read_client_output(self) -> None:
++        assert self._proc is not None and self._proc.stdout is not None
++        async for raw in self._proc.stdout:
++            line = raw.decode(errors="replace").rstrip()
++            self._tail.append(line)
++            if _CONNECTED_MARKER in line:
++                self._connected.set()
++
++    async def close(self) -> None:
++        proc, self._proc = self._proc, None
++        if proc is not None and proc.returncode is None:
++            proc.terminate()
++            try:
++                await asyncio.wait_for(proc.wait(), timeout=5)
++            except asyncio.TimeoutError:
++                proc.kill()
++                await proc.wait()
++        reader, self._reader = self._reader, None
++        if reader is not None:
++            try:
++                await asyncio.wait_for(reader, timeout=5)
++            except (asyncio.TimeoutError, asyncio.CancelledError):
++                reader.cancel()
+diff --git a/responses_api_agents/harbor_agent/tests/test_app.py b/responses_api_agents/harbor_agent/tests/test_app.py
+index ae57dd8aa..ab63debcd 100644
+--- a/responses_api_agents/harbor_agent/tests/test_app.py
++++ b/responses_api_agents/harbor_agent/tests/test_app.py
+@@ -531,6 +531,42 @@ class TestApp:
+             == "https://proxy.example.org/gym/ng-rollout/3-1/training-token-capture/v1"
+         )
+ 
++    def test_model_tunnel_kwargs_absent_without_config(self) -> None:
++        assert _make_server()._model_tunnel_kwargs(_GLOBAL_CONFIG) is None
++        server = _make_server(harbor_environment_kwargs={"workdir": "/w"})
++        assert server._model_tunnel_kwargs(_GLOBAL_CONFIG) is None
++
++    def test_model_tunnel_target_defaults_to_model_server(self) -> None:
++        server = _make_server(harbor_environment_kwargs={"model_tunnel": {"chisel_dir": "/c", "pod_port": 8001}})
++        assert server._model_tunnel_kwargs(_GLOBAL_CONFIG) == {
++            "chisel_dir": "/c",
++            "pod_port": 8001,
++            "target": "policy-host:9000",
++        }
++        # the config itself is not mutated (it is shared by all runs)
++        assert "target" not in server.config.harbor_environment_kwargs["model_tunnel"]
++
++    def test_model_tunnel_explicit_target_wins(self) -> None:
++        server = _make_server(harbor_environment_kwargs={"model_tunnel": {"chisel_dir": "/c", "target": "gw:1"}})
++        assert server._model_tunnel_kwargs(_GLOBAL_CONFIG)["target"] == "gw:1"
++
++    def test_build_job_config_passes_resolved_model_tunnel(self) -> None:
++        pytest.importorskip("harbor")
++        server = _make_server(harbor_environment_kwargs={"model_tunnel": {"chisel_dir": "/c"}, "workdir": "/w"})
++        config = server._build_job_config(
++            dataset_alias="scientific",
++            task_name="test_task_123",
++            model_name="test_model",
++            api_base="http://policy-host:9000/v1",
++            job_name="test_job",
++            jobs_dir=Path("/tmp/harbor_jobs"),
++            model_tunnel={"chisel_dir": "/c", "target": "policy-host:9000"},
++        )
++        assert config["environment"]["kwargs"]["model_tunnel"] == {"chisel_dir": "/c", "target": "policy-host:9000"}
++        assert config["environment"]["kwargs"]["workdir"] == "/w"
++        # Terminus-2 keeps calling the model from the node
++        assert config["agents"][0]["kwargs"]["api_base"] == "http://policy-host:9000/v1"
++
+     def test_build_job_config_uses_daytona_type_when_import_path_is_clear(self) -> None:
+         pytest.importorskip("harbor")
+         server = _make_server(
+diff --git a/responses_api_agents/harbor_agent/tests/test_environment.py b/responses_api_agents/harbor_agent/tests/test_environment.py
+index 6116ca5bd..e35b1eda8 100644
+--- a/responses_api_agents/harbor_agent/tests/test_environment.py
++++ b/responses_api_agents/harbor_agent/tests/test_environment.py
+@@ -440,3 +440,66 @@ class TestFileTransfer:
+         target = tmp_path / "verifier-out"
+         await env.download_dir("/logs/verifier", target)
+         assert (target / "reward.txt").read_bytes() == b"1.0"
++
++
++class _RecordingTunnel:
++    instances: list["_RecordingTunnel"] = []
++    fail_open = False
++
++    def __init__(self, sandbox, config, logger, label=""):
++        self.sandbox, self.config, self.label = sandbox, config, label
++        self.opened = self.closed = False
++        _RecordingTunnel.instances.append(self)
++
++    async def open(self):
++        if _RecordingTunnel.fail_open:
++            raise RuntimeError("tunnel down")
++        self.opened = True
++
++    async def close(self):
++        self.closed = True
++
++
++class TestModelTunnel:
++    @pytest.fixture(autouse=True)
++    def _patch_tunnel(self, monkeypatch):
++        from responses_api_agents.harbor_agent.custom_envs.nemo_gym_sandbox import environment as env_module
++
++        _RecordingTunnel.instances.clear()
++        _RecordingTunnel.fail_open = False
++        monkeypatch.setattr(env_module, "ModelTunnel", _RecordingTunnel)
++
++    def test_rejects_unknown_tunnel_keys_at_construction(self, tmp_path):
++        with pytest.raises(ValueError, match="Unknown model_tunnel keys"):
++            _make_environment(tmp_path, model_tunnel={"chisel_dir": "/c", "bogus": 1})
++
++    @pytest.mark.asyncio
++    async def test_no_tunnel_by_default(self, tmp_path):
++        env = _make_environment(tmp_path)
++        await env.start(force_build=False)
++        assert _provider().created_specs[0].ports == ()
++        assert _RecordingTunnel.instances == []
++
++    @pytest.mark.asyncio
++    async def test_tunnel_opens_after_start_and_closes_on_stop(self, tmp_path):
++        env = _make_environment(
++            tmp_path, model_tunnel={"chisel_dir": "/c", "target": "policy-host:9000", "server_port": 9999}
++        )
++        await env.start(force_build=False)
++        provider = _provider()
++        assert provider.created_specs[0].ports == (9999,)  # declared, so sandbox.endpoint() resolves it
++        (tunnel,) = _RecordingTunnel.instances
++        assert tunnel.opened and tunnel.config.target == "policy-host:9000"
++        assert "example-task__trial-1" in tunnel.label
++
++        await env.stop(delete=True)
++        assert tunnel.closed and provider.closed_handles == ["sbx-123"]
++
++    @pytest.mark.asyncio
++    async def test_failed_tunnel_fails_start_and_stop_still_deletes_sandbox(self, tmp_path):
++        _RecordingTunnel.fail_open = True
++        env = _make_environment(tmp_path, model_tunnel={"chisel_dir": "/c", "target": "h:1"})
++        with pytest.raises(RuntimeError, match="tunnel down"):
++            await env.start(force_build=False)
++        await env.stop(delete=True)
++        assert _provider().closed_handles == ["sbx-123"]
+diff --git a/responses_api_agents/harbor_agent/tests/test_model_tunnel.py b/responses_api_agents/harbor_agent/tests/test_model_tunnel.py
+new file mode 100644
+index 000000000..b2877294c
+--- /dev/null
++++ b/responses_api_agents/harbor_agent/tests/test_model_tunnel.py
+@@ -0,0 +1,239 @@
++# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++import http.server
++import json
++import logging
++import os
++import platform
++import shutil
++import subprocess
++import threading
++from pathlib import Path
++from typing import Optional
++
++import pytest
++
++from nemo_gym.sandbox import SandboxExecResult
++from nemo_gym.sandbox.providers.base import SandboxEndpoint
++from responses_api_agents.harbor_agent.custom_envs.nemo_gym_sandbox.model_tunnel import (
++    _ARCH,
++    ModelTunnel,
++    ModelTunnelConfig,
++    health_check_script,
++)
++
++
++NODE_ARCH = _ARCH.get(platform.machine())
++pytestmark = pytest.mark.skipif(NODE_ARCH is None or shutil.which("bash") is None, reason="needs bash on amd64/arm64")
++
++ENDPOINT = SandboxEndpoint(
++    endpoint="https://osb.example/v1/sandboxes/sbx-1/proxy/8765/",
++    headers={"OPEN-SANDBOX-API-KEY": "secret-key", "OpenSandbox-Secure-Access": "tok"},
++)
++
++
++def _fake_chisel(path: Path, record: Path, *, connect: bool = True) -> None:
++    """Stand-in for the node-side chisel client: records argv and AUTH, prints chisel's log lines."""
++    body = (
++        "#!/bin/bash\n"
++        f'python3 -c \'import json,os,sys; json.dump({{"argv": sys.argv[1:], "auth": os.environ.get("AUTH")}}, '
++        f'open("{record}", "w"))\' "$@"\n'
++        'echo "client: Connecting"\n'
++    )
++    if connect:
++        body += 'echo "client: Connected (Latency 1.2ms)"\nexec sleep 60\n'
++    else:
++        body += 'echo "client: Give up"\nexit 1\n'
++    path.write_text(body)
++    path.chmod(0o755)
++
++
++class FakeSandbox:
++    def __init__(self, *, pod_arch: str = "x86_64", health: str = "HTTP/1.1 200 OK", health_rc: int = 0):
++        self.pod_arch = pod_arch
++        self.health = health
++        self.health_rc = health_rc
++        self.exec_calls: list[dict] = []
++        self.uploads: dict[str, bytes] = {}
++
++    async def exec(self, command: str, *, env: Optional[dict] = None, timeout_s=None) -> SandboxExecResult:
++        self.exec_calls.append({"command": command, "env": env})
++        if command == "uname -m":
++            return SandboxExecResult(stdout=f"{self.pod_arch}\n", stderr=None, return_code=0)
++        if command.startswith("bash -c"):
++            return SandboxExecResult(stdout=self.health + "\n", stderr=None, return_code=self.health_rc)
++        return SandboxExecResult(stdout="", stderr=None, return_code=0)
++
++    async def upload(self, local_path, remote_path: str) -> None:
++        self.uploads[remote_path] = Path(local_path).read_bytes()
++
++    async def endpoint(self, port: int) -> SandboxEndpoint:
++        assert port == 8765
++        return ENDPOINT
++
++
++@pytest.fixture
++def chisel_dir(tmp_path: Path) -> Path:
++    d = tmp_path / "chisel"
++    d.mkdir()
++    for arch in ("amd64", "arm64"):
++        (d / f"chisel_1.12.0_linux_{arch}").write_bytes(f"pod-binary-{arch}".encode())
++    return d
++
++
++def _config(chisel_dir: Path, **kw) -> ModelTunnelConfig:
++    return ModelTunnelConfig.from_mapping(
++        {"chisel_dir": str(chisel_dir), "target": "policy-host:9000", "connect_timeout_s": 10, **kw}
++    )
++
++
++def _pid_alive(proc) -> bool:
++    return proc is not None and proc.returncode is None
++
++
++class TestConfig:
++    def test_rejects_unknown_keys(self, chisel_dir):
++        with pytest.raises(ValueError, match="Unknown model_tunnel keys"):
++            ModelTunnelConfig.from_mapping({"chisel_dir": str(chisel_dir), "pod_prot": 8000})
++
++    def test_requires_chisel_dir(self):
++        with pytest.raises(ValueError, match="chisel_dir"):
++            ModelTunnelConfig.from_mapping({"target": "h:1"})
++
++    def test_binary_names_follow_release_assets(self, chisel_dir):
++        assert _config(chisel_dir).binary("arm64") == chisel_dir / "chisel_1.12.0_linux_arm64"
++
++
++class TestOpenClose:
++    @pytest.mark.asyncio
++    async def test_open_starts_both_ends_and_close_stops_client(self, chisel_dir, tmp_path, caplog):
++        record = tmp_path / "client.json"
++        _fake_chisel(chisel_dir / f"chisel_1.12.0_linux_{NODE_ARCH}", record)
++        sandbox = FakeSandbox(pod_arch="x86_64")
++        tunnel = ModelTunnel(sandbox, _config(chisel_dir), logging.getLogger("t"), label=" [trial-1]")
++        with caplog.at_level(logging.INFO, logger="t"):
++            await tunnel.open()
++        assert "model_tunnel [trial-1]: sandbox 127.0.0.1:8000 -> policy-host:9000 up in" in caplog.text
++        assert "GET /health: HTTP/1.1 200 OK" in caplog.text
++        try:
++            # the sandbox gets the binary for ITS architecture
++            assert sandbox.uploads["/tmp/.nemo-gym-chisel"] == (chisel_dir / "chisel_1.12.0_linux_amd64").read_bytes()
++            start = next(c for c in sandbox.exec_calls if "server" in c["command"])
++            assert "--reverse" in start["command"] and "--port 8765" in start["command"]
++            server_auth = start["env"]["AUTH"]
++            assert server_auth.startswith("nemo-gym:") and server_auth not in start["command"]
++
++            client = json.loads(record.read_text())
++            argv = client["argv"]
++            assert argv[0] == "client"
++            assert client["auth"] == server_auth  # same per-sandbox credential, via the environment
++            assert not any(server_auth in a for a in argv)
++            assert argv[-2:] == [
++                "https://osb.example/v1/sandboxes/sbx-1/proxy/8765",
++                "R:127.0.0.1:8000:policy-host:9000",
++            ]
++            assert "OPEN-SANDBOX-API-KEY: secret-key" in argv and "OpenSandbox-Secure-Access: tok" in argv
++            assert "--tls-skip-verify" not in argv
++
++            health = sandbox.exec_calls[-1]["command"]
++            assert health.startswith("bash -c") and "/dev/tcp/127.0.0.1/8000" in health and "GET /health" in health
++            proc = tunnel._proc
++            assert _pid_alive(proc)
++        finally:
++            await tunnel.close()
++        assert proc.returncode is not None
++
++    @pytest.mark.asyncio
++    async def test_client_that_never_connects_fails_with_its_output(self, chisel_dir, tmp_path):
++        _fake_chisel(chisel_dir / f"chisel_1.12.0_linux_{NODE_ARCH}", tmp_path / "c.json", connect=False)
++        tunnel = ModelTunnel(FakeSandbox(), _config(chisel_dir), logging.getLogger("t"))
++        with pytest.raises(RuntimeError, match="did not connect") as exc:
++            await tunnel.open()
++        assert "Give up" in str(exc.value)
++        assert tunnel._proc is None
++
++    @pytest.mark.asyncio
++    async def test_failed_health_check_fails_open_and_stops_client(self, chisel_dir, tmp_path):
++        _fake_chisel(chisel_dir / f"chisel_1.12.0_linux_{NODE_ARCH}", tmp_path / "c.json")
++        tunnel = ModelTunnel(
++            FakeSandbox(health="HTTP/1.1 502 Bad Gateway"),
++            _config(chisel_dir, tls_skip_verify=True),
++            logging.getLogger("t"),
++        )
++        with pytest.raises(RuntimeError, match="health check"):
++            await tunnel.open()
++        assert tunnel._proc is None
++        assert "--tls-skip-verify" in json.loads((tmp_path / "c.json").read_text())["argv"]
++
++    @pytest.mark.asyncio
++    async def test_no_health_check_when_disabled(self, chisel_dir, tmp_path):
++        _fake_chisel(chisel_dir / f"chisel_1.12.0_linux_{NODE_ARCH}", tmp_path / "c.json")
++        sandbox = FakeSandbox(health="garbage", health_rc=1)
++        tunnel = ModelTunnel(sandbox, _config(chisel_dir, health_path=None), logging.getLogger("t"))
++        await tunnel.open()
++        await tunnel.close()
++        assert not any(c["command"].startswith("bash -c") for c in sandbox.exec_calls)
++
++    @pytest.mark.asyncio
++    async def test_missing_target_or_binary(self, chisel_dir):
++        with pytest.raises(ValueError, match="target"):
++            await ModelTunnel(FakeSandbox(), _config(chisel_dir, target=None), logging.getLogger("t")).open()
++        (chisel_dir / "chisel_1.12.0_linux_amd64").unlink()
++        with pytest.raises(FileNotFoundError, match="chisel_1.12.0_linux_amd64"):
++            await ModelTunnel(FakeSandbox(), _config(chisel_dir), logging.getLogger("t")).open()
++
++    @pytest.mark.asyncio
++    async def test_unsupported_sandbox_arch(self, chisel_dir):
++        with pytest.raises(RuntimeError, match="unsupported architecture"):
++            await ModelTunnel(FakeSandbox(pod_arch="s390x"), _config(chisel_dir), logging.getLogger("t")).open()
++
++
++class _Health(http.server.BaseHTTPRequestHandler):
++    def do_GET(self):  # noqa: N802
++        self.send_response(200 if self.path == "/health" else 404)
++        self.end_headers()
++
++    def log_message(self, *args):
++        pass
++
++
++class TestHealthCheckScript:
++    """The script runs for real under bash against a local HTTP server."""
++
++    def test_reports_status_line(self):
++        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Health)
++        threading.Thread(target=server.serve_forever, daemon=True).start()
++        try:
++            port = server.server_address[1]
++            ok = subprocess.run(["bash", "-c", health_check_script(port, "/health")], capture_output=True, text=True)
++            assert ok.returncode == 0 and ok.stdout.split()[1] == "200"
++            missing = subprocess.run(
++                ["bash", "-c", health_check_script(port, "/nope")], capture_output=True, text=True
++            )
++            assert missing.returncode == 0 and missing.stdout.split()[1] == "404"
++        finally:
++            server.shutdown()
++
++    def test_no_listener_fails(self):
++        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Health)
++        port = server.server_address[1]
++        server.server_close()  # nothing listens on the port any more
++        res = subprocess.run(
++            ["bash", "-c", health_check_script(port, "/health", attempts=2)],
++            capture_output=True,
++            text=True,
++            env={**os.environ},
++            timeout=30,
++        )
++        assert res.returncode == 1 and "no answer" in res.stdout
+-- 
+2.55.0
+

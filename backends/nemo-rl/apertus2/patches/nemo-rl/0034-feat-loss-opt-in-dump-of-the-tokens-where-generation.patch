@@ -1,0 +1,692 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Mon, 9 Nov 2026 12:23:52 +0000
+Subject: [PATCH] feat(loss): opt-in dump of the tokens where generation and
+ trainer logprobs disagree
+
+token_mult_prob_error is a token mean of exp(|generation - prev|), so a
+handful of tokens with a gap of 10+ nats dominate it, and the metric does
+not say which tokens they are. Job 5304373 (Apertus 2 SFT checkpoint, FP8
+vLLM, Megatron trainer): 1.03 at step 1, before any refit, then 6.97 and
+26.54, max_seq_mult_prob_error 390, while gen_kl_error stays ~0.0025, i.e.
+a few tokens with generation logprob >> trainer logprob.
+
+With NRL_LOGPROB_DUMP_DIR set in the policy workers' environment (for
+Megatron: policy.megatron_cfg.env_vars), ClippedPGLossFn appends JSON
+lines per loss call to <dir>/logprob-<host>-<pid>.jsonl: a call record
+(rows, valid tokens, tokens over 1/2/5/10 nats, every row's
+seq_mult_prob_error) and, for rows whose largest gap reaches
+NRL_LOGPROB_DUMP_MIN_NATS (default 3), a seq record plus up to
+NRL_LOGPROB_DUMP_MAX_TOKENS (default 32) token records, worst first: token
+id, position, generation/prev/current logprob, advantage, which generated
+burst it is in and its offset there, neighbouring token ids and logprobs.
+A seq_key hash of the token ids joins records across ranks. Tensor
+parallel ranks other than 0 write nothing.
+
+Unset, the hook is one environment lookup. Failures are logged once and
+never raised.
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ nemo_rl/algorithms/loss/logprob_dump.py    | 328 +++++++++++++++++++++
+ nemo_rl/algorithms/loss/loss_functions.py  |  10 +
+ tests/unit/algorithms/test_logprob_dump.py | 284 ++++++++++++++++++
+ 3 files changed, 622 insertions(+)
+ create mode 100644 nemo_rl/algorithms/loss/logprob_dump.py
+ create mode 100644 tests/unit/algorithms/test_logprob_dump.py
+
+diff --git a/nemo_rl/algorithms/loss/logprob_dump.py b/nemo_rl/algorithms/loss/logprob_dump.py
+new file mode 100644
+index 000000000..2c1efa4af
+--- /dev/null
++++ b/nemo_rl/algorithms/loss/logprob_dump.py
+@@ -0,0 +1,328 @@
++# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""Opt-in dump of the tokens where the generation and trainer logprobs disagree.
++
++A diagnostic for a large ``token_mult_prob_error``: that metric is a token mean
++of ``exp(|generation - prev|)``, so a handful of tokens with a gap of 10+ nats
++dominate it and the metric alone cannot say which tokens they are. The policy
++gradient loss has, per microbatch, the generation logprobs (from the inference
++engine), ``prev_logprobs`` (trainer, before the update) and the training
++forward's logprobs; this module writes the worst tokens out with their context.
++
++Enabled by ``NRL_LOGPROB_DUMP_DIR`` in the policy workers' environment (for
++Megatron: ``policy.megatron_cfg.env_vars``). Each loss call then appends JSON
++lines to ``<dir>/logprob-<host>-<pid>.jsonl``:
++
++- one ``call`` record: rows, valid tokens, how many tokens exceed 1/2/5/10 nats,
++  and every row's ``seq_mult_prob_error``;
++- for each row whose largest gap reaches ``NRL_LOGPROB_DUMP_MIN_NATS``
++  (default 3): one ``seq`` record and up to ``NRL_LOGPROB_DUMP_MAX_TOKENS``
++  (default 32) ``tok`` records, worst first, each with
++  ``NRL_LOGPROB_DUMP_WINDOW`` (default 8) token ids on either side.
++
++Rows are identified by ``seq_key``, a hash of their token ids, so records of the
++same sequence from different ranks or passes can be joined offline. Tensor
++parallel ranks other than 0 hold the same data and write nothing.
++
++Unset, the hook costs one environment lookup. A failure is logged once and never
++raised: a diagnostic must not stop training.
++"""
++
++from __future__ import annotations
++
++import hashlib
++import json
++import logging
++import math
++import os
++import socket
++import time
++from typing import Any, Optional, Sequence
++
++log = logging.getLogger(__name__)
++
++DIR_ENV = "NRL_LOGPROB_DUMP_DIR"
++MIN_NATS_ENV = "NRL_LOGPROB_DUMP_MIN_NATS"
++MAX_TOKENS_ENV = "NRL_LOGPROB_DUMP_MAX_TOKENS"
++WINDOW_ENV = "NRL_LOGPROB_DUMP_WINDOW"
++
++THRESHOLDS = (1.0, 2.0, 5.0, 10.0)
++# exp() of a larger gap overflows a float; the per-row error is a diagnostic only.
++_MAX_EXP_ARG = 50.0
++
++_state: dict[str, Any] = {"calls": 0, "warned": False}
++
++
++def enabled() -> bool:
++    """Whether the dump is switched on in this process."""
++    return bool(os.environ.get(DIR_ENV))
++
++
++def _gap(generation: float, prev: float) -> float:
++    gap = abs(generation - prev)
++    return gap if math.isfinite(gap) else 0.0
++
++
++def masked_runs(mask: Sequence[float]) -> list[tuple[int, int]]:
++    """Return the ``[start, end)`` index ranges of consecutive ``mask > 0`` entries.
++
++    In a multi-turn conversation each range is one generated burst.
++    """
++    runs: list[tuple[int, int]] = []
++    start: Optional[int] = None
++    for index, value in enumerate(mask):
++        if value > 0 and start is None:
++            start = index
++        elif value <= 0 and start is not None:
++            runs.append((start, index))
++            start = None
++    if start is not None:
++        runs.append((start, len(mask)))
++    return runs
++
++
++def _seq_key(input_ids: Optional[Sequence[int]], end: int) -> Optional[str]:
++    if input_ids is None:
++        return None
++    payload = ",".join(str(int(token)) for token in input_ids[:end]).encode()
++    return hashlib.sha1(payload).hexdigest()[:16]
++
++
++def _round(values: Sequence[float]) -> list[Optional[float]]:
++    return [round(v, 4) if math.isfinite(v) else None for v in values]
++
++
++def row_records(
++    *,
++    input_ids: Optional[Sequence[int]],
++    generation_logprobs: Sequence[float],
++    prev_logprobs: Sequence[float],
++    curr_logprobs: Sequence[float],
++    mask: Sequence[float],
++    advantages: Optional[Sequence[float]] = None,
++    min_nats: float = 3.0,
++    max_tokens: int = 32,
++    window: int = 8,
++) -> tuple[Optional[dict[str, Any]], list[dict[str, Any]]]:
++    """Build the ``seq`` record and the ``tok`` records of one row.
++
++    The logprob, mask and advantage lists are the loss function's ``[:, 1:]``
++    view: entry ``j`` scores token ``input_ids[j + 1]``. Positions in the records
++    (``pos``, ``run_start``) index ``input_ids``.
++
++    Returns ``(None, [])`` when no valid token's gap reaches ``min_nats``.
++    """
++    gaps = [
++        _gap(g, p) if m > 0 else 0.0
++        for g, p, m in zip(generation_logprobs, prev_logprobs, mask)
++    ]
++    max_gap = max(gaps, default=0.0)
++    if max_gap < min_nats:
++        return None, []
++
++    valid = [j for j, m in enumerate(mask) if m > 0]
++    runs = masked_runs(mask)
++    run_of: dict[int, tuple[int, int, int]] = {}
++    for run_index, (start, end) in enumerate(runs):
++        for j in range(start, end):
++            run_of[j] = (run_index, start, end)
++    last_pos = valid[-1] + 1
++    seq_key = _seq_key(input_ids, last_pos + 1)
++    seq_error = sum(math.exp(min(gaps[j], _MAX_EXP_ARG)) for j in valid) / len(valid)
++
++    seq = {
++        "kind": "seq",
++        "seq_key": seq_key,
++        "input_len": len(input_ids) if input_ids is not None else None,
++        "last_pos": last_pos,
++        "valid_tokens": len(valid),
++        "runs": len(runs),
++        "max_gap": round(max_gap, 4),
++        "seq_mult_prob_error": round(seq_error, 4),
++        "over": {f"{t:g}": sum(1 for j in valid if gaps[j] > t) for t in THRESHOLDS},
++    }
++
++    worst = sorted(
++        (j for j in valid if gaps[j] >= min_nats), key=lambda j: (-gaps[j], j)
++    )[:max_tokens]
++    tokens = []
++    for j in worst:
++        pos = j + 1
++        run_index, start, end = run_of[j]
++        lo, hi = max(0, j - 2), j + 3
++        record: dict[str, Any] = {
++            "kind": "tok",
++            "seq_key": seq_key,
++            "pos": pos,
++            "gap": round(gaps[j], 4),
++            "gen": round(generation_logprobs[j], 4),
++            "prev": round(prev_logprobs[j], 4),
++            "curr": round(curr_logprobs[j], 4),
++            "adv": round(advantages[j], 4) if advantages is not None else None,
++            "run": run_index,
++            "run_start": start + 1,
++            "run_offset": j - start,
++            "run_len": end - start,
++            "gen_ctx": _round(generation_logprobs[lo:hi]),
++            "prev_ctx": _round(prev_logprobs[lo:hi]),
++        }
++        if input_ids is not None:
++            record["token"] = int(input_ids[pos])
++            record["before"] = [int(t) for t in input_ids[max(0, pos - window) : pos]]
++            record["after"] = [int(t) for t in input_ids[pos + 1 : pos + 1 + window]]
++        tokens.append(record)
++    return seq, tokens
++
++
++def _env_float(name: str, default: float) -> float:
++    value = os.environ.get(name)
++    return float(value) if value else default
++
++
++def _env_int(name: str, default: int) -> int:
++    value = os.environ.get(name)
++    return int(value) if value else default
++
++
++def _is_duplicate_rank() -> bool:
++    """Tensor parallel ranks other than 0 see the same logprobs as rank 0."""
++    try:
++        from megatron.core import parallel_state
++
++        if parallel_state.model_parallel_is_initialized():
++            return parallel_state.get_tensor_model_parallel_rank() != 0
++    except Exception:  # noqa: BLE001  (no Megatron, or not initialized)
++        pass
++    return False
++
++
++def _global_rank() -> Optional[int]:
++    try:
++        import torch.distributed as dist
++
++        return dist.get_rank() if dist.is_initialized() else None
++    except Exception:  # noqa: BLE001
++        return None
++
++
++def dump(
++    *,
++    input_ids: Any,
++    generation_logprobs: Any,
++    prev_logprobs: Any,
++    curr_logprobs: Any,
++    mask: Any,
++    advantages: Any = None,
++) -> None:
++    """Append this microbatch's records; never raises.
++
++    All tensors are ``[B, S - 1]`` (the loss function's ``[:, 1:]`` view) except
++    ``input_ids``, which is ``[B, S]`` or None.
++    """
++    try:
++        _dump(
++            input_ids=input_ids,
++            generation_logprobs=generation_logprobs,
++            prev_logprobs=prev_logprobs,
++            curr_logprobs=curr_logprobs,
++            mask=mask,
++            advantages=advantages,
++        )
++    except Exception as error:  # noqa: BLE001  (a diagnostic must not stop training)
++        if not _state["warned"]:
++            _state["warned"] = True
++            log.warning("logprob dump failed, continuing without it: %r", error)
++
++
++def _dump(
++    *,
++    input_ids: Any,
++    generation_logprobs: Any,
++    prev_logprobs: Any,
++    curr_logprobs: Any,
++    mask: Any,
++    advantages: Any,
++) -> None:
++    import torch
++
++    directory = os.environ.get(DIR_ENV)
++    if not directory or _is_duplicate_rank():
++        return
++    min_nats = _env_float(MIN_NATS_ENV, 3.0)
++    max_tokens = _env_int(MAX_TOKENS_ENV, 32)
++    window = _env_int(WINDOW_ENV, 8)
++
++    _state["calls"] += 1
++    with torch.no_grad():
++        generation = generation_logprobs.detach().float()
++        prev = prev_logprobs.detach().float()
++        curr = curr_logprobs.detach().float()
++        valid = mask.detach() > 0
++        gap = torch.nan_to_num((generation - prev).abs(), nan=0.0, posinf=0.0)
++        gap = torch.where(valid, gap, torch.zeros_like(gap))
++        valid_per_row = valid.sum(dim=-1)
++        seq_error = (torch.exp(gap.clamp(max=_MAX_EXP_ARG)) * valid).sum(
++            dim=-1
++        ) / valid_per_row.clamp(min=1)
++        row_max = gap.max(dim=-1).values
++        rows = torch.nonzero(row_max >= min_nats).flatten().tolist()
++        call = {
++            "kind": "call",
++            "call": _state["calls"],
++            "time": round(time.time(), 3),
++            "host": socket.gethostname(),
++            "pid": os.getpid(),
++            "rank": _global_rank(),
++            "rows": int(gap.shape[0]),
++            "valid_tokens": int(valid_per_row.sum()),
++            "max_gap": round(float(row_max.max()), 4) if gap.numel() else 0.0,
++            "over": {f"{t:g}": int((gap > t).sum()) for t in THRESHOLDS},
++            "seq_mult_prob_error": [
++                round(float(e), 4)
++                for e, n in zip(seq_error.tolist(), valid_per_row.tolist())
++                if n > 0
++            ],
++        }
++
++    records: list[dict[str, Any]] = [call]
++    for row in rows:
++        seq, tokens = row_records(
++            input_ids=input_ids[row].tolist() if input_ids is not None else None,
++            generation_logprobs=generation[row].tolist(),
++            prev_logprobs=prev[row].tolist(),
++            curr_logprobs=curr[row].tolist(),
++            mask=valid[row].float().tolist(),
++            advantages=advantages[row].detach().float().tolist()
++            if advantages is not None
++            else None,
++            min_nats=min_nats,
++            max_tokens=max_tokens,
++            window=window,
++        )
++        if seq is None:
++            continue
++        seq["call"] = _state["calls"]
++        seq["row"] = row
++        for token in tokens:
++            token["call"] = _state["calls"]
++        records.append(seq)
++        records.extend(tokens)
++
++    os.makedirs(directory, exist_ok=True)
++    path = os.path.join(
++        directory, f"logprob-{socket.gethostname()}-{os.getpid()}.jsonl"
++    )
++    with open(path, "a") as handle:
++        for record in records:
++            handle.write(json.dumps(record, separators=(",", ":")) + "\n")
+diff --git a/nemo_rl/algorithms/loss/loss_functions.py b/nemo_rl/algorithms/loss/loss_functions.py
+index 09732161f..95c1b429c 100755
+--- a/nemo_rl/algorithms/loss/loss_functions.py
++++ b/nemo_rl/algorithms/loss/loss_functions.py
+@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, NotRequired, Optional, TypedDict, TypeVar
+ import torch
+ from pydantic import BaseModel, Field
+ 
++from nemo_rl.algorithms.loss import logprob_dump
+ from nemo_rl.algorithms.loss.draft import (
+     DEFAULT_DRAFT_TOKEN_CHUNK_SIZE,
+     DraftLossStats,
+@@ -538,6 +539,15 @@ class ClippedPGLossFn(LossFunction):
+         # token_mult_prob_error
+         # See more details and other metrics in docs/guides/grpo.md#metrics
+         lp_error = torch.abs(finite_generation_logprobs - prev_logprobs)  # noqa: F841  (precommit ignore for now)
++        if logprob_dump.enabled():
++            logprob_dump.dump(
++                input_ids=data.get("input_ids"),
++                generation_logprobs=finite_generation_logprobs,
++                prev_logprobs=prev_logprobs,
++                curr_logprobs=curr_logprobs,
++                mask=mask,
++                advantages=advantages,
++            )
+         # average over all tokens in the microbatch
+         mult_prob_error = masked_mean(
+             torch.exp(lp_error * mask),
+diff --git a/tests/unit/algorithms/test_logprob_dump.py b/tests/unit/algorithms/test_logprob_dump.py
+new file mode 100644
+index 000000000..7624e1ce8
+--- /dev/null
++++ b/tests/unit/algorithms/test_logprob_dump.py
+@@ -0,0 +1,284 @@
++# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""Tests for the opt-in logprob outlier dump (nemo_rl.algorithms.loss.logprob_dump)."""
++
++import json
++import math
++
++import pytest
++
++from nemo_rl.algorithms.loss import logprob_dump
++from nemo_rl.algorithms.loss.logprob_dump import masked_runs, row_records
++
++# 12 tokens: prompt 0-2, burst A 3-5, tool output 6-8, burst B 9-11.
++IDS = [100, 101, 102, 7, 8, 9, 200, 201, 202, 10, 11, 12]
++# The loss function's [:, 1:] view: entry j scores IDS[j + 1].
++MASK = [0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1]
++
++
++def _lists(gaps: dict[int, float]):
++    prev = [-1.0] * len(MASK)
++    gen = [p + gaps.get(j, 0.0) for j, p in enumerate(prev)]
++    curr = [p - 0.01 for p in prev]
++    adv = [0.5] * len(MASK)
++    return gen, prev, curr, adv
++
++
++def test_masked_runs_finds_each_burst():
++    assert masked_runs(MASK) == [(2, 5), (8, 11)]
++    assert masked_runs([1, 1, 0, 1]) == [(0, 2), (3, 4)]
++    assert masked_runs([0, 0]) == []
++    assert masked_runs([]) == []
++
++
++def test_row_below_threshold_gives_nothing():
++    gen, prev, curr, adv = _lists({3: 2.9})
++    assert row_records(
++        input_ids=IDS,
++        generation_logprobs=gen,
++        prev_logprobs=prev,
++        curr_logprobs=curr,
++        mask=MASK,
++        advantages=adv,
++        min_nats=3.0,
++    ) == (None, [])
++
++
++def test_masked_positions_are_ignored_even_with_a_large_gap():
++    # j = 5 and 6 score the tool output (mask 0): never reported.
++    gen, prev, curr, adv = _lists({5: 20.0, 6: 30.0})
++    seq, tokens = row_records(
++        input_ids=IDS,
++        generation_logprobs=gen,
++        prev_logprobs=prev,
++        curr_logprobs=curr,
++        mask=MASK,
++        advantages=adv,
++    )
++    assert seq is None and tokens == []
++
++
++def test_token_record_locates_the_token_in_its_burst():
++    # j = 9 scores IDS[10] = 11, the second token of burst B (runs index 1).
++    gen, prev, curr, adv = _lists({9: 12.0, 3: 4.0})
++    seq, tokens = row_records(
++        input_ids=IDS,
++        generation_logprobs=gen,
++        prev_logprobs=prev,
++        curr_logprobs=curr,
++        mask=MASK,
++        advantages=adv,
++        min_nats=3.0,
++        window=3,
++    )
++    assert seq is not None
++    assert seq["valid_tokens"] == 6
++    assert seq["runs"] == 2
++    assert seq["last_pos"] == 11
++    assert seq["input_len"] == 12
++    assert seq["max_gap"] == 12.0
++    assert seq["over"] == {"1": 2, "2": 2, "5": 1, "10": 1}
++    expected = (4 * 1.0 + math.exp(12.0) + math.exp(4.0)) / 6
++    assert seq["seq_mult_prob_error"] == pytest.approx(expected, rel=1e-4)
++
++    worst, second = tokens
++    assert worst["kind"] == "tok"
++    assert worst["seq_key"] == seq["seq_key"]
++    assert worst["pos"] == 10 and worst["token"] == 11
++    assert worst["gap"] == 12.0
++    assert worst["gen"] == 11.0 and worst["prev"] == -1.0 and worst["curr"] == -1.01
++    assert worst["adv"] == 0.5
++    assert worst["run"] == 1
++    assert worst["run_start"] == 9 and worst["run_offset"] == 1 and worst["run_len"] == 3
++    assert worst["before"] == [201, 202, 10]
++    assert worst["after"] == [12]
++    # j - 2 .. j + 2, cut at the end of the row
++    assert worst["gen_ctx"] == [-1.0, -1.0, 11.0, -1.0]
++    # j = 3 scores IDS[4] = 8, the second token of burst A
++    assert second["pos"] == 4 and second["token"] == 8 and second["run"] == 0
++    assert second["run_offset"] == 1
++
++
++def test_tokens_are_worst_first_and_capped():
++    gen, prev, curr, adv = _lists({2: 4.0, 3: 9.0, 4: 6.0, 8: 5.0})
++    _, tokens = row_records(
++        input_ids=IDS,
++        generation_logprobs=gen,
++        prev_logprobs=prev,
++        curr_logprobs=curr,
++        mask=MASK,
++        advantages=adv,
++        max_tokens=2,
++    )
++    assert [t["pos"] for t in tokens] == [4, 5]
++    assert [t["gap"] for t in tokens] == [9.0, 6.0]
++
++
++def test_sequence_key_ignores_padding_and_distinguishes_sequences():
++    gen, prev, curr, adv = _lists({3: 5.0})
++    common = dict(
++        generation_logprobs=gen + [0.0, 0.0],
++        prev_logprobs=prev + [0.0, 0.0],
++        curr_logprobs=curr + [0.0, 0.0],
++        mask=MASK + [0, 0],
++        advantages=adv + [0.0, 0.0],
++    )
++    padded, _ = row_records(input_ids=IDS + [0, 0], **common)
++    plain, _ = row_records(
++        input_ids=IDS,
++        generation_logprobs=gen,
++        prev_logprobs=prev,
++        curr_logprobs=curr,
++        mask=MASK,
++        advantages=adv,
++    )
++    other, _ = row_records(input_ids=[1] + IDS[1:] + [0, 0], **common)
++    assert padded["seq_key"] == plain["seq_key"]
++    assert other["seq_key"] != plain["seq_key"]
++
++
++def test_non_finite_logprobs_do_not_count_and_huge_gaps_do_not_overflow():
++    gen, prev, curr, adv = _lists({3: 900.0})
++    prev[4] = float("-inf")
++    seq, tokens = row_records(
++        input_ids=IDS,
++        generation_logprobs=gen,
++        prev_logprobs=prev,
++        curr_logprobs=curr,
++        mask=MASK,
++        advantages=adv,
++    )
++    assert [t["pos"] for t in tokens] == [4]
++    assert math.isfinite(seq["seq_mult_prob_error"])
++    assert tokens[0]["prev_ctx"][3] is None
++
++
++def test_without_input_ids_records_have_no_tokens():
++    gen, prev, curr, adv = _lists({3: 5.0})
++    seq, tokens = row_records(
++        input_ids=None,
++        generation_logprobs=gen,
++        prev_logprobs=prev,
++        curr_logprobs=curr,
++        mask=MASK,
++        advantages=None,
++    )
++    assert seq["seq_key"] is None and seq["input_len"] is None
++    assert "token" not in tokens[0] and tokens[0]["adv"] is None
++
++
++def test_enabled_follows_the_environment(monkeypatch):
++    monkeypatch.delenv(logprob_dump.DIR_ENV, raising=False)
++    assert not logprob_dump.enabled()
++    monkeypatch.setenv(logprob_dump.DIR_ENV, "")
++    assert not logprob_dump.enabled()
++    monkeypatch.setenv(logprob_dump.DIR_ENV, "/some/dir")
++    assert logprob_dump.enabled()
++
++
++def test_dump_never_raises(monkeypatch, tmp_path, caplog):
++    monkeypatch.setenv(logprob_dump.DIR_ENV, str(tmp_path))
++    monkeypatch.setitem(logprob_dump._state, "warned", False)
++    monkeypatch.setattr(logprob_dump, "_is_duplicate_rank", lambda: False)
++    for _ in range(2):
++        logprob_dump.dump(
++            input_ids=None,
++            generation_logprobs=object(),
++            prev_logprobs=object(),
++            curr_logprobs=object(),
++            mask=object(),
++        )
++    assert sum("logprob dump failed" in r.message for r in caplog.records) == 1
++
++
++# ---- torch glue: needs a real torch (skipped where only stubs exist) ----
++
++
++def _read(directory):
++    records = []
++    for path in sorted(directory.glob("logprob-*.jsonl")):
++        records.extend(json.loads(line) for line in path.read_text().splitlines())
++    return records
++
++
++def test_dump_writes_call_seq_and_token_records(monkeypatch, tmp_path):
++    torch = pytest.importorskip("torch", minversion="2.0")
++    monkeypatch.setenv(logprob_dump.DIR_ENV, str(tmp_path))
++    monkeypatch.setenv(logprob_dump.MIN_NATS_ENV, "3")
++    gen, prev, curr, adv = _lists({9: 12.0})
++    clean = list(prev)
++    logprob_dump.dump(
++        input_ids=torch.tensor([IDS, IDS]),
++        generation_logprobs=torch.tensor([gen, clean]),
++        prev_logprobs=torch.tensor([prev, prev]),
++        curr_logprobs=torch.tensor([curr, curr], requires_grad=True),
++        mask=torch.tensor([MASK, MASK], dtype=torch.float32),
++        advantages=torch.tensor([adv, adv]),
++    )
++    records = _read(tmp_path)
++    kinds = [r["kind"] for r in records]
++    assert kinds == ["call", "seq", "tok"]
++    call, seq, tok = records
++    assert call["rows"] == 2 and call["valid_tokens"] == 12
++    assert call["over"] == {"1": 1, "2": 1, "5": 1, "10": 1}
++    assert call["seq_mult_prob_error"][1] == pytest.approx(1.0)
++    assert seq["row"] == 0 and seq["call"] == call["call"]
++    assert tok["pos"] == 10 and tok["token"] == 11 and tok["call"] == call["call"]
++
++
++def test_dump_is_inert_without_the_environment(monkeypatch, tmp_path):
++    torch = pytest.importorskip("torch", minversion="2.0")
++    monkeypatch.delenv(logprob_dump.DIR_ENV, raising=False)
++    gen, prev, curr, adv = _lists({9: 12.0})
++    logprob_dump.dump(
++        input_ids=torch.tensor([IDS]),
++        generation_logprobs=torch.tensor([gen]),
++        prev_logprobs=torch.tensor([prev]),
++        curr_logprobs=torch.tensor([curr]),
++        mask=torch.tensor([MASK]),
++    )
++    assert list(tmp_path.iterdir()) == []
++
++
++def test_clipped_pg_loss_dumps_its_outlier_tokens(monkeypatch, tmp_path):
++    torch = pytest.importorskip("torch", minversion="2.0")
++    from nemo_rl.algorithms.loss import ClippedPGLossConfig, ClippedPGLossFn
++    from nemo_rl.distributed.batched_data_dict import BatchedDataDict
++
++    monkeypatch.setenv(logprob_dump.DIR_ENV, str(tmp_path))
++    seq_len = len(IDS)
++    token_mask = torch.tensor([[0] + MASK])
++    prev = torch.full((1, seq_len), -1.0)
++    gen = prev.clone()
++    gen[0, 10] = 11.0  # scores IDS[10]
++    data = BatchedDataDict(
++        {
++            "input_ids": torch.tensor([IDS]),
++            "token_mask": token_mask,
++            "sample_mask": torch.ones(1, dtype=torch.int64),
++            "advantages": torch.zeros((1, seq_len)),
++            "prev_logprobs": prev,
++            "reference_policy_logprobs": torch.zeros((1, seq_len)),
++            "generation_logprobs": gen,
++        }
++    )
++    loss_fn = ClippedPGLossFn(ClippedPGLossConfig(reference_policy_kl_penalty=0.0))
++    loss_fn(
++        next_token_logprobs=torch.full((1, seq_len - 1), -1.0),
++        data=data,
++        global_valid_seqs=torch.tensor(1),
++        global_valid_toks=torch.sum(token_mask),
++    )
++    tokens = [r for r in _read(tmp_path) if r["kind"] == "tok"]
++    assert [(t["pos"], t["token"], t["gap"]) for t in tokens] == [(10, 11, 12.0)]
+-- 
+2.56.0
+

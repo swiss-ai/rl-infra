@@ -88,7 +88,9 @@ while [[ ! -e "${LOG_DIR}/ENDED" ]]; do
   fi
   size=$(stat -c %s "${DRIVER_LOG}")
   if (( size > offset )); then
-    hit="$(tail -c +$(( offset + 1 )) "${DRIVER_LOG}" | awk -v max="${MAX_CHARS}" 'length($0) < max' \
+    # the one-line MasterConfig dump has "deepep" and many *timeout* keys (false alarm in jobs 5255374, 5255592);
+    # it is longer than MAX_CHARS too, but its length depends on the config
+    hit="$(tail -c +$(( offset + 1 )) "${DRIVER_LOG}" | grep -v "MasterConfig(" | awk -v max="${MAX_CHARS}" 'length($0) < max' \
       | grep -m1 -iE "${TIMEOUT_RE}")"
     offset=${size}
     if [[ -n "${hit}" ]] && (( now - last_dump >= 120 )); then

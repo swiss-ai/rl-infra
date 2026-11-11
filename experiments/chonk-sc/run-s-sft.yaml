@@ -1,0 +1,90 @@
+# Run S: run B on the SFT checkpoint. Merged last by ../../run-harbor-osb.sh, after
+#   ../../recipes/apertus2-chonk-sft-vllm-adamw-tools.yaml   12 nodes: 8 trainer (Megatron PP2 EP16,
+#                                                             CPU AdamW) + 4 vLLM (TP1 EP4, FP8), 16384 tokens
+#   ../../envs/harbor-osb-sft.yaml                            Terminus-2 in the Apertus 2 message format
+#                                                             (output_format apertus2, system prompt,
+#                                                             stop token 12, thinking budget 4096, 6144
+#                                                             new tokens per turn); its defaults/script
+#                                                             lines stripped (common.sh, sft_task_copy)
+#   run-b-harbor-sc.yaml                                      SC, token capture, 3 steps
+# and adds what differs from main's Gym-entrypoint runs of that task (HANGANG jobs 1210063-1210341):
+# the SFT model on Alps, run B's data and pod labels, no validation, no checkpoint, longer timeouts.
+# Launched by run-s.sh. Research report 2026-11-05-sft-checkpoint-for-harbor-runs.md, sections 4-5.
+
+# run B's tasks ($HARBOR_ROOT/{train,validation}.jsonl, tasks/) instead of $SCRATCH/harbor/micro
+harbor_data_dir: ${oc.env:HARBOR_ROOT}
+
+grpo:
+  # SC has no validation (check.py); the task file turns it on for the Gym entrypoint
+  val_period: 0
+  val_at_start: false
+  val_at_end: false
+
+checkpointing:
+  # 3-step run: skip the 200 GB checkpoint write (the task file saves every 10 steps)
+  enabled: false
+
+policy:
+  # Rob's HF export of the last SFT save, staged here by run-s.sh (stage_model.sh: shards linked to
+  # /capstor, config.json with the auto_map for the modeling code); vLLM loads it, Megatron imports it
+  model_name: ${oc.env:SCRATCH}/models/chonk-lc-16k-v0.1-ep1-iter_0019374
+  generation:
+    vllm_cfg:
+      # Explicit default, kept on purpose; a decision for an RL/algorithm specialist (HANDOFF §8, note
+      # research/reports/2026-11-09-forced-thinking-tokens-note.md). vLLM's thinking budget
+      # (thinking_token_budget 4096, envs/harbor-osb-sft.yaml) forces <|/out|> at 4096 thinking tokens.
+      # processed_logprobs reports that forced token with logprob 0 (trainer: -10..-27). Consequences:
+      # - training: IS correction is on (TIS 2.0, inherited from
+      #   experiments/grpo-chonk/chonk-gsm8k-9n-megatron-128x16-async.yaml), so the forced token's weight
+      #   exp(prev - gen) is ~e^-20: it is left out of the gradient (as in every run so far);
+      # - metrics: token_mult_prob_error / policy_kl_error / *seq_mult_prob_error are dominated by these
+      #   tokens (job 5305277: 6.25e6 / 14 / 70) and are no alarm; the 0034 dump (run-s-lpdump.yaml) shows
+      #   whether outliers are only the forced <|/out|> at burst offset ~4099.
+      # raw_logprobs would make the metrics honest but train the forced tokens (weight ~1); not chosen.
+      logprobs_mode: processed_logprobs
+
+async_rl:
+  rollout_failure:
+    nemo_gym:
+      # up to 20 turns of up to 6144 new tokens, with thinking, per trial (run B at 1024 per turn:
+      # 1800); a prompt group still has to finish within the micro-task's agent timeout of 900 s
+      # plus the sandbox start and the verifier
+      rollout_timeout_s: 3000
+  stall_watchdog:
+    # must exceed rollout_timeout_s
+    stall_timeout_s: 3300
+
+env:
+  nemo_gym:
+    sandbox:
+      opensandbox:
+        connection:
+          # the task file sets api_key null and asks for the key's file; the key itself never enters
+          # the config (run-s.sh exports the absolute path, HOME in the container is not the user's)
+          api_key_file: ${oc.env:OPENSANDBOX_API_KEY_FILE}
+        # the task file labels the pods user=rl-infra, run=${logger.wandb.name}; without W&B that name
+        # is the recipe's constant, and ../../envs/reap_after.sh deletes by NEMO_GYM_RUN_ID and
+        # NEMO_GYM_USER, which run-harbor-osb.sh exports, as for run B
+        attribution:
+          user: ${oc.env:NEMO_GYM_USER}
+          workload: ${oc.env:NEMO_GYM_WORKLOAD}
+          run: ${oc.env:NEMO_GYM_RUN_ID}
+    harbor_agent:
+      responses_api_agents:
+        harbor_agent:
+          harbor_datasets:
+            # run B's rows name this alias (../../envs/harbor-osb.yaml); the task file's `micro` alias
+            # stays and points at the same tree through harbor_data_dir
+            swe_lego:
+              local_dataset_path: ${oc.env:HARBOR_TASKS_DIR}
+          harbor_environment_kwargs:
+            sandbox_provider_options:
+              # swe_lego_v05_1 is no longer public (pull 401 since about 2026-10-29, job 5317993): a robot
+              # account's `name:password` file (run-s.sh: RL_REGISTRY_CRED_FILE, default ~/.rl_registry_cred),
+              # read by Gym patch 0028 at create time, so the password is not in this config (NeMo-RL prints
+              # and saves it in full). `registry`: only images from there get it, not Docker Hub (micro tasks).
+              image_auth:
+                credentials_file: ${oc.env:RL_REGISTRY_CRED_FILE}
+                registry: rl-registry.swissai.svc.cscs.ch
+          # as run B, where the trial directories are downloaded from (the task file: next to the weights)
+          harbor_jobs_dir: ${oc.env:HARBOR_ROOT}/jobs

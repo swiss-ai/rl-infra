@@ -1,0 +1,67 @@
+# Task file for the Single-Controller variant of the token-capture test: the legacy task
+# (../token-capture-test/mini-swe-osb.yaml, mini_swe_agent_2 on OpenSandbox, 2 prompts x 2
+# generations, 1 step) plus what examples/run_grpo_single_controller.py needs, and token capture
+# at the model endpoint. Merged over qwen3-4b-1n-sc.yaml by run.sh in this directory.
+#
+# With token_capture.enabled, NeMo-RL (environments/nemo_gym.py ~660-700) turns off Gym's token
+# echo (policy_model return_token_id_information=false) and turns on Gym's external staging: the
+# vLLM worker's HTTP server records the token ids of every call, keyed by the rollout id in the
+# URL that Gym's agents get from base_url_for_run, and the RolloutReassembler rebuilds the
+# trajectory from them. Nothing in the harness has to carry token ids. Settings follow
+# examples/nemo_gym/grpo_qwen3_0_6b_megatron_generation_single_controller.yaml and
+# tests/functional/grpo_async_gym_single_controller.sh (run there with token_capture.enabled=true).
+defaults: ../token-capture-test/mini-swe-osb.yaml
+
+grpo:
+  # the entrypoint raises unless the legacy async block is null
+  async_grpo: null
+  # the base KL penalty (0.01) needs reference logprobs; Single-Controller checks the pair
+  skip_reference_policy_logprobs_calculation: false
+  # not supported together with token capture (setup raises)
+  invalid_tool_call_advantage: null
+  malformed_thinking_advantage: null
+
+loss_fn:
+  # inert at max_lookahead_versions 0 (all ratios 1), set as in the upstream examples
+  use_importance_sampling_correction: true
+
+# TransferQueue data plane, mandatory for Single-Controller
+data_plane:
+  enabled: true
+  impl: transfer_queue
+  backend: simple
+  claim_meta_poll_interval_s: 0.5
+  simple:
+    # TransferQueue wants at least 2 per node
+    num_storage_units: 2
+
+async_rl:
+  sampler:
+    name: in_order
+    # 0 = synchronous: generation never runs ahead of the trainer
+    max_lookahead_versions: 0
+  recompute_kv_cache_after_weight_updates: true
+  min_groups_for_streaming_train: ${grpo.num_prompts_per_step}
+  max_inflight_prompts: ${grpo.num_prompts_per_step}
+  max_buffered_rollouts: ${grpo.num_prompts_per_step}
+  rollout_failure:
+    # a test: fail on the first broken rollout instead of retrying it elsewhere
+    max_infra_attempts_per_prompt: 1
+    max_data_attempts_per_prompt: 1
+    nemo_gym:
+      # whole prompt group (2 mini-swe-agent runs of up to 10 steps, plus SWE-bench eval)
+      rollout_timeout_s: 2700
+  stall_watchdog:
+    # must exceed rollout_timeout_s
+    stall_timeout_s: 3000
+    stall_action: abort
+
+token_capture:
+  enabled: true
+
+reward_penalties:
+  # skipped on the capture path anyway; off to make that explicit
+  penalize_duplicated_reasoning: false
+  penalize_empty_final_answer: false
+  penalize_unwanted_tokens: false
+  penalize_malformed_think_tag: false
