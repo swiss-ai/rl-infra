@@ -1,0 +1,12 @@
+{
+  "walar_dir": "/users/jgarciagilabert/projects/WALAR",
+  "glotlid_model": "/iopsstor/scratch/cscs/jgarciagilabert/mt-reward-models/glotlid.bin",
+  "masklid_model": "/iopsstor/scratch/cscs/jgarciagilabert/mt-reward-models/masklid.bin",
+  "languages": {
+    "es": "spa_Latn",
+    "de": "deu_Latn"
+  },
+  "max_length": 1536,
+  "alignment_weight": 20,
+  "chrf_weight": 20
+}

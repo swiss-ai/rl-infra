@@ -13,6 +13,7 @@
 #   PREFLIGHT=0 skips the config check (preflight.sh) done before submission.
 #   PIN_FILE, DRIVER_PYTHON select another NeMo-RL source/image stack (see apertus2/launch.sh).
 #   DRY_RUN=1 prints the sbatch command and the container setup instead of submitting.
+#   RUN_IN_ALLOCATION=1 runs ray.sub directly inside an existing Slurm allocation.
 #   WANDB_PROJECT (and WANDB_ENTITY), e.g. in site.env, log the run to Weights & Biases under
 #   its run name; the API key is read from WANDB_KEY_FILE (default ~/.wandb_api_key) at job start.
 #
@@ -158,6 +159,18 @@ fi
 
 # ray.sub writes logs and helper files into the submit dir, so submit from scratch.
 cd "${OUT}/slurm"
+if [[ "${RUN_IN_ALLOCATION:-0}" == 1 ]]; then
+    [[ -n "${SLURM_JOB_ID:-}" ]] || { echo "ERROR: RUN_IN_ALLOCATION requires a Slurm job" >&2; exit 1; }
+    [[ "${SLURM_JOB_NUM_NODES:-0}" == "${NODES}" ]] || { echo "ERROR: allocation node count differs from requested ${NODES}" >&2; exit 1; }
+    if [[ -n "${PREFLIGHT_OUT}" ]]; then
+        mv "${PREFLIGHT_OUT}" "${OUT}/slurm/${SLURM_JOB_ID}-${RUN}.preflight.txt"
+        PREFLIGHT_OUT=""
+    fi
+    echo "Running ${RUN} in allocation ${SLURM_JOB_ID}"
+    echo "Training log: ${OUT}/slurm/${SLURM_JOB_ID}-logs/ray-driver.log"
+    # Match the scratch submit directory used by the normal sbatch launch.
+    exec env SLURM_SUBMIT_DIR="${PWD}" bash "${NEMO_RL_DIR}/ray.sub"
+fi
 submitted="$(sbatch "${SBATCH_FLAGS[@]}" "${NEMO_RL_DIR}/ray.sub")"
 echo "${submitted}"
 if [[ -n "${PREFLIGHT_OUT}" ]]; then mv "${PREFLIGHT_OUT}" "${OUT}/slurm/${submitted##* }-${RUN}.preflight.txt"; fi

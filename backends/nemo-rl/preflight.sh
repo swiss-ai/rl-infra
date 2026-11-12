@@ -63,6 +63,12 @@ for extra_nodes in $(r 'env.extra_judge_pools.*.num_nodes'); do
   judge_nodes=$(( judge_nodes + extra_nodes ))
 done
 train_nodes=$(( train_nodes - judge_nodes ))
+mt_reward_nodes=0
+if [[ "$(r data.default.env_name)" == mt && "${NODES}" -gt 1 ]]; then
+  mt_reward_nodes=$(r env.mt.resources.num_nodes)
+  [[ "${mt_reward_nodes}" =~ ^[0-9]+$ ]] || mt_reward_nodes=0
+  train_nodes=$(( train_nodes - mt_reward_nodes ))
+fi
 megatron=$(r policy.megatron_cfg.enabled)
 prompts=$(r grpo.num_prompts_per_step); gens=$(r grpo.num_generations_per_prompt)
 gbs=$(r policy.train_global_batch_size); maxlen=$(r policy.max_total_sequence_length)
@@ -76,7 +82,7 @@ gen_pp=$(g pipeline_model_parallel_size); gen_pp=${gen_pp:-$(r policy.megatron_c
 gen_ep=$(g expert_model_parallel_size); gen_ep=${gen_ep:-$(r policy.megatron_cfg.expert_model_parallel_size)}
 gen_dispatcher=$(g moe_token_dispatcher_type); gen_dispatcher=${gen_dispatcher:-$(r policy.megatron_cfg.moe_token_dispatcher_type)}
 gen_deepep=$(g moe_enable_deepep); gen_deepep=${gen_deepep:-$(r policy.megatron_cfg.moe_enable_deepep)}
-echo "  nodes: ${NODES} = ${train_nodes} train + ${gen_nodes:-0} generation$( (( judge_nodes > 0 )) && echo " + ${judge_nodes} judge") (colocated: ${colocated})"
+echo "  nodes: ${NODES} = ${train_nodes} train + ${gen_nodes:-0} generation$( (( judge_nodes > 0 )) && echo " + ${judge_nodes} judge")$( (( mt_reward_nodes > 0 )) && echo " + ${mt_reward_nodes} MT reward") (colocated: ${colocated})"
 if [[ "${backend}" == megatron ]]; then
   echo "  generation: megatron TP${gen_tp} PP${gen_pp} EP${gen_ep}, dispatcher ${gen_dispatcher} (deepep ${gen_deepep}), buffer $(g buffer_size_gb) GB, max requests $(g max_requests), cuda graphs $(g cuda_graph_impl)/$(g inference_cuda_graph_scope), kv cache $(g kv_cache_management_mode), logprobs $(g logprobs_mode), refit $(r policy.generation.refit_transport)"
 else

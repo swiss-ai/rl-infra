@@ -1,0 +1,59 @@
+# One GRPO step: 3 prompts x 4 translations, three policy GPUs + one reward GPU.
+defaults: /opt/nemo-rl/examples/configs/grpo_math_8B.yaml
+
+grpo:
+  num_prompts_per_step: 3
+  num_generations_per_prompt: 4
+  max_num_steps: 1
+  max_rollout_turns: 1
+  val_at_start: false
+  val_at_end: false
+  use_dynamic_sampling: false
+
+policy:
+  model_name: Qwen/Qwen3-8B
+  train_global_batch_size: 12
+  train_micro_batch_size: 1
+  logprob_batch_size: 1
+  max_total_sequence_length: 4096
+  dtensor_cfg:
+    activation_checkpointing: true
+    tensor_parallel_size: 1
+  generation:
+    max_new_tokens: 256
+    stop_strings: null
+    vllm_cfg:
+      tensor_parallel_size: 1
+      enforce_eager: true
+
+data:
+  train:
+    dataset_name: mt_reward.data.TranslationDataset
+    data_path: ${oc.env:MT_DATA_PATH}
+    split: train
+    split_validation_size: 32
+    seed: 42
+  validation: null
+  default:
+    prompt_file: null
+    system_prompt_file: null
+    processor: translation_data_processor
+    env_name: mt
+
+env:
+  mt:
+    scorer_python: /iopsstor/scratch/cscs/${oc.env:USER}/mt-reward-venv/bin/python
+    scorer_config: ${oc.env:MT_SCORER_CONFIG}
+    resources:
+      num_nodes: 1
+      gpus_per_node: 1
+      num_cpus: 4
+    timeout: 1800
+
+cluster:
+  num_nodes: 1
+  gpus_per_node: 4
+  segment_size: null
+
+checkpointing:
+  enabled: false

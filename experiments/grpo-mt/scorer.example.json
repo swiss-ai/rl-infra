@@ -1,0 +1,12 @@
+{
+  "walar_dir": "/path/to/WALAR",
+  "glotlid_model": "/path/to/glotlid/model.bin",
+  "masklid_model": "/path/to/glotlid/model_v3.bin",
+  "metricx_model": "google/metricx-24-hybrid-xxl-v2p6-bfloat16",
+  "metricx_tokenizer": "google/mt5-xl",
+  "alignment_model": "BAAI/bge-m3",
+  "languages": {"en": "eng_Latn", "de": "deu_Latn", "fr": "fra_Latn"},
+  "max_length": 1536,
+  "alignment_weight": 20,
+  "chrf_weight": 20
+}

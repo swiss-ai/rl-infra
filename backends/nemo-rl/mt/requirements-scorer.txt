@@ -1,0 +1,10 @@
+# Install only in a separate scorer venv, never in NeMo-RL's prebuilt venvs.
+# Match WALAR's Transformers API for code/models.py.
+transformers==4.52.4
+sentencepiece==0.2.1
+fasttext==0.9.3
+numpy==2.2.6
+sacrebleu==2.5.1
+# torch must be supplied by the GPU environment (CUDA/architecture specific).
+# Install exactly the same Ray version as the training container in this venv.
+# Chinese directions additionally require hanlp==2.1.1 and its tokenizer model.
