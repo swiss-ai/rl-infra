@@ -1,4 +1,4 @@
-From b83fce280984957caaf92913455334ebf8679f55 Mon Sep 17 00:00:00 2001
+From 191db5afc4b2d7b33ab7e687155ca8fa24968088 Mon Sep 17 00:00:00 2001
 From: Antonio Lopardo <antonio.lopardo@outlook.com>
 Date: Sat, 14 Nov 2026 04:28:00 +0900
 Subject: [PATCH] Math environment: reasoning_gym verifier for Reasoning Gym
@@ -8,15 +8,18 @@ verifier_type: reasoning_gym scores each answer with the scorer of its Reasoning
 Gym task. The row's ground truth is a JSON object with the task name and the entry
 the scorer reads (question, answer, metadata). The graded frame is reduced to the
 last <answer>...</answer>, else the last \boxed{} with balanced braces, else the
-whole text. Scorers that eval() or parse_expr the answer are refused, scores below
-0.05 count as 0 (several scorers give 0.01 to any wrong answer), and each call has
-a 5 s timeout. reasoning_gym is imported in the worker, so only runs that use it
-need the package. The env name reasoning_gym maps to MathEnvironment.
+whole text. The reward is binary: 1 when the scorer gives 1, else 0, because many
+scorers pay small amounts for any well-formed answer. Scorers that eval() or
+parse_expr the answer are refused, coin_flip is refused (its prefix credit gives "0"
+full marks), complex_arithmetic and number_sorting refuse nan and inf (their
+tolerance checks pass NaN), and each call has a 5 s timeout that a scorer's own
+`except Exception` cannot swallow. reasoning_gym is imported in the worker, so only
+runs that use it need the package. The env name reasoning_gym maps to MathEnvironment.
 ---
  nemo_rl/environments/math_environment.py      |   2 +
- .../environments/reasoning_gym_verifier.py    | 150 ++++++++++++++++++
+ .../environments/reasoning_gym_verifier.py    | 162 ++++++++++++++++++
  nemo_rl/environments/utils.py                 |   3 +
- 3 files changed, 155 insertions(+)
+ 3 files changed, 167 insertions(+)
  create mode 100644 nemo_rl/environments/reasoning_gym_verifier.py
 
 diff --git a/nemo_rl/environments/math_environment.py b/nemo_rl/environments/math_environment.py
@@ -41,10 +44,10 @@ index 8874fec8c..c18cb8602 100644
      def _verify(
 diff --git a/nemo_rl/environments/reasoning_gym_verifier.py b/nemo_rl/environments/reasoning_gym_verifier.py
 new file mode 100644
-index 000000000..6ea0ecbea
+index 000000000..d64f33341
 --- /dev/null
 +++ b/nemo_rl/environments/reasoning_gym_verifier.py
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,162 @@
 +# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 +#
 +# Licensed under the Apache License, Version 2.0 (the "License");
@@ -63,11 +66,16 @@ index 000000000..6ea0ecbea
 +Each row's ground truth is a JSON object {"task", "question", "answer", "metadata"}: the
 +reasoning_gym task name and the entry its scorer reads. The graded text (the claim frame with
 +reward_frame: claim) is reduced to an answer: the last <answer>...</answer>, else the last
-+\\boxed{...} with balanced braces, else the whole text. The task's own scorer,
-+reasoning_gym.get_score_answer_fn(task)(answer, entry), gives the reward.
++\\boxed{...} with balanced braces, else the whole text. The reward is binary: 1 when the task's own
++scorer, reasoning_gym.get_score_answer_fn(task)(answer, entry), gives 1, else 0. Partial credit is
++dropped on purpose: many scorers pay 0.01 to 0.1 for any well-formed answer (a palindrome, a
++fraction, a weekday name) and pay a share for an answer that contains the gold one ("12 or 13").
 +
-+- Scorers that eval() or parse_expr the answer are refused (score 0): the answer is model text.
-+- Scores below MIN_SCORE count as 0: several scorers give 0.01 to any non-empty wrong answer.
++- Tasks whose scorer runs eval() or parse_expr on the answer are refused (score 0).
++- coin_flip is refused: its scorer credits a matching prefix divided by the shorter string, so
++  the answer "0" scores 1 against any probability "0.xxx".
++- complex_arithmetic and number_sorting refuse answers with nan or inf: their tolerance checks
++  give 1 to NaN (exp(-nan) and abs(nan - x) > tol are both read as a match).
 +- Each scorer call runs under a SIGALRM timeout when the worker method runs on the main thread.
 +"""
 +
@@ -93,10 +101,13 @@ index 000000000..6ea0ecbea
 +        "polynomial_multiplication",
 +    }
 +)
-+MIN_SCORE = 0.05
++# Scorers that give full marks to a wrong answer.
++BROKEN_TASKS = frozenset({"coin_flip"})
++NAN_TASKS = frozenset({"complex_arithmetic", "number_sorting"})
 +TIMEOUT_S = 5
 +
 +_ANSWER_TAG = re.compile(r"<answer>(.*?)</answer>", re.S)
++_NAN_OR_INF = re.compile(r"(?i)\b(nan|inf|infinity)\b")
 +
 +
 +def _last_boxed(text: str) -> str | None:
@@ -130,8 +141,8 @@ index 000000000..6ea0ecbea
 +    return text
 +
 +
-+class _Timeout(Exception):
-+    pass
++class _Timeout(BaseException):
++    """Not an Exception, so a scorer's own `except Exception` cannot swallow it."""
 +
 +
 +def _on_alarm(signum: int, frame: Any) -> None:
@@ -156,7 +167,9 @@ index 000000000..6ea0ecbea
 +        gt = json.loads(ground_truth)
 +        task = gt["task"]
 +        answer = extract_answer(response)
-+        if answer is None or task in UNSAFE_TASKS:
++        if not answer or task in UNSAFE_TASKS or task in BROKEN_TASKS:
++            return 0.0, answer
++        if task in NAN_TASKS and _NAN_OR_INF.search(answer):
 +            return 0.0, answer
 +        entry = {
 +            "question": gt.get("question", ""),
@@ -172,8 +185,10 @@ index 000000000..6ea0ecbea
 +        finally:
 +            if on_main:
 +                signal.alarm(0)
-+                signal.signal(signal.SIGALRM, previous)
-+        return (score if score >= MIN_SCORE else 0.0), answer
++                # None: the previous handler was installed from C and cannot be restored.
++                signal.signal(signal.SIGALRM, previous if previous is not None else signal.SIG_DFL)
++        # Binary; a NaN score is not >= 1.
++        return (1.0 if score >= 1.0 else 0.0), answer
 +
 +    def verify(
 +        self,

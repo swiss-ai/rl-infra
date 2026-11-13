@@ -2,14 +2,14 @@
 # Test of the math environment's reasoning_gym verifier (NeMo-RL patch 0034) before a training job:
 # installs the PYDEPS_RG overlay, starts the real Ray worker and scores, for every row of a native
 # Reasoning Gym file, the gold answer (plain, in <answer> tags, in \boxed{}), an empty answer and the
-# gold answer of another row of the same task. Fails if a gold answer scores below 1 on more than
-# MAX_GOLD_FAIL rows (default 0), or if an empty or unsafe-task answer scores above 0. Rows from
-# envs/prepare_reasoning_gym.py. Runs as a one-node job, after setup.sh has applied patch 0034 to the clone
-# (run.sh, or a DRY_RUN=1 of it, does):
+# gold answer of another row of the same task, plus known reward hacks (NaN on complex_arithmetic and
+# number_sorting, "0" on coin_flip, an unsafe task) and answers that some scorers pay a little for (any
+# sentence, any palindrome, any fraction). Fails if a gold answer scores below 1 on more than MAX_GOLD_FAIL
+# rows (default 0), or if any other case scores above 0, except another row's answer when it is also right.
+# Rows from envs/prepare_reasoning_gym.py. Runs as a one-node job, after setup.sh has applied patch 0034 to
+# the clone (run.sh, or a DRY_RUN=1 of it, does):
 #   PYDEPS_RG=1 PYDEPS=$SCRATCH/nemo-rl-apertus2/pydeps-rg CHECK_SCRIPT=check_rg_verifier.sh \
 #       RG_FILE=$SCRATCH/reasoning-gym/native/train.jsonl bash backends/nemo-rl/apertus2/check_env_job.sh
-# Job 1276153 (HANGANG, 2,000 train rows): gold 2000/2000 plain, in tags and boxed; empty and unsafe 0; another
-# row's answer never 1.
 set -euo pipefail
 
 : "${RG_FILE:?RG_FILE: a native Reasoning Gym jsonl}"
@@ -17,7 +17,7 @@ bash "$(dirname "$0")/pydeps.sh"
 export RG_FILE MAX_GOLD_FAIL="${MAX_GOLD_FAIL:-0}"
 
 python3.12 - <<'EOF'
-import collections, json, os, random
+import ast, collections, json, os, random
 
 import ray
 
@@ -49,8 +49,17 @@ for r in rows:
     others = [o for o in by_task[task] if str(json.loads(o["output"])["answer"]) != gold]
     if others:
         cases.append(("other", task, str(json.loads(rng.choice(others)["output"])["answer"]), r["output"]))
-unsafe_gt = json.dumps({"task": "countdown", "question": "", "answer": "1", "metadata": {}})
-cases.append(("unsafe", "countdown", "__import__('os')", unsafe_gt))
+synthetic = lambda task, answer: json.dumps({"task": task, "question": "", "answer": answer, "metadata": {}})
+cases.append(("hack", "countdown", "__import__('os')", synthetic("countdown", "1")))
+cases.append(("hack", "coin_flip", "0", synthetic("coin_flip", "0.375")))
+for r in by_task["complex_arithmetic"][:5]:
+    cases += [("hack", "complex_arithmetic", a, r["output"]) for a in ("nan", "NaN + NaNi", "inf")]
+for r in by_task["number_sorting"][:5]:
+    n = len(ast.literal_eval(json.loads(r["output"])["answer"]))
+    cases.append(("hack", "number_sorting", json.dumps([float("nan")] * n), r["output"]))
+for task, answer in (("sentence_reordering", "x"), ("palindrome_generation", "a"), ("fraction_simplification", "1/2")):
+    cases += [("format", task, answer, r["output"]) for r in by_task[task][:5]
+              if str(json.loads(r["output"])["answer"]) != answer]
 
 ray.init(num_cpus=8, include_dashboard=False, log_to_driver=False)
 workers = [ReasoningGymVerifyWorker.remote() for _ in range(8)]
@@ -69,8 +78,9 @@ gold_fail = collections.Counter(t for k, t, s, _ in scored if k.startswith("gold
 other_hit = collections.Counter(t for k, t, s, _ in scored if k == "other" and s >= 1)
 print("gold < 1 by task:", dict(gold_fail))
 print("other row's answer scored 1, by task (duplicate answers or lenient scorers):", dict(other_hit))
-bad = [(k, t, s) for k, t, s, _ in scored if k in ("empty", "unsafe") and s > 0]
+bad = [(k, t, s) for k, t, s, _ in scored if k in ("empty", "hack", "format") and s > 0]
 assert not bad, bad
+assert all(s in (0.0, 1.0) for _, _, s, _ in scored), "reward is not binary"
 assert sum(gold_fail.values()) <= int(os.environ["MAX_GOLD_FAIL"]), "gold answers below 1"
 print("RG VERIFIER OK")
 EOF

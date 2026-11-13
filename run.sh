@@ -23,7 +23,9 @@ source "${ROOT}/sites/load.sh" && rl_infra_load "${APERTUS2_DIR}/env"
 export ACCOUNT PARTITION="${PARTITION:-${RUN_PARTITION:-${DEFAULT_PARTITION}}}" JOB_TIME="${JOB_TIME:-05:00:00}" SCRATCH
 mkdir -p "${OUT}/configs"
 # pydeps.sh replaces an overlay when its list changes, and running jobs import from it, so a task
-# with a script gets an overlay of its own.
+# with a script gets an overlay of its own. The task alone sets the overlay flags: one left exported
+# in the shell would put its packages into the overlay of a task that does not ask for them.
+unset PYDEPS_GYM PYDEPS_RG
 TASK_SCRIPT="$(yq r "${TASK}" script)"
 if [[ -n "${TASK_SCRIPT}" ]]; then
     export SCRIPT="${TASK_SCRIPT}" PYDEPS_GYM=1 PYDEPS="${SCRATCH}/nemo-rl-apertus2/pydeps-gym"

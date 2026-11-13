@@ -1,15 +1,18 @@
 # Task file: Reasoning Gym on the SFT v0.2 checkpoint, scored in NeMo-RL's own math environment (no Gym), so it
 # can share steps with the native math and science sets (data.use_multiple_dataloader). verifier_type
 # reasoning_gym (NeMo-RL patch 0034) reduces the claim frame to an answer (<answer> tags, else \boxed{} with
-# balanced braces, else the claim) and scores it with the task's own reasoning_gym scorer; each row's output is
-# the JSON ground truth that scorer reads. Rows: 84 tasks of nvidia/Nemotron-RL-ReasoningGym-v1 (CC BY 4.0),
-# 2,000 train and 128 validation, from envs/prepare_reasoning_gym.py:
+# balanced braces, else the claim) and rewards 1 when the task's own reasoning_gym scorer gives 1; each row's
+# output is the JSON ground truth that scorer reads. Rows: 83 tasks of nvidia/Nemotron-RL-ReasoningGym-v1
+# (CC BY 4.0), 2,000 train and 128 validation, from envs/prepare_reasoning_gym.py:
 #   python3.12 envs/prepare_reasoning_gym.py $SCRATCH/reasoning-gym/native
 #   bash run.sh envs/reasoning-gym-sft.yaml
-# Thinking level high: at medium, v0.2 leaves the think frame empty on these prompts (128 of 128 answers).
-# As a set in a native mix, add to the mix's task file (same keys as a multiple-choice set on math_default):
+# Thinking level high: at medium, v0.2 left the think frame empty on all 128 validation prompts (measured with
+# Gym's reasoning_gym server and an "<answer> tags" line on each prompt, job 1276079).
+# As a set in a native mix, add to the mix's task file (same keys as a multiple-choice set on math_default).
+# A ResponseDataset is named after its path, "<parent dir>-<file stem>", and num_prompts_per_dataloader is keyed
+# by that name: $SCRATCH/reasoning-gym/native/train.jsonl is "native-train".
 #   pydeps: reasoning_gym
-#   data.num_prompts_per_dataloader: {..., rg: <prompts per step>}
+#   data.num_prompts_per_dataloader: {..., native-train: <prompts per step>}
 #   data.train: [..., {dataset_name: ResponseDataset, data_path: <train.jsonl>, env_name: reasoning_gym}]
 #   env.reasoning_gym: {num_workers: 8, verifier_type: reasoning_gym, reward_frame: claim}
 defaults: ../recipes/apertus2-chonk-sftv02-18315-vllm-adamw-rg.yaml
@@ -42,7 +45,7 @@ policy:
 
 data:
   _override_: true
-  # Longest prompt about 7,000 characters (rectangle_count grids).
+  # Longest prompt about 7,000 characters (codeio; rectangle_count grids are close).
   max_input_seq_length: 4096
   shuffle: true
   num_workers: 1

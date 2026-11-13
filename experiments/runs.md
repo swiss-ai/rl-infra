@@ -562,8 +562,12 @@ training was not affected. The task file has no budget since.
 
 ## SFT v0.2 (iter_0018315), Reasoning Gym in the math environment
 
-Job 1276175, 10 nodes (HANGANG, account hanint09; data from the first version of `envs/prepare_reasoning_gym.py`,
-whose train split differs from the script's in 10 of the 2,000 rows, all `ab`; validation is identical):
+Job 1276175, 10 nodes (HANGANG, account hanint09). It ran an earlier version of this branch, which differs from the
+current one in two ways. Its rows had 84 tasks, coin_flip included (24 train rows, 1 or 2 validation rows); the current
+script drops coin_flip and gives 83. Its reward kept Reasoning Gym's partial credit above 0.05; the current verifier
+is binary, and refuses NaN answers on complex_arithmetic and number_sorting. Of its 392 rewarded training answers
+none used those holes (no coin_flip or number_sorting answer was rewarded, the 12 complex_arithmetic ones were
+numbers, and no reward was below 0.2), so the numbers below should carry over, but they are not a rerun.
 
 ```bash
 python3.12 envs/prepare_reasoning_gym.py $SCRATCH/reasoning-gym/native
@@ -586,7 +590,8 @@ think frame was never empty (thinking level high). So far the gain is the claim 
 is right about as often as at step 0, and most correct replies still carry no claim. 1 h 35 min, about 63 GPU-h.
 
 Two settings that did not work, from the same session:
-- Thinking level medium (the default system frame): v0.2 leaves the think frame empty on every one of these
-  prompts (128/128 on the validation set, through Gym's reasoning_gym server, job 1276079).
+- Thinking level medium (the default system frame): v0.2 left the think frame empty on every one of these
+  prompts (128/128 on the validation set, through Gym's reasoning_gym server with an "<answer> tags" line on each
+  prompt, job 1276079).
 - DAPO-Math's "Answer:" instruction around each prompt: the claim rate did not rise (20/128 at step 0), the model
   wrote "Answer: X" in the reply instead, and only 2 of the 20 claims were right (job 1276229, stopped at step 5).

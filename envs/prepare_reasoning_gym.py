@@ -13,12 +13,13 @@ The dataset has 15,000 rows over 104 tasks, all at default difficulty, CC BY 4.0
 - arc_agi, rearc: ARC grids, kept out of training against the ARC evaluations;
 - boxnet, graph_color, jugs, propositional_logic, rubiks_cube, rush_hour, word_ladder: the dataset's own gold
   answers score below 1 with the task's scorer; game_of_life_halting rewards wrong answers;
-- the nine tasks whose scorers eval() or parse_expr the answer (the verifier refuses them as well);
+- the nine tasks whose scorers eval() or parse_expr the answer, and coin_flip, whose scorer gives the answer
+  "0" full marks (the verifier refuses all ten as well);
 - rows with an empty gold answer (one in base_conversion, whose scorer rejects it, and one in ab, which the
   verifier cannot score: an empty claim gets 0).
-That leaves 84 tasks. Validation then train are sampled round-robin over the tasks (seed 0), so both are
-balanced across tasks and disjoint. Every kept gold answer scores 1 with reasoning-gym 0.1.25 (check with
-backends/nemo-rl/apertus2/check_rg_verifier.sh).
+DROP below names all 21 tasks. That leaves 83. Validation then train are sampled round-robin over the tasks
+(seed 0), so both are balanced across tasks and disjoint. The dataset is read at a fixed revision, so the
+rows are the same on every run. Check them with backends/nemo-rl/apertus2/check_rg_verifier.sh.
 """
 
 import argparse
@@ -28,11 +29,13 @@ import random
 import urllib.request
 from pathlib import Path
 
-URL = "https://huggingface.co/datasets/nvidia/Nemotron-RL-ReasoningGym-v1/resolve/main/data/train.jsonl"
+# The dataset's revision of 2026-09-29.
+REVISION = "4c25c3b67c94c2201339232139b0315a03ac84f7"
+URL = f"https://huggingface.co/datasets/nvidia/Nemotron-RL-ReasoningGym-v1/resolve/{REVISION}/data/train.jsonl"
 DROP = {
     "gsm_symbolic", "arc_agi", "rearc",
     "boxnet", "graph_color", "jugs", "propositional_logic", "rubiks_cube", "rush_hour", "word_ladder",
-    "game_of_life_halting",
+    "game_of_life_halting", "coin_flip",
     "n_queens", "spiral_matrix", "binary_matrix", "string_insertion", "countdown", "puzzle24",
     "simple_integration", "intermediate_integration", "polynomial_multiplication",
 }
@@ -59,6 +62,9 @@ def main() -> None:
         rng.shuffle(by_task[task])
 
     cursor = {task: 0 for task in tasks}
+    available = sum(len(rows_) for rows_ in by_task.values())
+    if args.train + args.validation > available:
+        parser.error(f"--train + --validation = {args.train + args.validation}, but only {available} rows are kept")
 
     def take(n: int) -> list:
         picked, i = [], 0
