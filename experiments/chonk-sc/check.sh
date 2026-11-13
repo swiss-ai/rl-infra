@@ -117,6 +117,31 @@ if [[ " ${RUNS} " == *" s "* || " ${RUNS} " == *" o "* || " ${RUNS} " == *" w "*
         || echo "  WARN  SFT export ${SFT_MODEL_SRC}: no readable config.json + model.safetensors.index.json (run S needs it)"
     [[ -f "${SFT_MODEL_DIR}/MODELING_SOURCE" ]] && echo "  ok    staged ${SFT_MODEL_DIR}" \
         || echo "  note  ${SFT_MODEL_DIR} not staged yet (run-s.sh stages it)"
+    # what a filesystem outage can leave behind (Alps, 2026-11-13) and a presence check misses: shard links
+    # that no longer resolve, and a harbor_agent venv an interrupted build left without Harbor, which Gym
+    # reuses anyway (skip_venv_if_present, cli/setup_command.py: bin/python + bin/activate suffice)
+    if [[ -d "${SFT_MODEL_DIR}" ]]; then
+        broken="$(find "${SFT_MODEL_DIR}/" -maxdepth 1 -xtype l | wc -l)"
+        (( broken == 0 )) && echo "  ok    staged links resolve" \
+            || echo "  WARN  ${broken} broken link(s) in ${SFT_MODEL_DIR}: delete the directory, run-s.sh stages it again"
+    fi
+    want="$(sed -nE 's/^harbor @ .*@v([0-9.]+).*/\1/p' \
+        "${NEMO_RL_DIR}/3rdparty/Gym-workspace/Gym/responses_api_agents/harbor_agent/requirements.txt" 2>/dev/null)"
+    seen=""
+    # the venv root is set twice (run-harbor-osb.sh: $HARBOR_ROOT/venvs, the EDF: GYM_VENV_DIR); check both
+    for vroot in "${GYM_VENV_DIR:-${SCRATCH}/nemo-rl-apertus2/gym-venvs}" "${NEMO_GYM_VENV_DIR:-${HARBOR_ROOT}/venvs}"; do
+        v="${vroot}/responses_api_agents/harbor_agent/.venv"
+        [[ -e "${v}" && " ${seen} " != *" ${v} "* ]] || continue
+        seen+=" ${v}"
+        have="$(find "${v}"/lib/python3*/site-packages -maxdepth 1 -name 'harbor-*.dist-info' 2>/dev/null \
+            | sed -E 's#.*/harbor-(.*)\.dist-info$#\1#' | head -1)"
+        if [[ -n "${have}" && "${have}" == "${want}" ]]; then
+            echo "  ok    ${v}: harbor ${have}"
+        else
+            echo "  WARN  ${v}: harbor '${have:-none}', the Gym checkout pins '${want:-?}': delete the venv, the run rebuilds it"
+        fi
+    done
+    [[ -n "${seen}" ]] || echo "  note  no harbor_agent venv yet (the run builds it)"
     [[ -r "${OPENSANDBOX_API_KEY_FILE}" ]] && echo "  ok    key file ${OPENSANDBOX_API_KEY_FILE}" \
         || echo "  WARN  no OpenSandbox key file ${OPENSANDBOX_API_KEY_FILE} (run S reads it)"
 fi
