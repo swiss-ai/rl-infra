@@ -1,0 +1,37 @@
+# Enigmata pass rates of SFT v0.2 at thinking medium, 16k tokens: 8 puzzles per task and difficulty
+# (sample.jsonl, build_enigmata.py sample), 8 answers each, graded by the native enigmata environment
+# exactly as in training (claim frame, reply when the claim is empty).
+# Run: SCRIPT=<dir>/passrate_score.py RUN=<name> bash run.sh <dir>/task-passrate.yaml (see README.md).
+defaults: recipe-sftv02-score1.yaml
+
+score:
+  num_generations: 8
+  batch_prompts: 216
+
+data:
+  _override_: true
+  max_input_seq_length: 2048
+  shuffle: false
+  num_workers: 1
+  train:
+    - dataset_name: ResponseDataset
+      data_path: /scratch/hanint06/data/stem-rl/enigmata/sample/passrate_sample.jsonl
+      env_name: enigmata
+  validation: null
+  default:
+    prompt_file: null
+    system_prompt_file: ${oc.env:RL_INFRA_DIR}/envs/apertus2-system.json
+    processor: apertus2_math_data_processor
+    env_name: enigmata
+
+env:
+  enigmata:
+    repo_dir: /scratch/hanint06/data/stem-rl/enigmata/repo
+    num_workers: 8
+    reward_frame: claim
+    fallback_frame: reply
+    timeout_s: 10.0
+    hard_timeout_s: 120.0
+    log_every: 1000
+    stats_path: ${logger.log_dir}/enigmata_stats.jsonl
+    stats_text_chars: 0
