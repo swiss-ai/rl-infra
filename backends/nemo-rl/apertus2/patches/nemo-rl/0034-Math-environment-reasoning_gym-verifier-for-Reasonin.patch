@@ -1,0 +1,229 @@
+From 191db5afc4b2d7b33ab7e687155ca8fa24968088 Mon Sep 17 00:00:00 2001
+From: Antonio Lopardo <antonio.lopardo@outlook.com>
+Date: Sat, 14 Nov 2026 04:28:00 +0900
+Subject: [PATCH] Math environment: reasoning_gym verifier for Reasoning Gym
+ tasks
+
+verifier_type: reasoning_gym scores each answer with the scorer of its Reasoning
+Gym task. The row's ground truth is a JSON object with the task name and the entry
+the scorer reads (question, answer, metadata). The graded frame is reduced to the
+last <answer>...</answer>, else the last \boxed{} with balanced braces, else the
+whole text. The reward is binary: 1 when the scorer gives 1, else 0, because many
+scorers pay small amounts for any well-formed answer. Scorers that eval() or
+parse_expr the answer are refused, coin_flip is refused (its prefix credit gives "0"
+full marks), complex_arithmetic and number_sorting refuse nan and inf (their
+tolerance checks pass NaN), and each call has a 5 s timeout that a scorer's own
+`except Exception` cannot swallow. reasoning_gym is imported in the worker, so only
+runs that use it need the package. The env name reasoning_gym maps to MathEnvironment.
+---
+ nemo_rl/environments/math_environment.py      |   2 +
+ .../environments/reasoning_gym_verifier.py    | 162 ++++++++++++++++++
+ nemo_rl/environments/utils.py                 |   3 +
+ 3 files changed, 167 insertions(+)
+ create mode 100644 nemo_rl/environments/reasoning_gym_verifier.py
+
+diff --git a/nemo_rl/environments/math_environment.py b/nemo_rl/environments/math_environment.py
+index 8874fec8c..c18cb8602 100644
+--- a/nemo_rl/environments/math_environment.py
++++ b/nemo_rl/environments/math_environment.py
+@@ -37,6 +37,7 @@ from nemo_rl.environments.interfaces import (
+ from nemo_rl.environments.metrics import (
+     calculate_pass_rate_per_prompt,
+ )
++from nemo_rl.environments.reasoning_gym_verifier import ReasoningGymVerifyWorker
+ from nemo_rl.environments.utils import chunk_list_to_workers
+ from nemo_rl.evals import answer_parsing
+ 
+@@ -472,6 +473,7 @@ class MathEnvironment(BaseMathEnvironment):
+         "math": HFVerifyWorker,
+         "english_multichoice": EnglishMultichoiceVerifyWorker,
+         "multilingual_multichoice": MultilingualMultichoiceVerifyWorker,
++        "reasoning_gym": ReasoningGymVerifyWorker,
+     }
+ 
+     def _verify(
+diff --git a/nemo_rl/environments/reasoning_gym_verifier.py b/nemo_rl/environments/reasoning_gym_verifier.py
+new file mode 100644
+index 000000000..d64f33341
+--- /dev/null
++++ b/nemo_rl/environments/reasoning_gym_verifier.py
+@@ -0,0 +1,162 @@
++# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""Reasoning Gym answers scored in the math environment (verifier_type: reasoning_gym).
++
++Each row's ground truth is a JSON object {"task", "question", "answer", "metadata"}: the
++reasoning_gym task name and the entry its scorer reads. The graded text (the claim frame with
++reward_frame: claim) is reduced to an answer: the last <answer>...</answer>, else the last
++\\boxed{...} with balanced braces, else the whole text. The reward is binary: 1 when the task's own
++scorer, reasoning_gym.get_score_answer_fn(task)(answer, entry), gives 1, else 0. Partial credit is
++dropped on purpose: many scorers pay 0.01 to 0.1 for any well-formed answer (a palindrome, a
++fraction, a weekday name) and pay a share for an answer that contains the gold one ("12 or 13").
++
++- Tasks whose scorer runs eval() or parse_expr on the answer are refused (score 0).
++- coin_flip is refused: its scorer credits a matching prefix divided by the shorter string, so
++  the answer "0" scores 1 against any probability "0.xxx".
++- complex_arithmetic and number_sorting refuse answers with nan or inf: their tolerance checks
++  give 1 to NaN (exp(-nan) and abs(nan - x) > tol are both read as a match).
++- Each scorer call runs under a SIGALRM timeout when the worker method runs on the main thread.
++"""
++
++import json
++import re
++import signal
++import threading
++from typing import Any, Union
++
++import ray
++
++# Scorers that run eval() or sympy's parse_expr on the model's answer.
++UNSAFE_TASKS = frozenset(
++    {
++        "n_queens",
++        "spiral_matrix",
++        "binary_matrix",
++        "string_insertion",
++        "countdown",
++        "puzzle24",
++        "simple_integration",
++        "intermediate_integration",
++        "polynomial_multiplication",
++    }
++)
++# Scorers that give full marks to a wrong answer.
++BROKEN_TASKS = frozenset({"coin_flip"})
++NAN_TASKS = frozenset({"complex_arithmetic", "number_sorting"})
++TIMEOUT_S = 5
++
++_ANSWER_TAG = re.compile(r"<answer>(.*?)</answer>", re.S)
++_NAN_OR_INF = re.compile(r"(?i)\b(nan|inf|infinity)\b")
++
++
++def _last_boxed(text: str) -> str | None:
++    """Content of the last \\boxed{...}, braces balanced; None without one."""
++    start = text.rfind("\\boxed{")
++    if start < 0:
++        return None
++    i = start + len("\\boxed{")
++    depth = 1
++    for j in range(i, len(text)):
++        if text[j] == "{":
++            depth += 1
++        elif text[j] == "}":
++            depth -= 1
++            if depth == 0:
++                return text[i:j]
++    return None
++
++
++def extract_answer(text: str) -> str | None:
++    """The answer in a graded frame: <answer> tags, else \\boxed{}, else the stripped text."""
++    text = (text or "").strip()
++    if not text:
++        return None
++    tags = _ANSWER_TAG.findall(text)
++    if tags:
++        return tags[-1].strip()
++    boxed = _last_boxed(text)
++    if boxed is not None:
++        return boxed.strip()
++    return text
++
++
++class _Timeout(BaseException):
++    """Not an Exception, so a scorer's own `except Exception` cannot swallow it."""
++
++
++def _on_alarm(signum: int, frame: Any) -> None:
++    raise _Timeout()
++
++
++@ray.remote  # pragma: no cover
++class ReasoningGymVerifyWorker:
++    def __init__(self) -> None:
++        # Imported here: only runs with PYDEPS_RG have reasoning-gym in their overlay.
++        import reasoning_gym
++
++        self._rg = reasoning_gym
++        self._score_fns: dict[str, Any] = {}
++
++    def _score_fn(self, task: str) -> Any:
++        if task not in self._score_fns:
++            self._score_fns[task] = self._rg.get_score_answer_fn(task)
++        return self._score_fns[task]
++
++    def _score_one(self, response: str, ground_truth: str) -> tuple[float, str | None]:
++        gt = json.loads(ground_truth)
++        task = gt["task"]
++        answer = extract_answer(response)
++        if not answer or task in UNSAFE_TASKS or task in BROKEN_TASKS:
++            return 0.0, answer
++        if task in NAN_TASKS and _NAN_OR_INF.search(answer):
++            return 0.0, answer
++        entry = {
++            "question": gt.get("question", ""),
++            "answer": gt["answer"],
++            "metadata": gt["metadata"],
++        }
++        on_main = threading.current_thread() is threading.main_thread()
++        if on_main:
++            previous = signal.signal(signal.SIGALRM, _on_alarm)
++            signal.alarm(TIMEOUT_S)
++        try:
++            score = float(self._score_fn(task)(answer=answer, entry=entry))
++        finally:
++            if on_main:
++                signal.alarm(0)
++                # None: the previous handler was installed from C and cannot be restored.
++                signal.signal(signal.SIGALRM, previous if previous is not None else signal.SIG_DFL)
++        # Binary; a NaN score is not >= 1.
++        return (1.0 if score >= 1.0 else 0.0), answer
++
++    def verify(
++        self,
++        pred_responses: list[str],
++        ground_truths: list[str],
++        return_extracted_answer: bool = False,
++        **kwargs: Any,
++    ) -> Union[list[float], tuple[list[float], list[str | None]]]:
++        """Score each response with its Reasoning Gym task; one score (and answer) per sample."""
++        results: list[float] = []
++        extracted_answers: list[str | None] = []
++        for response, ground_truth in zip(pred_responses, ground_truths):
++            try:
++                score, answer = self._score_one(response, ground_truth)
++            except (Exception, _Timeout):
++                score, answer = 0.0, None
++            results.append(score)
++            extracted_answers.append(answer)
++        if return_extracted_answer:
++            return results, extracted_answers
++        return results
+diff --git a/nemo_rl/environments/utils.py b/nemo_rl/environments/utils.py
+index 1cd70e425..83830bb2b 100644
+--- a/nemo_rl/environments/utils.py
++++ b/nemo_rl/environments/utils.py
+@@ -40,6 +40,9 @@ ENV_REGISTRY: Dict[str, EnvRegistryEntry] = {
+     "math": {
+         "actor_class_fqn": "nemo_rl.environments.math_environment.MathEnvironment",
+     },
++    "reasoning_gym": {
++        "actor_class_fqn": "nemo_rl.environments.math_environment.MathEnvironment",
++    },
+     "math_multi_reward": {
+         "actor_class_fqn": "nemo_rl.environments.math_environment.MathMultiRewardEnvironment",
+     },
+-- 
+2.43.0
+
