@@ -169,6 +169,10 @@ check_gym_capture() {
     grep -q "def kwargs_for_harbor_options" "${g}/responses_api_agents/harbor_agent/custom_agents/installed_compat.py" 2>/dev/null \
         && ok "Gym patch 0032: Harbor 0.25 preflight accepts our agents' kwargs" \
         || bad "Gym patch 0032 missing (kwargs_for_harbor_options in harbor_agent/custom_agents/installed_compat.py)"
+    # 0033: OpenCode/mini drop the Terminus-2 kwargs of Gym's training yaml (Harbor 0.25 rejects them, job 5330618)
+    grep -q '"nemo_model_server_timeout_sec",' "${g}/responses_api_agents/harbor_agent/custom_agents/installed_compat.py" 2>/dev/null \
+        && ok "Gym patch 0033: OpenCode/mini drop the training yaml's Terminus-2 kwargs" \
+        || bad "Gym patch 0033 missing (nemo_model_server_timeout_sec in SHARED_AGENT_KWARGS, custom_agents/installed_compat.py)"
     # 0031: image_auth (from image_auth_file, Kostas' 0013) only for one registry, not Docker Hub
     grep -q "def _image_registry" "${g}/nemo_gym/sandbox/providers/opensandbox/provider.py" 2>/dev/null \
         && ok "Gym patch 0031: image_auth_registry" \
