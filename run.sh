@@ -23,10 +23,20 @@ source "${ROOT}/sites/load.sh" && rl_infra_load "${APERTUS2_DIR}/env"
 export ACCOUNT PARTITION="${PARTITION:-${RUN_PARTITION:-${DEFAULT_PARTITION}}}" JOB_TIME="${JOB_TIME:-05:00:00}" SCRATCH
 mkdir -p "${OUT}/configs"
 # pydeps.sh replaces an overlay when its list changes, and running jobs import from it, so a task
-# with a script gets an overlay of its own.
+# with a script gets an overlay of its own. The task alone sets the overlay flags: one left exported
+# in the shell would put its packages into the overlay of a task that does not ask for them.
+unset PYDEPS_GYM PYDEPS_RG
 TASK_SCRIPT="$(yq r "${TASK}" script)"
 if [[ -n "${TASK_SCRIPT}" ]]; then
     export SCRIPT="${TASK_SCRIPT}" PYDEPS_GYM=1 PYDEPS="${SCRATCH}/nemo-rl-apertus2/pydeps-gym"
+fi
+# A task that scores with Reasoning Gym in NeMo-RL's math environment (`pydeps: reasoning_gym`)
+# gets reasoning-gym in an overlay of its own, for the same reason.
+TASK_PYDEPS="$(yq r "${TASK}" pydeps)"
+if [[ "${TASK_PYDEPS}" == reasoning_gym ]]; then
+    export PYDEPS_RG=1 PYDEPS="${PYDEPS}-rg"
+elif [[ -n "${TASK_PYDEPS}" ]]; then
+    echo "ERROR: unknown pydeps '${TASK_PYDEPS}' in ${TASK} (known: reasoning_gym)" >&2; exit 1
 fi
 # A recipe on an SFT checkpoint names its export. apertus-common goes in an overlay of its own, for
 # the same reason, and the export is staged next to the base model.
@@ -47,9 +57,9 @@ echo "== setup (log: ${LOG})"
 
 # The task is merged over the recipe, so it can also override any recipe setting. Its copy drops
 # its own defaults, which would otherwise merge the recipe that RECIPE replaced over this one, and
-# its script, which is not a config key.
+# its script and pydeps, which are not config keys.
 CFG="${OUT}/configs/${RUN}.yaml"
-yq d "${TASK}" defaults | yq d - script > "${OUT}/configs/${RUN}-task.yaml"
+yq d "${TASK}" defaults | yq d - script | yq d - pydeps > "${OUT}/configs/${RUN}-task.yaml"
 printf 'defaults:\n  - %s\n  - %s\n' "${RECIPE}" "${OUT}/configs/${RUN}-task.yaml" > "${CFG}"
 if [[ "${DRY_RUN:-0}" == 1 ]]; then
     exec bash "${APERTUS2_DIR}/launch.sh" "${CFG}" "${NODES}" "${RUN}" "$@"

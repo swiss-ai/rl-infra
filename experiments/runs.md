@@ -559,3 +559,39 @@ These runs had a thinking budget of 4096 per turn. Their `train/policy_kl_error`
 to e^-34 (from the per-token dumps `train_data_step*.jsonl`). The coding run with a budget of 6144,
 `sft-code-full-128x16-wandb`, reads up to 5e11 for the same reason. The IS weight of such a token is about 0, so
 training was not affected. The task file has no budget since.
+
+## SFT v0.2 (iter_0018315), Reasoning Gym in the math environment
+
+Job 1276175, 10 nodes (HANGANG, account hanint09). It ran an earlier version of this branch, which differs from the
+current one in two ways. Its rows had 84 tasks, coin_flip included (24 train rows, 1 or 2 validation rows); the current
+script drops coin_flip and gives 83. Its reward kept Reasoning Gym's partial credit above 0.05; the current verifier
+is binary, and refuses NaN answers on complex_arithmetic and number_sorting. Of its 392 rewarded training answers
+none used those holes (no coin_flip or number_sorting answer was rewarded, the 12 complex_arithmetic ones were
+numbers, and no reward was below 0.2), so the numbers below should carry over, but they are not a rerun.
+
+```bash
+python3.12 envs/prepare_reasoning_gym.py $SCRATCH/reasoning-gym/native
+RUN=rg-native-v02-high-20st JOB_TIME=04:00:00 bash run.sh envs/reasoning-gym-sft.yaml
+```
+
+Validation on the same 128 prompts, reward on the claim frame (counts from the environment's frame metrics; "reply
+correct" = the reply frame verified the same way, logged but not rewarded):
+
+| Validation step | 0 | 10 | 20 |
+|---|---|---|---|
+| accuracy | 0.070 | 0.109 | 0.178 |
+| answers with a claim frame | 20/128 | 26/128 | 44/128 |
+| correct claims | 9 | 14 | 24 |
+| reply correct | 59 | 57 | 53 |
+
+Training reward rose from 0.016 (step 1) to 0.20 and 0.19 (steps 19 and 20), and the share of training answers with
+a claim frame from 2.7% to 26.6%; rows trained per step (non-zero advantage) went from 16-96 to 104-112 of 256. The
+think frame was never empty (thinking level high). So far the gain is the claim format, not the reasoning: the reply
+is right about as often as at step 0, and most correct replies still carry no claim. 1 h 35 min, about 63 GPU-h.
+
+Two settings that did not work, from the same session:
+- Thinking level medium (the default system frame): v0.2 left the think frame empty on every one of these
+  prompts (128/128 on the validation set, through Gym's reasoning_gym server with an "<answer> tags" line on each
+  prompt, job 1276079).
+- DAPO-Math's "Answer:" instruction around each prompt: the claim rate did not rise (20/128 at step 0), the model
+  wrote "Answer: X" in the reply instead, and only 2 of the 20 claims were right (job 1276229, stopped at step 5).
