@@ -1,0 +1,14 @@
+# Kimina Lean Server for the Lean task: defaults, loaded after the site profile (a variable already set wins).
+# Sourced by setup.sh, start.sh, setup-data.sh and the jobs, after sites/load.sh.
+
+# Where setup.sh installs the server, its Python venv and the Lean REPL.
+: "${KIMINA_INSTALL:=${SCRATCH}/lean-kimina/install}"
+# Python for the venv: Clariden's login and compute nodes have /usr/bin/python3.11 (3.12 is not installed).
+: "${KIMINA_PYTHON:=python3.11}"
+# A Lean toolchain and a Lake project with Mathlib compiled for it, at the REPL's Lean version (pin: REPL_TAG).
+# Both are only read; the server copies what it needs into node memory. No default: set them in site.env
+# (see README.md for making such a project).
+: "${LEAN_TOOLCHAIN:=}"
+: "${LEAN_PROJECT:=}"
+# The Lean task's rows (as backends/nemo-rl/lean/, which writes the same files for the NeMo-Skills sandbox).
+: "${LEAN_DATA:=${SCRATCH}/lean}"

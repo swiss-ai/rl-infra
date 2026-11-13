@@ -1,0 +1,9 @@
+# Kimina Lean Server for the Lean task's verifier (see README.md): swiss-ai's fork of
+# project-numina/kimina-lean-server, branch clariden-performance. It adds settings for many-core nodes, fixes
+# for failures that are otherwise silent, and a streaming client, all measured on Clariden (the fork's
+# docs/MANY_CORE_NODES.md). Every new setting defaults to upstream behaviour; kimina.sh sets the measured ones.
+KIMINA_URL=https://github.com/swiss-ai/kimina-lean-server.git
+KIMINA_COMMIT=97d7683753bf0fbf6259db05b54d5fe7689c678e
+# The Lean REPL, at the tag of the Lean version the Mathlib build (LEAN_PROJECT) uses.
+REPL_URL=https://github.com/leanprover-community/repl.git
+REPL_TAG=v4.34.0

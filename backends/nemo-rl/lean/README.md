@@ -37,3 +37,8 @@ Lean runs code at compile time (`#eval`, `IO`). In an enroot container this site
 `/home01` whatever pyxis is told, so the sandbox runs in bubblewrap on the image unpacked to node-local disk
 (`sandbox_job.sh`): compiled code sees neither (checked with `System.FilePath.pathExists`). It keeps the
 network: the 0.7.1 image predates NeMo-Skills' network blocking.
+
+## With a Kimina Lean Server instead
+
+`backends/nemo-rl/lean-kimina` checks the proofs in a Kimina Lean Server (Lean v4.34.0, warm REPLs) instead of
+this sandbox, with the task file `envs/lean-kimina-sft.yaml`; it also makes this task's rows on Alps.
