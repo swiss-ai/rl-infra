@@ -28,27 +28,27 @@ TASK_INFO = None
 # Command templates as the prompt lists them, keyed by the simulator's template name.
 COMMANDS = [
     ("look around", "look around", "describe the room you are in"),
-    ("look at OBJ", "look at OBJ", "describe an object"),
-    ("look in OBJ", "look in OBJ", "describe a container's contents"),
-    ("read OBJ", "read OBJ", "read a note, book or label"),
-    ("go OBJ", "go to LOC", "move to an adjacent room through an open door"),
-    ("teleport OBJ", "teleport to LOC", "move to any room at once"),
-    ("open OBJ", "open OBJ", "open a door or container"),
-    ("close OBJ", "close OBJ", "close a door or container"),
-    ("pick up OBJ", "pick up OBJ", "put an object into your inventory"),
-    ("put down OBJ", "put down OBJ", "drop an object from your inventory"),
-    ("move OBJ to OBJ", "move OBJ to OBJ", "put an object into or onto another"),
-    ("pour OBJ in OBJ", "pour OBJ in OBJ", "pour a liquid or the contents of a container"),
-    ("dunk OBJ in OBJ", "dunk OBJ in OBJ", "dip an object into a liquid"),
-    ("mix OBJ", "mix OBJ", "mix the contents of a container"),
-    ("activate OBJ", "activate OBJ", "switch a device on"),
-    ("deactivate OBJ", "deactivate OBJ", "switch a device off"),
-    ("use OBJ on OBJ", "use OBJ on OBJ", "use a tool on an object, e.g. a thermometer"),
-    ("connect OBJ to OBJ", "connect OBJ to OBJ", "connect two electrical terminals"),
-    ("disconnect OBJ", "disconnect OBJ", "disconnect an electrical component"),
-    ("eat OBJ", "eat OBJ", "eat something"),
-    ("flush OBJ", "flush OBJ", "flush a toilet"),
-    ("focus on OBJ", "focus on OBJ", "declare the object the task is about (see below)"),
+    ("look at OBJ", "look at <object>", "describe an object"),
+    ("look in OBJ", "look in <object>", "describe a container's contents"),
+    ("read OBJ", "read <object>", "read a note, book or label"),
+    ("go OBJ", "go to <room>", "move to an adjacent room through an open door"),
+    ("teleport OBJ", "teleport to <room>", "move to any room at once"),
+    ("open OBJ", "open <object>", "open a door or container"),
+    ("close OBJ", "close <object>", "close a door or container"),
+    ("pick up OBJ", "pick up <object>", "put an object into your inventory"),
+    ("put down OBJ", "put down <object>", "drop an object from your inventory"),
+    ("move OBJ to OBJ", "move <object> to <object>", "put an object into or onto another"),
+    ("pour OBJ in OBJ", "pour <object> in <object>", "pour a liquid or the contents of a container"),
+    ("dunk OBJ in OBJ", "dunk <object> in <object>", "dip an object into a liquid"),
+    ("mix OBJ", "mix <object>", "mix the contents of a container"),
+    ("activate OBJ", "activate <object>", "switch a device on"),
+    ("deactivate OBJ", "deactivate <object>", "switch a device off"),
+    ("use OBJ on OBJ", "use <object> on <object>", "use a tool on an object, e.g. a thermometer"),
+    ("connect OBJ to OBJ", "connect <object> to <object>", "connect two electrical terminals"),
+    ("disconnect OBJ", "disconnect <object>", "disconnect an electrical component"),
+    ("eat OBJ", "eat <object>", "eat something"),
+    ("flush OBJ", "flush <object>", "flush a toilet"),
+    ("focus on OBJ", "focus on <object>", "declare the object the task is about; see the notes"),
     ("wait", "wait", "let 10 time steps pass"),
     ("wait1", "wait1", "let 1 time step pass"),
     ("inventory", "inventory", "list what you carry"),
@@ -60,8 +60,10 @@ INTRO = (
     "physics, chemistry and biology. You act by entering commands, one per turn."
 )
 NOTES = (
+    "Write each command in plain words and name objects as the observations do, for example: look around, "
+    "teleport to kitchen, open door to kitchen, look at picture, pick up thermometer, move metal pot to stove.\n\n"
     "Notes:\n"
-    "- \"focus on OBJ\" commits you to an object. Focus only on the objects the task tells you to focus on: "
+    "- \"focus on <object>\" commits you to an object. Focus only on the objects the task tells you to focus on: "
     "focusing on any other object fails the task.\n"
     "- Time passes only through commands; processes such as heating or plant growth may need several "
     "\"wait\" commands.\n"
@@ -82,11 +84,11 @@ HOW = {
 
 def prompt(fmt, task_desc, templates, first_obs):
     commands = "\n".join(
-        f"- {shown}: {what}" for name, shown, what in COMMANDS if name in templates
+        f"- {shown} ({what})" for name, shown, what in COMMANDS if name in templates
     )
     return (
-        f"{INTRO}\n\nYour task: {task_desc}\n\nCommands (OBJ is an object and LOC a room, named as in the "
-        f"observations):\n{commands}\n\n{NOTES}\n\n{HOW[fmt]}\n\nObservation:\n{first_obs}"
+        f"{INTRO}\n\nYour task: {task_desc}\n\nCommands:\n{commands}\n\n{NOTES}\n\n{HOW[fmt]}\n\n"
+        f"Observation:\n{first_obs}"
     )
 
 
@@ -108,7 +110,7 @@ def worker(args):
 
     jar = sorted(glob.glob(os.path.join(pkg, "py4j-*.data/data/share/py4j/py4j*.jar")))[-1]
     port = launch_gateway(jarpath=jar, classpath=JAR_PATH, die_on_exit=True, cwd=BASEPATH, java_path=java,
-                          javaopts=["-Xmx2g", "-XX:+UseSerialGC", "-XX:ActiveProcessorCount=2"])
+                          javaopts=["-Xmx2g", "-XX:+UseSerialGC", "-XX:ActiveProcessorCount=2", "-XX:-UsePerfData", "-Xlog:all=warning:stderr"])
     gw = JavaGateway(gateway_parameters=GatewayParameters(auto_field=True, port=port))
     sim = gw.jvm.scienceworld.runtime.pythonapi.PythonInterface()
     out = []
@@ -159,7 +161,7 @@ def main():
 
     jar = sorted(glob.glob(os.path.join(args.package, "py4j-*.data/data/share/py4j/py4j*.jar")))[-1]
     port = launch_gateway(jarpath=jar, classpath=JAR_PATH, die_on_exit=True, cwd=BASEPATH, java_path=args.java,
-                          javaopts=["-Xmx2g", "-XX:+UseSerialGC", "-XX:ActiveProcessorCount=2"])
+                          javaopts=["-Xmx2g", "-XX:+UseSerialGC", "-XX:ActiveProcessorCount=2", "-XX:-UsePerfData", "-Xlog:all=warning:stderr"])
     gw = JavaGateway(gateway_parameters=GatewayParameters(auto_field=True, port=port))
     sim = gw.jvm.scienceworld.runtime.pythonapi.PythonInterface()
     tasks = {}

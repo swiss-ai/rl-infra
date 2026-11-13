@@ -4,6 +4,6 @@
 set -euo pipefail
 SW=${SW:-/home01/hanint06/sciworld}
 HERE=/home01/hanint06/projects/rl-infra-sciworld/experiments/scienceworld
-python3 -u ${HERE}/build_data.py --java $SW/jre/bin/java --package $SW/pydeps --out-dir ${OUT_DIR:-$SW/data} \
+python3 -u ${HERE}/build_data.py --java $SW/jre/bin/java --package $SW/pydeps --out-dir ${OUT_DIR:-$SW/data2} \
     --simplifications teleportAction,openDoors,openContainers,selfWateringFlowerPots \
     --train-rows-per-task ${ROWS_PER_TASK:-200} --dev-per-task 5 --sample-per-task 4 --processes 48 "$@"
