@@ -1,0 +1,115 @@
+# Task file: Lean 4 theorem proving on an SFT checkpoint, as envs/lean-sft.yaml, but proofs are checked by a
+# Kimina Lean Server (Lean v4.34.0 + Mathlib, warm REPLs that imported the header once) instead of the
+# NeMo-Skills sandbox (Lean 4.12, one cold `lake env lean` per proof). See backends/nemo-rl/lean-kimina/README.md.
+# NOT YET RUN AS A TRAINING JOB. Before it:
+#   bash backends/nemo-rl/lean-kimina/setup.sh          # once: the server, its venv, the Lean REPL
+#   bash backends/nemo-rl/lean-kimina/setup-data.sh     # once: $SCRATCH/lean/data/{train,validation}.v434.jsonl
+#   bash backends/nemo-rl/lean-kimina/start.sh          # the server job; endpoint in $SCRATCH/lean-kimina/endpoint
+#   bash run.sh envs/lean-kimina-sft.yaml \
+#       env.nemo_gym.math_formal_lean.resources_servers.math_formal_lean.kimina_url=$(cat $SCRATCH/lean-kimina/endpoint) \
+#       env.nemo_gym.math_formal_lean.resources_servers.math_formal_lean.kimina_api_key=$(cat $SCRATCH/lean-kimina/endpoint.key)
+# Gym patch 0011 (backends/nemo-rl/apertus2/patches/gym) adds `verifier: kimina`. Everything else is
+# envs/lean-sft.yaml's, copied, because run.sh reads a task's `defaults:` as its recipe.
+defaults: ../recipes/apertus2-chonk-sft-vllm-adamw-code.yaml
+script: examples/nemo_gym/run_grpo_nemo_gym.py
+
+grpo:
+  num_prompts_per_step: 128
+  num_generations_per_prompt: 16
+  val_period: 20
+  val_at_start: true
+  val_at_end: true
+  # The Gym entrypoint refuses any other value and validates on the whole validation file.
+  max_val_samples: null
+  val_batch_size: null
+  val_num_generations_per_prompt: 1
+  # The Gym entrypoint refuses reward shaping.
+  reward_shaping:
+    enabled: false
+  skip_zero_advantage_groups: false
+
+policy:
+  train_global_batch_size: 512
+  megatron_cfg:
+    optimizer:
+      lr: 2.0e-6
+  generation:
+    max_new_tokens: 16384
+    # No budget: it slows vLLM generation 1.5-1.9x (see envs/code-gen-osb-sft.yaml).
+    thinking_token_budget: null
+    output_format: apertus2
+    system_prompt_file: ${oc.env:RL_INFRA_DIR}/envs/apertus2-system.json
+    stop_token_ids: [12]
+    stop_strings: null
+    vllm_cfg:
+      max_model_len: ${policy.max_total_sequence_length}
+      async_engine: true
+      expose_http_server: true
+      # The checkpoint tokenizer has no chat template, and the HTTP server does not use
+      # policy.tokenizer.chat_template on its own.
+      http_server_serving_chat_kwargs:
+        chat_template: ${policy.tokenizer.chat_template}
+    vllm_kwargs:
+      # Chonk hybrid Mamba layers need it.
+      enable_chunked_prefill: true
+
+data:
+  max_input_seq_length: null
+  shuffle: true
+  num_workers: 0
+  # The data block below replaces the recipe one, and grpo.setup() indexes this key.
+  use_multiple_dataloader: false
+  train:
+    dataset_name: NemoGymDataset
+    data_path: ${oc.env:SCRATCH}/lean/data/train.v434.jsonl
+  validation:
+    dataset_name: NemoGymDataset
+    data_path: ${oc.env:SCRATCH}/lean/data/validation.v434.jsonl
+  default:
+    dataset_name: NemoGymDataset
+    env_name: nemo_gym
+    prompt_file: null
+    system_prompt_file: null
+    processor: nemo_gym_data_processor
+  _override_: true
+
+env:
+  should_use_nemo_gym: true
+  should_log_nemo_gym_responses: true
+  # Full results of every rollout, next to the weights. Never in W&B.
+  rollout_dir: ${checkpointing.checkpoint_dir}/rollouts
+  nemo_gym:
+    skip_venv_if_present: true
+    port_range_low: 5000
+    port_range_high: 5999
+    is_trajectory_collection: false
+    # Gym servers live on several Ray nodes and must advertise the node IP.
+    use_absolute_ip: true
+    # NeMo-RL patch 0030: Gym agent server holds every request in flight; keep it off the trainer nodes.
+    place_on_generation_node: true
+    config_paths:
+    - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+    - resources_servers/math_formal_lean/configs/math_formal_lean.yaml
+    policy_model:
+      responses_api_models:
+        vllm_model:
+          # NeMo-RL clears its own stop settings for Gym, so they travel with each request.
+          extra_body:
+            stop: []
+            stop_token_ids: [12]
+    math_formal_lean:
+      resources_servers:
+        math_formal_lean:
+          verifier: kimina
+          # http://<node>:<port> and key of the server job (backends/nemo-rl/lean-kimina/start.sh), given at launch.
+          kimina_url: ???
+          kimina_api_key: ???
+          # The server's MAX_REPLS: more in flight would only queue on the server.
+          kimina_max_inflight: 128
+          sandbox_host: unused
+          # Kimina's timeout covers the proof alone; the REPL imported the header beforehand.
+          compilation_timeout: 30.0
+  _override_: true
+
+logger:
+  tensorboard_enabled: true
