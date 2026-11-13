@@ -1,0 +1,68 @@
+# Task file: Reasoning Gym on the SFT v0.2 checkpoint, scored in NeMo-RL's own math environment (no Gym), so it
+# can share steps with the native math and science sets (data.use_multiple_dataloader). verifier_type
+# reasoning_gym (NeMo-RL patch 0034) reduces the claim frame to an answer (<answer> tags, else \boxed{} with
+# balanced braces, else the claim) and scores it with the task's own reasoning_gym scorer; each row's output is
+# the JSON ground truth that scorer reads. Rows: 84 tasks of nvidia/Nemotron-RL-ReasoningGym-v1 (CC BY 4.0),
+# 2,000 train and 128 validation, from envs/prepare_reasoning_gym.py:
+#   python3.12 envs/prepare_reasoning_gym.py $SCRATCH/reasoning-gym/native
+#   bash run.sh envs/reasoning-gym-sft.yaml
+# Thinking level high: at medium, v0.2 leaves the think frame empty on these prompts (128 of 128 answers).
+# As a set in a native mix, add to the mix's task file (same keys as a multiple-choice set on math_default):
+#   pydeps: reasoning_gym
+#   data.num_prompts_per_dataloader: {..., rg: <prompts per step>}
+#   data.train: [..., {dataset_name: ResponseDataset, data_path: <train.jsonl>, env_name: reasoning_gym}]
+#   env.reasoning_gym: {num_workers: 8, verifier_type: reasoning_gym, reward_frame: claim}
+defaults: ../recipes/apertus2-chonk-sftv02-18315-vllm-adamw-rg.yaml
+# reasoning-gym in an overlay of its own (run.sh, backends/nemo-rl/apertus2/pydeps.sh).
+pydeps: reasoning_gym
+
+grpo:
+  num_prompts_per_step: 32
+  num_generations_per_prompt: 8
+  max_num_steps: 20
+  max_num_epochs: 1
+  val_period: 10
+  val_at_start: true
+  val_at_end: true
+  val_batch_size: 128
+  max_val_samples: 128
+
+checkpointing:
+  enabled: false
+
+policy:
+  # 32 x 8 = 256 rollouts, one optimizer step per GRPO step.
+  train_global_batch_size: 256
+  megatron_cfg:
+    optimizer:
+      lr: 2.0e-6
+    env_vars:
+      # NeMo-RL patch 0033: PyTorch's allocator at most 78% of the GPU (74 GB).
+      NRL_CUDA_MEMORY_FRACTION: "0.78"
+
+data:
+  _override_: true
+  # Longest prompt about 7,000 characters (rectangle_count grids).
+  max_input_seq_length: 4096
+  shuffle: true
+  num_workers: 1
+  use_multiple_dataloader: false
+  train:
+    dataset_name: ResponseDataset
+    data_path: ${oc.env:SCRATCH}/reasoning-gym/native/train.jsonl
+    env_name: reasoning_gym
+  validation:
+    dataset_name: ResponseDataset
+    data_path: ${oc.env:SCRATCH}/reasoning-gym/native/validation.jsonl
+    env_name: reasoning_gym
+  default:
+    prompt_file: null
+    system_prompt_file: ${oc.env:RL_INFRA_DIR}/envs/apertus2-system-high.json
+    processor: apertus2_math_data_processor
+    env_name: reasoning_gym
+
+env:
+  reasoning_gym:
+    num_workers: 8
+    verifier_type: reasoning_gym
+    reward_frame: claim

@@ -1,0 +1,20 @@
+# The DAPO recipe in the Apertus 2 format (apertus2_math_data_processor, reward on the claim frame) on the
+# SFT v0.2 export iter_0018315, on 10 nodes = 8 trainer + 2 vLLM: the smallest layout that runs Chonk.
+# envs/reasoning-gym-sft.yaml holds the task. run.sh reads cluster.num_nodes and sft_export from this file.
+# The export is in hanint06's scratch (group-readable). On another account, NeMo-RL's HF->Megatron
+# conversion (about 200 GB under ${HF_HOME}/nemo_rl) can be reused by linking hanint06's:
+#   ln -s /scratch/hanint06/huggingface/nemo_rl/model__scratch_hanint06_models_chonk-lc-16k-v0.2-iter_0018315 \
+#         $SCRATCH/huggingface/nemo_rl/model__scratch_${USER}_models_chonk-lc-16k-v0.2-iter_0018315
+defaults: apertus2-chonk-sft-vllm-adamw-dapo.yaml
+
+sft_export: ../hanint06/chonk-sft/models/chonk-lc-16k-v0.2-iter_0018315
+
+cluster:
+  num_nodes: 10
+
+policy:
+  model_name: ${oc.env:SCRATCH}/models/chonk-lc-16k-v0.2-iter_0018315
+  generation:
+    colocated:
+      resources:
+        num_nodes: 2
