@@ -31,7 +31,9 @@ if [[ "$(cat "${GYM_DIR}/.git/rl-infra-patches" 2>/dev/null)" != "${stamp}" ]]; 
     git -C "${GYM_DIR}" checkout --quiet --force "${GYM_COMMIT}"
     git -C "${GYM_DIR}" clean -fdxq resources_servers/rubric_judge resources_servers/code_gen/opensandbox_pods.py \
         responses_api_agents/harbor_agent/configs/harbor_agent_opensandbox_training.yaml \
-        responses_api_agents/harbor_agent/overrides.txt
+        responses_api_agents/harbor_agent/overrides.txt \
+        resources_servers/math_formal_lean/kimina_lean_client.py \
+        resources_servers/math_formal_lean/tests/test_kimina_lean_client.py
     for p in "${APERTUS2_DIR}"/patches/gym/*.patch; do
         git -C "${GYM_DIR}" apply "${p}"
         echo "== Gym: applied $(basename "${p}")"

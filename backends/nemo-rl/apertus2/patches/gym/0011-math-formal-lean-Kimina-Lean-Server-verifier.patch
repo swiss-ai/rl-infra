@@ -1,0 +1,395 @@
+diff --git a/resources_servers/math_formal_lean/app.py b/resources_servers/math_formal_lean/app.py
+index f81a2616..c068f7ec 100644
+--- a/resources_servers/math_formal_lean/app.py
++++ b/resources_servers/math_formal_lean/app.py
+@@ -29,6 +29,7 @@ from nemo_gym.base_resources_server import (
+     BaseVerifyResponse,
+     SimpleResourcesServer,
+ )
++from resources_servers.math_formal_lean.kimina_lean_client import KiminaLean4Client
+ from resources_servers.math_formal_lean.sandbox_client import Lean4SandboxClient
+ 
+ 
+@@ -348,6 +349,13 @@ class MathFormalLeanResourcesServerConfig(BaseResourcesServerConfig):
+     strip_theorem_from_proof: bool = True
+     # Multi-turn self-correction settings (error feedback always provided on failure)
+     refinement_prompt_template: Optional[str] = None  # Use default if None
++    # Which Lean checker compiles proofs: "sandbox" (the NeMo-Skills sandbox, one `lake env lean`
++    # per proof) or "kimina" (a Kimina Lean Server, whose REPLs import the header once).
++    verifier: str = "sandbox"
++    kimina_url: Optional[str] = None
++    kimina_api_key: Optional[str] = None
++    # Proofs in flight to the Kimina server at once; set it to the server's MAX_REPLS.
++    kimina_max_inflight: int = 256
+ 
+ 
+ class MathFormalLeanRunRequest(BaseRunRequest):
+@@ -384,11 +392,23 @@ class MathFormalLeanResourcesServer(SimpleResourcesServer):
+ 
+     def model_post_init(self, context: Any) -> None:
+         super().model_post_init(context)
+-        self._sandbox_client = Lean4SandboxClient(
+-            host=self.config.sandbox_host,
+-            port=self.config.sandbox_port,
+-            max_output_characters=self.config.max_output_characters,
+-        )
++        if self.config.verifier == "kimina":
++            if not self.config.kimina_url:
++                raise ValueError("verifier: kimina needs kimina_url")
++            self._sandbox_client = KiminaLean4Client(
++                url=self.config.kimina_url,
++                api_key=self.config.kimina_api_key,
++                max_output_characters=self.config.max_output_characters,
++                max_inflight=self.config.kimina_max_inflight,
++            )
++        elif self.config.verifier == "sandbox":
++            self._sandbox_client = Lean4SandboxClient(
++                host=self.config.sandbox_host,
++                port=self.config.sandbox_port,
++                max_output_characters=self.config.max_output_characters,
++            )
++        else:
++            raise ValueError(f"unknown verifier {self.config.verifier!r}: use 'sandbox' or 'kimina'")
+         self._proof_build_config = ProofBuildConfig(
+             extract_code_mode=self.config.extract_code_mode,
+             restate_formal_statement=self.config.restate_formal_statement,
+diff --git a/resources_servers/math_formal_lean/kimina_lean_client.py b/resources_servers/math_formal_lean/kimina_lean_client.py
+new file mode 100644
+index 00000000..345e1ece
+--- /dev/null
++++ b/resources_servers/math_formal_lean/kimina_lean_client.py
+@@ -0,0 +1,153 @@
++# SPDX-License-Identifier: Apache-2.0
++"""Lean 4 checks on a Kimina Lean Server (https://github.com/project-numina/kimina-lean-server).
++
++The NeMo-Skills sandbox runs `lake env lean` on every proof, which imports the header
++(all of Mathlib) again each time. Kimina keeps a pool of Lean REPLs that have imported
++the header once and checks each proof in one of them, so a proof costs its own
++elaboration only. This client returns the sandbox's result format, so `app.py` scores
++and formats feedback the same way whichever verifier runs:
++
++- `process_status`: "completed" when Lean reports no error (the sandbox: `lean` exit 0),
++  "failed" when it reports one, "timeout", or "error" when the proof was not checked;
++- `stdout`: Lean's messages as `lean` prints them (`<file>:<line>:<col>: <severity>: <text>`),
++  so a `sorry` warning still reads "declaration uses 'sorry'";
++- `stderr`: the reason for "timeout" or "error".
++
++Requests wait for a free slot (`max_inflight`, set it to the server's MAX_REPLS) instead
++of timing out in httpx's connection pool, so a burst of verifications queues rather than
++scoring proofs that were never checked as timeouts.
++"""
++
++import asyncio
++import logging
++import math
++from typing import Any, Dict, Optional
++
++import httpx
++
++
++LOG = logging.getLogger(__name__)
++
++# Same file prefix as the sandbox's project, which `app.parse_error` looks for.
++LEAN_FILE = "/lean4/my_project/Main.lean"
++
++
++def _truncate(text: str, limit: int) -> str:
++    return text[:limit] + "<output cut>" if len(text) > limit else text
++
++
++def to_sandbox_output(result: Dict[str, Any], max_output_characters: int) -> Dict[str, Any]:
++    """Map one Kimina `ReplResponse` (as JSON) to the sandbox's output dictionary."""
++    error = result.get("error")
++    if error:
++        status = "timeout" if "timed out" in error else "error"
++        return {"process_status": status, "stdout": "", "stderr": _truncate(error, max_output_characters)}
++
++    response = result.get("response") or {}
++    if "message" in response:  # the REPL refused the command itself
++        return {
++            "process_status": "error",
++            "stdout": "",
++            "stderr": _truncate(str(response["message"]), max_output_characters),
++        }
++
++    lines = []
++    has_error = False
++    for message in response.get("messages") or []:
++        severity = message.get("severity", "info")
++        has_error = has_error or severity == "error"
++        pos = message.get("pos") or {}
++        lines.append(
++            f"{LEAN_FILE}:{pos.get('line', 0)}:{pos.get('column', 0)}: {severity}: {message.get('data', '')}"
++        )
++    stdout = "\n".join(lines) + ("\n" if lines else "")
++    # A `sorry` always comes with Lean's "declaration uses 'sorry'" warning; say it anyway
++    # if the REPL reported sorries without one, so app.determine_proof_status sees it.
++    if response.get("sorries") and "sorry" not in stdout:
++        stdout += f"{LEAN_FILE}:0:0: warning: declaration uses 'sorry'\n"
++    return {
++        "process_status": "failed" if has_error else "completed",
++        "stdout": _truncate(stdout, max_output_characters),
++        "stderr": "",
++    }
++
++
++class KiminaLean4Client:
++    """Same interface as `Lean4SandboxClient`, backed by a Kimina Lean Server."""
++
++    def __init__(
++        self,
++        url: str,
++        api_key: Optional[str] = None,
++        max_output_characters: int = 1000,
++        max_inflight: int = 256,
++        n_retries: int = 3,
++        transport: Optional[httpx.AsyncBaseTransport] = None,
++    ):
++        self.url = url.rstrip("/")
++        self.api_key = api_key
++        self.max_output_characters = max_output_characters
++        self.max_inflight = max_inflight
++        self.n_retries = n_retries
++        self._transport = transport
++        self._client: Optional[httpx.AsyncClient] = None
++        self._sem: Optional[asyncio.Semaphore] = None
++
++    async def _get_client(self) -> httpx.AsyncClient:
++        if self._client is None:
++            headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
++            self._client = httpx.AsyncClient(
++                headers=headers,
++                limits=httpx.Limits(
++                    max_keepalive_connections=self.max_inflight, max_connections=self.max_inflight
++                ),
++                transport=self._transport,
++            )
++            self._sem = asyncio.Semaphore(self.max_inflight)
++        return self._client
++
++    async def close(self) -> None:
++        if self._client is not None:
++            await self._client.aclose()
++            self._client = None
++
++    async def execute_lean4(self, code: str, timeout: float = 30.0) -> Dict[str, Any]:
++        client = await self._get_client()
++        assert self._sem is not None
++        seconds = max(1, math.ceil(timeout))
++        payload = {"snippets": [{"id": "proof", "code": code}], "timeout": seconds, "reuse": True}
++        # The server may wait for a free REPL and import a header before the check's own
++        # timeout starts; the slot semaphore keeps that wait short.
++        request_timeout = httpx.Timeout(2 * seconds + 180.0, connect=30.0, pool=None)
++        last = ""
++        async with self._sem:
++            for attempt in range(self.n_retries):
++                if attempt:
++                    await asyncio.sleep(min(10.0, 2.0**attempt))
++                try:
++                    response = await client.post(f"{self.url}/api/check", json=payload, timeout=request_timeout)
++                except httpx.HTTPError as e:
++                    last = f"{type(e).__name__}: {e}"
++                    continue
++                if response.status_code in (429, 500, 502, 503, 504):
++                    last = f"Kimina server HTTP {response.status_code}"
++                    continue
++                if response.status_code != 200:
++                    last = f"Kimina server HTTP {response.status_code}: {response.text[:200]}"
++                    break
++                try:
++                    (result,) = response.json()["results"]
++                except (ValueError, KeyError, TypeError):
++                    last = "Invalid response from the Kimina server"
++                    break
++                return to_sandbox_output(result, self.max_output_characters)
++        LOG.error("Proof not checked by the Kimina server: %s", last)
++        return {"process_status": "error", "stdout": "", "stderr": f"Proof not checked: {last}"}
++
++    async def health_check(self, timeout: float = 5.0) -> bool:
++        client = await self._get_client()
++        try:
++            response = await client.get(f"{self.url}/health", timeout=timeout)
++            return response.status_code == 200
++        except httpx.HTTPError:
++            return False
+diff --git a/resources_servers/math_formal_lean/tests/test_kimina_lean_client.py b/resources_servers/math_formal_lean/tests/test_kimina_lean_client.py
+new file mode 100644
+index 00000000..2331e9a7
+--- /dev/null
++++ b/resources_servers/math_formal_lean/tests/test_kimina_lean_client.py
+@@ -0,0 +1,175 @@
++# SPDX-License-Identifier: Apache-2.0
++"""The Kimina verifier gives the sandbox's result format, so app.py scores it the same way."""
++
++import asyncio
++import json
++from unittest.mock import MagicMock
++
++import httpx
++import pytest
++
++from nemo_gym.openai_utils import (
++    NeMoGymResponse,
++    NeMoGymResponseCreateParamsNonStreaming,
++    NeMoGymResponseOutputMessage,
++    NeMoGymResponseOutputText,
++)
++from nemo_gym.server_utils import ServerClient
++from resources_servers.math_formal_lean.app import (
++    MathFormalLeanResourcesServer,
++    MathFormalLeanResourcesServerConfig,
++    MathFormalLeanVerifyRequest,
++    determine_proof_status,
++    format_error_feedback,
++)
++from resources_servers.math_formal_lean.kimina_lean_client import (
++    LEAN_FILE,
++    KiminaLean4Client,
++    to_sandbox_output,
++)
++
++
++def ok(messages=None, sorries=None):
++    response = {"env": 0}
++    if messages is not None:
++        response["messages"] = messages
++    if sorries is not None:
++        response["sorries"] = sorries
++    return {"id": "proof", "time": 0.1, "response": response}
++
++
++ERROR = {
++    "severity": "error",
++    "pos": {"line": 7, "column": 2},
++    "endPos": {"line": 7, "column": 10},
++    "data": "linarith failed to find a contradiction",
++}
++SORRY = {
++    "severity": "warning",
++    "pos": {"line": 5, "column": 8},
++    "endPos": {"line": 5, "column": 9},
++    "data": "declaration uses 'sorry'",
++}
++
++
++def test_valid_proof_is_completed():
++    out = to_sandbox_output(ok(), 1000)
++    assert out == {"process_status": "completed", "stdout": "", "stderr": ""}
++    assert determine_proof_status(out) == "completed"
++
++
++def test_lean_error_is_failed_with_lean_style_lines():
++    out = to_sandbox_output(ok([ERROR]), 1000)
++    assert out["process_status"] == "failed"
++    assert out["stdout"] == f"{LEAN_FILE}:7:2: error: linarith failed to find a contradiction\n"
++    assert determine_proof_status(out) == "failed"
++    assert "linarith failed" in format_error_feedback(out, "proof")
++
++
++def test_sorry_is_detected():
++    out = to_sandbox_output(ok([SORRY], sorries=[{"pos": {"line": 5, "column": 8}}]), 1000)
++    assert out["process_status"] == "completed"
++    assert determine_proof_status(out) == "has_sorry"
++
++
++def test_sorries_without_a_warning_still_count():
++    out = to_sandbox_output(ok([], sorries=[{"pos": {"line": 5, "column": 8}}]), 1000)
++    assert determine_proof_status(out) == "has_sorry"
++
++
++def test_timeouts_and_server_errors():
++    timed_out = to_sandbox_output({"id": "proof", "error": "Lean REPL command timed out in 30 seconds"}, 1000)
++    assert determine_proof_status(timed_out) == "timeout"
++    broken = to_sandbox_output({"id": "proof", "response": {"message": "unknown environment"}}, 1000)
++    assert determine_proof_status(broken) == "error"
++
++
++def test_output_is_truncated_like_the_sandbox():
++    out = to_sandbox_output(ok([dict(ERROR, data="x" * 5000)]), 100)
++    assert out["stdout"].endswith("<output cut>") and len(out["stdout"]) == 100 + len("<output cut>")
++
++
++class Server:
++    def __init__(self, replies):
++        self.replies = list(replies)
++        self.payloads = []
++
++    def handler(self, request):
++        self.payloads.append(json.loads(request.content))
++        status, body = self.replies.pop(0)
++        return httpx.Response(status, json=body)
++
++
++def test_execute_lean4_sends_one_snippet_and_retries_refusals(monkeypatch):
++    async def no_sleep(_):
++        return None
++
++    monkeypatch.setattr("resources_servers.math_formal_lean.kimina_lean_client.asyncio.sleep", no_sleep)
++    server = Server([(429, {"detail": "busy"}), (200, {"results": [ok([ERROR])]})])
++    client = KiminaLean4Client("http://kimina", transport=httpx.MockTransport(server.handler))
++    out = asyncio.run(client.execute_lean4("theorem t : 1 = 2 := by linarith", timeout=29.5))
++    assert out["process_status"] == "failed"
++    assert len(server.payloads) == 2
++    assert server.payloads[0]["snippets"][0]["code"].startswith("theorem t")
++    assert server.payloads[0]["timeout"] == 30
++
++
++def test_unchecked_proof_is_an_error_not_a_timeout(monkeypatch):
++    async def no_sleep(_):
++        return None
++
++    monkeypatch.setattr("resources_servers.math_formal_lean.kimina_lean_client.asyncio.sleep", no_sleep)
++    server = Server([(503, {})] * 3)
++    client = KiminaLean4Client("http://kimina", n_retries=3, transport=httpx.MockTransport(server.handler))
++    out = asyncio.run(client.execute_lean4("x"))
++    assert out["process_status"] == "error" and "not checked" in out["stderr"]
++
++
++def make_response(text):
++    return NeMoGymResponse(
++        id="r",
++        created_at=0.0,
++        model="m",
++        object="response",
++        output=[
++            NeMoGymResponseOutputMessage(
++                id="msg",
++                content=[NeMoGymResponseOutputText(annotations=[], text=text, type="output_text")],
++                role="assistant",
++                status="completed",
++                type="message",
++            )
++        ],
++        parallel_tool_calls=True,
++        tool_choice="auto",
++        tools=[],
++    )
++
++
++@pytest.mark.parametrize("reply,reward", [(ok(), 1.0), (ok([ERROR]), 0.0), (ok([SORRY]), 0.0)])
++def test_verify_end_to_end_with_kimina(reply, reward):
++    config = MathFormalLeanResourcesServerConfig(
++        host="127.0.0.1", port=0, entrypoint="app.py", name="math_formal_lean",
++        verifier="kimina", kimina_url="http://kimina",
++    )
++    server = MathFormalLeanResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
++    lean = Server([(200, {"results": [reply]})])
++    server._sandbox_client._transport = httpx.MockTransport(lean.handler)
++    body = MathFormalLeanVerifyRequest(
++        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
++        response=make_response("```lean4\ntheorem t : 1 + 1 = 2 := by\n  norm_num\n```"),
++        header="import Mathlib\n",
++        formal_statement="theorem t : 1 + 1 = 2 := by\n",
++    )
++    result = asyncio.run(server.verify(body))
++    assert result.reward == reward
++    sent = lean.payloads[0]["snippets"][0]["code"]
++    assert sent.startswith("import Mathlib\ntheorem t : 1 + 1 = 2 := by\n") and "norm_num" in sent
++
++
++def test_unknown_verifier_is_refused():
++    config = MathFormalLeanResourcesServerConfig(
++        host="127.0.0.1", port=0, entrypoint="app.py", name="math_formal_lean", verifier="other"
++    )
++    with pytest.raises(ValueError):
++        MathFormalLeanResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
