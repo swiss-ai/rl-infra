@@ -1,0 +1,123 @@
+# STEM mix with open-answer science graded by an LLM judge: the run-3 mix (envs/stem-mix-run3.yaml) with a quarter
+# of each 512-prompt step from Nemotron-RL-knowledge-openqa. Per step: 128 DAPO-Math-17K, 128 cleaned NuminaMath-1.5,
+# 128 science + CS knowledge-mcqa, 128 science + CS knowledge-openqa (Qwen3-235B pass rate < 1.0; domain-labelled,
+# no law or medicine). The openqa answers (claim frame, or its last \boxed{} content) are graded against the
+# reference by the native llm_judge environment, calling the judge model that env.judge_pool serves on its own
+# nodes (the recipe adds them: apertus2-chonk-sftv02-18315-vllm-adamw-dapo-32n-judge<N>.yaml).
+# Data: /scratch/hanint06/data/stem-rl/run3 and /scratch/hanint06/data/stem-rl/openqa
+# (rl-analysis/openqa-judge/prep_openqa.py, label_openqa.py, finalize_openqa.py).
+defaults: ../recipes/apertus2-chonk-sftv02-18315-vllm-adamw-dapo-32n-judge1.yaml
+
+grpo:
+  max_num_steps: 100
+  max_num_epochs: 1
+  val_period: 20
+  val_batch_size: 2544
+  max_val_samples: 2544
+
+data:
+  _override_: true
+  max_input_seq_length: 2048
+  shuffle: true
+  num_workers: 1
+  use_multiple_dataloader: true
+  custom_dataloader: examples.custom_dataloader.custom_dataloader.example_custom_dataloader
+  num_prompts_per_dataloader:
+    DAPOMath17K: 128
+    run3-numina_clean: 128
+    run3-mcqa_science_cs: 128
+    openqa-openqa_science: 128
+  train:
+    - dataset_name: DAPOMath17K
+      deduplicate: true
+    - dataset_name: ResponseDataset
+      data_path: /scratch/hanint06/data/stem-rl/run3/numina_clean.jsonl
+    - dataset_name: ResponseDataset
+      data_path: /scratch/hanint06/data/stem-rl/run3/mcqa_science_cs.jsonl
+      env_name: math_default
+    - dataset_name: ResponseDataset
+      data_path: /scratch/hanint06/data/stem-rl/openqa/openqa_science.jsonl
+      env_name: llm_judge
+  validation:
+    - dataset_name: DAPOMathAIME2024
+      split: test
+    - dataset_name: ResponseDataset
+      data_path: /scratch/hanint06/data/stem-rl/gpqa_diamond_x8.jsonl
+      env_name: math_default
+  default:
+    prompt_file: null
+    system_prompt_file: ${oc.env:RL_INFRA_DIR}/envs/apertus2-system.json
+    processor: apertus2_math_data_processor
+    env_name: math
+
+env:
+  # Multiple-choice questions: the same environment class, grading the option letter in the claim.
+  math_default:
+    num_workers: 8
+    verifier_type: claim_multichoice
+    reward_frame: claim
+  # Open answers: the llm_judge environment (NeMo-RL nemo_rl/environments/llm_judge_environment.py).
+  llm_judge:
+    judge_pool: judge
+    # verdict: one token, reward P(Yes) (score soft) or P(Yes) >= 0.5 (score hard).
+    # justify: NVIDIA's Gym equivalence prompt, a short justification and [[A=B]]/[[A!=B]].
+    mode: verdict
+    score: hard
+    reward_frame: claim
+    # SFT v0.2 often answers \boxed{} questions in the reply with no claim frame (77% of answers in job
+    # 1275487): then the reply's last \boxed{} content is graded.
+    fallback_frame: reply
+    # Must match the pool's temperature/top_p (verdict) or val_temperature/val_top_p (justify, greedy).
+    temperature: 1.0
+    top_p: 1.0
+    max_tokens: 512
+    top_logprobs: 20
+    max_concurrent_calls: 1024
+    timeout_s: 300
+    retries: 2
+    pool_wait_s: 3600
+    max_answer_chars: 2000
+    log_every: 512
+    chat_template_kwargs:
+      enable_thinking: false
+  judge_pool:
+    num_nodes: 1
+    stats_path: ${logger.log_dir}/judge_stats.jsonl
+    stats_interval_s: 5.0
+    # A complete generation config: it inherits nothing from policy.generation. One vLLM per GPU.
+    generation:
+      backend: vllm
+      model_name: ${oc.env:SCRATCH}/models/gemma-4-26B-A4B-it
+      max_new_tokens: 1024
+      temperature: 1.0
+      top_p: 1.0
+      top_k: null
+      val_temperature: 0.0
+      val_top_p: 1.0
+      val_top_k: null
+      stop_token_ids: null
+      stop_strings: null
+      colocated:
+        enabled: false
+      vllm_cfg:
+        async_engine: true
+        expose_http_server: true
+        precision: bfloat16
+        kv_cache_dtype: auto
+        logprobs_mode: processed_logprobs
+        tensor_parallel_size: 1
+        pipeline_parallel_size: 1
+        expert_parallel_size: 1
+        gpu_memory_utilization: 0.88
+        max_model_len: 8192
+        enforce_eager: false
+        use_deep_gemm: false
+        num_last_layers_in_bf16: 0
+        num_first_layers_in_bf16: 0
+        enable_vllm_metrics_logger: true
+        vllm_metrics_logger_interval: 2.0
+        refit_with_reload_api: false
+        enable_prefix_caching: true
+      vllm_kwargs:
+        max_num_seqs: 256
+        max_num_batched_tokens: 16384
