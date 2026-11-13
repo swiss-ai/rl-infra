@@ -18,6 +18,16 @@ PKGS=(
 if [[ -n "${PYDEPS_GYM:-}" ]]; then
     PKGS+=(openai==2.44.0 devtools==0.13.0 yappi==1.7.6 pydot==4.0.1 asttokens==3.0.2 executing==2.3.0)
 fi
+# Reasoning Gym scored in NeMo-RL's math environment (PYDEPS_RG, set by run.sh for a task with
+# `pydeps: reasoning_gym`, overlay of its own): reasoning-gym and the dependencies the image lacks.
+# The image has numpy, sympy, matplotlib, pyyaml, pytz, rich and tabulate (0.10.0 for the 0.9.0 pin).
+# pycosat has no wheels and compiles here (gcc-13 and the Python 3.12 headers are in the image).
+# 0.1.25, as Gym's reasoning_gym server resolves (>=0.1.19): 0.1.19 lacks coin_flip, kakurasu and survo
+# (its __version__ still says 0.1.19 in 0.1.25).
+if [[ -n "${PYDEPS_RG:-}" ]]; then
+    PKGS+=(reasoning-gym==0.1.25 arckit==0.1.0 drawsvg==2.4.2 bfi==1.0.4 cellpylib==2.4.0 magiccube==0.3.0
+           pycosat==0.6.6 pyfiglet==1.0.2 zss==1.2.0)
+fi
 # Tasks in the Apertus 2 message format (PYDEPS_APERTUS2, set by run.sh with an overlay of their own,
 # so this never reaches the overlay other jobs run from) install apertus-common from the checkout
 # setup.sh made. It asks for Python 3.13 and tokenizers 0.23.2, but runs on the image's 3.12 and

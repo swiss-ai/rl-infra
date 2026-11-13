@@ -24,6 +24,7 @@ container_render() {
         -e "s|@@PYDEPS@@|${PYDEPS:-}|g" \
         -e "s|@@PYDEPS_APERTUS2@@|${PYDEPS_APERTUS2:-}|g" \
         -e "s|@@PYDEPS_GYM@@|${PYDEPS_GYM:-}|g" \
+        -e "s|@@PYDEPS_RG@@|${PYDEPS_RG:-}|g" \
         -e "s|@@MEGATRON_DIR@@|${MEGATRON_DIR:-}|g" \
         -e "s|@@BRIDGE_DIR@@|${BRIDGE_DIR:-}|g" \
         -e "s|@@VLLM_RUNNER@@|${VLLM_RUNNER:-}|g" \
