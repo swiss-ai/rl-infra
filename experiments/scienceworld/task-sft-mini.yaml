@@ -1,0 +1,38 @@
+# Quick SFT v0.2 check on ScienceWorld: 1 train variation of each of the 30 tasks, 2 episodes each, in both action
+# formats (120 episodes), thinking medium, 16k tokens per episode. Run with sciworld_score.py.
+score:
+  num_generations: 2
+  batch_prompts: 512
+grpo:
+  max_rollout_turns: 100
+data:
+  _override_: true
+  max_input_seq_length: 4096
+  shuffle: false
+  num_workers: 1
+  train:
+    - dataset_name: ResponseDataset
+      data_path: /home01/hanint06/sciworld/data/sciworld_reply_mini.jsonl
+    - dataset_name: ResponseDataset
+      data_path: /home01/hanint06/sciworld/data/sciworld_tool_mini.jsonl
+      system_prompt_file: ${oc.env:RL_INFRA_DIR}/envs/apertus2-system-sciworld-act.json
+  validation: null
+  default:
+    prompt_file: null
+    system_prompt_file: ${oc.env:RL_INFRA_DIR}/envs/apertus2-system.json
+    processor: apertus2_sciworld_data_processor
+    env_name: scienceworld
+env:
+  scienceworld:
+    num_workers: 8
+    java_path: /home01/hanint06/sciworld/jre/bin/java
+    package_path: /home01/hanint06/sciworld/pydeps
+    jvm_heap: 2g
+    tokenizer_path: ${policy.model_name}
+    simplifications: teleportAction,openDoors,openContainers,selfWateringFlowerPots
+    max_actions: 100
+    max_calls_per_turn: 5
+    idle_timeout_s: 1800
+    call_timeout_s: 300
+    placement_group_prefix: null
+    max_observation_chars: null
