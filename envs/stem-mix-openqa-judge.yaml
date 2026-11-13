@@ -66,6 +66,13 @@ env:
     # Gemma sometimes starts to explain (first token "To"/"The", 5% of calls in job 1275730); its Yes/No
     # tokens among the top 20 still give the verdict.
     min_verdict_mass: 0.0
+    # vLLM structured outputs: choice ["Yes", "No"] (verdict) or a JSON {reasoning, verdict} (justify), so every
+    # well-formed judge answer carries a verdict.
+    structured: true
+    max_reasoning_chars: 400
+    # A failed judge call (no verdict, HTTP error, timeout) makes its sample zero-weight (mask_sample: out of the
+    # loss and of its group's baseline) instead of reward 0. An answer with nothing to judge stays reward 0.
+    mask_failures: true
     reward_frame: claim
     # SFT v0.2 often answers \boxed{} questions in the reply with no claim frame (77% of answers in job
     # 1275487): then the reply's last \boxed{} content is graded.
