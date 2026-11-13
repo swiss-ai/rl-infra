@@ -11,9 +11,8 @@ Gym patch `0011` (`../apertus2/patches/gym`) adds `verifier: kimina` to `math_fo
 sandbox's result format, so scoring and correction prompts are unchanged. The task file is
 `envs/lean-kimina-sft.yaml`.
 
-**Status (2026-11-13):** `setup.sh` and the data job have run on Clariden; see [Tested](#tested). The server job
-(`start.sh`) and the task file have not run with a training job, and REPLs confined in bubblewrap have not yet
-worked (the fixed wrapper is untested).
+**Status (2026-11-13):** `setup.sh`, the data job and the server job (`start.sh`) have run on Clariden, with the
+REPLs in bubblewrap; see [Tested](#tested). The task file has not yet run with a training job.
 
 ## Before the first run: Lean and Mathlib
 
@@ -86,19 +85,36 @@ For comparison, one cold `lean` per proof (the sandbox's way) checked 3.2–4.2 
 
 ## Tested
 
-On Clariden, 2026-11-12, before the server moved from a patch to the fork (same code):
-- **`setup.sh`** ran in 2 min 20 s; a second run took 11 s and changed nothing.
-- **Data job 3925556** (debug partition):
+On Clariden (debug partition, one GH200 node per job):
+- **`setup.sh`** made a fresh install in 2 min 20 s (2026-11-12). On 2026-11-13 it moved that install, made from
+  the earlier patch, to the fork at the pin in 8 s; a rerun took 2 s and changed nothing. The patched tree and the
+  fork's commit had the same code (only `README.md`, `.env.template` and `docs/` differ).
+- **Data job 3925556** (2026-11-12, before the fixes below):
   - The 29.5 GB download took 18 s; reduction read 1,376,663 rows.
   - Gym's selection gave **9,605 theorems**, as `backends/nemo-rl/lean` documents.
   - On Lean v4.34.0, **9,128 of the 9,605 training statements and 212 of the 244 miniF2F statements elaborate**.
     The 32 miniF2F failures use the `∑ x in s` notation that newer Mathlib replaced by `∑ x ∈ s`.
-  - **Bubblewrap:** with REPLs inside bubblewrap every import failed silently. `CHECK_HEADER` caught it, refused
-    all 128 REPLs, and the job went on unconfined. The cause was the mount order in `repl-bwrap.sh`: `--dev /dev`
-    came after binding the Lean copy under `/dev/shm` and hid it. The wrapper is fixed, but **the fix is
-    untested**: Clariden went down before it could be run. The job also waited its full 900 s before falling back,
-    although the confined server had refused to start; why `kimina_wait` did not see it exit is not yet known.
-  - The result of the 400-proof check was not read before Clariden went down.
+  - Of 400 Nemotron proofs verified on Lean 4.12 and built into code as Gym does, **115 pass on v4.34**; 272 fail
+    with a Lean error, 11 time out (60 s) and 2 are `sorry`.
+  - With the REPLs in bubblewrap every import failed silently: `--dev /dev` came after binding the Lean copy under
+    `/dev/shm` and hid it. `CHECK_HEADER` caught it and the job went on unconfined, but only after waiting its
+    full 900 s (see job 3931849).
+- **Test job 3931849** (2026-11-13, the scripts of this commit):
+  - One REPL through the fixed `repl-bwrap.sh` imported Mathlib and checked a proof. From inside, reading a file
+    on scratch failed (no such file), writing into the Lean copy failed (read-only file system), and `curl` found
+    no network.
+  - A server with 128 REPLs in bubblewrap was up after 68 s and passed its controls. Validating all 9,849
+    statements again kept exactly the rows of the unconfined data job, and the 400 sample proofs gave the same
+    counts.
+  - The 900 s wait: a server whose start-up fails does not exit. When every initial REPL fails, replacements are
+    still being started; at exit Python cancels them and waits forever for those half-started processes. A
+    ten-line asyncio script reproduces this on Clariden's Python 3.11.13 without any Kimina code. `kimina_wait`
+    only checked that the process was alive; it now also stops when uvicorn logs `Application startup failed`:
+    after 20 s instead of 900 s in this job.
+- **Server job 3931932** (2026-11-13, `start.sh`): up 43 s after staging, with 128 REPLs in bubblewrap. It wrote
+  `endpoint`; from a login node `/health` answered, a check without the key got HTTP 401, and the controls passed.
+  Its `endpoint.key` was readable by two groups: the folder's default ACL overrides the umask. `server_job.sh` now
+  makes the file private before the key goes in (checked on a login node: no one but the owner can read it).
 
 Locally, 2026-11-12 and 2026-11-13:
 - All 11 Gym patches apply in order to Gym at the pin. With 0011 applied, Gym's own `math_formal_lean` tests and
@@ -115,5 +131,4 @@ Locally, 2026-11-12 and 2026-11-13:
     error.
   - The sample check passed the correct proof and failed the wrong one, and the job exited 0.
 
-Not yet run: `server_job.sh`/`start.sh`, REPLs in bubblewrap with the fixed wrapper, and a training run with
-`envs/lean-kimina-sft.yaml`.
+Not yet run: a training run with `envs/lean-kimina-sft.yaml`, and a server job with the key-file change.
