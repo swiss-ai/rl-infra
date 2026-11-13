@@ -18,7 +18,7 @@
 Input is the shared verified-task store, one directory per validation
 campaign, with the tasks that campaign produced shipped as tarballs:
 
-    <verified-dir>/<campaign>/tasks/<task_name>.tar   the task, as a tarball
+    <verified-dir>/<campaign>/tasks/[<group>/...]<task_name>.tar   the task, as a tarball
     <verified-dir>/<campaign>/tasks.csv               per-task verdict + image
     <verified-dir>/<campaign>/{attempts,logs,...}     campaign bookkeeping
 
@@ -86,7 +86,11 @@ class TaskTar:
 
 
 def read_verdicts(campaign_dir: Path) -> dict[str, str] | None:
-    """Return `{<task>.tar: verdict}` from the campaign's tasks.csv.
+    """Return `{<path under tasks/>: verdict}` from the campaign's tasks.csv.
+
+    The csv's `task` column is the tarball's path relative to `tasks/`, which
+    is just `<task>.tar` for a flat campaign and `<group>/.../<task>.tar` for
+    one that groups its tarballs in subdirectories.
 
     Returns None when the campaign has no readable tasks.csv, which is the
     caller's signal that there is no verdict to filter on -- distinct from a
@@ -117,7 +121,11 @@ def select_campaign(
     Returns the selection plus a per-reason count of everything rejected, so
     the caller can report why a campaign contributed fewer tasks than it holds.
     """
-    tars = sorted((campaign_dir / "tasks").glob("*.tar"))
+    # Some campaigns group their tarballs in subdirectories of tasks/. The
+    # task names stay unique within a campaign, so the group is not part of
+    # the destination name.
+    tasks_dir = campaign_dir / "tasks"
+    tars = sorted(tasks_dir.rglob("*.tar"))
     rejected = {DROP_VERDICT: 0, "unverified": 0}
     if not tars:
         return [], rejected
@@ -126,7 +134,8 @@ def select_campaign(
     selected: list[TaskTar] = []
     for tar_path in tars:
         # A missing tasks.csv and a blank verdict both mean "never validated".
-        verdict = (verdicts or {}).get(tar_path.name, "") or "unverified"
+        key = tar_path.relative_to(tasks_dir).as_posix()
+        verdict = (verdicts or {}).get(key, "") or "unverified"
         if verdict == KEEP_VERDICT:
             pass
         elif verdict == DROP_VERDICT:
@@ -137,6 +146,10 @@ def select_campaign(
             rejected["unverified"] += 1
             continue
         selected.append(TaskTar(f"{campaign_dir.name}__{tar_path.stem}", tar_path))
+    names = [task.name for task in selected]
+    if len(names) != len(set(names)):
+        dupes = sorted({name for name in names if names.count(name) > 1})
+        sys.exit(f"{campaign_dir.name}: task names repeat across groups: {dupes[:5]}")
     return selected, rejected
 
 
