@@ -111,7 +111,16 @@ On Clariden (debug partition, one GH200 node per job):
     ten-line asyncio script reproduces this on Clariden's Python 3.11.13 without any Kimina code. `kimina_wait`
     only checked that the process was alive; it now also stops when uvicorn logs `Application startup failed`:
     after 20 s instead of 900 s in this job. The fork's b3c6c3e (the pin since 2026-11-14) fixes the cause: it
-    starts no replacement when every initial REPL fails, closes its REPLs, and exits. Not yet run on Clariden.
+    starts no replacement when every initial REPL fails, closes its REPLs, and exits.
+- **Test job 3941737** (2026-11-14, the fork's b3c6c3e from a test install beside the install at 97d7683):
+  - A failing start-up with 128 REPLs (`LEAN_PATH` pointing nowhere) exited with code 3 within 0.2 s of
+    `Application startup failed`, leaving no REPL. This held in 4 of 4 runs, 3 in bubblewrap and 1 without. The
+    old code on the same node still hung: alive 45 s later.
+  - A normal start with 128 confined REPLs was up after 52 s and passed its controls. The validation split kept
+    the data job's rows, and the 400 sample proofs gave the same counts as job 3931849.
+  - SIGTERM stopped the server within 1.1 s, with no REPL left. That held when idle, and with 16 replacements
+    importing; the log showed the cleanup closing all 144 REPLs started.
+  - With 2 of 10 initial REPLs failing, the server started and tried exactly 4 replacements for the bad header.
 - **Server job 3931932** (2026-11-13, `start.sh`): up 43 s after staging, with 128 REPLs in bubblewrap. It wrote
   `endpoint`; from a login node `/health` answered, a check without the key got HTTP 401, and the controls passed.
   Its `endpoint.key` was readable by two groups: the folder's default ACL overrides the umask. `server_job.sh` now
