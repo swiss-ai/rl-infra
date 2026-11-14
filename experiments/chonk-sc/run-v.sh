@@ -67,5 +67,6 @@ exec bash "${ROOT}/run.sh" "${ROOT}/envs/harbor-verified-sft.yaml" \
     data.train.data_path="${TRAIN}" \
     registry_cred_file="${CRED}" \
     env.nemo_gym.sandbox.opensandbox.connection.api_key_file="${KEY}" \
+    env.nemo_gym.sandbox.opensandbox.attribution.run="${RUN}" \
     env.nemo_gym.harbor_agent.responses_api_agents.harbor_agent.harbor_jobs_dir="${JOBS}" \
     "$@"
