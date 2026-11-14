@@ -1,0 +1,12 @@
+# The tools layout (8 trainer and 4 vLLM nodes) on iter_0019374, the last save of the SFT run. The
+# export on /appsdata already carries the modeling code, so run.sh links it into scratch whole.
+defaults: apertus2-chonk-sft-vllm-adamw-tools.yaml
+
+# Relative to SCRATCH, as run.sh reads it.
+sft_export: ../../appsdata/hanint06/chonk-lc-16k-v0.1-ep1-iter_0019374
+
+cluster:
+  num_nodes: 12
+
+policy:
+  model_name: ${oc.env:SCRATCH}/models/chonk-lc-16k-v0.1-ep1-iter_0019374

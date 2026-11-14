@@ -1,0 +1,92 @@
+harbor_agent: a trial on a local dataset names its task directly (JobConfig.tasks) instead of a
+DatasetConfig filtered by task_names. Harbor 0.25.0 builds such a DatasetConfig by reading and
+validating the task.toml of every task in the directory, then filters, once per trial: on the
+10,810 verified tasks that is 211 s per trial on a login node, and step 0 of job 1276126 waited 7
+minutes for its 64 trials before asking for a single sandbox (512 trials per training step would
+wait far longer). The task path and source come out the same as from the DatasetConfig.
+Registry datasets keep the DatasetConfig.
+
+--- a/responses_api_agents/harbor_agent/app.py
++++ b/responses_api_agents/harbor_agent/app.py
+@@ -474,6 +474,7 @@
+         from harbor.models.trial.config import (
+             AgentConfig,
+             EnvironmentConfig,
++            TaskConfig,
+             VerifierConfig,
+         )
+ 
+@@ -549,16 +550,29 @@
+         # DatasetConfig and flattened OrchestratorConfig onto JobConfig.
+         # Leaving registry_url unset selects the default harbor registry,
+         # which is what RemoteRegistryInfo() used to supply.
++        dataset_configs: list[DatasetConfig] = []
++        task_configs: list[TaskConfig] = []
+         if has_registry:
+-            dataset_config = DatasetConfig(
+-                name=dataset_source.dataset_name,
+-                version=dataset_source.dataset_version,
+-                task_names=[task_name],
++            dataset_configs.append(
++                DatasetConfig(
++                    name=dataset_source.dataset_name,
++                    version=dataset_source.dataset_version,
++                    task_names=[task_name],
++                )
+             )
+         else:
+-            dataset_config = DatasetConfig(
+-                path=Path(dataset_source.local_dataset_path),
+-                task_names=[task_name],
++            # Name the one task directly. A local DatasetConfig filtered by
++            # task_names makes Harbor read and validate the task.toml of every
++            # task in the directory before filtering, once per trial: with
++            # 10k tasks and hundreds of trials at once that stalled every
++            # batch for many minutes before the first sandbox was requested.
++            # The source is the one the DatasetConfig would have given.
++            local_root = Path(dataset_source.local_dataset_path)
++            task_configs.append(
++                TaskConfig(
++                    path=local_root / task_name,
++                    source=local_root.expanduser().resolve().name,
++                )
+             )
+ 
+         job_config = JobConfig(
+@@ -572,7 +586,8 @@
+             environment=environment_config,
+             verifier=verifier_config,
+             agents=[agent_config],
+-            datasets=[dataset_config],
++            datasets=dataset_configs,
++            tasks=task_configs,
+         )
+ 
+         return job_config.model_dump(mode="json")
+--- a/responses_api_agents/harbor_agent/tests/test_app.py
++++ b/responses_api_agents/harbor_agent/tests/test_app.py
+@@ -535,6 +535,24 @@
+         assert config["datasets"][0]["version"] == "2.0"
+         assert config["datasets"][0]["task_names"] == ["fix-git"]
+ 
++    def test_build_job_config_names_a_local_task_directly(self) -> None:
++        pytest.importorskip("harbor")
++        server = _make_server(harbor_environment_type="docker")
++
++        config = server._build_job_config(
++            dataset_alias="scientific",
++            task_name="test_task_123",
++            model_name="test_model",
++            api_base="http://policy-host:9000/v1",
++            job_name="test_job",
++            jobs_dir=Path("/tmp/harbor_jobs"),
++        )
++
++        assert config["datasets"] == []
++        assert len(config["tasks"]) == 1
++        assert config["tasks"][0]["path"] == "/tmp/test_dataset/test_task_123"
++        assert config["tasks"][0]["source"] == "test_dataset"
++
+     def test_build_job_config_harbor_no_delete(self) -> None:
+         pytest.importorskip("harbor")
+         server = _make_server(harbor_no_delete=True, harbor_environment_type="docker")

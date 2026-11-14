@@ -36,7 +36,13 @@ if [[ -n "${SFT_EXPORT}" ]]; then
     export PYDEPS_APERTUS2="${SCRATCH}/nemo-rl-apertus2/apertus-common-${APERTUS_COMMON_COMMIT:0:9}"
     export PYDEPS="${PYDEPS}-apertus2"
     export SRC="${SCRATCH}/${SFT_EXPORT}" DST="${SCRATCH}/models/$(basename "${SFT_EXPORT}")"
-    export CHONK_MODEL_STAGE=copy STAGE_SHARDS=link
+    # An export that already carries the modeling code (MODELING_SOURCE) is linked whole and only read;
+    # stage_model.sh checks its hfconverter commit and auto_map.
+    if [[ -f "${SRC}/MODELING_SOURCE" ]]; then
+        export CHONK_MODEL_STAGE=link
+    else
+        export CHONK_MODEL_STAGE=copy STAGE_SHARDS=link
+    fi
 fi
 
 LOG="${OUT}/setup.log"

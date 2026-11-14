@@ -1,6 +1,6 @@
 # Task file: Harbor terminal tasks on an SFT checkpoint. Gym's harbor_agent runs Terminus-2, which
 # reads a tmux screen and answers with JSON keystrokes, against a fresh OpenSandbox pod per trial
-# (Gym patches 0006-0010); the task's tests/test.sh, copied in after the agent stops, gives the
+# (Gym patches 0006-0012, Harbor 0.25.0); the task's tests/test.sh, copied in after the agent stops, gives the
 # reward. Every turn may think. NeMo-RL patch 0032 groups the 8 trials of a task by their prompt
 # group: their first prompts differ, since each shows its own pod's hostname. The tasks are Robert's
 # micro-tasks (envs/make_micro_tasks.py). Only the path of the API key file goes in the config:
