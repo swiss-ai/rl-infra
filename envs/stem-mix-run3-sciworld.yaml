@@ -4,7 +4,8 @@
 # ScienceWorld (AllenAI, Apache-2.0): multi-turn text simulator of 30 elementary-school science tasks, played by the
 # scienceworld environment (NeMo-RL branch apertus2-sciworld). Rows: train variations only, task-balanced (see
 # experiments/scienceworld/build_data.py); simplifications teleportAction, openDoors, openContainers,
-# selfWateringFlowerPots. The model acts through the act tool (system frame envs/apertus2-system-sciworld-act.json).
+# selfWateringFlowerPots. The model acts through the act tool (system frame envs/apertus2-system-sciworld-act.json,
+# copied next to the data).
 # Reward: the episode's last score / 100, negative (failed) scores as 0.
 # Validation every 20 steps: AIME 2024 mean@32 and GPQA-Diamond mean@8 (as run 3) plus the ScienceWorld dev set
 # (5 dev variations per kept task, played once).
@@ -17,7 +18,7 @@ grpo:
   val_batch_size: 2689
   max_val_samples: 2689
   # ScienceWorld turns per episode; math environments end after the first turn.
-  max_rollout_turns: 52
+  max_rollout_turns: 60
 
 data:
   _override_: true
@@ -30,7 +31,7 @@ data:
     DAPOMath17K: 128
     run3-numina_clean: 224
     run3-mcqa_science_cs: 128
-    scienceworld-sciworld_tool_train: 32
+    scienceworld-sciworld_act_train: 32
   train:
     - dataset_name: DAPOMath17K
       deduplicate: true
@@ -40,9 +41,9 @@ data:
       data_path: /scratch/hanint06/data/stem-rl/run3/mcqa_science_cs.jsonl
       env_name: math_default
     - dataset_name: ResponseDataset
-      data_path: /scratch/hanint06/data/stem-rl/scienceworld/sciworld_tool_train.jsonl
+      data_path: /scratch/hanint06/data/stem-rl/scienceworld/sciworld_act_train.jsonl
       processor: apertus2_sciworld_data_processor
-      system_prompt_file: ${oc.env:RL_INFRA_DIR}/envs/apertus2-system-sciworld-act.json
+      system_prompt_file: /scratch/hanint06/data/stem-rl/scienceworld/apertus2-system-sciworld-act.json
       env_name: scienceworld
   validation:
     - dataset_name: DAPOMathAIME2024
@@ -51,9 +52,9 @@ data:
       data_path: /scratch/hanint06/data/stem-rl/gpqa_diamond_x8.jsonl
       env_name: math_default
     - dataset_name: ResponseDataset
-      data_path: /scratch/hanint06/data/stem-rl/scienceworld/sciworld_tool_dev.jsonl
+      data_path: /scratch/hanint06/data/stem-rl/scienceworld/sciworld_act_dev.jsonl
       processor: apertus2_sciworld_data_processor
-      system_prompt_file: ${oc.env:RL_INFRA_DIR}/envs/apertus2-system-sciworld-act.json
+      system_prompt_file: /scratch/hanint06/data/stem-rl/scienceworld/apertus2-system-sciworld-act.json
       env_name: scienceworld
   default:
     prompt_file: null

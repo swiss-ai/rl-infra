@@ -1,0 +1,35 @@
+# SFT v0.2 on ScienceWorld with the revised prompt (<object> placeholders and command examples instead of OBJ/LOC):
+# act tool only, 2 train variations of each of the 30 tasks, 2 episodes each (120 episodes), thinking medium.
+score:
+  num_generations: 2
+  batch_prompts: 512
+grpo:
+  max_rollout_turns: 52
+data:
+  _override_: true
+  max_input_seq_length: 4096
+  shuffle: false
+  num_workers: 1
+  train:
+    - dataset_name: ResponseDataset
+      data_path: /home01/hanint06/sciworld/data2/sciworld_tool_mini2.jsonl
+  validation: null
+  default:
+    prompt_file: null
+    system_prompt_file: ${oc.env:RL_INFRA_DIR}/envs/apertus2-system-sciworld-act.json
+    processor: apertus2_sciworld_data_processor
+    env_name: scienceworld
+env:
+  scienceworld:
+    num_workers: 8
+    java_path: /home01/hanint06/sciworld/jre/bin/java
+    package_path: /home01/hanint06/sciworld/pydeps
+    jvm_heap: 2g
+    tokenizer_path: ${policy.model_name}
+    simplifications: teleportAction,openDoors,openContainers,selfWateringFlowerPots
+    max_actions: 50
+    max_calls_per_turn: 1
+    idle_timeout_s: 1800
+    call_timeout_s: 300
+    placement_group_prefix: null
+    max_observation_chars: null
