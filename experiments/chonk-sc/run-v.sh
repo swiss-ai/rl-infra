@@ -10,7 +10,8 @@
 # Env: VERIFIED_STORE (default the capstor store HANGANG mirrors), HARBOR_ROOT ($SCRATCH/osb/harbor_verified),
 # COLLECT_ARGS (default --include-unverified when the store has no tasks.csv, as on HANGANG), RUN, JOB_TIME
 # (02:00:00), PARTITION (normal), DRIVER_RETRIES (0), RL_REGISTRY_CRED_FILE (~/.rl_registry_cred), OPENSANDBOX_API_KEY_FILE (~/.opensandbox_token),
-# APERTUS_COMMON_URL (SSH, as run-s.sh). Harbor trial dirs: $SCRATCH/harbor-jobs/<RUN>.
+# APERTUS_COMMON_URL (SSH, as run-s.sh), EXCLUDE_CAMPAIGNS (regex, default swe-rebench-v2\.1-rl; empty = all).
+# Harbor trial dirs: $SCRATCH/harbor-jobs/<RUN>.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "${HERE}/../.." && pwd)"
@@ -34,6 +35,19 @@ if [[ ! -s "${HARBOR_ROOT}/train.jsonl" ]]; then
 fi
 echo "== tasks: $(wc -l < "${HARBOR_ROOT}/train.jsonl") train, $(wc -l < "${HARBOR_ROOT}/validation.jsonl") validation rows in ${HARBOR_ROOT}"
 
+# Campaigns left out of training (regex on the campaign name). swe-rebench-v2.1-rl: its pods took up to
+# 1492 s to start and 10 of 24 hit the 1800 s start timeout (job 5350472), and a step waits for its
+# slowest group. Rows look like {"instance_id": "verified::<campaign>__<task>", ...} (json.dumps).
+EXCLUDE_CAMPAIGNS="${EXCLUDE_CAMPAIGNS-swe-rebench-v2\.1-rl}"
+TRAIN="${HARBOR_ROOT}/train.jsonl"
+if [[ -n "${EXCLUDE_CAMPAIGNS}" ]]; then
+    TRAIN="${HARBOR_ROOT}/train-filtered.jsonl"
+    grep -vE "\"instance_id\": \"verified::[^\"]*(${EXCLUDE_CAMPAIGNS})__" "${HARBOR_ROOT}/train.jsonl" > "${TRAIN}.tmp" || true
+    [[ -s "${TRAIN}.tmp" ]] || { echo "ERROR: EXCLUDE_CAMPAIGNS='${EXCLUDE_CAMPAIGNS}' leaves no training rows" >&2; exit 1; }
+    mv -f "${TRAIN}.tmp" "${TRAIN}"
+    echo "== left out /${EXCLUDE_CAMPAIGNS}/: $(( $(wc -l < "${HARBOR_ROOT}/train.jsonl") - $(wc -l < "${TRAIN}") )) rows; training on ${TRAIN}"
+fi
+
 # exported before use: in `RUN=x bash run.sh ... $RUN` the argument's $RUN is expanded by the calling shell first
 export RUN="${RUN:-sft19374-harbor-verified-$(date +%Y%m%d-%H%M%S)}"
 export JOB_TIME="${JOB_TIME:-02:00:00}"
@@ -50,6 +64,7 @@ exec bash "${ROOT}/run.sh" "${ROOT}/envs/harbor-verified-sft.yaml" \
     grpo.max_num_steps=1 grpo.val_at_start=false grpo.val_at_end=false grpo.val_period=0 \
     checkpointing.enabled=false \
     harbor_data_dir="${HARBOR_ROOT}" \
+    data.train.data_path="${TRAIN}" \
     registry_cred_file="${CRED}" \
     env.nemo_gym.sandbox.opensandbox.connection.api_key_file="${KEY}" \
     env.nemo_gym.harbor_agent.responses_api_agents.harbor_agent.harbor_jobs_dir="${JOBS}" \
