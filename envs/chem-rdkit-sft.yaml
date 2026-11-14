@@ -1,0 +1,61 @@
+# Task file: RDKit chemistry questions on the SFT v0.2 checkpoint, scored in NeMo-RL's own math environment (no Gym),
+# so they can share steps with the native math and science sets (data.use_multiple_dataloader). A clone of
+# Litmus-Bench v0.1 (nvidia/Nemotron-RL-litmus-bench-v0.1) without its ChEMBL molecules or its question text: the
+# same 123 RDKit properties (fragment counts, ring and atom counts, Ro5, Veber and QED checks), molecules from
+# COCONUT (CC0, minus its ChEMBL collection) and the NCI DTP Open set (US public domain), answers computed with
+# RDKit 2025.09.5 (which reproduces all 5,714 Litmus v0.1 answers). Every answer is an integer or 0/1, so the claim is
+# graded by the math environment unchanged. Rows from envs/prepare_chem_rdkit.py:
+#   python3.12 envs/prepare_chem_rdkit.py <generator output dir> $SCRATCH/chem-rdkit/native
+#   bash run.sh envs/chem-rdkit-sft.yaml
+# Validation rows are held-out molecules whose Bemis-Murcko scaffolds are not in train.
+# As a set in a native mix, add to the mix's task file (the dataloader key is "<parent dir>-<file stem>"):
+#   data.num_prompts_per_dataloader: {..., native-train: <prompts per step>}
+#   data.train: [..., {dataset_name: ResponseDataset, data_path: <train.jsonl>, env_name: math}]
+defaults: ../recipes/apertus2-chonk-sftv02-18315-vllm-adamw-rg.yaml
+
+grpo:
+  num_prompts_per_step: 32
+  num_generations_per_prompt: 8
+  max_num_steps: 20
+  max_num_epochs: 1
+  val_period: 10
+  val_at_start: true
+  val_at_end: true
+  val_batch_size: 128
+  max_val_samples: 128
+
+checkpointing:
+  enabled: false
+
+policy:
+  # 32 x 8 = 256 rollouts, one optimizer step per GRPO step.
+  train_global_batch_size: 256
+  megatron_cfg:
+    optimizer:
+      lr: 2.0e-6
+    env_vars:
+      # NeMo-RL patch 0033: PyTorch's allocator at most 78% of the GPU (74 GB).
+      NRL_CUDA_MEMORY_FRACTION: "0.78"
+
+data:
+  _override_: true
+  # Longest prompt 1,657 characters (a SMILES of about 1,400).
+  max_input_seq_length: 2048
+  shuffle: true
+  num_workers: 1
+  use_multiple_dataloader: false
+  train:
+    dataset_name: ResponseDataset
+    data_path: ${oc.env:SCRATCH}/chem-rdkit/native/train.jsonl
+    env_name: math
+  validation:
+    dataset_name: ResponseDataset
+    data_path: ${oc.env:SCRATCH}/chem-rdkit/native/validation.jsonl
+    env_name: math
+  default:
+    prompt_file: null
+    # Thinking level high, as for Reasoning Gym (envs/reasoning-gym-sft.yaml): at medium, v0.2 left the think
+    # frame empty.
+    system_prompt_file: ${oc.env:RL_INFRA_DIR}/envs/apertus2-system-high.json
+    processor: apertus2_math_data_processor
+    env_name: math
