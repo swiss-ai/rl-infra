@@ -9,7 +9,7 @@
 # (TASK_STORE, not STORE: Alps exports STORE and sites/alps.env builds the image paths from it.)
 # Env: VERIFIED_STORE (default the capstor store HANGANG mirrors), HARBOR_ROOT ($SCRATCH/osb/harbor_verified),
 # COLLECT_ARGS (default --include-unverified when the store has no tasks.csv, as on HANGANG), RUN, JOB_TIME
-# (02:00:00), RL_REGISTRY_CRED_FILE (~/.rl_registry_cred), OPENSANDBOX_API_KEY_FILE (~/.opensandbox_token),
+# (02:00:00), PARTITION (normal), DRIVER_RETRIES (0), RL_REGISTRY_CRED_FILE (~/.rl_registry_cred), OPENSANDBOX_API_KEY_FILE (~/.opensandbox_token),
 # APERTUS_COMMON_URL (SSH, as run-s.sh). Harbor trial dirs: $SCRATCH/harbor-jobs/<RUN>.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -37,6 +37,9 @@ echo "== tasks: $(wc -l < "${HARBOR_ROOT}/train.jsonl") train, $(wc -l < "${HARB
 # exported before use: in `RUN=x bash run.sh ... $RUN` the argument's $RUN is expanded by the calling shell first
 export RUN="${RUN:-sft19374-harbor-verified-$(date +%Y%m%d-%H%M%S)}"
 export JOB_TIME="${JOB_TIME:-02:00:00}"
+# as run-s.sh: run.sh's default is sites/alps.env's RUN_PARTITION=preemptable, which exists on Clariden only
+# (Daint: normal); one attempt, so a failed smoke test leaves one set of trial dirs
+export PARTITION="${PARTITION:-normal}" DRIVER_RETRIES="${DRIVER_RETRIES:-0}"
 export APERTUS_COMMON_URL="${APERTUS_COMMON_URL:-git@github.com:swiss-ai/apertus-common.git}"
 JOBS="${SCRATCH}/harbor-jobs/${RUN}"
 mkdir -p "${JOBS}"
