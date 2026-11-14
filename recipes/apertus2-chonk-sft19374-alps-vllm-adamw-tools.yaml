@@ -1,0 +1,14 @@
+# apertus2-chonk-sft19374-vllm-adamw-tools.yaml on Alps: the same layout and checkpoint (iter_0019374, the
+# last save of the SFT run), from Rob's HF export on /capstor instead of HANGANG's /appsdata. The export has
+# no modeling code, so run.sh copies its small files, links its shards and adds the code (stage_model.sh),
+# into the directory experiments/chonk-sc/run-s.sh stages the same export to (safe to re-run).
+defaults: apertus2-chonk-sft-vllm-adamw-tools.yaml
+
+sft_export: /capstor/store/cscs/swissai/infra01/hf-checkpoints/chonk-lc-16k-v0.1-ep1/iter_0019374
+sft_stage_as: chonk-lc-16k-v0.1-ep1-iter_0019374
+
+cluster:
+  num_nodes: 12
+
+policy:
+  model_name: ${oc.env:SCRATCH}/models/chonk-lc-16k-v0.1-ep1-iter_0019374

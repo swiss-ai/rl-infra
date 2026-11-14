@@ -6,6 +6,7 @@
 # not the Single Controller. One step of 8 x 8 trials, no validation, no checkpoint.
 #   bash experiments/chonk-sc/run-v.sh [overrides...]        DRY_RUN=1 shows the job without submitting it
 # First use: extracts the tasks into HARBOR_ROOT (~1.4 GB, ~80k files; envs/prepare_harbor_verified_tasks.sh).
+# (TASK_STORE, not STORE: Alps exports STORE and sites/alps.env builds the image paths from it.)
 # Env: VERIFIED_STORE (default the capstor store HANGANG mirrors), HARBOR_ROOT ($SCRATCH/osb/harbor_verified),
 # COLLECT_ARGS (default --include-unverified when the store has no tasks.csv, as on HANGANG), RUN, JOB_TIME
 # (02:00:00), RL_REGISTRY_CRED_FILE (~/.rl_registry_cred), OPENSANDBOX_API_KEY_FILE (~/.opensandbox_token),
@@ -14,7 +15,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "${HERE}/../.." && pwd)"
 
-STORE="${VERIFIED_STORE:-/capstor/store/cscs/swissai/infra01/datasets/swe_and_agentic_gym_datasets/harbor_verified_tasks}"
+TASK_STORE="${VERIFIED_STORE:-/capstor/store/cscs/swissai/infra01/datasets/swe_and_agentic_gym_datasets/harbor_verified_tasks}"
 HARBOR_ROOT="${HARBOR_ROOT:-${SCRATCH}/osb/harbor_verified}"
 # absolute paths: HOME inside the container is not yours; the files themselves are never read here
 CRED="$(realpath -m "${RL_REGISTRY_CRED_FILE:-${HOME}/.rl_registry_cred}")"
@@ -23,13 +24,13 @@ KEY="$(realpath -m "${OPENSANDBOX_API_KEY_FILE:-${HOME}/.opensandbox_token}")"
 [[ -r "${KEY}" ]] || { echo "ERROR: no OpenSandbox key file ${KEY}" >&2; exit 1; }
 
 if [[ ! -s "${HARBOR_ROOT}/train.jsonl" ]]; then
-    [[ -d "${STORE}" ]] || { echo "ERROR: no task store ${STORE}; set VERIFIED_STORE" >&2; exit 1; }
-    if [[ -z "${COLLECT_ARGS+x}" ]] && ! compgen -G "${STORE}/*/tasks.csv" > /dev/null; then
-        echo "note: no <campaign>/tasks.csv in ${STORE}: taking every task (--include-unverified), as on HANGANG"
+    [[ -d "${TASK_STORE}" ]] || { echo "ERROR: no task store ${TASK_STORE}; set VERIFIED_STORE" >&2; exit 1; }
+    if [[ -z "${COLLECT_ARGS+x}" ]] && ! compgen -G "${TASK_STORE}/*/tasks.csv" > /dev/null; then
+        echo "note: no <campaign>/tasks.csv in ${TASK_STORE}: taking every task (--include-unverified), as on HANGANG"
         export COLLECT_ARGS=--include-unverified
     fi
     echo "== preparing the verified tasks in ${HARBOR_ROOT}"
-    bash "${ROOT}/envs/prepare_harbor_verified_tasks.sh" "${STORE}" "${HARBOR_ROOT}"
+    bash "${ROOT}/envs/prepare_harbor_verified_tasks.sh" "${TASK_STORE}" "${HARBOR_ROOT}"
 fi
 echo "== tasks: $(wc -l < "${HARBOR_ROOT}/train.jsonl") train, $(wc -l < "${HARBOR_ROOT}/validation.jsonl") validation rows in ${HARBOR_ROOT}"
 
@@ -41,7 +42,7 @@ JOBS="${SCRATCH}/harbor-jobs/${RUN}"
 mkdir -p "${JOBS}"
 echo "== run ${RUN}; Harbor trial dirs in ${JOBS}"
 
-RECIPE="${ROOT}/recipes/apertus2-chonk-sft19374-vllm-adamw-tools.yaml" \
+RECIPE="${ROOT}/recipes/apertus2-chonk-sft19374-alps-vllm-adamw-tools.yaml" \
 exec bash "${ROOT}/run.sh" "${ROOT}/envs/harbor-verified-sft.yaml" \
     grpo.max_num_steps=1 grpo.val_at_start=false grpo.val_at_end=false grpo.val_period=0 \
     checkpointing.enabled=false \

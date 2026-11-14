@@ -35,7 +35,11 @@ if [[ -n "${SFT_EXPORT}" ]]; then
     source "${PIN_FILE}"
     export PYDEPS_APERTUS2="${SCRATCH}/nemo-rl-apertus2/apertus-common-${APERTUS_COMMON_COMMIT:0:9}"
     export PYDEPS="${PYDEPS}-apertus2"
-    export SRC="${SCRATCH}/${SFT_EXPORT}" DST="${SCRATCH}/models/$(basename "${SFT_EXPORT}")"
+    # sft_export is relative to SCRATCH (HANGANG) or absolute (Alps: the exports on /capstor); the
+    # staged copy is named after it unless the recipe's sft_stage_as names it (an export dir iter_0019374).
+    [[ "${SFT_EXPORT}" == /* ]] && SRC="${SFT_EXPORT}" || SRC="${SCRATCH}/${SFT_EXPORT}"
+    STAGE_AS="$(yq r "${RECIPE}" sft_stage_as)"
+    export SRC DST="${SCRATCH}/models/${STAGE_AS:-$(basename "${SFT_EXPORT}")}"
     # An export that already carries the modeling code (MODELING_SOURCE) is linked whole and only read;
     # stage_model.sh checks its hfconverter commit and auto_map.
     if [[ -f "${SRC}/MODELING_SOURCE" ]]; then
