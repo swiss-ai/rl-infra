@@ -110,17 +110,21 @@ On Clariden (debug partition, one GH200 node per job):
     still being started; at exit Python cancels them and waits forever for those half-started processes. A
     ten-line asyncio script reproduces this on Clariden's Python 3.11.13 without any Kimina code. `kimina_wait`
     only checked that the process was alive; it now also stops when uvicorn logs `Application startup failed`:
-    after 20 s instead of 900 s in this job.
+    after 20 s instead of 900 s in this job. The fork's b3c6c3e (the pin since 2026-11-14) fixes the cause: it
+    starts no replacement when every initial REPL fails, closes its REPLs, and exits. Not yet run on Clariden.
 - **Server job 3931932** (2026-11-13, `start.sh`): up 43 s after staging, with 128 REPLs in bubblewrap. It wrote
   `endpoint`; from a login node `/health` answered, a check without the key got HTTP 401, and the controls passed.
   Its `endpoint.key` was readable by two groups: the folder's default ACL overrides the umask. `server_job.sh` now
   makes the file private before the key goes in (checked on a login node: no one but the owner can read it).
 
-Locally, 2026-11-12 and 2026-11-13:
+Locally, 2026-11-12 to 2026-11-14:
 - All 11 Gym patches apply in order to Gym at the pin. With 0011 applied, Gym's own `math_formal_lean` tests and
   the new ones pass against the real `nemo_gym` (54 tests).
-- The fork's test suite passes on Python 3.11 with `requirements.txt` (50 tests). Upstream's `test_mathlib` only
-  fails because the Mac imports Mathlib slowly.
+- The fork's test suite passes on Python 3.11 with `requirements.txt` (50 tests; 53 at b3c6c3e, on 2026-11-14).
+  Upstream's `test_mathlib` only fails because the Mac imports Mathlib slowly.
+- At b3c6c3e, a server whose 16 initial REPLs all fail (`import Mathlib` with an empty `LEAN_PATH`, `PREWARM`,
+  `CHECK_HEADER`) exits with code 3 about 2 s after launch and leaves no REPL running; at 97d7683 it was still
+  running 40 s after `Application startup failed`.
 - `setup.sh` was checked against a local copy of the fork's branch: it moves an install made from the earlier
   patch to the fork's commit, does nothing on a rerun, clones a fresh install, and stops with a clear error when
   `LEAN_TOOLCHAIN`/`LEAN_PROJECT` are unset.

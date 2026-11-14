@@ -61,9 +61,10 @@ kimina_wait() {
     local url=$1 limit=$2 t0=${SECONDS}
     until curl -sf "${url}/health" > /dev/null; do
         kill -0 "${KIMINA_PID}" 2>/dev/null || { echo "ERROR: Kimina server exited" >&2; return 1; }
-        # A server whose start-up failed can stay alive: Python then waits forever at exit for the REPLs that were
-        # still starting (asyncio cannot cancel a process start it is in the middle of; job 3925556 waited 900 s).
-        # uvicorn has logged the failure by then, so the caller can stop it.
+        # Before the fork's b3c6c3e, a server whose start-up failed stayed alive: Python waited forever at exit for
+        # the REPLs that were still starting (asyncio cannot cancel a process start it is in the middle of; job
+        # 3925556 waited 900 s). The fork now exits by itself; this check stays as a guard. uvicorn has logged the
+        # failure by then, so the caller can stop the server.
         if grep -q "Application startup failed" "${KIMINA_LOG:-/dev/null}" 2>/dev/null; then
             echo "ERROR: Kimina server start-up failed after $((SECONDS - t0)) s (see ${KIMINA_LOG})" >&2
             return 1
