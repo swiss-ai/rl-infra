@@ -21,6 +21,8 @@ container_render() {
         -e "s|@@IMAGE_WORK@@|${IMAGE_WORK}|g" \
         -e "s|@@NEMO_RL_DIR@@|${NEMO_RL_DIR}|g" \
         -e "s|@@SCRATCH@@|${SCRATCH}|g" \
+        -e "s|@@GYM_VENV_DIR@@|${GYM_VENV_DIR:-${SCRATCH}/nemo-rl-apertus2/gym-venvs}|g" \
+        -e "s|@@UV_CACHE_DIR@@|${JOB_UV_CACHE_DIR:-${SCRATCH}/.cache/uv}|g" \
         -e "s|@@PYDEPS@@|${PYDEPS:-}|g" \
         -e "s|@@PYDEPS_APERTUS2@@|${PYDEPS_APERTUS2:-}|g" \
         -e "s|@@PYDEPS_GYM@@|${PYDEPS_GYM:-}|g" \

@@ -1,0 +1,274 @@
+From: Konstantinos Pitas <cwstas2007@hotmail.com>
+Subject: [PATCH] harbor_agent: run on Harbor 0.25.0
+
+Port of swiss-ai/nemo-gym d2002ed3 (branch swissai/harbor_agent_osb_v0.8.0). Harbor >=0.20
+merged Local/RegistryDatasetConfig into DatasetConfig and flattened OrchestratorConfig onto
+JobConfig, no longer sets BaseLLM._logger, has Terminus2 build its own LLM through _init_llm()
+instead of taking an llm argument, and moved allow_internet to network_mode.
+requirements.txt pins Harbor v0.25.0 and keeps our pin's nemo-gym[dev,sandbox] extras (the
+original also asks for ray, which this pin's harbor_agent does not need).
+---
+ responses_api_agents/harbor_agent/app.py           | 22 +++++++--------
+ .../custom_agents/llms/nemo_gym_llm.py             |  4 +++
+ .../custom_agents/terminus_2_nemo_gym.py           | 16 ++++++++++-
+ .../custom_envs/nemo_gym_sandbox/environment.py    | 31 +++++++++++++---------
+ responses_api_agents/harbor_agent/requirements.txt |  2 +-
+ .../harbor_agent/tests/test_environment.py         | 31 ++++++++++++++--------
+ 6 files changed, 68 insertions(+), 38 deletions(-)
+
+diff --git a/responses_api_agents/harbor_agent/app.py b/responses_api_agents/harbor_agent/app.py
+index 2c866a54..4f66a81e 100644
+--- a/responses_api_agents/harbor_agent/app.py
++++ b/responses_api_agents/harbor_agent/app.py
+@@ -464,12 +464,9 @@ class HarborAgent(SimpleResponsesAPIAgent):
+     ) -> dict:
+         """Build a Harbor JobConfig dict for a single task."""
+         from harbor.models.job.config import (
++            DatasetConfig,
+             JobConfig,
+-            LocalDatasetConfig,
+-            OrchestratorConfig,
+-            RegistryDatasetConfig,
+         )
+-        from harbor.models.registry import RemoteRegistryInfo
+         from harbor.models.trial.config import (
+             AgentConfig,
+             EnvironmentConfig,
+@@ -544,20 +541,18 @@ class HarborAgent(SimpleResponsesAPIAgent):
+             ),
+         )
+ 
+-        orchestrator_config = OrchestratorConfig(
+-            n_concurrent_trials=1,
+-            quiet=True,
+-        )
+-
++        # harbor >=0.20 merged Local/RegistryDatasetConfig into a single
++        # DatasetConfig and flattened OrchestratorConfig onto JobConfig.
++        # Leaving registry_url unset selects the default harbor registry,
++        # which is what RemoteRegistryInfo() used to supply.
+         if has_registry:
+-            dataset_config = RegistryDatasetConfig(
+-                registry=RemoteRegistryInfo(),
++            dataset_config = DatasetConfig(
+                 name=dataset_source.dataset_name,
+                 version=dataset_source.dataset_version,
+                 task_names=[task_name],
+             )
+         else:
+-            dataset_config = LocalDatasetConfig(
++            dataset_config = DatasetConfig(
+                 path=Path(dataset_source.local_dataset_path),
+                 task_names=[task_name],
+             )
+@@ -568,7 +563,8 @@ class HarborAgent(SimpleResponsesAPIAgent):
+             timeout_multiplier=(
+                 self.config.harbor_timeout_multiplier if self.config.harbor_timeout_multiplier is not None else 1.0
+             ),
+-            orchestrator=orchestrator_config,
++            n_concurrent_trials=1,
++            quiet=True,
+             environment=environment_config,
+             verifier=verifier_config,
+             agents=[agent_config],
+diff --git a/responses_api_agents/harbor_agent/custom_agents/llms/nemo_gym_llm.py b/responses_api_agents/harbor_agent/custom_agents/llms/nemo_gym_llm.py
+index da83ae52..79940c28 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/llms/nemo_gym_llm.py
++++ b/responses_api_agents/harbor_agent/custom_agents/llms/nemo_gym_llm.py
+@@ -23,6 +23,7 @@ from harbor.llms.base import (
+     OutputLengthExceededError,
+ )
+ from harbor.models.metric import UsageInfo
++from harbor.utils.logger import logger as harbor_logger
+ from tenacity import (
+     retry,
+     retry_if_exception_type,
+@@ -65,6 +66,9 @@ class NemoGymLLM(BaseLLM):
+         **kwargs: Any,
+     ) -> None:
+         super().__init__(**kwargs)
++        # harbor >=0.20 no longer sets _logger on BaseLLM; each LLM owns one
++        # (see harbor.llms.lite_llm.LiteLLM.__init__).
++        self._logger = harbor_logger.getChild(__name__)
+         self._model_name = model_name
+         self._api_base = api_base.rstrip("/")
+         self._collect_rollout_details = collect_rollout_details
+diff --git a/responses_api_agents/harbor_agent/custom_agents/terminus_2_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/terminus_2_nemo_gym.py
+index 0487292b..c97b66aa 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/terminus_2_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/terminus_2_nemo_gym.py
+@@ -74,6 +74,11 @@ class Terminus2NemoGym(Terminus2):
+                 timeout_sec=nemo_model_server_timeout_sec,
+             )
+ 
++        # Harbor >=0.20 dropped the `llm` constructor parameter: Terminus2 now
++        # builds its own backend by calling self._init_llm() from __init__.
++        # Stash the instance first so the override below can hand it back.
++        self._injected_llm = llm
++
+         super().__init__(
+             logs_dir=logs_dir,
+             model_name=model_name,
+@@ -93,12 +98,21 @@ class Terminus2NemoGym(Terminus2):
+             tmux_pane_height=tmux_pane_height,
+             store_all_messages=store_all_messages,
+             record_terminal_session=record_terminal_session,
+-            llm=llm,
+             interleaved_thinking=interleaved_thinking,
+             *args,
+             **kwargs,
+         )
+ 
++    def _init_llm(self, *args: Any, **kwargs: Any) -> BaseLLM:
++        """Return the NeMo Gym LLM instead of Terminus2's litellm/tinker backends.
++
++        Terminus2._init_llm is a closed `match` over LLMBackend with no
++        extension point, so overriding it is the only way to inject a custom
++        BaseLLM. Signature is deliberately permissive: upstream passes every
++        argument by keyword and has changed the set across releases.
++        """
++        return self._injected_llm
++
+     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
+         """Override run() to gracefully handle agent errors.
+ 
+diff --git a/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/environment.py b/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/environment.py
+index 601c5254..2a6b95cf 100644
+--- a/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/environment.py
++++ b/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/environment.py
+@@ -37,6 +37,7 @@ from typing import Any, Mapping, Optional
+ 
+ from harbor.environments.base import BaseEnvironment, ExecResult
+ from harbor.models.environment_type import EnvironmentType
++from harbor.models.task.config import NetworkMode
+ from harbor.models.trial.paths import EnvironmentPaths
+ 
+ from nemo_gym.sandbox import (
+@@ -116,9 +117,10 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
+         workdir: Container working directory override (defaults to the image's
+             own WORKDIR).
+         allow_unenforced_internet_isolation: Accept tasks that request
+-            ``allow_internet = false`` even though this environment cannot
+-            enforce network isolation (default False). Each affected trial
+-            logs a prominent warning.
++            network isolation (``network_mode = "no-network"``, or the legacy
++            ``allow_internet = false``) even though this environment cannot
++            enforce it (default False). Each affected trial logs a prominent
++            warning.
+     """
+ 
+     def __init__(
+@@ -191,13 +193,17 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
+             )
+ 
+     def _validate_internet_config(self):
+-        if not self.task_env_config.allow_internet and not self.can_disable_internet:
+-            raise ValueError(
+-                f"Task {self.environment_name!r} requires allow_internet=false, which "
+-                "NemoGymSandboxEnvironment cannot enforce. Set "
+-                "harbor_environment_kwargs.allow_unenforced_internet_isolation=true to run "
+-                "the task anyway (without isolation)."
+-            )
++        """Deprecated; retained only as documentation of where the guard moved.
++
++        Harbor >=0.20 clears the task's ``allow_internet`` after migrating it to
++        ``network_mode``, so this check would reject *every* task if it were
++        wired back into ``_validate_definition``. The real guard is the base
++        class's ``_validate_network_policy_support``, which rejects
++        ``network_mode="no-network"`` unless ``can_disable_internet`` is True.
++        """
++        raise NotImplementedError(
++            "Superseded by BaseEnvironment._validate_network_policy_support; see can_disable_internet."
++        )
+ 
+     @property
+     def _resolved_image(self) -> str:
+@@ -239,11 +245,12 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
+                 "force_build is not supported by NemoGymSandboxEnvironment; using the task's prebuilt image %r.",
+                 self._resolved_image,
+             )
+-        if not self.task_env_config.allow_internet:
++        if self.network_policy.network_mode != NetworkMode.PUBLIC:
+             self.logger.warning(
+-                "Task %r requests allow_internet=false but NemoGymSandboxEnvironment does "
++                "Task %r requests network_mode=%s but NemoGymSandboxEnvironment does "
+                 "not enforce network isolation; the sandbox keeps cluster-default egress.",
+                 self.environment_name,
++                self.network_policy.network_mode.value,
+             )
+ 
+         sandbox = AsyncSandbox(
+diff --git a/responses_api_agents/harbor_agent/requirements.txt b/responses_api_agents/harbor_agent/requirements.txt
+index 41c6fef4..f28a6fce 100644
+--- a/responses_api_agents/harbor_agent/requirements.txt
++++ b/responses_api_agents/harbor_agent/requirements.txt
+@@ -1,2 +1,2 @@
+ -e nemo-gym[dev,sandbox] @ ../../
+-harbor @ git+https://github.com/laude-institute/harbor.git@9dddd797b57ab8a0f9d6352a20fce73abbb29573
++harbor @ git+https://github.com/laude-institute/harbor.git@v0.25.0
+diff --git a/responses_api_agents/harbor_agent/tests/test_environment.py b/responses_api_agents/harbor_agent/tests/test_environment.py
+index 6116ca5b..03c75582 100644
+--- a/responses_api_agents/harbor_agent/tests/test_environment.py
++++ b/responses_api_agents/harbor_agent/tests/test_environment.py
+@@ -18,6 +18,7 @@ from typing import Optional
+ 
+ import pytest
+ from harbor.models.task.config import EnvironmentConfig as TaskEnvironmentConfig
++from harbor.models.task.config import NetworkMode, NetworkPolicy
+ from harbor.models.trial.paths import TrialPaths
+ 
+ from nemo_gym.sandbox import SandboxExecResult, SandboxHandle, SandboxSpec, SandboxStatus, register_provider
+@@ -129,14 +130,21 @@ class TestValidation:
+             _make_environment(tmp_path, task_env_config=TaskEnvironmentConfig(docker_image=None))
+ 
+     def test_rejects_internet_isolation_by_default(self, tmp_path):
+-        config = TaskEnvironmentConfig(docker_image="example/task:1.0", allow_internet=False)
+-        with pytest.raises(ValueError, match="allow_internet"):
+-            _make_environment(tmp_path, task_env_config=config)
++        # Harbor >=0.20 migrates a task's allow_internet=false into
++        # network_mode="no-network" at TaskConfig load time, and the base class
++        # rejects it unless the environment advertises the disable_internet
++        # capability. Asserting on the policy keeps this pinned to the real guard.
++        with pytest.raises(ValueError, match="no-network"):
++            _make_environment(tmp_path, network_policy=NetworkPolicy(network_mode=NetworkMode.NO_NETWORK))
+ 
+     def test_internet_isolation_opt_in(self, tmp_path):
+-        config = TaskEnvironmentConfig(docker_image="example/task:1.0", allow_internet=False)
+-        env = _make_environment(tmp_path, task_env_config=config, allow_unenforced_internet_isolation=True)
++        env = _make_environment(
++            tmp_path,
++            network_policy=NetworkPolicy(network_mode=NetworkMode.NO_NETWORK),
++            allow_unenforced_internet_isolation=True,
++        )
+         assert env.can_disable_internet is True
++        assert env.capabilities.disable_internet is True
+ 
+ 
+ class TestStartStop:
+@@ -306,9 +314,12 @@ class TestExec:
+         assert _provider().exec_calls[-1]["command"] == "true"
+ 
+     @pytest.mark.asyncio
+-    async def test_exec_cpu_pin_width_tracks_task_cpu_default(self, tmp_path):
+-        # Harbor defaults EnvironmentConfig.cpus to 1, so a task without an
+-        # explicit cpu count pins with width 1 (matching its cgroup limit).
++    async def test_exec_cpu_pin_skipped_without_task_cpu_count(self, tmp_path):
++        # Harbor >=0.20 defaults EnvironmentConfig.cpus to None (it used to be 1),
++        # so a task that omits a cpu count gives no width to pin to and runs
++        # unpinned rather than pinning to a bogus width. Note the same None also
++        # means _build_spec sends no cpu limit, so such tasks get the cluster
++        # default; task.toml should set cpus explicitly.
+         env = _make_environment(
+             tmp_path,
+             exec_shell=None,
+@@ -317,9 +328,7 @@ class TestExec:
+         )
+         await env.start(force_build=False)
+         await env.exec("true")
+-        command = _provider().exec_calls[-1]["command"]
+-        assert command.startswith("__osb_w=1; ")
+-        assert command.endswith("$__osb_pin true")
++        assert _provider().exec_calls[-1]["command"] == "true"
+ 
+     def test_cpu_pin_prefix_is_valid_posix_sh(self):
+         import shutil
