@@ -173,6 +173,12 @@ check_gym_capture() {
     grep -q '"nemo_model_server_timeout_sec",' "${g}/responses_api_agents/harbor_agent/custom_agents/installed_compat.py" 2>/dev/null \
         && ok "Gym patch 0033: OpenCode/mini drop the training yaml's Terminus-2 kwargs" \
         || bad "Gym patch 0033 missing (nemo_model_server_timeout_sec in SHARED_AGENT_KWARGS, custom_agents/installed_compat.py)"
+    # 0035: Terminus-2 ends the episode after max_consecutive_truncations replies in a row that hit max_tokens
+    # (it looped 320x, jobs 5350472/5355345); envs/harbor-verified-sft.yaml sets it, which Harbor 0.25 rejects
+    # without the patch (no trial runs)
+    grep -q "class TruncationLoopError" "${g}/responses_api_agents/harbor_agent/custom_agents/terminus_2_nemo_gym.py" 2>/dev/null \
+        && ok "Gym patch 0035: Terminus-2 stops after max_consecutive_truncations" \
+        || bad "Gym patch 0035 missing (TruncationLoopError in harbor_agent/custom_agents/terminus_2_nemo_gym.py)"
     # 0031: image_auth (from image_auth_file, Kostas' 0013) only for one registry, not Docker Hub
     grep -q "def _image_registry" "${g}/nemo_gym/sandbox/providers/opensandbox/provider.py" 2>/dev/null \
         && ok "Gym patch 0031: image_auth_registry" \

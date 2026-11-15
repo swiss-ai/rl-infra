@@ -165,6 +165,9 @@ env:
             # The history carries each reply without its thinking: Gym's schema refuses an assistant message
             # with reasoning_content (HTTP 422, job 1209869).
             interleaved_thinking: false
+            # After this many replies in a row that hit max_new_tokens, the episode ends and the verifier runs
+            # (Gym patch 0035; Terminus-2 re-asks without limit: 320x, then a recursion error, jobs 5350472/5355345).
+            max_consecutive_truncations: 8
             model_info:
               # Terminus-2's context limit: the whole trajectory, as in policy.max_total_sequence_length.
               max_input_tokens: ${policy.max_total_sequence_length}
