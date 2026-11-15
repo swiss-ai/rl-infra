@@ -29,6 +29,12 @@ mkdir -p "${OUT}/configs"
 TASK_SCRIPT="$(yq r "${TASK}" script)"
 if [[ -n "${TASK_SCRIPT}" ]]; then
     export SCRIPT="${TASK_SCRIPT}" PYDEPS_GYM=1 PYDEPS="${SCRATCH}/nemo-rl-apertus2/pydeps-gym"
+    # Gym builds its server venvs with uv and keeps uv's cache (about 70k files per build) in the
+    # directory NeMo-RL gives it: the container's `uv cache dir`, unless the config names one. NeMo-RL's
+    # ray.sub unsets UV_CACHE_DIR before srun, so under pyxis (HANGANG) the container spec's value never
+    # arrives and the cache fell back to $XDG_CACHE_HOME/uv on scratch, whatever JOB_UV_CACHE_DIR said.
+    # Naming it in the config works on every site; it goes first, so a command-line override still wins.
+    set -- "++env.nemo_gym.uv_cache_dir=${JOB_UV_CACHE_DIR:-${SCRATCH}/.cache/uv}" "$@"
 fi
 # A recipe on an SFT checkpoint names its export. apertus-common goes in an overlay of its own, for
 # the same reason, and the export is staged next to the base model.
