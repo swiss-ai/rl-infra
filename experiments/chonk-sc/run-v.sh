@@ -12,7 +12,7 @@
 # (02:00:00), PARTITION (normal), DRIVER_RETRIES (0), RL_REGISTRY_CRED_FILE (~/.rl_registry_cred), OPENSANDBOX_API_KEY_FILE (~/.opensandbox_token),
 # APERTUS_COMMON_URL (SSH, as run-s.sh), EXCLUDE_CAMPAIGNS (regex, default swe-rebench-v2\.1-rl; empty = all),
 # EXCLUDE_TASKS (regex on the task part after `<campaign>__`, default the 5 tasks whose verifier timed out in
-# job 5356101; empty = none).
+# job 5356101; empty = none), RECIPE (default recipes/apertus2-chonk-sft19374-alps-vllm-adamw-tools.yaml).
 # Harbor trial dirs: $SCRATCH/harbor-jobs/<RUN>.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -72,7 +72,9 @@ JOBS="${SCRATCH}/harbor-jobs/${RUN}"
 mkdir -p "${JOBS}"
 echo "== run ${RUN}; Harbor trial dirs in ${JOBS}"
 
-RECIPE="${ROOT}/recipes/apertus2-chonk-sft19374-alps-vllm-adamw-tools.yaml" \
+RECIPE="${RECIPE:-${ROOT}/recipes/apertus2-chonk-sft19374-alps-vllm-adamw-tools.yaml}"
+echo "== recipe ${RECIPE}"
+RECIPE="${RECIPE}" \
 exec bash "${ROOT}/run.sh" "${ROOT}/envs/harbor-verified-sft.yaml" \
     grpo.max_num_steps=1 grpo.val_at_start=false grpo.val_at_end=false grpo.val_period=0 \
     checkpointing.enabled=false \

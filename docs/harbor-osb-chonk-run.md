@@ -265,6 +265,7 @@ The warning "checkpoint_must_save_by ... is not before the job time" is harmless
 | `apertus2-chonk-vllm-adamw.yaml` | 12 | 8 (EP32) / 4 | the blueprint; up to 6144 tokens | 1153929, 1172833 |
 | `apertus2-chonk-vllm-adamw-20n.yaml` | 20 | 16 (EP64) / 4 | 8192 tokens | 1172834 (4096), 1172935 (8192) |
 | `apertus2-chonk-vllm-adamw-24n.yaml` | 24 | 8 (EP32) / 16 | more sandboxes per step | 1172832 (128 per step) |
+| `apertus2-chonk-sft19374-alps-vllm-adamw-tools-20n.yaml` | 20 | 16 (PP2, EP32) / 4 | SFT iter_0019374 past 16k tokens (`experiments/chonk-sc/run-v-24k.sh`); 24576 ran out of memory on 12 nodes (Daint 5358015) | not yet |
 
 ```bash
 # 8192 tokens, 2048 per agent turn
