@@ -39,6 +39,8 @@ PYTHONNOUSERSITE = "1"
 PYTHONDONTWRITEBYTECODE = "1"
 TOKENIZERS_PARALLELISM = "false"
 RAY_USAGE_STATS_ENABLED = "0"
+# Harbor 0.25 posts a PostHog event per Harbor job (one per rollout under Gym), model path included
+HARBOR_TELEMETRY = "0"
 RAY_ENABLE_UV_RUN_RUNTIME_ENV = "0"
 VLLM_WORKER_MULTIPROC_METHOD = "spawn"
 HF_DEACTIVATE_ASYNC_LOAD = "1"
