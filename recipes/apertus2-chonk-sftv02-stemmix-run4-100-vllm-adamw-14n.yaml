@@ -1,0 +1,17 @@
+# apertus2-chonk-sftv02-stemmix-run4-100-vllm-adamw.yaml on 14 nodes = 8 trainer + 6 vLLM: generation for 64 trained
+# prompts per step with DAPO dynamic sampling (batch_multiplier 2, so 128 prompts x 8 generated per batch).
+defaults: apertus2-chonk-sftv02-stemmix-run4-100-vllm-adamw.yaml
+
+# run.sh reads sft_export and the node count from this file alone (yq does not follow defaults): without
+# sft_export here it uses the overlay without apertus-common and every vLLM worker fails (job 1280691).
+sft_export: exports/sftv02-stem-mix-run4-step100
+
+cluster:
+  num_nodes: 14
+
+policy:
+  model_name: ${oc.env:SCRATCH}/models/sftv02-stem-mix-run4-step100
+  generation:
+    colocated:
+      resources:
+        num_nodes: 6

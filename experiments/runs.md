@@ -604,3 +604,67 @@ RECIPE=recipes/apertus2-chonk-sft19374-vllm-adamw-tools.yaml bash run.sh envs/ha
   stayed idle 50 to 80% of the time with at most 9 requests in flight per engine. Many trials end at the 16k
   context (about 570 `ContextLengthExceededError` log lines for 382 trials), so a longer context is the first thing
   to try.
+
+## RDKit chemistry in the math environment (claim graded)
+
+Rows from `envs/prepare_chem_rdkit.py`: 12,499 train candidates (not pass-rate filtered) and validation rows from
+held-out molecules (no shared Bemis-Murcko scaffold with train) covering all 123 properties. HANGANG, account hanint09,
+thinking level high, lr 2e-6.
+
+### From SFT v0.2: the model does not claim
+
+Job 1276738, 10 nodes, bare prompts, async trainer: at step 0, 110 of 128 validation answers had no claim frame, 1 had a
+claim (wrong), and the reply was right in 37. Steps 1 and 2 had reward 0, then the async trainer waited for 32 groups
+with a rewarded answer that never came ("not enough groups to form a full step", 503 times). Cancelled after 28 min.
+
+As a diagnostic, job 1276869 graded the reply (`env.math.reward_frame=reply`): 0.273, 0.258, 0.398 at steps 0, 10, 20
+on 128 prompts. 8 of its 24 newly correct answers had been cut at 16K at step 0, so part of that gain is truncation
+repair.
+
+### From the STEM-mix climb: it claims, with the answer-line instruction
+
+`recipes/apertus2-chonk-sftv02-stemmix-run4-100-vllm-adamw.yaml` starts from step 100 of hanint06's
+`sftv02-stem-mix-run4-33n`, converted to HF (`/scratch/hanint09/exports/sftv02-stem-mix-run4-step100`). That run
+claims on 959 of its 960 DAPO-Math validation prompts. On chemistry, step 0 of
+validation (128 prompts):
+
+| Prompt | System frame | No claim | Correct (claim) | Correct (reply) | Mean length |
+|---|---|---|---|---|---|
+| bare | high | 125 | 0 | 42 | 5,801 |
+| bare | medium | 127 | 0 | 31 | 522 (think frame empty in 125) |
+| with the answer-line instruction | high | **0** | **60** | 61 | 4,909 |
+
+The answer-line instruction is the text the math rows carry (as in DAPO-Math-17k), word for word: "Solve the following
+math problem step by step. The last line of your response should be of the form Answer: $Answer …" before the
+prompt and "Remember to put your answer on its own line after "Answer:"." after it. `prepare_chem_rdkit.py` always adds it.
+
+### Training: async with 32 prompts is flat, dynamic sampling with 64 learns
+
+| Job | Trainer | Prompts per step | Steps | Validation accuracy (claim) |
+|---|---|---|---|---|
+| 1280114 | async, `skip_zero_advantage_groups` | 32 | 20 | 0.469, 0.414, 0.461 (128 prompts, steps 0/10/20) |
+| 1280378 | async, `skip_zero_advantage_groups` | 32 | 50 | 0.469, 0.438, 0.461 (128 prompts, steps 0/20/40); length 4,909 to 7,041 |
+| **1280697** | **sync, `use_dynamic_sampling`** | **64 (of 128 generated)** | 45 | **0.420, 0.438, 0.484, 0.463, 0.492** (512 prompts, steps 0/10/20/30/40) |
+
+The async runs trained on all 32 groups per step although 11 to 15 had equal rewards. `skip_zero_advantage_groups`
+leaves them out of the passes but scales the rest so the update equals the full-batch one ("Training 160 of 256
+rows"). In the async loop `use_dynamic_sampling` is only logged; the filtering is in the synchronous trainer.
+
+Job 1280697 (`chem-rdkit-sft.yaml` as committed): 14 nodes, 8 trainer + 6 vLLM.
+- **Dynamic sampling**: 77 to 83 of 128 generated groups had differing rewards, and all 512 trained rows had
+  nonzero advantage. Steps took about 360 s, and about 680 s when a second generation batch was needed.
+- **Validation (512 prompts)**:
+  - steps 0 to 20: 79 newly correct (1 previously cut), 46 newly wrong;
+  - fragments 147/322 to 174/322, counts 54/170 to 61/170;
+  - mean length 4,979 to 5,372;
+  - at most 14 of 1,024 rollouts cut at 16K per step.
+- **Training reward per step**: about 0.43 over steps 1 to 25, about 0.48 over steps 26 to 45.
+- **OOM**: trainer rank 19 ran out of memory in `train_prep` at steps 27 and 46. It requested 6.1 GiB with 68.7 GiB
+  reserved and 53.2 GiB allocated, under the 0.78 cap (74.1 GiB). `driver_retry` resumed from the step-25 checkpoint
+  (weights only, so Adam restarted). The job was stopped at step 46, before the step-50 save.
+- Raising `NRL_CUDA_MEMORY_FRACTION` is the next thing to try; the task file now saves every 10 steps.
+
+```bash
+python3.12 envs/prepare_chem_rdkit.py /scratch/hanint09/chem/data/faithful-qwen-v1/rows $SCRATCH/chem-rdkit/native --val-rows 512
+RUN=chem-rdkit-run4s100-dapo-dynsamp JOB_TIME=10:00:00 bash run.sh envs/chem-rdkit-sft.yaml
+```
