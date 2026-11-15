@@ -168,6 +168,9 @@ env:
             # After this many replies in a row that hit max_new_tokens, the episode ends and the verifier runs
             # (Gym patch 0035; Terminus-2 re-asks without limit: 320x, then a recursion error, jobs 5350472/5355345).
             max_consecutive_truncations: 8
+            # Such a reply is asked again with the same prompt (Gym patch 0036). "harbor": Terminus-2's re-ask,
+            # after which the model never saw the last observation (619 turns in 412 trials, job 5356101).
+            truncation_retry: resample
             model_info:
               # Terminus-2's context limit: the whole trajectory, as in policy.max_total_sequence_length.
               max_input_tokens: ${policy.max_total_sequence_length}

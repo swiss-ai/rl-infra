@@ -179,6 +179,12 @@ check_gym_capture() {
     grep -q "class TruncationLoopError" "${g}/responses_api_agents/harbor_agent/custom_agents/terminus_2_nemo_gym.py" 2>/dev/null \
         && ok "Gym patch 0035: Terminus-2 stops after max_consecutive_truncations" \
         || bad "Gym patch 0035 missing (TruncationLoopError in harbor_agent/custom_agents/terminus_2_nemo_gym.py)"
+    # 0036: after such a reply Terminus-2 asks again with the same prompt; its own re-ask dropped the observation of
+    # the commands that did run (job 5356101); envs/harbor-verified-sft.yaml sets truncation_retry, which Harbor 0.25
+    # rejects without the patch (no trial runs)
+    grep -q "def _take_back_truncated_exchange" "${g}/responses_api_agents/harbor_agent/custom_agents/terminus_2_nemo_gym.py" 2>/dev/null \
+        && ok "Gym patch 0036: Terminus-2 resamples after a truncated reply" \
+        || bad "Gym patch 0036 missing (_take_back_truncated_exchange in harbor_agent/custom_agents/terminus_2_nemo_gym.py)"
     # 0031: image_auth (from image_auth_file, Kostas' 0013) only for one registry, not Docker Hub
     grep -q "def _image_registry" "${g}/nemo_gym/sandbox/providers/opensandbox/provider.py" 2>/dev/null \
         && ok "Gym patch 0031: image_auth_registry" \
