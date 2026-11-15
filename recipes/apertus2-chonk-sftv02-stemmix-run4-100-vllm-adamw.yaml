@@ -1,0 +1,15 @@
+# The SFT v0.2 recipe (apertus2-chonk-sftv02-18315-vllm-adamw-rg.yaml: DAPO settings, Apertus 2 format, claim
+# rewarded, 10 nodes) started from step 100 of the native STEM-mix climb sftv02-stem-mix-run4-33n instead of the SFT
+# export. By step 100 that run claimed in all but 14 of 2,544 validation answers. The export is that checkpoint
+# converted to HF, with tokenizer and code from v0.2, in hanint09's scratch (group-readable).
+# run.sh stages it next to the base models, as for an SFT export.
+defaults: apertus2-chonk-sftv02-18315-vllm-adamw-rg.yaml
+
+sft_export: exports/sftv02-stem-mix-run4-step100
+
+# run.sh reads the node count from this file alone (yq does not follow defaults).
+cluster:
+  num_nodes: 10
+
+policy:
+  model_name: ${oc.env:SCRATCH}/models/sftv02-stem-mix-run4-step100
