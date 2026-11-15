@@ -18,7 +18,7 @@ export NEMO_RL_DIR=/home01/hanint06/projects/nemo-rl-apertus2-stemall
 head=$(git -C "$NEMO_RL_DIR" rev-parse --short=9 HEAD)
 [[ "$head" == 862d358d6 ]] || { echo "NeMo-RL clone at $head, expected 862d358d6"; exit 1; }
 for f in /scratch/hanint06/data/stem-rl/chem_rdkit/train.jsonl /scratch/hanint06/data/stem-rl/chem_rdkit/validation.jsonl; do
-    [[ -s "$f" ]] || { echo "missing $f (envs/prepare_chem_rdkit.py --val-rows 246)"; exit 1; }
+    [[ -s "$f" ]] || { echo "missing $f (experiments/stem-mix-run5/gen_chem.sbatch)"; exit 1; }
 done
 export JOB_TIME=${JOB_TIME:-24:00:00}
 export SBATCH_EXTRA="--gres=gpu:4 --exclusive --comment=field=nlp;appl=pytorch --propagate=NONE --job-name=nrl-${RUN} ${SBATCH_MORE:-}"
