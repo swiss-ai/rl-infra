@@ -10,7 +10,9 @@
 # Env: VERIFIED_STORE (default the capstor store HANGANG mirrors), HARBOR_ROOT ($SCRATCH/osb/harbor_verified),
 # COLLECT_ARGS (default --include-unverified when the store has no tasks.csv, as on HANGANG), RUN, JOB_TIME
 # (02:00:00), PARTITION (normal), DRIVER_RETRIES (0), RL_REGISTRY_CRED_FILE (~/.rl_registry_cred), OPENSANDBOX_API_KEY_FILE (~/.opensandbox_token),
-# APERTUS_COMMON_URL (SSH, as run-s.sh), EXCLUDE_CAMPAIGNS (regex, default swe-rebench-v2\.1-rl; empty = all).
+# APERTUS_COMMON_URL (SSH, as run-s.sh), EXCLUDE_CAMPAIGNS (regex, default swe-rebench-v2\.1-rl; empty = all),
+# EXCLUDE_TASKS (regex on the task part after `<campaign>__`, default the 5 tasks whose verifier timed out in
+# job 5356101; empty = none).
 # Harbor trial dirs: $SCRATCH/harbor-jobs/<RUN>.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -39,13 +41,24 @@ echo "== tasks: $(wc -l < "${HARBOR_ROOT}/train.jsonl") train, $(wc -l < "${HARB
 # 1492 s to start and 10 of 24 hit the 1800 s start timeout (job 5350472), and a step waits for its
 # slowest group. Rows look like {"instance_id": "verified::<campaign>__<task>", ...} (json.dumps).
 EXCLUDE_CAMPAIGNS="${EXCLUDE_CAMPAIGNS-swe-rebench-v2\.1-rl}"
+# Single tasks left out (regex on the task part, the instance_id after `verified::<campaign>__`, matched to
+# its end). Their verifier failed in most of their 8 trials in job 5356101 (all 32 VerifierTimeoutError at
+# the 1200 s cap of 1302 trials; the modin ones partly because the verifier pod stopped answering), and
+# a step waits for its slowest group.
+EXCLUDE_TASKS="${EXCLUDE_TASKS-gui-cs__terminal-gui-4860|ml-explore__mlx-3604|floci-io__floci-1932|modin-project__modin-(6369|7193)}"
 TRAIN="${HARBOR_ROOT}/train.jsonl"
-if [[ -n "${EXCLUDE_CAMPAIGNS}" ]]; then
+DROP=()
+[[ -z "${EXCLUDE_CAMPAIGNS}" ]] || DROP+=(-e "\"instance_id\": \"verified::[^\"]*(${EXCLUDE_CAMPAIGNS})__")
+[[ -z "${EXCLUDE_TASKS}" ]] || DROP+=(-e "\"instance_id\": \"verified::[^\"]*__(${EXCLUDE_TASKS})\"")
+if (( ${#DROP[@]} )); then
     TRAIN="${HARBOR_ROOT}/train-filtered.jsonl"
-    grep -vE "\"instance_id\": \"verified::[^\"]*(${EXCLUDE_CAMPAIGNS})__" "${HARBOR_ROOT}/train.jsonl" > "${TRAIN}.tmp" || true
-    [[ -s "${TRAIN}.tmp" ]] || { echo "ERROR: EXCLUDE_CAMPAIGNS='${EXCLUDE_CAMPAIGNS}' leaves no training rows" >&2; exit 1; }
+    grep -vE "${DROP[@]}" "${HARBOR_ROOT}/train.jsonl" > "${TRAIN}.tmp" || true
+    [[ -s "${TRAIN}.tmp" ]] || {
+        echo "ERROR: EXCLUDE_CAMPAIGNS='${EXCLUDE_CAMPAIGNS}' EXCLUDE_TASKS='${EXCLUDE_TASKS}' leave no training rows" >&2
+        rm -f "${TRAIN}.tmp"; exit 1; }
     mv -f "${TRAIN}.tmp" "${TRAIN}"
-    echo "== left out /${EXCLUDE_CAMPAIGNS}/: $(( $(wc -l < "${HARBOR_ROOT}/train.jsonl") - $(wc -l < "${TRAIN}") )) rows; training on ${TRAIN}"
+    echo "== left out $(( $(wc -l < "${HARBOR_ROOT}/train.jsonl") - $(wc -l < "${TRAIN}") )) rows" \
+        "(campaigns /${EXCLUDE_CAMPAIGNS}/, tasks /${EXCLUDE_TASKS}/); training on ${TRAIN}"
 fi
 
 # exported before use: in `RUN=x bash run.sh ... $RUN` the argument's $RUN is expanded by the calling shell first
