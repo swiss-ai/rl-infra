@@ -1,18 +1,17 @@
-# STEM mix, run 5: SFT v0.2 on the run-3 data plus four generated environments, 512 prompts per step, 100 steps.
-# Per step: 96 DAPO-Math-17K, 192 cleaned NuminaMath-1.5, 96 science + CS knowledge-mcqa (run 3's 1:2:1), and
-# 32 each (6.25%) from Reasoning Gym, Enigmata, ScienceWorld and RDKit chemistry. No openqa and no judge node
-# (run 4 had both), hence 32 nodes = 16 trainer + 16 vLLM.
+# STEM mix, run 5: run 4 (envs/stem-mix-run4.yaml) plus RDKit chemistry, with a new split. 512 prompts per step, 100
+# steps. Per step: 32 each (6.25%) from Reasoning Gym, Enigmata, ScienceWorld and RDKit chemistry; the rest split
+# equally, 96 each, over DAPO-Math-17K, cleaned NuminaMath-1.5, science + CS knowledge-mcqa and knowledge-openqa
+# (graded by the llm_judge environment, gemma-4-26B-A4B verdict, 1 judge node). 33 nodes = 16 trainer + 16 vLLM + 1.
 # Thinking medium (apertus2-system.json) everywhere except Reasoning Gym and chemistry, which use thinking high: at
 # medium the model leaves the think frame empty on those prompts (runs.md: PR swiss-ai/rl-infra#5 and the RDKit
 # chemistry section).
-# Chemistry: rows from envs/gen_chem_rdkit.py, a template counterpart of the generator in PR swiss-ai/rl-infra#6
-# (whose rows this account cannot read): NCI Open Database molecules (public domain), 33 integer-valued properties
-# computed with RDKit, each defined in the question. Graded by the math environment on the claim; every prompt
-# carries DAPO-Math's answer-line instruction.
-# Validation every 20 steps: AIME 2024 mean@32 and GPQA-Diamond mean@8 as in runs 3 and 4, plus 264 held-out
-# chemistry prompts (8 per property; molecules share no Bemis-Murcko scaffold with train).
-# Sources: envs/stem-mix-run4.yaml, envs/chem-rdkit-sft.yaml.
-defaults: ../recipes/apertus2-chonk-sftv02-18315-vllm-adamw-dapo-32n.yaml
+# Chemistry: Antonio Lopardo's rows (PR swiss-ai/rl-infra#6; /scratch/hanint09/chem/data/faithful-qwen-v1/rows,
+# molecules from COCONUT and NCI DTP only), prepared with envs/prepare_chem_rdkit.py --val-rows 246; graded by the
+# math environment on the claim, every prompt with DAPO-Math's answer-line instruction. envs/gen_chem_rdkit.py makes
+# a template alternative (/scratch/hanint06/data/stem-rl/chem_rdkit).
+# Validation every 20 steps: AIME 2024 mean@32 and GPQA-Diamond mean@8 as in runs 3 and 4, plus 246 held-out
+# chemistry prompts (2 per RDKit property; molecules share no Bemis-Murcko scaffold with train).
+defaults: ../recipes/apertus2-chonk-sftv02-18315-vllm-adamw-dapo-32n-judge1.yaml
 
 # Reasoning Gym's scorers in the pydeps overlay (run.sh).
 pydeps: reasoning_gym
@@ -21,9 +20,9 @@ grpo:
   max_num_steps: 100
   max_num_epochs: 1
   val_period: 20
-  # 960 AIME + 1,584 GPQA-Diamond + 264 chemistry.
-  val_batch_size: 2808
-  max_val_samples: 2808
+  # 960 AIME + 1,584 GPQA-Diamond + 246 chemistry.
+  val_batch_size: 2790
+  max_val_samples: 2790
   # ScienceWorld turns (at most 50 actions per episode); the single-turn environments end after one.
   max_rollout_turns: 60
 
@@ -37,12 +36,13 @@ data:
   custom_dataloader: examples.custom_dataloader.custom_dataloader.example_custom_dataloader
   num_prompts_per_dataloader:
     DAPOMath17K: 96
-    run3-numina_clean: 192
+    run3-numina_clean: 96
     run3-mcqa_science_cs: 96
+    openqa-openqa_science: 96
     reasoning_gym-train: 32
     train-enigmata_v1: 32
     scienceworld-sciworld_act_train: 32
-    chem_rdkit-train: 32
+    chem_faithful-train: 32
   train:
     - dataset_name: DAPOMath17K
       deduplicate: true
@@ -51,6 +51,9 @@ data:
     - dataset_name: ResponseDataset
       data_path: /scratch/hanint06/data/stem-rl/run3/mcqa_science_cs.jsonl
       env_name: math_default
+    - dataset_name: ResponseDataset
+      data_path: /scratch/hanint06/data/stem-rl/openqa/openqa_science.jsonl
+      env_name: llm_judge
     - dataset_name: ResponseDataset
       data_path: /scratch/hanint06/data/stem-rl/reasoning_gym/train.jsonl
       env_name: reasoning_gym
@@ -65,9 +68,9 @@ data:
       processor: apertus2_sciworld_data_processor
       system_prompt_file: /scratch/hanint06/data/stem-rl/scienceworld/apertus2-system-sciworld-act.json
       env_name: scienceworld
-    # RDKit chemistry (envs/gen_chem_rdkit.py): integer answers, the math environment on the claim.
+    # RDKit chemistry (envs/chem-rdkit-sft.yaml): integer or 0/1 answers, the math environment on the claim.
     - dataset_name: ResponseDataset
-      data_path: /scratch/hanint06/data/stem-rl/chem_rdkit/train.jsonl
+      data_path: /scratch/hanint06/data/stem-rl/chem_faithful/train.jsonl
       system_prompt_file: ${oc.env:RL_INFRA_DIR}/envs/apertus2-system-high.json
   validation:
     - dataset_name: DAPOMathAIME2024
@@ -76,7 +79,7 @@ data:
       data_path: /scratch/hanint06/data/stem-rl/gpqa_diamond_x8.jsonl
       env_name: math_default
     - dataset_name: ResponseDataset
-      data_path: /scratch/hanint06/data/stem-rl/chem_rdkit/validation.jsonl
+      data_path: /scratch/hanint06/data/stem-rl/chem_faithful/validation.jsonl
       system_prompt_file: ${oc.env:RL_INFRA_DIR}/envs/apertus2-system-high.json
   default:
     prompt_file: null
@@ -122,3 +125,68 @@ env:
     idle_timeout_s: 1800
     call_timeout_s: 300
     max_observation_chars: null
+  # Open answers: the llm_judge environment (handover/openqa-judge-integration.md).
+  llm_judge:
+    judge_pool: judge
+    mode: verdict
+    score: hard
+    min_verdict_mass: 0.0
+    # vLLM structured outputs: the judge can only answer Yes or No.
+    structured: true
+    max_reasoning_chars: 400
+    # A failed judge call makes its sample zero-weight instead of reward 0; nothing to judge stays reward 0.
+    mask_failures: true
+    reward_frame: claim
+    fallback_frame: reply
+    temperature: 1.0
+    top_p: 1.0
+    max_tokens: 512
+    top_logprobs: 20
+    max_concurrent_calls: 1024
+    timeout_s: 300
+    retries: 2
+    pool_wait_s: 3600
+    max_answer_chars: 2000
+    log_every: 512
+    chat_template_kwargs:
+      enable_thinking: false
+  judge_pool:
+    num_nodes: 1
+    stats_path: ${logger.log_dir}/judge_stats.jsonl
+    stats_interval_s: 5.0
+    generation:
+      backend: vllm
+      model_name: ${oc.env:SCRATCH}/models/gemma-4-26B-A4B-it
+      max_new_tokens: 1024
+      temperature: 1.0
+      top_p: 1.0
+      top_k: null
+      val_temperature: 0.0
+      val_top_p: 1.0
+      val_top_k: null
+      stop_token_ids: null
+      stop_strings: null
+      colocated:
+        enabled: false
+      vllm_cfg:
+        async_engine: true
+        expose_http_server: true
+        precision: bfloat16
+        kv_cache_dtype: auto
+        logprobs_mode: processed_logprobs
+        tensor_parallel_size: 1
+        pipeline_parallel_size: 1
+        expert_parallel_size: 1
+        gpu_memory_utilization: 0.88
+        max_model_len: 8192
+        enforce_eager: false
+        use_deep_gemm: false
+        num_last_layers_in_bf16: 0
+        num_first_layers_in_bf16: 0
+        enable_vllm_metrics_logger: true
+        vllm_metrics_logger_interval: 2.0
+        refit_with_reload_api: false
+        enable_prefix_caching: true
+      vllm_kwargs:
+        max_num_seqs: 256
+        max_num_batched_tokens: 16384
