@@ -168,8 +168,12 @@ stage_image() {   # <ref> <master> <work>
         echo "== image present: ${work}"
     fi
 }
-# Striped for many-node opens; not where the image is a shared master used in place.
-[[ "${IMAGE_WORK}" == "${IMAGE_MASTER}" ]] || lfs setstripe -c 16 -S 4M "$(dirname "${IMAGE_WORK}")" 2>/dev/null || true
+# Striped for many-node opens; not where the image is a shared master used in place. The folder is made first:
+# on a missing path, lfs setstripe creates an empty file, and stage_image's mkdir then fails ("File exists").
+if [[ "${IMAGE_WORK}" != "${IMAGE_MASTER}" ]]; then
+    mkdir -p "$(dirname "${IMAGE_WORK}")"
+    lfs setstripe -c 16 -S 4M "$(dirname "${IMAGE_WORK}")" 2>/dev/null || true
+fi
 if [[ -s "${IMAGE_MASTER}" ]]; then
     stage_image "" "${IMAGE_MASTER}" "${IMAGE_WORK}"
 else
