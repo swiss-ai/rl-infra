@@ -14,6 +14,11 @@
 # EXCLUDE_TASKS (regex on the task part after `<campaign>__`, default the 5 tasks whose verifier timed out in
 # job 5356101; empty = none), RECIPE (default recipes/apertus2-chonk-sft19374-alps-vllm-adamw-tools.yaml).
 # Harbor trial dirs: $SCRATCH/harbor-jobs/<RUN>.
+# At most SANDBOXES (64) pods on Breithorn, to leave room for the other tenants: harbor_agent concurrency is one
+# semaphore around the whole trial, and with [verifier] environment_mode = "separate" Harbor stops the agent pod
+# before it starts the verifier pod (harbor/trial/single_step.py), so one pod per trial. PROMPTS (8) prompts x 8
+# rollouts per step, train_global_batch_size to match (as jobs 5356101-5359900). main's 2026-11-14 defaults in
+# envs/harbor-verified-sft.yaml (concurrency 200, 64 x 8 = 512 per step, for HANGANG) would hold 200 pods.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "${HERE}/../.." && pwd)"
@@ -69,8 +74,9 @@ export JOB_TIME="${JOB_TIME:-02:00:00}"
 export PARTITION="${PARTITION:-normal}" DRIVER_RETRIES="${DRIVER_RETRIES:-0}"
 export APERTUS_COMMON_URL="${APERTUS_COMMON_URL:-git@github.com:swiss-ai/apertus-common.git}"
 JOBS="${SCRATCH}/harbor-jobs/${RUN}"
+SANDBOXES="${SANDBOXES:-64}" PROMPTS="${PROMPTS:-8}"
 mkdir -p "${JOBS}"
-echo "== run ${RUN}; Harbor trial dirs in ${JOBS}"
+echo "== run ${RUN}; Harbor trial dirs in ${JOBS}; at most ${SANDBOXES} sandboxes, ${PROMPTS} x 8 rollouts per step"
 
 RECIPE="${RECIPE:-${ROOT}/recipes/apertus2-chonk-sft19374-alps-vllm-adamw-tools.yaml}"
 echo "== recipe ${RECIPE}"
@@ -84,4 +90,6 @@ exec bash "${ROOT}/run.sh" "${ROOT}/envs/harbor-verified-sft.yaml" \
     env.nemo_gym.sandbox.opensandbox.connection.api_key_file="${KEY}" \
     env.nemo_gym.sandbox.opensandbox.attribution.run="${RUN}" \
     env.nemo_gym.harbor_agent.responses_api_agents.harbor_agent.harbor_jobs_dir="${JOBS}" \
+    env.nemo_gym.harbor_agent.responses_api_agents.harbor_agent.concurrency="${SANDBOXES}" \
+    grpo.num_prompts_per_step="${PROMPTS}" policy.train_global_batch_size="$(( PROMPTS * 8 ))" \
     "$@"
