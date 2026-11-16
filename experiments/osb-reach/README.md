@@ -111,6 +111,25 @@ Needs patches 0016+0017 in the NeMo-RL clone's Gym (`setup-gym.sh`, see `harbor-
 
 If `OLD_START=1` fails and the default passes, the race with the exec service was the cause of 5245999.
 
+## Sandboxes through the ingress gateway (`gateway.py`, `REACH_TESTS=gateway`)
+
+Since main's 2026-11-14 defaults, `envs/harbor-verified-sft.yaml` sets `connection.use_server_proxy: false`:
+the client talks to each sandbox's exec daemon through the ingress gateway instead of through the OpenSandbox
+server, which answered "no available server" at about 190 sandboxes on HANGANG. Every run before used the
+proxy (Gym's `opensandbox.yaml` sets true), so whether Alps compute nodes reach the gateway is untested.
+
+`gateway.py` uses the runs' client code (`AsyncSandbox`, Gym's `opensandbox.yaml`, transport httpx,
+`background_exec`, `secure_access`) with the proxy off, `GATEWAY_N` (16) sandboxes in parallel; per sandbox:
+start, the exec daemon's endpoint host (printed; its headers carry the sandbox's access token and are not),
+a short command, a `LONG_S` (75 s) command (an idle timeout in the gateway would cut its status polls), a
+2 MB upload and download with a checksum, stop.
+
+    REACH_TESTS=gateway bash experiments/osb-reach/run.sh            # expect RESULT: 16/16 through the gateway
+    REACH_TESTS=gateway GATEWAY_PROXY=1 bash experiments/osb-reach/run.sh   # the same through the server proxy
+
+A failure at `start` with the proxy off and none with `GATEWAY_PROXY=1`: the create's readiness check already
+goes through the gateway. Failures only at `long_exec`: an idle timeout. `GATEWAY_N=64` or more checks load.
+
 ## Why do pods stay Pending? (`pending.py`, no kubectl needed)
 
 Job 5317993 (SWE-Lego): all 512 creates ended in `HTTP 504 KUBERNETES::POD_READY_TIMEOUT`, Pending after

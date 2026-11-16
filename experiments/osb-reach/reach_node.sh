@@ -2,7 +2,8 @@
 # Runs on the compute node inside the training image (started by run.sh through srun). REACH_TESTS
 # selects: tcp (sandbox -> every address of this node, TCP listener), ws (node -> pod HTTP/WebSocket
 # through the OpenSandbox proxy), tunnel (chisel reverse tunnel per sandbox, pod 127.0.0.1:8000 -> node),
-# gymtunnel (the same through Gym's model_tunnel.py, patch 0016).
+# gymtunnel (the same through Gym's model_tunnel.py, patch 0016), gateway (sandboxes without the server
+# proxy, through the ingress gateway).
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PY=/usr/bin/python3.12
@@ -77,6 +78,16 @@ if [[ "${TESTS}" == *" gymtunnel "* ]]; then
         "${REACH_PYTHON}" -X faulthandler "${HERE}/gym_tunnel.py"
     rc=$?
     echo "== $(date +%T) gym_tunnel.py exit ${rc} (124 or 134 = timeout)"
+    [[ ${rc} -eq 0 ]] || RC=${rc}
+fi
+
+# Sandboxes through the ingress gateway (use_server_proxy: false, envs/harbor-verified-sft.yaml since main's
+# 2026-11-14 defaults) instead of the server proxy: start, exec, a LONG_S exec, file round trip (gateway.py).
+if [[ "${TESTS}" == *" gateway "* ]]; then
+    echo "== sandboxes through the ingress gateway: ${GATEWAY_N:-16} sandboxes, GATEWAY_PROXY=${GATEWAY_PROXY:-0}"
+    PYTHONUNBUFFERED=1 timeout -s ABRT "${GATEWAY_TIMEOUT_S:-900}" "${REACH_PYTHON}" -X faulthandler "${HERE}/gateway.py"
+    rc=$?
+    echo "== $(date +%T) gateway.py exit ${rc} (124 or 134 = timeout)"
     [[ ${rc} -eq 0 ]] || RC=${rc}
 fi
 exit "${RC}"
