@@ -222,6 +222,9 @@ env:
           # The start timeout (task.toml's build_timeout_sec) also covers a pod's wait in the cluster's
           # queue; Terminal-Lego-15k allows 120 s, which queueing alone exceeds (Gym patch 0015).
           harbor_environment_build_timeout_multiplier: 5.0
+          # Mask rollouts whose failure class is infra (sandbox never started, verifier pod lost, ...): their
+          # reward says nothing about the model. Gym's default (patch 0041), written out so the config dump shows it.
+          harbor_mask_infra: true
           # Harbor's trial directories (trajectories, test output) next to the weights. The harbor_agent
           # server reads them back, so they must be on a shared filesystem.
           harbor_jobs_dir: ${checkpointing.checkpoint_dir}/harbor-jobs
