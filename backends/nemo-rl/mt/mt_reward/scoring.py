@@ -26,7 +26,6 @@ class Example:
 
 class Components(Protocol):
     def language_matches(self, text: str, language: str) -> bool: ...
-    def mask(self, text: str, language: str) -> str: ...
     def metricx(self, source: str, hypothesis: str, reference: str) -> float: ...
     def cometkiwi(self, source: str, hypothesis: str) -> float: ...
     def alignment(self, reference: str, hypothesis: str,
@@ -76,18 +75,16 @@ class TranslationReward:
         self.chrf = chrf
 
     def score(self, example: Example) -> Score:
-        # chrF++ always uses the original output, never the masked translation.
         chrf = bounded(self.chrf.sentence_score(
             example.hypothesis, [example.reference]).score, 0, 100, "chrF++")
         if not example.hypothesis.strip() or not self.components.language_matches(
                 example.hypothesis, example.target_lang):
             return Score(-25.0, False, None, None, chrf)
-        masked = self.components.mask(example.hypothesis, example.target_lang)
         metricx = bounded(self.components.metricx(
             example.source, example.hypothesis, example.reference), -25, 0, "MetricX")
         alignment = bounded(self.components.alignment(
-            example.reference, masked, example.target_lang, example.target_lang),
-            0, 1, "word alignment") if masked.strip() else 0.0
+            example.reference, example.hypothesis, example.target_lang, example.target_lang),
+            0, 1, "word alignment")
         kiwi = bounded(self.components.cometkiwi(example.source, example.hypothesis),
                        0, 1, "COMET-Kiwi") if self.cometkiwi_weight else None
         reward = self.cometkiwi_weight * kiwi if kiwi is not None else 0.0

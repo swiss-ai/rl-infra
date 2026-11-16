@@ -1,6 +1,6 @@
 """Model adapters for WALAR's publicly released components.
 
-Uses CTFAlign for reference alignment and loads MetricX/MaskLID from a WALAR
+Uses CTFAlign for reference alignment and loads MetricX from a WALAR
 checkout; no upstream code is copied into this repository.
 """
 
@@ -33,16 +33,12 @@ class WalarComponents:
         if not self.languages or any(not isinstance(v, str) or "_" not in v
                                      for v in self.languages.values()):
             raise ValueError("languages must map dataset codes to GlotLID labels, e.g. en: eng_Latn")
-        code = Path(config["walar_dir"]) / "code"
-        masklid = load_module(code / "masklid.py", "mt_masklid_upstream")
         self.lid = fasttext.load_model(config["glotlid_model"])
         labels = ["__label__" + label for label in set(self.languages.values())]
-        self.masklid = masklid.MaskLID(config["masklid_model"], languages=labels)
         # Do not silently ignore a misspelled or unavailable language label.
-        for detector in (self.lid, self.masklid.model):
-            missing = set(labels) - set(detector.get_labels())
-            if missing:
-                raise ValueError(f"Language labels absent from detector: {sorted(missing)}")
+        missing = set(labels) - set(self.lid.get_labels())
+        if missing:
+            raise ValueError(f"Language labels absent from detector: {sorted(missing)}")
         self.cometkiwi_scorer = None
         if config.get("cometkiwi_weight", 0):
             from .cometkiwi import CometKiwiReward
@@ -60,13 +56,6 @@ class WalarComponents:
         # copy=False conversion while preserving the same top-label result.
         label = self.lid.predict([text.replace("\n", " ").strip()])[0][0][0]
         return label.removeprefix("__label__") == self.label(language)
-
-    def mask(self, text, language):
-        segments = self.masklid.predict_codeswitch(
-            text.replace("\n", " "), beta=20, alpha=3, max_lambda=3,
-            min_length=10, min_prob=0.90, max_retry=3,
-            alpha_step_increase=3, beta_step_increase=5)
-        return segments.get("__label__" + self.label(language), "")
 
     def cometkiwi(self, source, hypothesis):
         if self.cometkiwi_scorer is None:

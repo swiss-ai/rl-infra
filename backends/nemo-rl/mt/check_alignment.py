@@ -94,7 +94,7 @@ def main():
         print(f"Word pairs and full scores: {args.output}")
     print("Bonus = alignment_weight * coverage F1, as in GRPO. "
           "This isolates alignment: inputs are treated as already target-language filtered; "
-          "GlotLID/MaskLID, MetricX, and chrF++ are not run.")
+          "GlotLID, MetricX, and chrF++ are not run.")
     print("Coverage measures aligned words, not factual correctness. "
           "Compare the incorrect-facts and unrelated controls; a high score is not proof of a good translation.")
 

@@ -14,10 +14,9 @@ from mt_reward.rollouts import rollout_metrics
 
 
 class CometKiwiTests(unittest.TestCase):
-    def test_weighted_original_translation_without_reference_or_mask(self):
+    def test_weighted_original_translation_without_reference(self):
         components = Mock()
         components.language_matches.return_value = True
-        components.mask.return_value = "MASKED"
         components.metricx.return_value = -5
         components.alignment.return_value = 0.5
         components.cometkiwi.return_value = 0.8

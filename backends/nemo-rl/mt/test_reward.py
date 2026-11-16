@@ -24,7 +24,6 @@ class RewardTests(unittest.TestCase):
         self.example = Example("en", "de", "Hello world.", "Hallo Welt.", "Hallo Welt.")
         self.components = Mock()
         self.components.language_matches.return_value = True
-        self.components.mask.return_value = "Hallo"
         self.components.metricx.return_value = -5
         self.components.alignment.return_value = 0.5
         self.reward = TranslationReward(self.components)
@@ -34,9 +33,9 @@ class RewardTests(unittest.TestCase):
         self.assertAlmostEqual(score.chrf_pp, 100)
         self.assertAlmostEqual(score.reward, -5 + 20 * 0.5 + 20)
         self.components.metricx.assert_called_once_with("Hello world.", "Hallo Welt.", "Hallo Welt.")
-        self.components.alignment.assert_called_once_with("Hallo Welt.", "Hallo", "de", "de")
+        self.components.alignment.assert_called_once_with("Hallo Welt.", "Hallo Welt.", "de", "de")
 
-    def test_chrf_is_sentence_level_plus_plus_on_unmasked_output(self):
+    def test_chrf_is_sentence_level_plus_plus_on_full_output(self):
         example = replace(self.example, hypothesis="Hallo schöne Welt.")
         expected = CHRF(char_order=6, word_order=2, beta=2).sentence_score(
             example.hypothesis, [example.reference]).score
@@ -51,7 +50,7 @@ class RewardTests(unittest.TestCase):
         self.assertFalse(score.language_alignment)
         self.assertIsNone(score.metricx)
         self.components.metricx.assert_not_called()
-        self.components.mask.assert_not_called()
+        self.components.alignment.assert_not_called()
 
     def test_empty_output_is_penalized(self):
         score = self.reward.score(replace(self.example, hypothesis=""))
@@ -59,11 +58,11 @@ class RewardTests(unittest.TestCase):
         self.assertEqual(score.chrf_pp, 0)
         self.components.language_matches.assert_not_called()
 
-    def test_empty_mask_has_zero_alignment(self):
-        self.components.mask.return_value = ""
-        score = self.reward.score(self.example)
-        self.assertEqual(score.word_alignment, 0)
-        self.components.alignment.assert_not_called()
+    def test_alignment_receives_full_mixed_language_output(self):
+        example = replace(self.example, hypothesis="Hallo Welt. This is extra English text.")
+        self.reward.score(example)
+        self.components.alignment.assert_called_once_with(
+            example.reference, example.hypothesis, "de", "de")
 
     def test_zero_chrf_weight_keeps_metricx_and_alignment(self):
         score = TranslationReward(self.components, chrf_weight=0).score(self.example)
@@ -79,13 +78,9 @@ class RewardTests(unittest.TestCase):
         ctfalign, fasttext, hub = Mock(), Mock(), Mock()
         hub.snapshot_download.return_value = "/cache/bidirlm-snapshot"
         fasttext.load_model.return_value.get_labels.return_value = ["__label__deu_Latn"]
-        upstream = Mock()
-        upstream.MaskLID.return_value.model.get_labels.return_value = ["__label__deu_Latn"]
         config = {"walar_dir": "/walar", "device": "cuda:0",
-                  "languages": {"de": "deu_Latn"}, "glotlid_model": "/lid",
-                  "masklid_model": "/mask"}
+                  "languages": {"de": "deu_Latn"}, "glotlid_model": "/lid"}
         with patch.dict(sys.modules, {"ctfalign": ctfalign, "fasttext": fasttext, "huggingface_hub": hub}), \
-                patch("mt_reward.models.load_module", return_value=upstream), \
                 patch("mt_reward.models.MetricXReward"):
             WalarComponents(config)
             ctfalign.WordAligner.from_huggingface.assert_called_with(
@@ -145,7 +140,7 @@ class RewardTests(unittest.TestCase):
 
     def test_reference_alignment_does_not_depend_on_source(self):
         self.reward.score(replace(self.example, source="A differently phrased source", source_lang="fr"))
-        self.components.alignment.assert_called_once_with("Hallo Welt.", "Hallo", "de", "de")
+        self.components.alignment.assert_called_once_with("Hallo Welt.", "Hallo Welt.", "de", "de")
 
     def test_metricx_negates_error_and_includes_reference(self):
         scorer = object.__new__(MetricXReward)

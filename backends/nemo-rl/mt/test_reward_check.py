@@ -11,7 +11,6 @@ class RewardCheckTests(unittest.TestCase):
     def test_reports_actual_weighted_terms_and_gate_override(self):
         components = Mock()
         components.language_matches.return_value = True
-        components.mask.side_effect = lambda text, lang: text
         components.metricx.return_value = -3
         components.alignment.return_value = 0.7
         scorer = TranslationReward(components, alignment_weight=8, chrf_weight=5)

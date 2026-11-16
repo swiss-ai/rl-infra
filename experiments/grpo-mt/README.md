@@ -58,14 +58,14 @@ reference-based, sentence-level chrF++ term:
 ```text
 reward = -25                                      if language alignment fails
 reward = metricx(source, hypothesis, reference)
-         + 20 * word_alignment(reference, masked_hypothesis)
+         + 20 * word_alignment(reference, hypothesis)
          + chrf_weight * chrf_pp(hypothesis, reference) / 100
          + cometkiwi_weight * cometkiwi(source, hypothesis)
                                                   otherwise
 ```
 
 Adapt WALAR to use reference-based MetricX alongside CTFAlign reference–hypothesis word alignment
-and GlotLID/MaskLID language alignment and masking. The MetricX term is the
+and a GlotLID language gate. Alignment uses the full generated translation without language filtering. The MetricX term is the
 negative error score (higher is better, in [-25, 0]); do not add MetricX's raw
 error score with a positive sign.
 The language failure branch overrides all other terms, including chrF++.

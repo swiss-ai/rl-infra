@@ -13,7 +13,7 @@ if output is empty or GlotLID predicts a different target language:
     reward = -25
 else:
     reward = -MetricX_error(source, original_output, reference)
-             + alignment_weight * alignment(reference, MaskLID_target_text)
+             + alignment_weight * alignment(reference, original_output)
              + chrf_weight * sentence_chrF++(original_output, reference) / 100
              + cometkiwi_weight * COMET_Kiwi(source, original_output)
 ```
@@ -33,7 +33,7 @@ The default input limit is 1536 tokens, matching the documented training limit;
 longer inputs are truncated. The adapter rejects a missing reference or an
 incompletely loaded checkpoint. MetricX component rewards are logged as
 `metricx`, rather than the former `qe` field.
-MaskLID extracts target-language segments for alignment against the reference,
+The full generated translation is aligned against the reference,
 with both sides tokenized as the target language. [CTFAlign](https://github.com/ZurichNLP/CTFAlign)
 uses its coarse-to-fine method, argmax extraction, and word units. The bonus is
 F1 of unique covered reference/hypothesis words, so repeated edges do not inflate
@@ -88,14 +88,12 @@ Run the model-backed MetricX check below after updating the scorer environment. 
 The scorer environment needs no NeMo-RL or OpenRLHF installation.
 
 Provide a checkout of `https://github.com/LeiLiLab/WALAR` at commit
-`963746136c5fbff4d3a36cf09f3e4ae1f33ebcb1`. Only `code/models.py` and
-`code/masklid.py` are imported. Obtain the model assets listed in WALAR's
-README, including GlotLID's `model.bin` and MaskLID's `model_v3.bin`.
+`963746136c5fbff4d3a36cf09f3e4ae1f33ebcb1`. Only `code/models.py` is imported. Obtain the MetricX assets listed in WALAR's
+README and GlotLID's `model.bin`; MaskLID is not required.
 
 Copy `experiments/grpo-mt/scorer.example.json` to a personal config and set the
 local paths. `languages` maps dataset language codes to GlotLID labels. Include
-every source and target language. This list also defines the candidate
-languages considered by MaskLID; keep it fixed across comparisons. For Chinese,
+every source and target language. For Chinese,
 add `hanlp==2.1.1` and set `chinese_tokenizer` to the downloaded
 `coarse_electra_small_20220616_012050` tokenizer directory. Model IDs can be
 replaced with downloaded local directories for offline execution.
@@ -194,7 +192,7 @@ checks loading diagnostics, and runs reference-based inference on two examples.
 It reports package versions, raw errors, and negative rewards. Inspect that the
 correct translation has lower error than the unrelated translation; the script
 does not impose a universal quality threshold. It needs no Ray cluster, CTFAlign encoder,
-GlotLID, or MaskLID models. `--input examples.jsonl` accepts your own examples
+or GlotLID models. `--input examples.jsonl` accepts your own examples
 with `source`, `hypothesis`, and `reference` fields. This check validates MetricX
 inference; full Ray execution remains a separate cluster check.
 
@@ -220,9 +218,8 @@ The table reports reference coverage, hypothesis coverage, coverage F1, and
 reward. The JSONL output contains all text, scores, index pairs, and aligned word
 strings for inspection. No universal quality threshold is imposed.
 
-The check treats hypotheses as already filtered target-language text. Training
-also runs the language gate and MaskLID before alignment; those steps can change
-the actual bonus. High word coverage alone does not establish semantic or factual
+The check aligns full hypotheses, as training does. Training also runs the
+language gate, which overrides the reward when it fails. High word coverage alone does not establish semantic or factual
 correctness; inspect the negative controls and word pairs.
 
 Use `--input documents.jsonl` for your own data, one object per line with
@@ -261,7 +258,7 @@ srun --account=infra01 --partition=debug --nodes=1 --ntasks=1 \
 The 10-minute limit is a maximum runtime; the job exits as soon as the check
 finishes. All scorer models must fit on one GPU.
 The six examples include the four alignment documents with a Spanish source,
-plus a Spanish source copy and empty output. GlotLID and MaskLID run normally.
+plus a Spanish source copy and empty output. GlotLID runs normally.
 The table reports the language gate, negative MetricX error, alignment F1,
 weighted alignment bonus, raw chrF++, weighted chrF++ bonus, and total reward.
 Gate failures get -25, with both effective bonuses reported as zero.
@@ -281,7 +278,7 @@ must cover all input languages (the built-ins use `es` and `de`).
 
 The supplied scorer configs add `20 * cometkiwi(source, original_output)` using
 [Unbabel/wmt22-cometkiwi-da](https://huggingface.co/Unbabel/wmt22-cometkiwi-da).
-This input contains only `src` and `mt`, never the reference or masked output.
+This input contains only `src` and `mt`, never the reference.
 The raw higher-is-better score (documented range 0–1) is logged as `cometkiwi`;
 `check_reward.py` also prints the weighted `cometkiwi_bonus` and includes it in
 the total. The language gate overrides this term too. Nonfinite/out-of-range
