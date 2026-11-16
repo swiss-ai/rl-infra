@@ -1,5 +1,6 @@
-# STEM mix, run 5: run 4 (envs/stem-mix-run4.yaml) plus RDKit chemistry, with a new split. 512 prompts per step, 100
-# steps. Per step: 32 each (6.25%) from Reasoning Gym, Enigmata, ScienceWorld and RDKit chemistry; the rest split
+# STEM mix, run 5: run 4 (envs/stem-mix-run4.yaml) plus RDKit chemistry, with a new split. 512 prompts per step, 135
+# steps, as the v0.2 DAPO-only run 1271308 (user, 2026-11-16); Enigmata's 4,002 rows run out at step 125 and its
+# dataloader restarts. Per step: 32 each (6.25%) from Reasoning Gym, Enigmata, ScienceWorld and RDKit chemistry; the rest split
 # equally, 96 each, over DAPO-Math-17K, cleaned NuminaMath-1.5, science + CS knowledge-mcqa and knowledge-openqa
 # (graded by the llm_judge environment, gemma-4-26B-A4B verdict, 1 judge node). 33 nodes = 16 trainer + 16 vLLM + 1.
 # Thinking medium (apertus2-system.json) everywhere except Reasoning Gym and chemistry, which use thinking high: at
@@ -17,7 +18,7 @@ defaults: ../recipes/apertus2-chonk-sftv02-18315-vllm-adamw-dapo-32n-judge1.yaml
 pydeps: reasoning_gym
 
 grpo:
-  max_num_steps: 100
+  max_num_steps: 135
   max_num_epochs: 1
   val_period: 20
   # 960 AIME + 1,584 GPQA-Diamond + 246 chemistry.
