@@ -171,6 +171,10 @@ env:
             # Such a reply is asked again with the same prompt (Gym patch 0036). "harbor": Terminus-2's re-ask,
             # after which the model never saw the last observation (619 turns in 412 trials, job 5356101).
             truncation_retry: resample
+            # A reply cut by the context ceiling (not by max_new_tokens) ends the episode as a context overflow and
+            # the verifier runs (Gym patch 0037); "resample" sent the same prompt into the same ceiling 8 times
+            # (72 of 73 truncation loops, job 5359900).
+            context_limit_truncation: overflow
             model_info:
               # Terminus-2's context limit: the whole trajectory, as in policy.max_total_sequence_length.
               max_input_tokens: ${policy.max_total_sequence_length}

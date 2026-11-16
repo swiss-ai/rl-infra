@@ -185,6 +185,12 @@ check_gym_capture() {
     grep -q "def _take_back_truncated_exchange" "${g}/responses_api_agents/harbor_agent/custom_agents/terminus_2_nemo_gym.py" 2>/dev/null \
         && ok "Gym patch 0036: Terminus-2 resamples after a truncated reply" \
         || bad "Gym patch 0036 missing (_take_back_truncated_exchange in harbor_agent/custom_agents/terminus_2_nemo_gym.py)"
+    # 0037: failure class per rollout (train/harbor_agent/failure_<class>/mean) and a reply cut by the context ends
+    # the episode as an overflow; envs/harbor-verified-sft.yaml sets context_limit_truncation, which Harbor 0.25
+    # rejects without the patch (no trial runs)
+    grep -q "def classify_rollout" "${g}/responses_api_agents/harbor_agent/failure_classes.py" 2>/dev/null \
+        && ok "Gym patch 0037: failure classes per rollout, context-limit truncation ends the episode" \
+        || bad "Gym patch 0037 missing (classify_rollout in harbor_agent/failure_classes.py)"
     # 0031: image_auth (from image_auth_file, Kostas' 0013) only for one registry, not Docker Hub
     grep -q "def _image_registry" "${g}/nemo_gym/sandbox/providers/opensandbox/provider.py" 2>/dev/null \
         && ok "Gym patch 0031: image_auth_registry" \

@@ -1,0 +1,1252 @@
+From 77c1538c027570906052fd41b37485d85131aee4 Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Mon, 16 Nov 2026 08:36:12 +0000
+Subject: [PATCH 37/37] feat(harbor_agent): failure class per rollout; a reply
+ cut by the context ends the episode
+
+Every /run response now says why the rollout ended: failure_class (ok,
+context_overflow, model_truncation_loop, agent_timeout,
+verifier_timeout, infra, other), a short masked failure_detail, and one
+0/1 field per class (failure_infra, ...). NeMo-RL logs every numeric
+response field per agent, so they reach TensorBoard as
+<agent>/failure_<class>/mean without a NeMo-RL change. The server prints
+one line per rollout with the class.
+
+The rules (failure_classes.py) read Harbor's exception_info including
+the chained causes of its traceback, the verifier phase time, whether
+the verifier produced a result, and the agent's agent_error_flags.json.
+Harbor's _verify_with_timeout reports every TimeoutError as
+VerifierTimeoutError, also the OpenSandbox provider's command-status
+timeout (8 of 32 in job 5356101): such a chain, or a verifier timeout
+well before its cap, is infra. Terminus2NemoGym catches the exception
+that ends its episode so the verifier still runs; it now writes its type
+and masked first line to the flags, so a sandbox that died during the
+episode (14 rollouts of job 5358015, scored 0 and trained on) is infra
+too.
+
+A reply with finish_reason length that is shorter than the output limit,
+or whose prompt + reply reach model_info.max_input_tokens (from the
+model server's usage numbers), was cut by the context ceiling; a
+resample meets the same ceiling (72 of 73 truncation loops in job
+5359900). With the new Terminus2NemoGym option context_limit_truncation:
+overflow (default) NemoGymLLM raises ContextLengthExceededError, so the
+episode ends as a context overflow and the verifier still runs;
+resample keeps the old path. The option joins SHARED_AGENT_KWARGS.
+
+The OpenSandbox SDK logs every failed file read at ERROR with the httpx
+traceback; a 404 "file not found" (Harbor's best-effort read of
+/logs/artifacts, 113 trials of job 5359900) is now one DEBUG line. The
+exception still reaches the caller; other read errors keep their ERROR.
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ .../sandbox/providers/opensandbox/provider.py |  35 +++
+ responses_api_agents/harbor_agent/README.md   |  23 ++
+ responses_api_agents/harbor_agent/app.py      |  17 ++
+ .../custom_agents/installed_compat.py         |   1 +
+ .../custom_agents/llms/nemo_gym_llm.py        |  65 ++++
+ .../custom_agents/terminus_2_nemo_gym.py      |  31 +-
+ .../test_mini_swe_agent_nemo_gym.py           |   2 +-
+ .../custom_agents/test_opencode_nemo_gym.py   |   1 +
+ .../custom_agents/test_terminus_2_nemo_gym.py | 141 +++++++++
+ .../harbor_agent/failure_classes.py           | 264 ++++++++++++++++
+ .../harbor_agent/tests/test_app.py            |  52 ++++
+ .../tests/test_failure_classes.py             | 289 ++++++++++++++++++
+ tests/unit_tests/test_opensandbox_provider.py |  38 +++
+ 13 files changed, 956 insertions(+), 3 deletions(-)
+ create mode 100644 responses_api_agents/harbor_agent/failure_classes.py
+ create mode 100644 responses_api_agents/harbor_agent/tests/test_failure_classes.py
+
+diff --git a/nemo_gym/sandbox/providers/opensandbox/provider.py b/nemo_gym/sandbox/providers/opensandbox/provider.py
+index 4e9e7e5a3..a3feba71a 100644
+--- a/nemo_gym/sandbox/providers/opensandbox/provider.py
++++ b/nemo_gym/sandbox/providers/opensandbox/provider.py
+@@ -64,6 +64,41 @@ class _MissingSandboxTerminateFilter(logging.Filter):
+ logging.getLogger("opensandbox.adapters.sandboxes_adapter").addFilter(_MissingSandboxTerminateFilter())
+ 
+ 
++class _MissingFileReadFilter(logging.Filter):
++    """Turn the SDK's ERROR + traceback for reading a file that does not exist into one DEBUG line.
++
++    ``filesystem_adapter.read_bytes`` logs every failed read at ERROR with the full httpx traceback and then
++    raises SandboxApiException anyway. Harbor probes optional paths this way: "Collecting main service
++    artifacts" reads ``/logs/artifacts`` in every task without one (113 trials of job 5359900) and treats the
++    failure as best-effort. Only an HTTP 404 whose body says the file is missing is demoted; the exception still
++    reaches the caller, and any other read failure (a dead sandbox, 502, a missing sandbox) keeps its ERROR.
++    """
++
++    _MESSAGES = ("Failed to read file ", "Failed to stream file ")
++
++    def filter(self, record: logging.LogRecord) -> bool:
++        if record.levelno < logging.ERROR or not record.exc_info:
++            return True
++        message = record.getMessage()
++        if not message.startswith(self._MESSAGES):
++            return True
++        error = record.exc_info[1]
++        response = getattr(error, "response", None)
++        status = getattr(response, "status_code", None) if response is not None else _exception_status_code(error)
++        try:
++            body = str(getattr(response, "text", "") or "")
++        except Exception:
++            body = ""
++        body = (body or str(error)).lower()
++        if status != 404 or "sandbox_not_found" in body or "file not found" not in body:
++            return True
++        LOGGER.debug("OpenSandbox: %s: HTTP 404 file not found (the caller handles it)", message)
++        return False
++
++
++logging.getLogger("opensandbox.adapters.filesystem_adapter").addFilter(_MissingFileReadFilter())
++
++
+ class OpenSandboxCreateError(SandboxCreateError):
+     """Raised when OpenSandbox cannot create a sandbox."""
+ 
+diff --git a/responses_api_agents/harbor_agent/README.md b/responses_api_agents/harbor_agent/README.md
+index b451db525..f0b7bff38 100644
+--- a/responses_api_agents/harbor_agent/README.md
++++ b/responses_api_agents/harbor_agent/README.md
+@@ -518,6 +518,29 @@ contribution while tracking their rate in metrics.
+ - **Context length exceeded on a later turn** (listed above): same behavior — completed
+   turns are preserved.
+ 
++### Failure classes
++
++Every `/run` response carries `failure_class` and a short masked `failure_detail` (exception type and
++first line), and one 0/1 field per class: `failure_ok`, `failure_context_overflow`,
++`failure_model_truncation_loop`, `failure_agent_timeout`, `failure_verifier_timeout`, `failure_infra`,
++`failure_other`. NeMo RL logs every numeric response field per agent, so these show up as
++`<agent>/failure_<class>/mean` next to `context_length_exceeded_error`. The server also prints one line per
++rollout: `[harbor_agent] INFO rollout <instance_id> failure_class=<class> reward=<reward> job=<job> detail=...`.
++Rules, first match wins (`failure_classes.py`): `infra` (sandbox start/setup timeouts, sandbox API errors,
++OpenSandbox command-status timeouts also when Harbor reports them as `VerifierTimeoutError`, a
++`VerifierTimeoutError` well before its cap, model-server connection errors, tunnel errors, a Harbor job
++without a result; also when such an error ended the agent's episode and the verifier then ran),
++`agent_timeout`, `verifier_timeout` (ran to its cap), `context_overflow` (the prompt does not fit, at the
++start or later, or a reply was cut by the context ceiling), `model_truncation_loop`
++(`max_consecutive_truncations` replies in a row hit the output limit with room left), `other` (type kept in the
++detail; also no verifier result), else `ok`.
++
++`Terminus2NemoGym` option `context_limit_truncation` (`overflow` by default, or `resample`): a reply with
++`finish_reason: length` that has fewer tokens than the output limit, or whose prompt + reply reach
++`model_info.max_input_tokens` (from the model server's `usage`), was cut by the context ceiling. `overflow`
++ends the episode as a context overflow (like a prompt that does not fit; the verifier still runs);
++`resample` treats it like any other truncation (`truncation_retry`, then the cap).
++
+ ### On-policy corrections for multi-turn training
+ 
+ In multi-turn RL training, turn `N+1` is built from the full conversation history
+diff --git a/responses_api_agents/harbor_agent/app.py b/responses_api_agents/harbor_agent/app.py
+index 66670022a..890e42e4b 100644
+--- a/responses_api_agents/harbor_agent/app.py
++++ b/responses_api_agents/harbor_agent/app.py
+@@ -46,6 +46,7 @@ from nemo_gym.openai_utils import (
+     NeMoGymResponse,
+     NeMoGymResponseCreateParamsNonStreaming,
+ )
++from responses_api_agents.harbor_agent.failure_classes import classify_rollout
+ from responses_api_agents.harbor_agent.utils import HarborAgentUtils
+ 
+ 
+@@ -318,6 +319,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
+                 model_tunnel=model_tunnel,
+             )
+ 
++            run_error: Optional[Exception] = None
+             try:
+                 params = dict(
+                     job_config_dict=job_config_dict,
+@@ -362,6 +364,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
+             except Exception as e:
+                 # stderr, flushed: buffered stdout is lost when the server is killed at shutdown
+                 print(f"Error running Harbor job: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
++                run_error = e
+                 trial_result = None
+                 trajectory = None
+                 agent_error_flags = {}
+@@ -370,6 +373,14 @@ class HarborAgent(SimpleResponsesAPIAgent):
+                 usage = None
+                 reward = 0.0
+ 
++            failure = classify_rollout(trial_result, agent_error_flags, run_error)
++            # one line per rollout; stdout, flushed (see above)
++            print(
++                f"[harbor_agent] INFO rollout {instance_id} failure_class={failure.failure_class} "
++                f"reward={reward} job={job_name}" + (f" detail={failure.detail}" if failure.detail else ""),
++                flush=True,
++            )
++
+             response = HarborAgentUtils.get_default_response_object()
+             response["model"] = policy_model_name
+             response["temperature"] = responses_create_params.get("temperature")
+@@ -401,6 +412,12 @@ class HarborAgent(SimpleResponsesAPIAgent):
+                 context_length_exceeded_error=int(agent_error_flags.get("context_length_exceeded", False)),
+                 memory_limit_exceeded_error=int(agent_error_flags.get("memory_limit_exceeded", False)),
+                 agent_timeout_error=int(_exception_type(trial_result) == "AgentTimeoutError"),
++                # Why the rollout ended (failure_classes.py): a string for logs and the full-result table, and one
++                # 0/1 field per class (failure_ok, failure_infra, ...), which NeMo-RL logs per agent as
++                # <agent>/failure_<class>/mean like the error fields above (it aggregates every numeric field).
++                failure_class=failure.failure_class,
++                failure_detail=failure.detail,
++                **failure.metrics(),
+             )
+ 
+             # Save result to disk (folder = run_id, file = task name)
+diff --git a/responses_api_agents/harbor_agent/custom_agents/installed_compat.py b/responses_api_agents/harbor_agent/custom_agents/installed_compat.py
+index e107f470f..cfaf3511a 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/installed_compat.py
++++ b/responses_api_agents/harbor_agent/custom_agents/installed_compat.py
+@@ -56,6 +56,7 @@ SHARED_AGENT_KWARGS = (
+     "nemo_model_server_timeout_sec",
+     "max_consecutive_truncations",
+     "truncation_retry",
++    "context_limit_truncation",
+ )
+ 
+ 
+diff --git a/responses_api_agents/harbor_agent/custom_agents/llms/nemo_gym_llm.py b/responses_api_agents/harbor_agent/custom_agents/llms/nemo_gym_llm.py
+index 79940c282..bc1a4b757 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/llms/nemo_gym_llm.py
++++ b/responses_api_agents/harbor_agent/custom_agents/llms/nemo_gym_llm.py
+@@ -99,6 +99,16 @@ class NemoGymLLM(BaseLLM):
+         # Set when the model hits the context length limit.
+         self.context_length_exceeded = False
+ 
++        # A reply cut by the context ceiling rather than by max_tokens (see _cut_by_context_limit):
++        # "overflow" raises ContextLengthExceededError (the episode ends as a context overflow, as when the prompt
++        # itself does not fit); "resample" raises OutputLengthExceededError like any truncation. Terminus2NemoGym
++        # sets it from its `context_limit_truncation` option.
++        self.context_limit_truncation = "overflow"
++        self.context_limit_truncations = 0
++        self.last_truncation_at_context_limit = False
++        # Calls answered with a reply (not truncated, not overflowed); 0 at the end = the prompt never fit.
++        self.answered_calls = 0
++
+         # Pre-compute extra chat params from responses_create_params once,
+         # since they don't change between calls.
+         self._extra_chat_params = self._build_extra_chat_params(responses_create_params or {})
+@@ -202,6 +212,16 @@ class NemoGymLLM(BaseLLM):
+                 content = parts[1] if len(parts) > 1 else ""
+ 
+         if isinstance(choice, dict) and choice.get("finish_reason") == "length":
++            cut_by_context = self._cut_by_context_limit(payload, response_dict)
++            self.last_truncation_at_context_limit = cut_by_context is not None
++            if cut_by_context is not None:
++                self.context_limit_truncations += 1
++                if self.context_limit_truncation == "overflow":
++                    self.context_length_exceeded = True
++                    raise ContextLengthExceededError(
++                        f"Model {self._model_name} reply was cut by the context limit ({cut_by_context}); "
++                        "ending the episode as a context overflow"
++                    )
+             raise OutputLengthExceededError(
+                 f"Model {self._model_name} hit max_tokens limit. "
+                 "Response was truncated. Consider increasing max_tokens if possible.",
+@@ -228,6 +248,7 @@ class NemoGymLLM(BaseLLM):
+                 routed_experts,
+             )
+ 
++        self.answered_calls += 1
+         return LLMResponse(
+             content=content,
+             reasoning_content=reasoning_content,
+@@ -237,6 +258,50 @@ class NemoGymLLM(BaseLLM):
+             logprobs=logprobs,
+         )
+ 
++    def _cut_by_context_limit(self, payload: dict[str, Any], response_dict: dict[str, Any]) -> str | None:
++        """For a reply with finish_reason "length": why it was cut by the context ceiling, or None.
++
++        The NeMo-RL endpoint clamps max_tokens to max_model_len - len(prompt), so near the end of the context a
++        reply stops at the ceiling, and a resample of the same prompt hits the same ceiling (job 5359900: 72 of 73
++        truncation loops had < max_new_tokens of room left, median 90 tokens). Uses the server's usage numbers
++        (Terminus2's own token count misses the thinking kept in the token-in prompt), else the returned token
++        ids. Cut by the context: fewer completion tokens than the output limit (the request's max_tokens, else
++        model_info.max_output_tokens), or prompt + completion reaching model_info.max_input_tokens. Without the
++        numbers or the limits: None (treated as an ordinary truncation).
++        """
++        usage = response_dict.get("usage") if isinstance(response_dict.get("usage"), dict) else {}
++        choices = response_dict.get("choices") or [{}]
++        message = (choices[0] or {}).get("message") if isinstance(choices[0], dict) else None
++        message = message if isinstance(message, dict) else {}
++
++        def count(usage_key: str, ids_key: str) -> int | None:
++            value = usage.get(usage_key)
++            if isinstance(value, int) and value >= 0:
++                return value
++            ids = message.get(ids_key)
++            return len(ids) if isinstance(ids, list) else None
++
++        prompt_tokens = count("prompt_tokens", "prompt_token_ids")
++        completion_tokens = count("completion_tokens", "generation_token_ids")
++        if completion_tokens is None:
++            return None
++
++        output_limit = payload.get("max_tokens") or payload.get("max_completion_tokens")
++        if not (isinstance(output_limit, int) and output_limit > 0):
++            output_limit = self._model_info.get("max_output_tokens")
++        if isinstance(output_limit, int) and output_limit > 0 and completion_tokens < output_limit:
++            return f"{completion_tokens} completion tokens < output limit {output_limit}"
++
++        context_limit = self._model_info.get("max_input_tokens")
++        if (
++            isinstance(context_limit, int)
++            and context_limit > 0
++            and prompt_tokens is not None
++            and prompt_tokens + completion_tokens >= context_limit
++        ):
++            return f"{prompt_tokens} prompt + {completion_tokens} completion tokens >= context limit {context_limit}"
++        return None
++
+     def get_model_context_limit(self) -> int:
+         fallback_context_limit = 1000000
+ 
+diff --git a/responses_api_agents/harbor_agent/custom_agents/terminus_2_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/terminus_2_nemo_gym.py
+index b6719eb8f..f67709131 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/terminus_2_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/terminus_2_nemo_gym.py
+@@ -24,6 +24,7 @@ from pydantic import Field
+ 
+ from responses_api_agents.harbor_agent.custom_agents.llms.nemo_gym_llm import NemoGymLLM
+ from responses_api_agents.harbor_agent.custom_envs.singularity.singularity import MemoryLimitExceededError
++from responses_api_agents.harbor_agent.failure_classes import mask_secrets
+ 
+ 
+ class TruncationLoopError(RuntimeError):
+@@ -59,6 +60,14 @@ class Terminus2NemoGymOptions(Terminus2Options):
+         "the same prompt and history; 'harbor' keeps Terminus2's re-ask, which adds the prompt, the truncated reply "
+         "and an ERROR message to the history (with NemoGymLLM's token ids the model then never sees that prompt).",
+     )
++    context_limit_truncation: Literal["overflow", "resample"] = Field(
++        default="overflow",
++        description="A reply cut by the context ceiling (fewer tokens than the output limit, or prompt + reply "
++        "reaching model_info.max_input_tokens, from the model server's usage numbers): 'overflow' ends the episode "
++        "as a context overflow at once (ContextLengthExceededError; the verifier still runs; with enable_summarize "
++        "Terminus2 summarizes instead); 'resample' treats it like any truncation (truncation_retry, then the "
++        "max_consecutive_truncations cap: the same prompt meets the same ceiling every time).",
++    )
+ 
+ 
+ class Terminus2NemoGym(Terminus2):
+@@ -143,6 +152,8 @@ class Terminus2NemoGym(Terminus2):
+             *args,
+             **kwargs,
+         )
++        if isinstance(self._injected_llm, NemoGymLLM):
++            self._injected_llm.context_limit_truncation = self.options.context_limit_truncation
+ 
+     def _init_llm(self, *args: Any, **kwargs: Any) -> BaseLLM:
+         """Return the NeMo Gym LLM instead of Terminus2's litellm/tinker backends.
+@@ -216,12 +227,15 @@ class Terminus2NemoGym(Terminus2):
+         entire rollout batch.
+         """
+         self._memory_limit_exceeded = False
++        self._end_error: Exception | None = None
+         try:
+             await super().run(instruction, environment, context)
+         except MemoryLimitExceededError as e:
+             self._memory_limit_exceeded = True
++            self._end_error = e
+             self.logger.info(f"Agent error: {type(e).__name__}: {e}. Returning history from completed turns.")
+         except Exception as e:
++            self._end_error = e
+             self.logger.info(f"Agent error: {type(e).__name__}: {e}. Returning history from completed turns.")
+         finally:
+             self._attach_routed_experts_to_trajectory()
+@@ -264,14 +278,27 @@ class Terminus2NemoGym(Terminus2):
+             self._dump_trajectory()
+ 
+     def _write_agent_error_flags(self) -> None:
+-        """Write agent error flags to disk for app.py to pick up."""
++        """Write agent error flags to disk for app.py to pick up.
++
++        Besides the flags, the exception that ended the episode (caught in run(), so Harbor never records it):
++        ``end_reason`` (its type) and ``end_message`` (first line, masked); app.py's failure classes need it to
++        tell a sandbox failure during the episode from the policy's own end.
++        """
+         try:
+-            flags: dict[str, bool] = {
++            end_error = getattr(self, "_end_error", None)
++            flags: dict[str, Any] = {
+                 "memory_limit_exceeded": self._memory_limit_exceeded,
++                "end_reason": type(end_error).__name__ if end_error is not None else None,
++                "end_message": mask_secrets(str(end_error).strip().split("\n")[0])[:240]
++                if end_error is not None
++                else None,
+             }
+             llm = getattr(self, "_llm", None)
+             if llm and isinstance(llm, NemoGymLLM):
+                 flags["context_length_exceeded"] = llm.context_length_exceeded
++                flags["context_limit_truncations"] = getattr(llm, "context_limit_truncations", 0)
++                flags["last_truncation_at_context_limit"] = getattr(llm, "last_truncation_at_context_limit", False)
++                flags["answered_model_calls"] = getattr(llm, "answered_calls", None)
+             (self.logs_dir / "agent_error_flags.json").write_text(json.dumps(flags))
+         except Exception:
+             pass  # Don't let flag-writing failures break the agent
+diff --git a/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py
+index 763f3a24c..8b76322c6 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py
+@@ -275,5 +275,5 @@ def test_preflight_accepts_the_training_yaml_kwargs() -> None:
+     kwargs = dict(cfg["harbor_agent"]["responses_api_agents"]["harbor_agent"]["harbor_agent_kwargs"])
+     kwargs.update(api_base="http://127.0.0.1:8000/v1", version="8e8a515fdcecf3a8e45c3909f7f196bfe18ca89a")
+     # Terminus-2 options an env yaml may set (Terminus2NemoGym's handling of truncated replies)
+-    kwargs.update(max_consecutive_truncations=8, truncation_retry="resample")
++    kwargs.update(max_consecutive_truncations=8, truncation_retry="resample", context_limit_truncation="overflow")
+     MiniSweAgentNemoGym.preflight(kwargs=kwargs, env={})
+diff --git a/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
+index d8b898c1c..1784742e6 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
+@@ -513,6 +513,7 @@ def _training_yaml_plus_opencode() -> dict:
+         # Terminus-2 options an env yaml may set (Terminus2NemoGym's handling of truncated replies)
+         "max_consecutive_truncations": 8,
+         "truncation_retry": "resample",
++        "context_limit_truncation": "overflow",
+         "api_base": API_BASE,
+         "responses_create_params": {"temperature": 1.0},
+         "temperature": 1.0,
+diff --git a/responses_api_agents/harbor_agent/custom_agents/test_terminus_2_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/test_terminus_2_nemo_gym.py
+index 1fb5ccaf1..5291092bf 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/test_terminus_2_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/test_terminus_2_nemo_gym.py
+@@ -292,3 +292,144 @@ async def test_truncation_retry_harbor_keeps_harbors_error_message(tmp_path) ->
+     roles = [m["role"] for m in requests[2]["messages"]]
+     assert roles == ["user", "assistant", "user", "assistant", "user"]
+     assert requests[2]["messages"][-1]["content"].startswith("ERROR!! NONE of the actions")
++
++
++# Job 5359900: 72 of 73 truncation loops had less room left than max_new_tokens (median 90 tokens): the endpoint
++# clamps max_tokens to max_model_len - len(prompt), so the reply stops at the context ceiling, and a resample of the
++# same prompt meets the same ceiling, 8 times. A reply cut by the ceiling now ends the episode as a context overflow.
++CONTEXT_MODEL_INFO = {"max_input_tokens": 24, "max_output_tokens": 10}
++ENDLESS = '{"analysis": "a reply that never ends'
++
++
++def _context_agent(tmp_path, replies, **kwargs):
++    # as in Gym's training config (configs/harbor_agent_opensandbox_training.yaml); with it on, Terminus2 answers a
++    # ContextLengthExceededError by summarizing instead of ending the episode
++    kwargs.setdefault("enable_summarize", False)
++    agent, requests = _server_agent(tmp_path, replies, **kwargs)
++    agent._llm._model_info = dict(CONTEXT_MODEL_INFO)
++    return agent, requests
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize(
++    "prompt_ids, completion_ids",
++    [
++        pytest.param(list(range(20)), [8] * 4, id="prompt+reply-reach-the-context-limit"),
++        pytest.param(list(range(5)), [8] * 3, id="reply-shorter-than-the-output-limit"),
++    ],
++)
++async def test_a_reply_cut_by_the_context_limit_ends_the_episode_as_an_overflow(
++    tmp_path, prompt_ids, completion_ids
++) -> None:
++    from harbor.llms.base import ContextLengthExceededError
++
++    agent, requests = _context_agent(
++        tmp_path,
++        [_completion(ENDLESS, prompt_ids, completion_ids, finish_reason="length"), _completion(REPLY_1, [1], [2])],
++    )
++    chat = Chat(agent._llm)
++
++    with pytest.raises(ContextLengthExceededError, match="cut by the context limit"):
++        await agent._query_llm(chat, "do the task")
++
++    assert len(requests) == 1  # no resample
++    assert chat.messages == []
++    assert agent._llm.context_length_exceeded is True
++    assert agent._llm.context_limit_truncations == 1
++
++
++@pytest.mark.asyncio
++async def test_a_reply_cut_by_the_output_limit_with_room_left_is_still_resampled(tmp_path) -> None:
++    agent, requests = _context_agent(
++        tmp_path,
++        [_completion(ENDLESS, [1, 2], [8] * 10, finish_reason="length"), _completion(REPLY_1, [1, 2], [3, 4])],
++    )
++    chat = Chat(agent._llm)
++
++    assert (await agent._query_llm(chat, "do the task")).content == REPLY_1
++    assert requests[1]["messages"] == requests[0]["messages"]
++    assert agent._llm.context_length_exceeded is False
++    assert agent._llm.last_truncation_at_context_limit is False
++
++
++@pytest.mark.asyncio
++async def test_without_usage_numbers_or_limits_a_truncation_is_an_ordinary_one(tmp_path) -> None:
++    # no model_info: nothing to compare with, so the 0036 resample path is unchanged
++    agent, requests = _server_agent(
++        tmp_path,
++        [_completion(ENDLESS, list(range(20)), [8] * 4, finish_reason="length"), _completion(REPLY_1, [1], [2])],
++    )
++    assert (await agent._query_llm(Chat(agent._llm), "do the task")).content == REPLY_1
++    assert len(requests) == 2
++
++
++@pytest.mark.asyncio
++async def test_context_limit_truncation_resample_keeps_the_old_behaviour(tmp_path) -> None:
++    clamp = _completion(ENDLESS, list(range(20)), [8] * 4, finish_reason="length")
++    agent, requests = _context_agent(
++        tmp_path, [clamp] * 3, context_limit_truncation="resample", max_consecutive_truncations=3
++    )
++
++    with pytest.raises(Exception, match="3 consecutive replies") as caught:
++        await agent._query_llm(Chat(agent._llm), "do the task")
++
++    assert type(caught.value).__name__ == "TruncationLoopError"
++    assert len(requests) == 3
++    assert agent._llm.context_length_exceeded is False
++    assert agent._llm.context_limit_truncations == 3
++    assert agent._llm.last_truncation_at_context_limit is True
++
++
++def test_preflight_checks_context_limit_truncation() -> None:
++    Terminus2NemoGym.preflight(kwargs={"context_limit_truncation": "overflow"}, env={})
++    Terminus2NemoGym.preflight(kwargs={"context_limit_truncation": "resample"}, env={})
++    with pytest.raises(ValueError):
++        Terminus2NemoGym.preflight(kwargs={"context_limit_truncation": "error"}, env={})
++
++
++@pytest.mark.asyncio
++async def test_the_context_overflow_ends_the_episode_and_is_classified(tmp_path, monkeypatch) -> None:
++    import json
++
++    from responses_api_agents.harbor_agent.failure_classes import classify_rollout
++
++    agent, _ = _context_agent(
++        tmp_path,
++        [
++            _completion(REPLY_1, [1, 2], [3, 4]),
++            _completion(ENDLESS, list(range(20)), [8] * 4, finish_reason="length"),
++        ],
++    )
++    chat = Chat(agent._llm)
++
++    async def two_turns(self, instruction, environment, context):
++        await self._query_llm(chat, instruction)
++        await self._query_llm(chat, "OBSERVATION")
++        raise AssertionError("the episode should have ended")
++
++    monkeypatch.setattr(Terminus2, "run", two_turns)
++    await agent.run("do the task", environment=MagicMock(), context=AgentContext())
++
++    flags = json.loads((tmp_path / "agent_error_flags.json").read_text())
++    assert flags["end_reason"] == "ContextLengthExceededError"
++    assert flags["context_length_exceeded"] is True
++    assert flags["context_limit_truncations"] == 1
++    assert flags["answered_model_calls"] == 1
++    result = classify_rollout({"verifier_result": {"rewards": {"reward": 0.0}}}, flags)
++    assert result.failure_class == "context_overflow"
++
++
++@pytest.mark.asyncio
++async def test_the_error_that_ended_the_episode_is_recorded_masked(tmp_path, monkeypatch) -> None:
++    import json
++
++    async def sandbox_dies(self, instruction, environment, context):
++        raise RuntimeError("Get command status failed: HTTP 502; api_key=abc123secret\nsecond line")
++
++    monkeypatch.setattr(Terminus2, "run", sandbox_dies)
++    agent = _agent(tmp_path)
++    await agent.run("do the task", environment=MagicMock(), context=AgentContext())
++
++    flags = json.loads((tmp_path / "agent_error_flags.json").read_text())
++    assert flags["end_reason"] == "RuntimeError"
++    assert flags["end_message"] == "Get command status failed: HTTP 502; api_key=<MASKED>"
+diff --git a/responses_api_agents/harbor_agent/failure_classes.py b/responses_api_agents/harbor_agent/failure_classes.py
+new file mode 100644
+index 000000000..58c873e2e
+--- /dev/null
++++ b/responses_api_agents/harbor_agent/failure_classes.py
+@@ -0,0 +1,264 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++# http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""Why a Harbor rollout ended: one failure class per rollout, from what harbor_agent sees.
++
++Inputs are the trial's result.json (Harbor's ``exception_info`` with the formatted traceback, the verifier phase
++timing, ``verifier_result``), the agent's ``agent_error_flags.json`` (Terminus2NemoGym writes the exception that
++ended its episode there, since it catches it so the verifier still runs) and an error raised by the Harbor job
++itself. Classes, first matching rule wins:
++
++- ``infra``: the sandbox, the model server or Harbor failed, not the policy (the exception types Harbor's own
++  error_policy.py files under SANDBOX_FAILED, plus the Gym/OpenSandbox ones): sandbox start/setup timeouts, sandbox
++  API errors (HTTP 502 backend unreachable, OOM-killed sandbox, memory limit), OpenSandbox command-status timeouts, also when
++  Harbor's ``_verify_with_timeout`` reports one as VerifierTimeoutError (it catches every TimeoutError), a
++  VerifierTimeoutError that ended well before its cap, connection errors to the model server, a Harbor job that
++  failed without a trial result. Also when the agent's episode ended on such an error and the verifier then ran.
++- ``agent_timeout``: the task's agent time limit (AgentTimeoutError).
++- ``verifier_timeout``: the verifier ran to its cap.
++- ``context_overflow``: the context is exhausted: the prompt did not fit (at the start or mid-episode), a reply cut
++  by the context ceiling, or a truncation loop whose last truncation was cut by the context ceiling.
++- ``model_truncation_loop``: the policy's replies hit the output limit too often in a row with room left (0035 cap).
++- ``other``: anything not recognised (the exception type is kept in the detail); also no verifier result.
++- ``ok``: the verifier ran and nothing above applies (task complete, max_turns, the agent stopped).
++"""
++
++import re
++from dataclasses import dataclass
++from datetime import datetime
++from typing import Any, Optional
++
++
++FAILURE_CLASSES = (
++    "ok",
++    "context_overflow",
++    "model_truncation_loop",
++    "agent_timeout",
++    "verifier_timeout",
++    "infra",
++    "other",
++)
++
++# A VerifierTimeoutError that ended before this share of its cap was not the cap.
++_EARLY_TIMEOUT_SHARE = 0.9
++
++_CONTEXT_TYPES = {"ContextLengthExceededError", "ContextWindowExceededError"}
++_INFRA_TYPES = {
++    # Harbor: sandbox / environment / setup
++    "EnvironmentStartTimeoutError",
++    "AgentSetupTimeoutError",
++    "SandboxBuildFailedError",
++    "HealthcheckError",
++    "SandboxLikelyOutOfMemoryError",
++    "MemoryLimitExceededError",
++    "RuntimeRequestError",
++    "AddTestsDirError",
++    "DownloadVerifierDirError",
++    # Gym sandbox providers (OpenSandbox)
++    "SandboxBackendUnreachableError",
++    "SandboxPtyError",
++    "SandboxCreateError",
++    "SandboxCreateVerificationError",
++    "OpenSandboxCreateError",
++    "OpenSandboxCreateTimeoutError",
++    "OpenSandboxCreateVerificationError",
++    # OpenSandbox SDK
++    "SandboxException",
++    "SandboxApiException",
++    "SandboxRateLimitException",
++    "SandboxWakeTimeoutException",
++    "SandboxInternalException",
++    "SandboxTimeoutException",
++    "SandboxConnectionException",
++    "SandboxUnhealthyException",
++    "SandboxReadyTimeoutException",
++    # Harbor: model provider unreachable or failing (its MODEL_PROVIDER_FAILED connection/server errors)
++    "ApiConnectionError",
++    "APIConnectionError",
++    "ApiConnectionClosedError",
++    "ApiResponseStalledError",
++    "ApiInternalServerError",
++    "InternalServerError",
++    "ServiceUnavailableError",
++    "NetworkConnectionError",
++    # transport to the model server or the sandbox API (httpx, aiohttp, builtins)
++    "ConnectError",
++    "ConnectTimeout",
++    "ReadTimeout",
++    "WriteTimeout",
++    "PoolTimeout",
++    "ReadError",
++    "WriteError",
++    "RemoteProtocolError",
++    "ClientConnectorError",
++    "ServerDisconnectedError",
++    "ClientOSError",
++    "ConnectionError",
++    "ConnectionRefusedError",
++    "ConnectionResetError",
++    "BrokenPipeError",
++}
++# Text of the errors above when they arrive wrapped (RuntimeError, TimeoutError, VerifierTimeoutError, ...).
++_INFRA_TEXT = re.compile(
++    r"OpenSandbox|SandboxApiException|SandboxBackendUnreachable|BACKEND_CONNECTION_FAILED|"
++    r"\bHTTP 50[234]\b|\b50[234] (?:Bad Gateway|Service Unavailable|Gateway Timeout)|"
++    r"Could not connect to the backend|all connection attempts failed|connection refused|"
++    r"model_tunnel|chisel",
++    re.IGNORECASE,
++)
++# "Type: message" lines at column 0 of a formatted traceback, one per exception of the chain.
++_TRACEBACK_EXC_LINE = re.compile(r"^([A-Za-z_][\w.]*(?:Error|Exception|Timeout|Exit|Cancelled)\w*)(?::\s?(.*))?$")
++_TIMEOUT_SECONDS = re.compile(r"timed out after ([0-9.]+) seconds")
++
++# Masking, as .claude/tools/_safe.py of the rl-infra analysis tools: a detail may end up in logs and TensorBoard
++# tables, and exception messages can carry URLs, headers or command lines.
++_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\r")
++_AUTH = re.compile(r"(authorization[\"']?\s*[:=]\s*).*", re.IGNORECASE)
++_BEARER = re.compile(r"((?:Bearer|Basic)\s+)\S+", re.IGNORECASE)
++_KV = re.compile(
++    r"((?:api[_-]?key|apikey|password|passwd|secret|x-api-key|token|access[_-]?key)[\"']?\s*[:=]\s*)"
++    r"(\"[^\"]*\"|'[^']*'|[^\s,}&]+)",
++    re.IGNORECASE,
++)
++_URL_USERINFO = re.compile(r"(\b[a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@", re.IGNORECASE)
++_OPAQUE = re.compile(r"\b(?=[A-Za-z0-9_\-]*[A-Z])(?=[A-Za-z0-9_\-]*[a-z])(?=[A-Za-z0-9_\-]*\d)[A-Za-z0-9_\-]{32,}\b")
++_DETAIL_WIDTH = 240
++
++
++def mask_secrets(text: str) -> str:
++    """``text`` with key=value secrets, authorization/bearer values, URL credentials and long opaque tokens masked."""
++    text = _ANSI.sub("", text)
++    text = _AUTH.sub(r"\1<MASKED>", text)
++    text = _BEARER.sub(r"\1<MASKED>", text)
++    text = _KV.sub(lambda m: m.group(1) + "<MASKED>", text)
++    text = _URL_USERINFO.sub(r"\1<MASKED>@", text)
++    return _OPAQUE.sub("<MASKED>", text)
++
++
++def short_error(exc_type: str, message: Any) -> str:
++    """'Type: first line of the message', masked and cut to a log-friendly width."""
++    first = str(message or "").strip().splitlines()[0] if str(message or "").strip() else ""
++    text = f"{exc_type}: {first}" if first else exc_type
++    return mask_secrets(text)[:_DETAIL_WIDTH]
++
++
++@dataclass(frozen=True)
++class FailureClassification:
++    failure_class: str
++    detail: str
++
++    def metrics(self) -> dict[str, int]:
++        """One 0/1 field per class, e.g. ``failure_infra``; NeMo-RL logs each as a per-agent mean."""
++        return {f"failure_{name}": int(name == self.failure_class) for name in FAILURE_CLASSES}
++
++
++def _short_type(name: Optional[str]) -> str:
++    return (name or "").rsplit(".", 1)[-1]
++
++
++def _chain(traceback_text: Optional[str]) -> list[tuple[str, str]]:
++    """(type, first line) of each exception in a formatted traceback, innermost cause first."""
++    out = []
++    for line in str(traceback_text or "").splitlines():
++        match = _TRACEBACK_EXC_LINE.match(line)
++        if match:
++            out.append((_short_type(match.group(1)), (match.group(2) or "").strip()))
++    return out
++
++
++def _is_infra(exc_type: str, message: str) -> bool:
++    return _short_type(exc_type) in _INFRA_TYPES or bool(_INFRA_TEXT.search(message or ""))
++
++
++def _phase_seconds(phase: Any) -> Optional[float]:
++    if not isinstance(phase, dict):
++        return None
++    try:
++        start = datetime.fromisoformat(str(phase["started_at"]).replace("Z", "+00:00"))
++        end = datetime.fromisoformat(str(phase["finished_at"]).replace("Z", "+00:00"))
++    except (KeyError, TypeError, ValueError):
++        return None
++    return (end - start).total_seconds()
++
++
++def classify_rollout(
++    trial_result: Optional[dict],
++    agent_error_flags: Optional[dict] = None,
++    run_error: Optional[BaseException] = None,
++) -> FailureClassification:
++    """The failure class of one rollout (see the module docstring for the rules)."""
++    flags = agent_error_flags or {}
++
++    if run_error is not None or trial_result is None:
++        if run_error is None:
++            return FailureClassification("other", "no trial result")
++        exc_type, message = type(run_error).__name__, str(run_error)
++        detail = "Harbor job failed: " + short_error(exc_type, message)
++        return FailureClassification("infra" if _is_infra(exc_type, message) else "other", detail)
++
++    info = trial_result.get("exception_info") or {}
++    exc_type = _short_type(info.get("exception_type"))
++    exc_message = str(info.get("exception_message") or "")
++    chain = _chain(info.get("exception_traceback"))
++    end_type = _short_type(flags.get("end_reason"))
++    end_message = str(flags.get("end_message") or "")
++
++    # 1. Infra anywhere: Harbor's exception, any cause in its chain, or the error that ended the agent's episode.
++    if exc_type:
++        for cause_type, cause_message in [*chain, (exc_type, exc_message)]:
++            if _is_infra(cause_type, cause_message):
++                if cause_type == exc_type and cause_message == exc_message:
++                    return FailureClassification("infra", short_error(exc_type, exc_message))
++                return FailureClassification(
++                    "infra", short_error(exc_type, exc_message) + " <- " + short_error(cause_type, cause_message)
++                )
++        if exc_type == "VerifierTimeoutError":
++            limit = _TIMEOUT_SECONDS.search(exc_message)
++            elapsed = _phase_seconds(trial_result.get("verifier"))
++            if limit and elapsed is not None and elapsed < _EARLY_TIMEOUT_SHARE * float(limit.group(1)):
++                return FailureClassification(
++                    "infra",
++                    short_error(exc_type, exc_message) + f" (ended after {elapsed:.0f} s: not the cap)",
++                )
++    if end_type and _is_infra(end_type, end_message):
++        return FailureClassification("infra", "agent: " + short_error(end_type, end_message))
++
++    # 2. What Harbor recorded.
++    if exc_type == "AgentTimeoutError":
++        return FailureClassification("agent_timeout", short_error(exc_type, exc_message))
++    if exc_type == "VerifierTimeoutError":
++        return FailureClassification("verifier_timeout", short_error(exc_type, exc_message))
++    if exc_type in _CONTEXT_TYPES:
++        return FailureClassification("context_overflow", short_error(exc_type, exc_message))
++    if exc_type:
++        return FailureClassification("other", short_error(exc_type, exc_message))
++
++    # 3. How the agent's episode ended (Terminus2NemoGym catches these so the verifier still runs).
++    if end_type in _CONTEXT_TYPES or flags.get("context_length_exceeded"):
++        detail = short_error(end_type or "ContextLengthExceededError", end_message)
++        if flags.get("answered_model_calls") == 0:
++            detail = "prompt does not fit: " + detail
++        return FailureClassification("context_overflow", detail)
++    if end_type == "TruncationLoopError":
++        if flags.get("last_truncation_at_context_limit"):
++            return FailureClassification(
++                "context_overflow", "truncation loop at the context limit: " + short_error(end_type, end_message)
++            )
++        return FailureClassification("model_truncation_loop", short_error(end_type, end_message))
++    if end_type:
++        return FailureClassification("other", "agent: " + short_error(end_type, end_message))
++
++    if not trial_result.get("verifier_result"):
++        return FailureClassification("other", "no verifier result")
++    return FailureClassification("ok", "")
+diff --git a/responses_api_agents/harbor_agent/tests/test_app.py b/responses_api_agents/harbor_agent/tests/test_app.py
+index 673cef2e1..0140f0d7f 100644
+--- a/responses_api_agents/harbor_agent/tests/test_app.py
++++ b/responses_api_agents/harbor_agent/tests/test_app.py
+@@ -274,6 +274,7 @@ def _harbor_run_mocks(
+     trial_result: Optional[Dict[str, Any]] = None,
+     trajectory: Optional[Dict[str, Any]] = None,
+     side_effect: Optional[Exception] = None,
++    agent_error_flags: Optional[Dict[str, Any]] = None,
+ ):
+     """Patch external deps and wire up mocks for HarborAgent.run()."""
+     with (
+@@ -300,6 +301,10 @@ def _harbor_run_mocks(
+                 agent_dir = Path(trial_dir) / "agent"
+                 agent_dir.mkdir(parents=True, exist_ok=True)
+                 (agent_dir / "trajectory.json").write_text(json.dumps(trajectory))
++            if agent_error_flags is not None:
++                agent_dir = Path(trial_dir) / "agent"
++                agent_dir.mkdir(parents=True, exist_ok=True)
++                (agent_dir / "agent_error_flags.json").write_text(json.dumps(agent_error_flags))
+         mock_ray.remote.side_effect = lambda *a, **k: _resolve_future()
+         mock_ray.options.return_value.remote.side_effect = lambda *a, **k: _resolve_future()
+ 
+@@ -458,6 +463,53 @@ class TestApp:
+         assert "Error running Harbor job" in err
+         assert "ValueError: Invalid kwargs for agent 'x': Unknown option 'y'." in err
+ 
++    async def test_run_reports_the_failure_class_as_numbers_and_text(self, capsys):
++        server = _make_server()
++        with _harbor_run_mocks(trajectory=DEFAULT_TRAJECTORY):
++            response = await server.run(_make_run_request())
++
++        dumped = response.model_dump()
++        # NeMo-RL logs every numeric top-level field per agent (train/harbor_agent/<field>/mean)
++        assert {k: v for k, v in dumped.items() if k.startswith("failure_") and isinstance(v, int)} == {
++            "failure_ok": 1,
++            "failure_context_overflow": 0,
++            "failure_model_truncation_loop": 0,
++            "failure_agent_timeout": 0,
++            "failure_verifier_timeout": 0,
++            "failure_infra": 0,
++            "failure_other": 0,
++        }
++        assert (dumped["failure_class"], dumped["failure_detail"]) == ("ok", "")
++        assert "failure_class=ok reward=1.0" in capsys.readouterr().out
++
++    async def test_run_classifies_a_sandbox_that_died_during_the_episode_as_infra(self, capsys):
++        # job 5358015: Terminus2NemoGym caught the sandbox error, the verifier ran and scored 0; nothing showed it
++        server = _make_server()
++        flags = {
++            "end_reason": "SandboxApiException",
++            "end_message": 'Get command status failed: HTTP 502: {"code":"BACKEND_CONNECTION_FAILED"}',
++            "context_length_exceeded": False,
++        }
++        trial_result = {**DEFAULT_TRIAL_RESULT, "verifier_result": {"rewards": {"reward": 0.0}}}
++        with _harbor_run_mocks(trial_result=trial_result, trajectory=DEFAULT_TRAJECTORY, agent_error_flags=flags):
++            response = await server.run(_make_run_request())
++
++        dumped = response.model_dump()
++        assert dumped["failure_class"] == "infra"
++        assert dumped["failure_infra"] == 1
++        assert dumped["failure_detail"].startswith("agent: SandboxApiException: Get command status failed: HTTP 502")
++        out = capsys.readouterr().out
++        assert "rollout scientific::test_task_123 failure_class=infra reward=0.0" in out
++
++    async def test_run_failed_execution_is_classified(self):
++        server = _make_server()
++        with _harbor_run_mocks(side_effect=ValueError("Invalid kwargs for agent 'x': Unknown option 'y'.")):
++            response = await server.run(_make_run_request(instance_id="scientific::fail_task"))
++
++        dumped = response.model_dump()
++        assert (dumped["failure_class"], dumped["failure_other"]) == ("other", 1)
++        assert dumped["failure_detail"].startswith("Harbor job failed: ValueError: Invalid kwargs")
++
+     @pytest.mark.parametrize(
+         "model_name, expected",
+         [
+diff --git a/responses_api_agents/harbor_agent/tests/test_failure_classes.py b/responses_api_agents/harbor_agent/tests/test_failure_classes.py
+new file mode 100644
+index 000000000..615776182
+--- /dev/null
++++ b/responses_api_agents/harbor_agent/tests/test_failure_classes.py
+@@ -0,0 +1,289 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++# http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""Failure classes of Harbor rollouts; cases taken from jobs 5356101, 5358015 and 5359900."""
++
++import pytest
++
++from responses_api_agents.harbor_agent.failure_classes import (
++    FAILURE_CLASSES,
++    classify_rollout,
++    mask_secrets,
++)
++
++
++VERIFIED = {"rewards": {"reward": 0.0}}
++
++
++def _trial(exception_type=None, message="", traceback="", verifier_seconds=None, verifier_result=VERIFIED):
++    result = {"verifier_result": verifier_result}
++    if exception_type is not None:
++        result["exception_info"] = {
++            "exception_type": exception_type,
++            "exception_message": message,
++            "exception_traceback": traceback,
++            "occurred_at": "2026-11-15T08:00:00Z",
++        }
++    if verifier_seconds is not None:
++        result["verifier"] = {
++            "started_at": "2026-11-15T08:00:00.000000Z",
++            "finished_at": f"2026-11-15T08:{int(verifier_seconds) // 60:02d}:{int(verifier_seconds) % 60:02d}.000000Z",
++        }
++    return result
++
++
++def _traceback(*lines):
++    """A formatted chained traceback whose exception lines are ``lines`` (innermost first)."""
++    blocks = [f'Traceback (most recent call last):\n  File "x.py", line 1, in f\n    g()\n{line}' for line in lines]
++    return "\n\nThe above exception was the direct cause of the following exception:\n\n".join(blocks) + "\n"
++
++
++VERIFIER_CAP = "Verifier execution timed out after 1200.0 seconds"
++# Harbor's _verify_with_timeout catches every TimeoutError, also the provider's own (job 5356101: 8 of 32).
++OPENSANDBOX_STATUS_TIMEOUT = _traceback(
++    "asyncio.exceptions.CancelledError",
++    "TimeoutError",
++    "TimeoutError: Timed out during OpenSandbox command status after 10s; sandbox_id='69a270b9-a497-495b'",
++    f"harbor.trial.errors.VerifierTimeoutError: {VERIFIER_CAP}",
++)
++REAL_VERIFIER_TIMEOUT = _traceback(
++    "asyncio.exceptions.CancelledError",
++    "TimeoutError",
++    f"harbor.trial.errors.VerifierTimeoutError: {VERIFIER_CAP}",
++)
++
++
++@pytest.mark.parametrize(
++    "trial_result, flags, expected_class, detail_part",
++    [
++        pytest.param(_trial(), {"end_reason": None}, "ok", "", id="ok"),
++        pytest.param(_trial(), {}, "ok", "", id="ok-no-flags-opencode"),
++        pytest.param(
++            _trial(),
++            {"context_length_exceeded": True, "end_reason": "ContextLengthExceededError", "answered_model_calls": 9},
++            "context_overflow",
++            "ContextLengthExceededError",
++            id="context-exhausted-mid-episode",
++        ),
++        pytest.param(
++            _trial(),
++            {"context_length_exceeded": True, "end_reason": "ContextLengthExceededError", "answered_model_calls": 0},
++            "context_overflow",
++            "prompt does not fit",
++            id="prompt-does-not-fit",
++        ),
++        pytest.param(
++            _trial("ContextLengthExceededError", "context length exceeded"),
++            {},
++            "context_overflow",
++            "ContextLengthExceededError",
++            id="context-error-recorded-by-harbor",
++        ),
++        pytest.param(
++            _trial(),
++            {"end_reason": "TruncationLoopError", "last_truncation_at_context_limit": True},
++            "context_overflow",
++            "truncation loop at the context limit",
++            id="truncation-loop-at-the-context-ceiling",
++        ),
++        pytest.param(
++            _trial(),
++            {"end_reason": "TruncationLoopError", "end_message": "8 consecutive replies hit the output limit"},
++            "model_truncation_loop",
++            "TruncationLoopError: 8 consecutive",
++            id="truncation-loop-with-room-left",
++        ),
++        pytest.param(
++            _trial("AgentTimeoutError", "Agent execution timed out after 300.0 seconds"),
++            {},
++            "agent_timeout",
++            "AgentTimeoutError",
++            id="agent-timeout",
++        ),
++        pytest.param(
++            _trial("VerifierTimeoutError", VERIFIER_CAP, REAL_VERIFIER_TIMEOUT, 1207.6, None),
++            {},
++            "verifier_timeout",
++            "VerifierTimeoutError",
++            id="verifier-ran-to-its-cap",
++        ),
++        pytest.param(
++            _trial("VerifierTimeoutError", VERIFIER_CAP, OPENSANDBOX_STATUS_TIMEOUT, 175.4, None),
++            {},
++            "infra",
++            "<- TimeoutError: Timed out during OpenSandbox command status",
++            id="opensandbox-status-timeout-wrapped-as-verifier-timeout",
++        ),
++        pytest.param(
++            _trial("VerifierTimeoutError", VERIFIER_CAP, OPENSANDBOX_STATUS_TIMEOUT, 1207.0, None),
++            {},
++            "infra",
++            "OpenSandbox command status",
++            id="opensandbox-status-timeout-near-the-cap",
++        ),
++        pytest.param(
++            _trial("VerifierTimeoutError", VERIFIER_CAP, REAL_VERIFIER_TIMEOUT, 300.0, None),
++            {},
++            "infra",
++            "ended after 300 s: not the cap",
++            id="verifier-timeout-long-before-the-cap",
++        ),
++        pytest.param(
++            _trial("EnvironmentStartTimeoutError", "Environment start timed out after 600.0 seconds", "", None, None),
++            {},
++            "infra",
++            "EnvironmentStartTimeoutError",
++            id="sandbox-start-timeout",
++        ),
++        pytest.param(
++            _trial("AgentSetupTimeoutError", "Agent setup timed out after 360.0 seconds", "", None, None),
++            {},
++            "infra",
++            "AgentSetupTimeoutError",
++            id="agent-setup-timeout",
++        ),
++        pytest.param(
++            _trial(
++                "SandboxApiException",
++                'Get command status failed: HTTP 502: {"code":"BACKEND_CONNECTION_FAILED"}',
++                "",
++                None,
++                None,
++            ),
++            {},
++            "infra",
++            "HTTP 502",
++            id="sandbox-api-502",
++        ),
++        pytest.param(
++            # 5358015: the sandbox died during the episode, Terminus2NemoGym caught it, the verifier ran (reward 0)
++            _trial(),
++            {
++                "end_reason": "SandboxBackendUnreachableError",
++                "end_message": "Sandbox backend unreachable through 6 submissions of 'command run'",
++            },
++            "infra",
++            "agent: SandboxBackendUnreachableError",
++            id="sandbox-died-during-the-episode",
++        ),
++        pytest.param(
++            _trial(),
++            {
++                "end_reason": "TimeoutError",
++                "end_message": "Timed out during OpenSandbox command status after 10s; sandbox_id='6addc843'",
++            },
++            "infra",
++            "agent: TimeoutError: Timed out during OpenSandbox",
++            id="opensandbox-timeout-during-the-episode",
++        ),
++        pytest.param(
++            _trial(),
++            {"end_reason": "ConnectError", "end_message": "All connection attempts failed"},
++            "infra",
++            "agent: ConnectError",
++            id="model-server-unreachable",
++        ),
++        pytest.param(
++            # Harbor's error_policy files it under SANDBOX_FAILED (reward not valid)
++            _trial(),
++            {"memory_limit_exceeded": True, "end_reason": "MemoryLimitExceededError", "end_message": "8 GiB"},
++            "infra",
++            "agent: MemoryLimitExceededError",
++            id="memory-limit",
++        ),
++        pytest.param(
++            _trial("RuntimeError", "model_tunnel: chisel client exited (rc=1)", "", None, None),
++            {},
++            "infra",
++            "model_tunnel",
++            id="tunnel-failure",
++        ),
++        pytest.param(
++            _trial("RewardFileNotFoundError", "No reward file found at /logs/verifier/reward.txt"),
++            {},
++            "other",
++            "RewardFileNotFoundError: No reward file found",
++            id="unknown-exception-keeps-its-type",
++        ),
++        pytest.param(
++            _trial(),
++            {"end_reason": "RuntimeError", "end_message": "something odd happened"},
++            "other",
++            "agent: RuntimeError: something odd happened",
++            id="unknown-agent-error",
++        ),
++        pytest.param(_trial(verifier_result=None), {}, "other", "no verifier result", id="no-verifier-result"),
++    ],
++)
++def test_classify_rollout(trial_result, flags, expected_class, detail_part) -> None:
++    result = classify_rollout(trial_result, flags)
++
++    assert result.failure_class == expected_class
++    assert detail_part in result.detail
++
++
++def test_harbor_job_errors_are_infra_only_when_they_look_like_it() -> None:
++    connect = classify_rollout(None, {}, ConnectionRefusedError("[Errno 111] Connection refused"))
++    config = classify_rollout(None, {}, ValueError("Invalid kwargs for agent 'x': Unknown option 'y'."))
++
++    assert (connect.failure_class, config.failure_class) == ("infra", "other")
++    assert config.detail == "Harbor job failed: ValueError: Invalid kwargs for agent 'x': Unknown option 'y'."
++
++
++def test_an_infra_failure_wins_over_what_followed() -> None:
++    # 5356101: the sandbox stopped answering during the episode, then the verifier "timed out" at its cap
++    trial = _trial("VerifierTimeoutError", VERIFIER_CAP, REAL_VERIFIER_TIMEOUT, 1210.0, None)
++    flags = {"end_reason": "TimeoutError", "end_message": "Timed out during OpenSandbox command status after 10s"}
++
++    assert classify_rollout(trial, flags).failure_class == "infra"
++
++
++def test_metrics_are_one_hot_over_every_class() -> None:
++    metrics = classify_rollout(_trial("AgentTimeoutError", "x"), {}).metrics()
++
++    assert list(metrics) == [f"failure_{name}" for name in FAILURE_CLASSES]
++    assert metrics["failure_agent_timeout"] == 1
++    assert sum(metrics.values()) == 1
++
++
++@pytest.mark.parametrize(
++    "text, secret",
++    [
++        ("request failed: OPEN-SANDBOX-API-KEY: sk-live-123456", "sk-live-123456"),
++        ("headers={'api_key': 'abc123secret'}", "abc123secret"),
++        ("Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig", "eyJhbGciOiJIUzI1NiJ9"),
++        ("GET https://user:hunter2@registry.example/v2/", "hunter2"),
++        ("token=Zx9QpL2mN8vR4tY6uW1aB3cD5eF7gH0jK2", "Zx9QpL2mN8vR4tY6uW1aB3cD5eF7gH0jK2"),
++        ("opaque Zx9QpL2mN8vR4tY6uW1aB3cD5eF7gH0jK2 in the middle", "Zx9QpL2mN8vR4tY6uW1aB3cD5eF7gH0jK2"),
++    ],
++)
++def test_details_never_carry_secrets(text, secret) -> None:
++    assert secret not in mask_secrets(text)
++    detail = classify_rollout(_trial(), {"end_reason": "RuntimeError", "end_message": text}).detail
++    assert secret not in detail
++    trial = _trial("SandboxApiException", text, _traceback(f"RuntimeError: {text}"), None, None)
++    assert secret not in classify_rollout(trial, {}).detail
++
++
++def test_masking_keeps_ids_we_need() -> None:
++    text = "Timed out during OpenSandbox command status after 10s; sandbox_id='69a270b9-a497-495b-9482-ea579a1b2c3d'"
++    assert mask_secrets(text) == text
++
++
++def test_detail_is_one_short_line() -> None:
++    detail = classify_rollout(_trial("RuntimeError", "first line\nsecond line " + "x" * 500), {}).detail
++
++    assert detail == "RuntimeError: first line"
++    long_detail = classify_rollout(_trial("RuntimeError", "y" * 1000), {}).detail
++    assert len(long_detail) <= 240
+diff --git a/tests/unit_tests/test_opensandbox_provider.py b/tests/unit_tests/test_opensandbox_provider.py
+index 09e451848..c1e71712a 100644
+--- a/tests/unit_tests/test_opensandbox_provider.py
++++ b/tests/unit_tests/test_opensandbox_provider.py
+@@ -112,6 +112,44 @@ def test_sdk_missing_sandbox_terminate_warning_is_silenced(caplog: pytest.LogCap
+     ]
+ 
+ 
++def _http_status_error(status: int, body: str) -> httpx.HTTPStatusError:
++    request = httpx.Request("GET", "https://opensandbox.example/v1/sandboxes/sb-1/files/download?path=/logs/artifacts")
++    response = httpx.Response(status, text=body, request=request)
++    return httpx.HTTPStatusError(
++        f"Client error '{status}' for url '{request.url}'", request=request, response=response
++    )
++
++
++def test_sdk_read_of_a_missing_file_is_one_debug_line(caplog: pytest.LogCaptureFixture) -> None:
++    # job 5359900: Harbor's best-effort artifact collection reads /logs/artifacts in every task without one; the SDK
++    # logged each 404 at ERROR with the full httpx traceback (113 trials), next to real sandbox failures
++    sdk_logger = logging.getLogger("opensandbox.adapters.filesystem_adapter")
++    missing = _http_status_error(404, '{"code":"FILE_NOT_FOUND","message":"file not found. open /logs/artifacts"}')
++    sandbox_gone = _http_status_error(404, '{"code":"KUBERNETES::SANDBOX_NOT_FOUND","message":"file not found"}')
++    bad_gateway = _http_status_error(502, '{"code":"BACKEND_CONNECTION_FAILED","message":"file not found"}')
++
++    with caplog.at_level(logging.DEBUG, logger=opensandbox_provider.LOGGER.name):
++        sdk_logger.error("Failed to read file /logs/artifacts", exc_info=missing)
++        sdk_logger.error("Failed to read file /logs/verifier/reward.txt", exc_info=sandbox_gone)
++        sdk_logger.error("Failed to read file /logs/agent/x", exc_info=bad_gateway)
++        sdk_logger.error("Failed to write 1 files", exc_info=missing)
++
++    sdk_records = [r for r in caplog.records if r.name == sdk_logger.name]
++    assert [(r.levelno, r.getMessage()) for r in sdk_records] == [
++        (logging.ERROR, "Failed to read file /logs/verifier/reward.txt"),
++        (logging.ERROR, "Failed to read file /logs/agent/x"),
++        (logging.ERROR, "Failed to write 1 files"),
++    ]
++    debug = [r for r in caplog.records if r.name == opensandbox_provider.LOGGER.name]
++    assert [(r.levelno, r.getMessage(), r.exc_info) for r in debug] == [
++        (
++            logging.DEBUG,
++            "OpenSandbox: Failed to read file /logs/artifacts: HTTP 404 file not found (the caller handles it)",
++            None,
++        )
++    ]
++
++
+ def test_sdk_import_helpers_and_retry_classification() -> None:
+     assert len(opensandbox_provider._require_opensandbox_sdk()) == 5
+     assert len(opensandbox_provider._require_tenacity()) == 4
+-- 
+2.56.0
+
