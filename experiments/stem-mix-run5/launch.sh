@@ -4,10 +4,11 @@
 # 32 prompts each from Reasoning Gym, Enigmata, ScienceWorld and chemistry, 96 each from DAPO, NuminaMath, MCQ and
 # openqa. 16 trainer + 16 vLLM + 1 judge node, variant B of handover/rl-throughput-and-512p-config.md (512 prompts x 16
 # answers, one optimizer step, no log-prob pass).
-# Checkpoints every 20 steps with optimizer state; only the latest is kept (keep_top_k 1 by recency). A failed driver
-# is restarted in the allocation from the latest checkpoint (driver_retry.sh); a resume job launched with the same
-# RUN and SBATCH_MORE=--dependency=afternotok:<job> continues from it on new nodes.
-# RUN, JOB_TIME, STALENESS (default 3), SBATCH_MORE and DRY_RUN pass through.
+# Checkpoints every 20 steps, weights only (user, 2026-11-16; SAVE_OPTIMIZER=true adds the optimizer state); only the
+# latest is kept (keep_top_k 1 by recency). A failed driver is restarted in the allocation from the latest checkpoint
+# (driver_retry.sh), with a fresh Adam state; a resume job launched with the same RUN and
+# SBATCH_MORE=--dependency=afternotok:<job> continues from it on new nodes.
+# RUN, JOB_TIME, STALENESS (default 3), SAVE_OPTIMIZER (default false), SBATCH_MORE and DRY_RUN pass through.
 set -euo pipefail
 cd /home01/hanint06/projects/rl-infra-stem5
 export RECIPE=/home01/hanint06/projects/rl-infra-stem5/recipes/apertus2-chonk-sftv02-18315-vllm-adamw-dapo-32n-judge1.yaml
@@ -30,5 +31,5 @@ bash run.sh envs/stem-mix-run5.yaml \
     "++policy.megatron_cfg.env_vars.TORCHINDUCTOR_COMPILE_THREADS=\"'1'\"" \
     ++policy.generation.vllm_kwargs.max_num_seqs=256 ++env.should_log_nemo_gym_responses=true \
     checkpointing.enabled=true checkpointing.save_period=20 checkpointing.keep_top_k=1 \
-    checkpointing.metric_name=null checkpointing.save_optimizer=true \
+    checkpointing.metric_name=null checkpointing.save_optimizer=${SAVE_OPTIMIZER:-false} \
     "$@"
