@@ -61,9 +61,14 @@ async def one(provider_cfg: dict, idx: int, metadata: dict, payload: pathlib.Pat
         started = True
         times["start"] = time.monotonic() - t0
 
-        phase = "endpoint"
-        ep = await sandbox.endpoint(EXECD_PORT)
-        host = urlsplit(ep.endpoint).netloc or ep.endpoint.split("/")[0]
+        # Informational only. Through the provider: AsyncSandbox.endpoint() answers only for ports declared in
+        # SandboxSpec.ports, and the exec daemon's is not (job 5365400). Same lookup as the SDK's create, which
+        # follows use_server_proxy; the readiness ping of start() already went to this endpoint.
+        try:
+            ep = await sandbox._provider.endpoint(sandbox._require_handle(), EXECD_PORT)
+            host = urlsplit(ep.endpoint).netloc or ep.endpoint.split("/")[0]
+        except Exception as e:  # noqa: BLE001
+            host = f"lookup failed: {type(e).__name__}"
 
         phase = "exec"
         t0 = time.monotonic()
