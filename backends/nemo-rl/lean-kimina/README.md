@@ -11,8 +11,11 @@ Gym patch `0011` (`../apertus2/patches/gym`) adds `verifier: kimina` to `math_fo
 sandbox's result format, so scoring and correction prompts are unchanged. The task file is
 `envs/lean-kimina-sft.yaml`.
 
-**Status (2026-11-13):** `setup.sh`, the data job and the server job (`start.sh`) have run on Clariden, with the
-REPLs in bubblewrap; see [Tested](#tested). The task file has not yet run with a training job.
+**Status (2026-11-17):** `setup.sh`, the data job and the server job have run on Clariden, with the REPLs in
+bubblewrap; see [Tested](#tested). Short GRPO runs of Chonk on the task have run with the server (see
+[Training runs](#training-runs-clariden-2026-11-15)). **To train, follow [`RUNBOOK.md`](RUNBOOK.md)**: it
+starts from an account that never ran the stack, and uses `train.sh`, which submits the training and its
+server together.
 
 ## Before the first run: Lean and Mathlib
 
@@ -32,12 +35,19 @@ matter for speed.
 
     bash backends/nemo-rl/lean-kimina/setup.sh                       # once, login node, ~2 min
     PARTITION=debug bash backends/nemo-rl/lean-kimina/setup-data.sh  # once, one node, < 30 min; prints the job
-    bash backends/nemo-rl/lean-kimina/start.sh                       # the server job; prints the job
-    bash run.sh envs/lean-kimina-sft.yaml \
-        env.nemo_gym.math_formal_lean.resources_servers.math_formal_lean.kimina_url=$(cat $SCRATCH/lean-kimina/endpoint) \
-        env.nemo_gym.math_formal_lean.resources_servers.math_formal_lean.kimina_api_key=$(cat $SCRATCH/lean-kimina/endpoint.key)
+    RECIPE=recipes/apertus2-chonk-sftv02-18315-vllm-adamw-code.yaml \
+        bash backends/nemo-rl/lean-kimina/train.sh [overrides...]    # the training, then its server on debug
 
-Stop the server job with `scancel` after the run.
+`RUNBOOK.md` has the whole procedure, including the one-time setup of the Apertus 2 stack.
+- **`train.sh`** submits the training through `run.sh`, then the server with `--dependency=after:<training>`.
+  - The training's command carries `$(… endpoint.sh url|key)` unexpanded. They run at job start and wait for a
+    live server, so neither job needs the other's queue time.
+  - The server job, `server_watch_job.sh`, stops the server when the training has left the queue. It cancels the
+    training if its Ray head is not up after `HEAD_LIMIT` (600 s), or if the server dies.
+  - Every run has its own endpoint, in `$SCRATCH/lean-kimina/runs/<RUN>/`.
+- **`start.sh`** starts a server alone, for runs longer than a debug job: the training then gets
+  `kimina_url=$(cat $SCRATCH/lean-kimina/endpoint)` and `kimina_api_key=$(cat $SCRATCH/lean-kimina/endpoint.key)`.
+  That puts the key on the submitted command line, and nothing stops the server after the run (`scancel` it).
 
 - **`setup.sh`** clones the fork at `pin`, makes a Python 3.11 venv with `requirements.txt` (Clariden has no
   3.12 outside containers), and builds the Lean REPL at `REPL_TAG` with `LEAN_TOOLCHAIN`, all in
@@ -144,4 +154,33 @@ Locally, 2026-11-12 to 2026-11-14:
     error.
   - The sample check passed the correct proof and failed the wrong one, and the job exited 0.
 
-Not yet run: a training run with `envs/lean-kimina-sft.yaml`, and a server job with the key-file change.
+## Training runs (Clariden, 2026-11-15)
+
+These are short GRPO runs of Chonk on `envs/lean-kimina-sft.yaml`, with a server from the fork's b3c6c3e. Each ran 16
+nodes, 3 steps of 32 prompts × 16 rollouts, and no checkpoints. The runs were submitted by hand-made scripts
+that `train.sh` and `endpoint.sh` now hold, with the training first and the server on debug after it. The watch
+(`server_watch_job.sh`) came after them.
+
+| Job | Checkpoint | Partition, `max_new_tokens` | Outcome |
+|---|---|---|---|
+| 3947435 | SFT v0.1 iter 19374 | preemptable, 16,384 | Failed in start-up: "Stale file handle" in flashinfer's kernel cache (cold cache, 32 vLLM workers compiling at once) |
+| 3947757 | SFT v0.1 iter 19374 | preemptable, 16,384 | Step 1 done (rewards 0), then preempted after 23 min |
+| 3948078 | SFT v0.1 iter 19374 | preemptable, 4,096 | **Completed 3/3**, exit 0; rewards 0, loss 0 |
+| 3948553 | SFT v0.2 iter 18315 | preemptable, 4,096 | Steps 1–2: reward 0.0039 / 0.0059, loss 0.0010 / −0.0033, 6 verified proofs in 1,536 rollouts; preempted in step 3 |
+| 3949635 | SFT v0.2 iter 18315 | normal, 16,384 | Nothing ran: the head node's container never started and ray.sub waited for the Ray head until the time limit (1:30 h). Since then the server job's watch cancels such a training |
+
+- **What worked:**
+  - Start-up took about 11 min on warm caches (NeMo-RL's setup 326–398 s).
+  - The server was up 38–51 s after its job started, and the training found it at once.
+  - Every rollout with a proof got a verdict: 0 unchecked.
+  - Weights were refit into vLLM after every step.
+- **The 6 rewarded v0.2 proofs are genuine.** Each proves exactly the prompt's statement, with no `sorry`,
+  `admit`, `axiom` or `native_decide`.
+- **v0.1 scored 0 everywhere.** Its SFT data had no Lean.
+- **The 4,096-token cap is too small:** 84 % of v0.2's rollouts (45 % of v0.1's) stopped before replying.
+- **Not yet run:**
+  - a run with rewards that finishes;
+  - the task's 16,384 tokens through a whole run;
+  - validation;
+  - checkpoint saving;
+  - `train.sh` itself on Clariden.

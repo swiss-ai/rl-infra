@@ -1,13 +1,11 @@
 # Task file: Lean 4 theorem proving on an SFT checkpoint, as envs/lean-sft.yaml, but proofs are checked by a
 # Kimina Lean Server (Lean v4.34.0 + Mathlib, warm REPLs that imported the header once) instead of the
 # NeMo-Skills sandbox (Lean 4.12, one cold `lake env lean` per proof). See backends/nemo-rl/lean-kimina/README.md.
-# NOT YET RUN AS A TRAINING JOB. Before it:
+# Short runs of it trained on Clariden on 2026-11-15. It needs a server, so launch it with
+# backends/nemo-rl/lean-kimina/train.sh, not run.sh alone; backends/nemo-rl/lean-kimina/RUNBOOK.md has the steps:
 #   bash backends/nemo-rl/lean-kimina/setup.sh          # once: the server, its venv, the Lean REPL
 #   bash backends/nemo-rl/lean-kimina/setup-data.sh     # once: $SCRATCH/lean/data/{train,validation}.v434.jsonl
-#   bash backends/nemo-rl/lean-kimina/start.sh          # the server job; endpoint in $SCRATCH/lean-kimina/endpoint
-#   bash run.sh envs/lean-kimina-sft.yaml \
-#       env.nemo_gym.math_formal_lean.resources_servers.math_formal_lean.kimina_url=$(cat $SCRATCH/lean-kimina/endpoint) \
-#       env.nemo_gym.math_formal_lean.resources_servers.math_formal_lean.kimina_api_key=$(cat $SCRATCH/lean-kimina/endpoint.key)
+#   RECIPE=recipes/apertus2-chonk-sftv02-18315-vllm-adamw-code.yaml bash backends/nemo-rl/lean-kimina/train.sh
 # Gym patch 0011 (backends/nemo-rl/apertus2/patches/gym) adds `verifier: kimina`. Everything else is
 # envs/lean-sft.yaml's, copied, because run.sh reads a task's `defaults:` as its recipe.
 defaults: ../recipes/apertus2-chonk-sft-vllm-adamw-code.yaml

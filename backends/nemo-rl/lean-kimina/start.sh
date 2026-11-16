@@ -1,7 +1,8 @@
 #!/bin/bash
 # Start a Kimina Lean Server on one node, as a job of its own, and print its job ID; envs/lean-kimina-sft.yaml
 # names its endpoint at launch. Stop it with scancel after the training run. Run setup.sh and setup-data.sh first.
-# NOT YET RUN WITH A TRAINING JOB (see README.md).
+# For a training, train.sh is the tested way: it starts the server with the training and stops it after.
+# This script is for a server on its own (tests, or runs longer than a debug job).
 #   JOB_TIME=06:00:00 MAX_REPLS=128 bash backends/nemo-rl/lean-kimina/start.sh
 # 128 REPLs: about 2 GB each, within a job's 450 GB next to the Lean copy; 64 already check an RL step of
 # 2,048 proofs as fast (the fork's docs/MANY_CORE_NODES.md).

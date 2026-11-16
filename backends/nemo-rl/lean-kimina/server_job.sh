@@ -2,7 +2,7 @@
 # Body of the Kimina server job (start.sh submits it): Lean into node memory, then a Kimina server whose REPLs
 # have imported the training rows' header, reachable from the other nodes. Once it answers, the job writes
 # http://<node>:<port> to $ENDPOINT_FILE and the API key to $ENDPOINT_FILE.key (mode 600). Stop it with scancel.
-# NOT YET RUN WITH A TRAINING JOB; it ran on its own on a debug node (job 3931932, see README.md).
+# It served the training runs of 2026-11-15 (see README.md); train.sh runs it through server_watch_job.sh.
 set -euo pipefail
 source "${ROOT}/sites/load.sh" && rl_infra_load "${LEAN_KIMINA_DIR}/env"
 source "${LEAN_KIMINA_DIR}/pin"

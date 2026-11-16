@@ -1,0 +1,15 @@
+# apertus2-chonk-sft-vllm-adamw-code.yaml on Chonk SFT v0.2 (chonk-lc-16k-v0.2, iteration 18315), whose SFT data
+# includes Lean. Used for the Lean task with the Kimina verifier (backends/nemo-rl/lean-kimina/RUNBOOK.md); it
+# found verified proofs on Clariden, where the v0.1 checkpoint scored 0.
+defaults: apertus2-chonk-sft-vllm-adamw-code.yaml
+
+# Relative to $SCRATCH (/iopsstor/scratch/cscs/<user> on Alps); run.sh links the shards into
+# $SCRATCH/models/chonk-lc-16k-v0.2-iter_0018315.
+sft_export: ../../../../capstor/store/cscs/swissai/infra01/apertus_checkpoints/v2/hf/chonk/posttraining/chonk-lc-16k-v0.2-iter_0018315
+
+# run.sh reads sft_export and cluster.num_nodes from this file alone, not from its defaults.
+cluster:
+  num_nodes: 16
+
+policy:
+  model_name: ${oc.env:SCRATCH}/models/chonk-lc-16k-v0.2-iter_0018315

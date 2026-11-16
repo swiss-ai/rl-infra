@@ -1,0 +1,15 @@
+# apertus2-chonk-sft-vllm-adamw-code.yaml on Chonk SFT v0.1 (chonk-lc-16k-v0.1-ep1, iteration 19374, the end of
+# the epoch), from capstor's hf-checkpoints. Its SFT data had no Lean: on the Lean task it scored 0 on every
+# rollout on Clariden (2026-11-15); prefer apertus2-chonk-sftv02-18315-vllm-adamw-code.yaml there.
+defaults: apertus2-chonk-sft-vllm-adamw-code.yaml
+
+# Relative to $SCRATCH (/iopsstor/scratch/cscs/<user> on Alps); run.sh links the shards into
+# $SCRATCH/models/iter_0019374.
+sft_export: ../../../../capstor/store/cscs/swissai/infra01/hf-checkpoints/chonk-lc-16k-v0.1-ep1/iter_0019374
+
+# run.sh reads sft_export and cluster.num_nodes from this file alone, not from its defaults.
+cluster:
+  num_nodes: 16
+
+policy:
+  model_name: ${oc.env:SCRATCH}/models/iter_0019374
