@@ -39,5 +39,9 @@ class MetricXReward:
             return_tensors="pt")
         inputs = {k: v[:, :-1].to(self.device) for k, v in inputs.items()}
         with self.torch.inference_mode():
-            error = float(self.model(**inputs).predictions.reshape(-1)[0])
+            # WALAR marks its decoder is_encoder_decoder=False. With newer
+            # Transformers, caching then shares a DynamicCache between self-
+            # and cross-attention, concatenating their keys (N+1 vs N mask).
+            # MetricX does one decoder step, so no generation cache is needed.
+            error = float(self.model(**inputs, use_cache=False).predictions.reshape(-1)[0])
         return -bounded(error, 0, 25, "MetricX error")

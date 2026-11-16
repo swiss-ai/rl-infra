@@ -1,0 +1,9 @@
+# Separate Python 3.12 environment: COMET pins NumPy <2; Python 3.13 needs NumPy 2.
+# Do not install this file into the NeMo-RL or MT scorer environments.
+unbabel-comet==2.2.7
+numpy==1.26.4
+transformers==4.57.6
+sentencepiece==0.2.1
+
+# COMET pins torchmetrics 0.10.x, which imports the removed pkg_resources API.
+setuptools==80.9.0

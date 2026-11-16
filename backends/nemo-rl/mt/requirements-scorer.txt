@@ -1,6 +1,7 @@
 # Install only in a separate scorer venv, never in NeMo-RL's prebuilt venvs.
-# Match WALAR's Transformers API for code/models.py.
-transformers==4.52.4
+# BidirLM's transformers-v4 branch requires >=4.57.6,<5.
+transformers==4.57.6
+ctfalign==0.1.0
 sentencepiece==0.2.1
 fasttext==0.9.3
 numpy==2.2.6

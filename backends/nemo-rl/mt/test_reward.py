@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, Mock, patch
 from sacrebleu.metrics import CHRF
 
 from mt_reward.scoring import Example, TranslationReward, alignment_f1
-from mt_reward.models import WalarComponents
+from mt_reward.models import WalarComponents, ReferenceAlignment
 from mt_reward.metricx import MetricXReward
 from mt_reward.rollouts import examples_from_rollouts, rollout_metrics
 from mt_reward.runtime import load_scorer_config, worker_options
@@ -34,7 +34,7 @@ class RewardTests(unittest.TestCase):
         self.assertAlmostEqual(score.chrf_pp, 100)
         self.assertAlmostEqual(score.reward, -5 + 20 * 0.5 + 20)
         self.components.metricx.assert_called_once_with("Hello world.", "Hallo Welt.", "Hallo Welt.")
-        self.components.alignment.assert_called_once_with("Hello world.", "Hallo", "en", "de")
+        self.components.alignment.assert_called_once_with("Hallo Welt.", "Hallo", "de", "de")
 
     def test_chrf_is_sentence_level_plus_plus_on_unmasked_output(self):
         example = replace(self.example, hypothesis="Hallo schöne Welt.")
@@ -65,7 +65,7 @@ class RewardTests(unittest.TestCase):
         self.assertEqual(score.word_alignment, 0)
         self.components.alignment.assert_not_called()
 
-    def test_zero_chrf_weight_recovers_walar_formula(self):
+    def test_zero_chrf_weight_keeps_metricx_and_alignment(self):
         score = TranslationReward(self.components, chrf_weight=0).score(self.example)
         self.assertEqual(score.reward, 5)
 
@@ -75,34 +75,77 @@ class RewardTests(unittest.TestCase):
         self.assertEqual(alignment_f1([], [0], [0], 1, 1), 0)
         self.assertEqual(alignment_f1([], [], [0], 0, 1), 0)
 
-    def test_alignment_fast_encoding_preserves_word_ids_and_skips_special_tokens(self):
-        models = object.__new__(WalarComponents)
-        models.device, models.max_length = "cpu", 5
-        models.torch = MagicMock()
-        models.align_tokenizer = Mock()
-        models.align_tokenizer.model_max_length = 8192
+    def test_ctfalign_loader_uses_configured_encoder_and_device(self):
+        ctfalign, fasttext, hub = Mock(), Mock(), Mock()
+        hub.snapshot_download.return_value = "/cache/bidirlm-snapshot"
+        fasttext.load_model.return_value.get_labels.return_value = ["__label__deu_Latn"]
+        upstream = Mock()
+        upstream.MaskLID.return_value.model.get_labels.return_value = ["__label__deu_Latn"]
+        config = {"walar_dir": "/walar", "device": "cuda:0",
+                  "languages": {"de": "deu_Latn"}, "glotlid_model": "/lid",
+                  "masklid_model": "/mask"}
+        with patch.dict(sys.modules, {"ctfalign": ctfalign, "fasttext": fasttext, "huggingface_hub": hub}), \
+                patch("mt_reward.models.load_module", return_value=upstream), \
+                patch("mt_reward.models.MetricXReward"):
+            WalarComponents(config)
+            ctfalign.WordAligner.from_huggingface.assert_called_with(
+                "/cache/bidirlm-snapshot", method="ctfalign", mode="argmax",
+                units="words", device="cuda:0", layer=15,
+                granularity="documents", trust_remote_code=True)
+            hub.snapshot_download.assert_called_once_with(
+                "BidirLM/BidirLM-1B-Embedding", revision="transformers-v4")
+            hub.snapshot_download.reset_mock()
+            WalarComponents({**config, "alignment_model": "/local/encoder", "alignment_layer": 12})
+            self.assertEqual(ctfalign.WordAligner.from_huggingface.call_args.args, ("/local/encoder",))
+            self.assertEqual(ctfalign.WordAligner.from_huggingface.call_args.kwargs["layer"], 12)
+            hub.snapshot_download.assert_not_called()
+            WalarComponents({**config, "alignment_model": "/local/bidirlm",
+                             "alignment_layer": 15, "alignment_trust_remote_code": True})
+            self.assertTrue(ctfalign.WordAligner.from_huggingface.call_args.kwargs["trust_remote_code"])
+            hub.snapshot_download.assert_not_called()
 
-        class Encoding(dict):
-            def word_ids(self):
-                # First word has two pieces; third word was truncated away.
-                return [None, 0, 0, 1, None]
+    def test_bidirlm_preserves_gemma_tokenizer_and_wraps_hidden_states(self):
+        ctfalign, transformers, hub = Mock(), Mock(), Mock()
+        hub.snapshot_download.return_value = "/cache/bidirlm"
+        encoder = ctfalign.WordAligner.from_huggingface.return_value.encoder
+        encoder.model.config.model_type = "bidirlm"
+        encoder.model.layers = [Mock() for _ in range(26)]
+        encoder.layer = 15
+        original_model = encoder.model
+        with patch.dict(sys.modules, {"ctfalign": ctfalign, "transformers": transformers,
+                                      "huggingface_hub": hub}):
+            ReferenceAlignment({"languages": {"de": "deu_Latn"}})
+        transformers.AutoTokenizer.from_pretrained.assert_called_once_with(
+            "/cache/bidirlm", fix_mistral_regex=False)
+        self.assertIs(encoder.model.model, original_model)
+        self.assertEqual(encoder.model.layer, 15)
 
-        models.align_tokenizer.return_value = Encoding(
-            input_ids=MagicMock(), attention_mask=MagicMock())
-        models.align_model = Mock()
-        hidden = MagicMock()
-        states = [None] * 25
-        states[24] = [hidden]
-        models.align_model.return_value.hidden_states = states
-        embeddings, mapping = models.embeddings(["primero", "segundo", "tercero"])
-        self.assertEqual(mapping, [0, 0, 1])
-        hidden.__getitem__.assert_called_once_with([1, 2, 3])
-        models.align_tokenizer.assert_called_once_with(
-            ["primero", "segundo", "tercero"], is_split_into_words=True,
-            add_special_tokens=True, truncation=True, max_length=5,
-            return_tensors="pt")
-        models.align_tokenizer.prepare_for_model.assert_not_called()
-        self.assertEqual(models.embeddings([]), (None, []))
+    def test_ctfalign_uses_word_pairs_and_unique_coverage(self):
+        models = object.__new__(ReferenceAlignment)
+        models.languages = {"de": "deu_Latn"}
+        models.aligner = Mock()
+        models.aligner.align.return_value = [(0, 0), (0, 1), (0, 1)]
+        self.assertAlmostEqual(models.alignment("Hallo Welt", "Hallo du Welt", "de", "de"), 4 / 7)
+        models.aligner.align.assert_called_once_with("Hallo Welt", "Hallo du Welt")
+        models.aligner.align.reset_mock()
+        self.assertEqual(models.alignment("", "Hallo", "de", "de"), 0)
+        self.assertEqual(models.alignment("Hallo", "", "de", "de"), 0)
+        models.aligner.align.assert_not_called()
+        models.aligner.align.return_value = []
+        self.assertEqual(models.alignment("Hallo", "Welt", "de", "de"), 0)
+
+    def test_ctfalign_preserves_chinese_segmentation(self):
+        models = object.__new__(ReferenceAlignment)
+        models.languages = {"zh": "cmn_Hans"}
+        models.han = Mock(side_effect=[["你好", "，", "世界"], ["世界", "。"]])
+        models.aligner = Mock()
+        models.aligner.align.return_value = [(1, 0)]
+        self.assertAlmostEqual(models.alignment("你好，世界", "世界。", "zh", "zh"), 2 / 3)
+        models.aligner.align.assert_called_once_with("你好 世界", "世界")
+
+    def test_reference_alignment_does_not_depend_on_source(self):
+        self.reward.score(replace(self.example, source="A differently phrased source", source_lang="fr"))
+        self.components.alignment.assert_called_once_with("Hallo Welt.", "Hallo", "de", "de")
 
     def test_metricx_negates_error_and_includes_reference(self):
         scorer = object.__new__(MetricXReward)
@@ -113,6 +156,9 @@ class RewardTests(unittest.TestCase):
         scorer.model = Mock()
         scorer.model.return_value.predictions.reshape.return_value = [7.0]
         self.assertEqual(scorer.score("source", "candidate", "reference"), -7)
+        scorer.model.assert_called_once_with(input_ids=ids.__getitem__.return_value.to.return_value,
+                                             attention_mask=mask.__getitem__.return_value.to.return_value,
+                                             use_cache=False)
         scorer.tokenizer.assert_called_once_with(
             "source: source candidate: candidate reference: reference",
             max_length=1536, truncation=True, padding=False, return_tensors="pt")

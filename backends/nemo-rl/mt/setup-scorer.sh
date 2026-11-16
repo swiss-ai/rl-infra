@@ -18,6 +18,7 @@ import torch
 import transformers
 import fasttext
 import sacrebleu
+from ctfalign import WordAligner
 print("Python:", sys.version)
 print("Ray:", ray.__version__)
 print("PyTorch:", torch.__version__)

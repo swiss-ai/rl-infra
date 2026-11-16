@@ -8,5 +8,12 @@
   },
   "max_length": 1536,
   "alignment_weight": 20,
-  "chrf_weight": 20
+  "chrf_weight": 20,
+  "alignment_model": "BidirLM/BidirLM-1B-Embedding",
+  "alignment_revision": "transformers-v4",
+  "alignment_layer": 15,
+  "alignment_trust_remote_code": true,
+  "cometkiwi_model": "Unbabel/wmt22-cometkiwi-da",
+  "cometkiwi_weight": 20,
+  "cometkiwi_python": "/iopsstor/scratch/cscs/jgarciagilabert/mt-kiwi-venv/bin/python"
 }

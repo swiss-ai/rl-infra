@@ -58,12 +58,13 @@ reference-based, sentence-level chrF++ term:
 ```text
 reward = -25                                      if language alignment fails
 reward = metricx(source, hypothesis, reference)
-         + 20 * word_alignment(source, masked_hypothesis)
+         + 20 * word_alignment(reference, masked_hypothesis)
          + chrf_weight * chrf_pp(hypothesis, reference) / 100
+         + cometkiwi_weight * cometkiwi(source, hypothesis)
                                                   otherwise
 ```
 
-Adapt WALAR to use reference-based MetricX alongside BGE-M3 word alignment
+Adapt WALAR to use reference-based MetricX alongside CTFAlign reference–hypothesis word alignment
 and GlotLID/MaskLID language alignment and masking. The MetricX term is the
 negative error score (higher is better, in [-25, 0]); do not add MetricX's raw
 error score with a positive sign.
@@ -119,3 +120,41 @@ The instruction
 model `Qwen/Qwen3-8B` is a different checkpoint from the earlier math test's
 `Qwen/Qwen3-8B-Base`; its first run may download weights. Prompt templates and
 language mappings are defined in `backends/nemo-rl/mt/mt_reward/prompts.py`.
+
+## Apertus 8B Instruct 2509 one-step configuration
+
+`apertus-8b-instruct-2509-smoke.yaml` selects `swiss-ai/Apertus-8B-Instruct-2509`,
+with 3 prompts × 4 candidates, one GRPO step, three policy GPUs and one reward GPU.
+It uses the same verified scorer config. Checkpoints and validation are disabled.
+The processor renders this checkpoint's own tokenizer chat template, without
+inserting Qwen control tokens or exposing references. `enable_thinking=False`
+disables reasoning in templates that support the option; templates without it
+ignore the extra argument.
+
+This text-only Apertus model supports `AutoModelForCausalLM` in Transformers
+4.56.0 and later; see its [model card](https://huggingface.co/swiss-ai/Apertus-8B-Instruct-2509).
+The wrapper checks the actual config and tokenizer in the training container
+before launching:
+
+```bash
+sbatch experiments/grpo-mt/run_apertus_smoke.sh
+```
+
+It requests one exclusive four-GPU node with a ten-minute limit and uses the same
+`MT_DATA_PATH` and `MT_SCORER_CONFIG` overrides as `run_smoke.sh`. It also works via
+`bash experiments/grpo-mt/run_apertus_smoke.sh` inside an existing Slurm allocation.
+The preflight prints the rendered prompt and checks the causal-model mapping
+without downloading weights. Model loading, backward-pass and the separate
+vLLM generation runtime still need verification on Clariden. Logs use
+`mt-smoke-<jobid>.out`; training metrics use the run name
+`apertus-8b-instruct-2509-mt-smoke`.
+
+## Additional reference-free QE term
+
+The scorer JSONs enable `Unbabel/wmt22-cometkiwi-da` with `cometkiwi_weight=20`.
+Run `bash backends/nemo-rl/mt/setup-kiwi.sh` before using these configs; COMET
+requires an isolated Python 3.12 environment. The supplied `scorer.json` points
+to the default scratch environment; customize `cometkiwi_python` for another
+location. Setting the weight to zero restores the previous reward and skips
+Kiwi loading. See the backend README for setup, checkpoint access and the full
+reward check, which now reports raw Kiwi scores and weighted bonuses.

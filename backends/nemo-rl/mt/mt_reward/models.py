@@ -1,6 +1,6 @@
 """Model adapters for WALAR's publicly released components.
 
-Loads upstream MetricX regression and MaskLID classes from a separate WALAR
+Uses CTFAlign for reference alignment and loads MetricX/MaskLID from a WALAR
 checkout; no upstream code is copied into this repository.
 """
 
@@ -25,10 +25,6 @@ def load_module(path, name):
 class WalarComponents:
     def __init__(self, config):
         import fasttext
-        import torch
-        from transformers import AutoModel, AutoTokenizer
-
-        self.torch = torch
         self.device = config.get("device", "cuda:0")
         self.max_length = int(config.get("max_length", 1536))
         if self.max_length < 3:
@@ -47,17 +43,12 @@ class WalarComponents:
             missing = set(labels) - set(detector.get_labels())
             if missing:
                 raise ValueError(f"Language labels absent from detector: {sorted(missing)}")
+        self.cometkiwi_scorer = None
+        if config.get("cometkiwi_weight", 0):
+            from .cometkiwi import CometKiwiReward
+            self.cometkiwi_scorer = CometKiwiReward(config)
         self.metricx_scorer = MetricXReward(config)
-        alignment_model = config.get("alignment_model", "BAAI/bge-m3")
-        self.align_tokenizer = AutoTokenizer.from_pretrained(alignment_model, use_fast=True)
-        if not self.align_tokenizer.is_fast:
-            raise ValueError("BGE-M3 alignment requires a fast tokenizer for word mappings")
-        self.align_model = AutoModel.from_pretrained(alignment_model).to(self.device).eval()
-        self.han = None
-        if any(label.startswith("cmn_") for label in self.languages.values()):
-            import hanlp
-            # Explicit path avoids an implicit tokenizer change for Chinese.
-            self.han = hanlp.load(config["chinese_tokenizer"], devices=[])
+        self.alignment_scorer = ReferenceAlignment(config)
 
     def label(self, language):
         if language not in self.languages:
@@ -77,8 +68,64 @@ class WalarComponents:
             alpha_step_increase=3, beta_step_increase=5)
         return segments.get("__label__" + self.label(language), "")
 
+    def cometkiwi(self, source, hypothesis):
+        if self.cometkiwi_scorer is None:
+            raise RuntimeError("COMET-Kiwi was not enabled at initialization")
+        return self.cometkiwi_scorer.score(source, hypothesis)
+
     def metricx(self, source, hypothesis, reference):
         return self.metricx_scorer.score(source, hypothesis, reference)
+
+    def alignment(self, reference, hypothesis, reference_lang, target_lang):
+        return self.alignment_scorer.alignment(reference, hypothesis, reference_lang, target_lang)
+
+
+class ReferenceAlignment:
+    """Production alignment component, usable without MetricX or language detectors."""
+
+    def __init__(self, config):
+        from ctfalign import WordAligner
+
+        self.device = config.get("device", "cuda:0")
+        self.languages = config["languages"]
+        alignment_model = config.get("alignment_model", "BidirLM/BidirLM-1B-Embedding")
+        is_bidirlm = alignment_model == "BidirLM/BidirLM-1B-Embedding"
+        revision = config.get("alignment_revision", "transformers-v4" if is_bidirlm else None)
+        if revision is not None:
+            # CTFAlign's HFEncoder does not forward a revision to HF loaders.
+            # Resolve a single snapshot for both tokenizer and custom model code.
+            from huggingface_hub import snapshot_download
+            alignment_model = snapshot_download(alignment_model, revision=revision)
+        self.aligner = WordAligner.from_huggingface(
+            alignment_model,
+            method="ctfalign", mode="argmax", units="words",
+            device=self.device,
+            # Use the selected BidirLM hidden layer for word alignment.
+            layer=config.get("alignment_layer", 15 if is_bidirlm else None),
+            granularity="documents",
+            trust_remote_code=config.get("alignment_trust_remote_code", is_bidirlm))
+        encoder = self.aligner.encoder
+        if getattr(encoder.model.config, "model_type", None) == "bidirlm":
+            from transformers import AutoTokenizer
+            from .bidirlm import BidirLMHiddenStates
+
+            # Transformers 4.57.6 misidentifies this local custom config as
+            # Mistral. BidirLM uses Gemma's Split(" ") tokenizer, not the
+            # Mistral regex sequence; applying that patch changes tokenization
+            # and crashes when indexing the standalone Split object.
+            encoder.tokenizer = AutoTokenizer.from_pretrained(
+                alignment_model, fix_mistral_regex=False)
+            encoder.model = BidirLMHiddenStates(encoder.model, encoder.layer)
+        self.han = None
+        if any(label.startswith("cmn_") for label in self.languages.values()):
+            import hanlp
+            # Explicit path avoids an implicit tokenizer change for Chinese.
+            self.han = hanlp.load(config["chinese_tokenizer"], devices=[])
+
+    def label(self, language):
+        if language not in self.languages:
+            raise ValueError(f"Unsupported dataset language code: {language}")
+        return self.languages[language]
 
     def words(self, text, language):
         if self.label(language).startswith("cmn_"):
@@ -86,38 +133,20 @@ class WalarComponents:
             return [w for w in self.han(text) if w not in excluded]
         return text.split()
 
-    def embeddings(self, words):
-        # Preserve word-to-subword mapping, excluding special tokens even when
-        # a long sentence is truncated. WALAR uses layer 24 and dot products.
-        if not words:
-            return None, []
-        # The fast tokenizer's encoding API adds special tokens and preserves
-        # word IDs. prepare_for_model cannot construct its special-token mask.
-        encoded = self.align_tokenizer(
-            words, is_split_into_words=True, add_special_tokens=True,
-            truncation=True,
-            max_length=min(self.max_length, self.align_tokenizer.model_max_length),
-            return_tensors="pt")
-        word_ids = encoded.word_ids()
-        positions = [i for i, word_id in enumerate(word_ids) if word_id is not None]
-        mapping = [word_ids[i] for i in positions]
-        if not positions:
-            return None, []
-        inputs = dict(encoded)
-        inputs = {k: v.reshape(1, -1).to(self.device) for k, v in inputs.items()}
-        with self.torch.inference_mode():
-            hidden = self.align_model(**inputs, output_hidden_states=True).hidden_states[24][0]
-        return hidden[positions], mapping
+    def alignment(self, reference, hypothesis, reference_lang, target_lang):
+        return self.details(reference, hypothesis, reference_lang, target_lang)["word_alignment"]
 
-    def alignment(self, source, hypothesis, source_lang, target_lang):
-        source_words, target_words = self.words(source, source_lang), self.words(hypothesis, target_lang)
-        if not source_words or not target_words:
-            return 0.0
-        src, src_map = self.embeddings(source_words)
-        tgt, tgt_map = self.embeddings(target_words)
-        if src is None or tgt is None:
-            return 0.0
-        dot = src @ tgt.T
-        pairs = ((dot.softmax(-1) > 1e-3) & (dot.softmax(-2) > 1e-3)).nonzero().tolist()
-        # Unique covered words, not number of alignment edges (many-to-many).
-        return alignment_f1(pairs, src_map, tgt_map, len(source_words), len(target_words))
+    def details(self, reference, hypothesis, reference_lang, target_lang):
+        reference_words = self.words(reference, reference_lang)
+        target_words = self.words(hypothesis, target_lang)
+        # CTFAlign returns indices into these whitespace-delimited word lists.
+        pairs = self.aligner.align(" ".join(reference_words), " ".join(target_words)) \
+            if reference_words and target_words else []
+        score = alignment_f1(
+            pairs, range(len(reference_words)), range(len(target_words)),
+            len(reference_words), len(target_words))
+        return {"word_alignment": score,
+                "reference_coverage": len({i for i, _ in pairs}) / len(reference_words) if reference_words else 0,
+                "hypothesis_coverage": len({j for _, j in pairs}) / len(target_words) if target_words else 0,
+                "reference_words": reference_words, "hypothesis_words": target_words,
+                "pairs": pairs}

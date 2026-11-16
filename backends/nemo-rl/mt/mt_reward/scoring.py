@@ -28,8 +28,9 @@ class Components(Protocol):
     def language_matches(self, text: str, language: str) -> bool: ...
     def mask(self, text: str, language: str) -> str: ...
     def metricx(self, source: str, hypothesis: str, reference: str) -> float: ...
-    def alignment(self, source: str, hypothesis: str,
-                  source_lang: str, target_lang: str) -> float: ...
+    def cometkiwi(self, source: str, hypothesis: str) -> float: ...
+    def alignment(self, reference: str, hypothesis: str,
+                  reference_lang: str, target_lang: str) -> float: ...
 
 
 def alignment_f1(pairs, source_map, target_map, source_length, target_length):
@@ -48,6 +49,7 @@ class Score:
     metricx: float | None
     word_alignment: float | None
     chrf_pp: float
+    cometkiwi: float | None = None
 
     def asdict(self):
         return asdict(self)
@@ -62,9 +64,10 @@ def bounded(value: float, low: float, high: float, name: str) -> float:
 
 class TranslationReward:
     def __init__(self, components: Components, *, alignment_weight=20.0,
-                 chrf_weight=20.0, chrf=None):
+                 chrf_weight=20.0, cometkiwi_weight=0.0, chrf=None):
         self.components = components
         self.alignment_weight = bounded(alignment_weight, 0, math.inf, "alignment_weight")
+        self.cometkiwi_weight = bounded(cometkiwi_weight, 0, math.inf, "cometkiwi_weight")
         self.chrf_weight = bounded(chrf_weight, 0, math.inf, "chrf_weight")
         if chrf is None:
             from sacrebleu.metrics import CHRF
@@ -83,7 +86,10 @@ class TranslationReward:
         metricx = bounded(self.components.metricx(
             example.source, example.hypothesis, example.reference), -25, 0, "MetricX")
         alignment = bounded(self.components.alignment(
-            example.source, masked, example.source_lang, example.target_lang),
+            example.reference, masked, example.target_lang, example.target_lang),
             0, 1, "word alignment") if masked.strip() else 0.0
-        reward = metricx + self.alignment_weight * alignment + self.chrf_weight * chrf / 100
-        return Score(reward, True, metricx, alignment, chrf)
+        kiwi = bounded(self.components.cometkiwi(example.source, example.hypothesis),
+                       0, 1, "COMET-Kiwi") if self.cometkiwi_weight else None
+        reward = self.cometkiwi_weight * kiwi if kiwi is not None else 0.0
+        reward += metricx + self.alignment_weight * alignment + self.chrf_weight * chrf / 100
+        return Score(reward, True, metricx, alignment, chrf, kiwi)

@@ -31,8 +31,8 @@ def rollout_metrics(batch):
     metrics = {}
     for prefix, rows in groups.items():
         metrics[f"{prefix}/num_samples"] = len(rows)
-        for key in ("reward", "language_alignment", "metricx", "word_alignment", "chrf_pp"):
-            values = [row[key] for row in rows if row[key] is not None]
+        for key in ("reward", "language_alignment", "metricx", "word_alignment", "chrf_pp", "cometkiwi"):
+            values = [row[key] for row in rows if row.get(key) is not None]
             if values:
                 metrics[f"{prefix}/{key}/mean"] = sum(values) / len(values)
     return metrics

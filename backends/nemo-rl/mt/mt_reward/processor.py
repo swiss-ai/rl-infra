@@ -4,7 +4,8 @@ def translation_data_processor(datum_dict, task_data_spec, tokenizer, max_seq_le
     messages = [{"role": "user", "content": datum_dict["prompt"]}]
     if task_data_spec.system_prompt:
         messages.insert(0, {"role": "system", "content": task_data_spec.system_prompt})
-    # Qwen3's non-thinking template starts generation directly in translation mode.
+    # Use the policy tokenizer's own template and control tokens. Disable
+    # thinking for templates that support it; others ignore the extra kwarg.
     text = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
     tokens = tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"][0]

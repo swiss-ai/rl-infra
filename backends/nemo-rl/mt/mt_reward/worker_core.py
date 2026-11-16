@@ -13,7 +13,8 @@ class RewardWorker:
         self.scorer = TranslationReward(
             WalarComponents(config),
             alignment_weight=config.get("alignment_weight", 20),
-            chrf_weight=config.get("chrf_weight", 20))
+            chrf_weight=config.get("chrf_weight", 20),
+            cometkiwi_weight=config.get("cometkiwi_weight", 0))
 
     def ready(self):
         return True
