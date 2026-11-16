@@ -191,6 +191,11 @@ check_gym_capture() {
     grep -q "def classify_rollout" "${g}/responses_api_agents/harbor_agent/failure_classes.py" 2>/dev/null \
         && ok "Gym patch 0037: failure classes per rollout, context-limit truncation ends the episode" \
         || bad "Gym patch 0037 missing (classify_rollout in harbor_agent/failure_classes.py)"
+    # 0038, 0039 (Kostas, from main's 0014/0015): a local task is named directly (no dataset scan per trial);
+    # harbor_environment_build_timeout_multiplier, which envs/harbor-verified-sft.yaml sets
+    grep -q "harbor_environment_build_timeout_multiplier" "${g}/responses_api_agents/harbor_agent/app.py" 2>/dev/null \
+        && ok "Gym patches 0038/0039: local task named directly, environment build timeout multiplier" \
+        || bad "Gym patch 0039 missing (harbor_environment_build_timeout_multiplier in harbor_agent/app.py)"
     # 0031: image_auth (from image_auth_file, Kostas' 0013) only for one registry, not Docker Hub
     grep -q "def _image_registry" "${g}/nemo_gym/sandbox/providers/opensandbox/provider.py" 2>/dev/null \
         && ok "Gym patch 0031: image_auth_registry" \
