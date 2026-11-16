@@ -3,7 +3,7 @@
 # container or Slurm; standard library only):
 #   bash envs/prepare_harbor_verified_tasks.sh <store> <harbor_data_dir>
 # <store> is the harbor_verified_tasks store, one directory per validation campaign with its tasks
-# as tarballs in <campaign>/tasks/ (or a single campaign directory). It writes
+# as tarballs under <campaign>/tasks/, possibly in subdirectories (or a single campaign directory). It writes
 # <harbor_data_dir>/tasks/<campaign>__<task>/ plus train.jsonl, validation.jsonl and task_names.txt;
 # every row's instance_id is `verified::<campaign>__<task>`. Port of
 # swiss-ai/nemo-rl-development's prepare_dataset_harbor_agent_osb.sh.
@@ -13,8 +13,8 @@
 # private registry, so nothing is pulled here (the run passes the registry credentials).
 #
 # The collector takes only the tasks a campaign's tasks.csv marks `keep`, and skips a campaign that
-# has no tasks.csv. The copy on HANGANG (~/projects/harbor_verified_tasks) has none, so there it needs
-# COLLECT_ARGS=--include-unverified. Other knobs: COLLECT_ARGS (also --include-dropped, --force),
+# has no tasks.csv (COLLECT_ARGS=--include-unverified takes those, and the tasks marked unverified).
+# Other knobs: COLLECT_ARGS (also --include-dropped, --force),
 # LIMIT (0 = every task), NUM_VALIDATION (16), SEED (0).
 #
 # The tasks set [verifier] environment_mode = "separate", which needs Harbor 0.25.0 (Gym patch 0011).

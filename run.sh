@@ -21,12 +21,20 @@ RUN="${RUN:-$(basename "${TASK}" .yaml)-$(date +%Y%m%d-%H%M%S)}"
 APERTUS2_DIR="${ROOT}/backends/nemo-rl/apertus2"
 source "${ROOT}/sites/load.sh" && rl_infra_load "${APERTUS2_DIR}/env"
 export ACCOUNT PARTITION="${PARTITION:-${RUN_PARTITION:-${DEFAULT_PARTITION}}}" JOB_TIME="${JOB_TIME:-05:00:00}" SCRATCH
+# HOME inside the container is not yours; task files find your files under ${oc.env:RL_USER_HOME}.
+export RL_USER_HOME="${HOME}"
 mkdir -p "${OUT}/configs"
 # pydeps.sh replaces an overlay when its list changes, and running jobs import from it, so a task
 # with a script gets an overlay of its own.
 TASK_SCRIPT="$(yq r "${TASK}" script)"
 if [[ -n "${TASK_SCRIPT}" ]]; then
     export SCRIPT="${TASK_SCRIPT}" PYDEPS_GYM=1 PYDEPS="${SCRATCH}/nemo-rl-apertus2/pydeps-gym"
+    # Gym builds its server venvs with uv and keeps uv's cache (about 70k files per build) in the
+    # directory NeMo-RL gives it: the container's `uv cache dir`, unless the config names one. NeMo-RL's
+    # ray.sub unsets UV_CACHE_DIR before srun, so under pyxis (HANGANG) the container spec's value never
+    # arrives and the cache fell back to $XDG_CACHE_HOME/uv on scratch, whatever JOB_UV_CACHE_DIR said.
+    # Naming it in the config works on every site; it goes first, so a command-line override still wins.
+    set -- "++env.nemo_gym.uv_cache_dir=${JOB_UV_CACHE_DIR:-${SCRATCH}/.cache/uv}" "$@"
 fi
 # A recipe on an SFT checkpoint names its export. apertus-common goes in an overlay of its own, for
 # the same reason, and the export is staged next to the base model.
