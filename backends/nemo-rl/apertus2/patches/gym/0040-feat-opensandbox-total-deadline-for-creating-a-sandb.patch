@@ -1,0 +1,312 @@
+From f70a45698da780a1561c49b272912981b03ace48 Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Mon, 16 Nov 2026 15:00:34 +0000
+Subject: [PATCH 40/42] feat(opensandbox): total deadline for creating a
+ sandbox
+
+A create attempt waits up to the server's pod-ready limit, and the
+provider retries a retryable failure create.retries times. In job
+5365870 an image pull hung (pod Pending): 830 attempts ended in HTTP
+504 KUBERNETES::POD_READY_TIMEOUT after 600 s, and with retries: 10 one
+create held its rollout for ~6900 s (46 creates used all 11 attempts).
+create.timeout_s bounds one attempt, not the total. A rollout stuck in
+a create held its group, and a step needs all 8 groups: step 3 waited
+6554 s of its 6682 s for rollouts.
+
+New create.deadline_s (default None = unchanged): no new attempt starts
+once deadline_s has passed since the first attempt began, counting the
+back-off before the next attempt (tenacity's stop_before_delay rule).
+The attempt in flight is not cancelled, since that could leak a pod the
+server is still readying. When the deadline ends the retries, the last
+attempt's error is raised as when the retries run out (reraise), so the
+harbor_agent failure classes still call it infra (tested with the
+5365870 error), and one WARNING line says that the deadline stopped the
+retries. With the 600 s server limit, deadline_s 1200 allows at most 2
+attempts, ~20 min.
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ .../infrastructure/sandbox/opensandbox.mdx    |   4 +-
+ .../opensandbox/configs/opensandbox.yaml      |   4 +
+ .../sandbox/providers/opensandbox/provider.py |  39 ++++-
+ tests/unit_tests/test_opensandbox_provider.py | 154 ++++++++++++++++++
+ 4 files changed, 199 insertions(+), 2 deletions(-)
+
+diff --git a/fern/versions/latest/pages/infrastructure/sandbox/opensandbox.mdx b/fern/versions/latest/pages/infrastructure/sandbox/opensandbox.mdx
+index 80985769f..da87c3091 100644
+--- a/fern/versions/latest/pages/infrastructure/sandbox/opensandbox.mdx
++++ b/fern/versions/latest/pages/infrastructure/sandbox/opensandbox.mdx
+@@ -81,7 +81,7 @@ The provider constructor accepts four optional config sections:
+ | Section | Purpose |
+ | --- | --- |
+ | `connection` | OpenSandbox SDK connection settings: domain, API key, protocol, request timeout, server proxy mode, and `tls_verify`. |
+-| `create` | Sandbox create timeout, retry, image pull policy, and health-check behavior. |
++| `create` | Sandbox create timeout, retry count and total deadline (`deadline_s`), image pull policy, and health-check behavior. |
+ | `probe` | Post-create command probe used to verify command execution before the sandbox is returned. |
+ | `operations` | Retry and timeout behavior for SDK operations after create, including command retries, close timeout, background command polling, and the dedicated `status_poll_timeout_s` budget for background status polls. |
+ 
+@@ -244,6 +244,8 @@ The provider's `create.image_pull_policy` defaults to `IfNotPresent`. Valid valu
+ 
+ Create retries handle transient allocation, connection, image pull, and server-side errors. Command retries are controlled separately by `operations.command_retries`.
+ 
++Each create attempt can take as long as the server's pod-ready limit (for example 600 s while an image pull hangs), so `retries` alone can hold one create for hours. `create.deadline_s` (default `null`, no deadline) bounds the total: no new attempt starts once that many seconds have passed since the first attempt began, counting the back-off before the next attempt. An attempt already in flight is not cancelled, since that could leak a pod the server is still readying; when the deadline ends the retries, the last attempt's error is raised as when the retries run out.
++
+ execd, the exec daemon inside each sandbox, holds every command response open for `EXECD_API_GRACE_SHUTDOWN` (default 1s) after the command's last event, which is fixed latency on each command and on the readiness probe. Set it in the sandbox spec's `env` to shorten it; the shipped SWE-bench and OpenCode configs use `50ms`, and the provider's `operations.background_poll_initial_s` (0.5) is sized to that.
+ 
+ `connection.tls_verify` (default `false`) controls certificate verification on every connection the provider opens, both the SDK transport and PTY WebSockets. The default skips verification so that `https://` endpoints with a certificate the client cannot verify, such as a validation cluster behind a self-signed load balancer, work without extra setup; set `tls_verify: true` for endpoints with a verifiable certificate. For `https` endpoints, either set `connection.protocol: https` or include the scheme in the domain (`connection.domain: https://sandbox.example`, or `OPENSANDBOX_DOMAIN=https://sandbox.example`): a scheme in the domain sets the protocol and takes precedence over `connection.protocol`. The `cleanup_sandboxes.py` helper mirrors the setting with `--tls-verify` and reads `tls_verify` from `--connection-config`.
+diff --git a/nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml b/nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+index 9575fb337..02c2e1bc7 100644
+--- a/nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
++++ b/nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+@@ -52,6 +52,10 @@ sandbox:
+       # is not listening yet, which returns a 502 and kills the rollout.
+       skip_health_check: false
+       retries: 10
++      # Total seconds for all attempts of one create: no new attempt starts after it (the one in flight
++      # finishes). An attempt can wait the server's pod-ready limit (e.g. 600 s while an image pull hangs),
++      # so 10 retries alone allow ~2 h. null = no deadline.
++      deadline_s: null
+       retry_delay_s: 5.0
+       retry_max_delay_s: 90.0
+     probe:
+diff --git a/nemo_gym/sandbox/providers/opensandbox/provider.py b/nemo_gym/sandbox/providers/opensandbox/provider.py
+index a3feba71a..cc51fce31 100644
+--- a/nemo_gym/sandbox/providers/opensandbox/provider.py
++++ b/nemo_gym/sandbox/providers/opensandbox/provider.py
+@@ -335,6 +335,35 @@ def _log_create_retry(retry_state: Any) -> None:
+     )
+ 
+ 
++def _create_deadline_stop(attempts_stop: Any, deadline_s: float) -> Any:
++    """Tenacity stop for creates: the retries are used up, or the next attempt would start after `deadline_s`.
++
++    Counted from the start of the first attempt, including the back-off before the next one (tenacity's
++    stop_before_delay). An attempt in flight is never cut: cancelling a create the server is still readying
++    could leak its pod. One WARNING line when the deadline (not the retry count) ends the retries.
++    """
++
++    def stop(retry_state: Any) -> bool:
++        if attempts_stop(retry_state):
++            return True
++        next_start_s = retry_state.seconds_since_start + retry_state.upcoming_sleep
++        if next_start_s < deadline_s:
++            return False
++        exception = retry_state.outcome.exception() if retry_state.outcome else None
++        LOGGER.warning(
++            "Not retrying OpenSandbox sandbox create after attempt %s: create.deadline_s=%g reached "
++            "(%.0fs since the first attempt, next_sleep_s=%.1f); error=%r",
++            retry_state.attempt_number,
++            deadline_s,
++            retry_state.seconds_since_start,
++            retry_state.upcoming_sleep,
++            exception,
++        )
++        return True
++
++    return stop
++
++
+ def _log_operation_retry(retry_state: Any, *, operation: str = "?", sandbox_id: str = "?") -> None:
+     # operation + sandbox_id make an absorbed create-probe retry distinguishable
+     # from a failing agent exec; without them every 502 retry looks identical.
+@@ -567,6 +596,9 @@ class OpenSandboxCreateConfig:
+     request_timeout_s: int | None = None
+     timeout_s: float | None = None
+     retries: int = 2
++    # Total time for all attempts of one create: no new attempt starts once it has passed since the first
++    # attempt began (the attempt in flight runs to its end). None = only `retries` bounds the create.
++    deadline_s: float | None = None
+     retry_delay_s: float = 5.0
+     retry_max_delay_s: float = 60.0
+     image_pull_policy: str | None = DEFAULT_IMAGE_PULL_POLICY
+@@ -581,6 +613,8 @@ class OpenSandboxCreateConfig:
+             raise ValueError("create.timeout_s must be > 0")
+         if self.retries < 0:
+             raise ValueError("create.retries must be >= 0")
++        if self.deadline_s is not None and self.deadline_s <= 0:
++            raise ValueError("create.deadline_s must be > 0")
+         if self.retry_delay_s < 0:
+             raise ValueError("create.retry_delay_s must be >= 0")
+         if self.retry_max_delay_s < 0:
+@@ -1480,9 +1514,12 @@ class OpenSandboxProvider:
+         spec: SandboxSpec,
+     ) -> SandboxHandle:
+         AsyncRetrying, retry_if_exception, stop_after_attempt, wait_random_exponential = _require_tenacity()
++        stop = stop_after_attempt(self._create.retries + 1)
++        if self._create.deadline_s is not None:
++            stop = _create_deadline_stop(stop, self._create.deadline_s)
+         retry_policy = AsyncRetrying(
+             retry=retry_if_exception(_is_retryable_create_error),
+-            stop=stop_after_attempt(self._create.retries + 1),
++            stop=stop,
+             wait=wait_random_exponential(
+                 multiplier=self._create.retry_delay_s,
+                 max=self._create.retry_max_delay_s,
+diff --git a/tests/unit_tests/test_opensandbox_provider.py b/tests/unit_tests/test_opensandbox_provider.py
+index c1e71712a..a57e9c573 100644
+--- a/tests/unit_tests/test_opensandbox_provider.py
++++ b/tests/unit_tests/test_opensandbox_provider.py
+@@ -1545,6 +1545,160 @@ async def _return_value(value: Any) -> Any:
+     return value
+ 
+ 
++def _pod_ready_timeout(attempt: int) -> BaseException:
++    """The create failure of job 5365870 (image pull hanging): the server's 504 after its pod-ready limit."""
++    from opensandbox.exceptions import SandboxApiException  # noqa: PLC0415
++
++    error = SandboxApiException(
++        'Create sandbox failed: HTTP 504: {"code":"KUBERNETES::POD_READY_TIMEOUT","message":"Timeout waiting for '
++        f'sandbox attempt-{attempt} to be Running with IP. Elapsed: 600.0s, Last state: Pending"}}'
++    )
++    error.status_code = 504
++    return error
++
++
++def _provider_with_scripted_creates(
++    monkeypatch: pytest.MonkeyPatch, create: dict[str, Any], attempts: list[tuple[float, BaseException | None]]
++) -> tuple[Any, list[int]]:
++    """A provider whose create attempt n waits attempts[n][0] seconds, then raises attempts[n][1] (None: succeeds)."""
++    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None}, create=create)
++    started: list[int] = []
++
++    async def scripted_create_once(spec: SandboxSpec) -> Any:
++        started.append(len(started) + 1)
++        duration_s, error = attempts[len(started) - 1]
++        await asyncio.sleep(duration_s)
++        if error is not None:
++            raise error
++        return opensandbox_provider.SandboxHandle(sandbox_id="sandbox-late", provider_name="opensandbox", raw=None)
++
++    monkeypatch.setattr(provider, "_create_once", scripted_create_once)
++    return provider, started
++
++
++def test_create_deadline_defaults_to_none_and_must_be_positive() -> None:
++    assert opensandbox_provider.OpenSandboxCreateConfig().deadline_s is None
++    assert opensandbox_provider.OpenSandboxCreateConfig(deadline_s=1200).deadline_s == 1200
++    for bad in (0, -1):
++        with pytest.raises(ValueError, match="create.deadline_s"):
++            opensandbox_provider.OpenSandboxProvider(create={"deadline_s": bad})
++
++
++async def test_create_deadline_stops_new_attempts_and_raises_the_last_error(
++    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
++) -> None:
++    """Job 5365870 scaled down: each attempt takes 0.3 s (600 s on the cluster), deadline 0.5 s (1200 s).
++
++    Attempt 1 fails before the deadline, so attempt 2 starts; it fails after the deadline, so no attempt 3
++    starts although 10 retries are configured. The caller sees attempt 2's own SDK error, as when retries run
++    out, and one log line says why the retries stopped.
++    """
++    errors = [_pod_ready_timeout(n) for n in range(1, 12)]
++    provider, started = _provider_with_scripted_creates(
++        monkeypatch,
++        {"retries": 10, "retry_delay_s": 0, "retry_max_delay_s": 0, "deadline_s": 0.5},
++        [(0.3, error) for error in errors],
++    )
++
++    with caplog.at_level(logging.WARNING, logger=opensandbox_provider.LOGGER.name):
++        with pytest.raises(type(errors[0])) as exc_info:
++            await provider.create(SandboxSpec(image="rl-registry.example/sample500_datalad:latest"))
++
++    assert started == [1, 2]
++    assert exc_info.value is errors[1]
++    deadline_lines = [r.getMessage() for r in caplog.records if "deadline" in r.getMessage()]
++    assert len(deadline_lines) == 1
++    assert "deadline_s=0.5" in deadline_lines[0]
++    assert "after attempt 2" in deadline_lines[0]
++    assert "POD_READY_TIMEOUT" in deadline_lines[0]
++
++
++async def test_create_deadline_error_is_still_classified_infra(monkeypatch: pytest.MonkeyPatch) -> None:
++    """The error the deadline lets through is what Harbor records; 0037's classifier must call it infra."""
++    import traceback  # noqa: PLC0415
++
++    from responses_api_agents.harbor_agent.failure_classes import classify_rollout  # noqa: PLC0415
++
++    provider, _ = _provider_with_scripted_creates(
++        monkeypatch,
++        {"retries": 10, "retry_delay_s": 0, "retry_max_delay_s": 0, "deadline_s": 0.05},
++        [(0.1, _pod_ready_timeout(1))],
++    )
++    with pytest.raises(Exception) as exc_info:
++        await provider.create(SandboxSpec(image="image:tag"))
++
++    error = exc_info.value
++    trial_result = {
++        "exception_info": {
++            "exception_type": type(error).__name__,
++            "exception_message": str(error),
++            "exception_traceback": "".join(traceback.format_exception(error)),
++        },
++        "verifier_result": None,
++    }
++    failure = classify_rollout(trial_result, {})
++    assert failure.failure_class == "infra"
++    assert "POD_READY_TIMEOUT" in failure.detail
++
++
++async def test_create_deadline_does_not_cancel_an_attempt_in_flight(monkeypatch: pytest.MonkeyPatch) -> None:
++    """Cancelling a create the server is still readying could leak its pod: the attempt runs to its end."""
++    provider, started = _provider_with_scripted_creates(
++        monkeypatch,
++        {"retries": 10, "retry_delay_s": 0, "retry_max_delay_s": 0, "deadline_s": 0.2},
++        [(0.05, _pod_ready_timeout(1)), (0.3, None)],
++    )
++
++    handle = await provider.create(SandboxSpec(image="image:tag"))
++
++    assert started == [1, 2]
++    assert handle.sandbox_id == "sandbox-late"
++
++
++async def test_create_without_deadline_uses_every_retry(monkeypatch: pytest.MonkeyPatch) -> None:
++    errors = [_pod_ready_timeout(n) for n in range(1, 5)]
++    provider, started = _provider_with_scripted_creates(
++        monkeypatch,
++        {"retries": 3, "retry_delay_s": 0, "retry_max_delay_s": 0},
++        [(0.0, error) for error in errors],
++    )
++
++    with pytest.raises(type(errors[0])) as exc_info:
++        await provider.create(SandboxSpec(image="image:tag"))
++
++    assert started == [1, 2, 3, 4]
++    assert exc_info.value is errors[3]
++
++
++@pytest.mark.parametrize(
++    "seconds_since_start, upcoming_sleep, attempts_done, stops",
++    [
++        (600.4, 45.0, False, False),  # attempt 1 failed, attempt 2 would start at ~645 s < 1200 s
++        (1200.9, 0.0, False, True),  # attempt 2 failed after the deadline
++        (1150.0, 60.0, False, True),  # the back-off would start attempt 3 after the deadline
++        (100.0, 0.0, True, True),  # retries used up: stops as before, without the deadline line
++    ],
++)
++def test_create_deadline_stop_counts_the_next_back_off(
++    caplog: pytest.LogCaptureFixture,
++    seconds_since_start: float,
++    upcoming_sleep: float,
++    attempts_done: bool,
++    stops: bool,
++) -> None:
++    stop = opensandbox_provider._create_deadline_stop(lambda _state: attempts_done, 1200.0)
++    retry_state = SimpleNamespace(
++        seconds_since_start=seconds_since_start,
++        upcoming_sleep=upcoming_sleep,
++        attempt_number=2,
++        outcome=SimpleNamespace(exception=lambda: _pod_ready_timeout(2)),
++    )
++    with caplog.at_level(logging.WARNING, logger=opensandbox_provider.LOGGER.name):
++        assert stop(retry_state) is stops
++    deadline_lines = [r for r in caplog.records if "deadline" in r.getMessage()]
++    assert len(deadline_lines) == (1 if stops and not attempts_done else 0)
++
++
+ ATTRIBUTION_ENV_VARS = (
+     "NEMO_GYM_TEAM",
+     "NEMO_GYM_USER",
+-- 
+2.56.0
+

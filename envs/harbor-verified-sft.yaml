@@ -157,6 +157,12 @@ env:
           # Reach sandboxes through the ingress gateway, not through the OpenSandbox server, which
           # answered "no available server" at about 190 sandboxes. opensandbox.yaml sets true.
           use_server_proxy: false
+        # Give up a sandbox create 1200 s after its first attempt (Gym patch 0040; no new attempt after that,
+        # the one in flight finishes). Job 5365870 (registry outage): every attempt waited the server's 600 s
+        # pod-ready limit, and with retries: 10 one create held its group ~6900 s. At 600 s per attempt: at
+        # most 2 attempts, ~20 min. opensandbox.yaml keeps retries: 10 for fast failures.
+        create:
+          deadline_s: 1200
         # Labels on every pod. The driver sees neither $USER nor Slurm's variables in the container, so
         # the run name tells a run's pods apart.
         attribution:

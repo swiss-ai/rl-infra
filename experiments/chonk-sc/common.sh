@@ -196,6 +196,22 @@ check_gym_capture() {
     grep -q "harbor_environment_build_timeout_multiplier" "${g}/responses_api_agents/harbor_agent/app.py" 2>/dev/null \
         && ok "Gym patches 0038/0039: local task named directly, environment build timeout multiplier" \
         || bad "Gym patch 0039 missing (harbor_environment_build_timeout_multiplier in harbor_agent/app.py)"
+    # 0040: create.deadline_s, a total deadline for a sandbox create (job 5365870: 10 retries x 600 s pod-ready
+    # wait held one create ~6900 s); envs/harbor-verified-sft.yaml sets it, which the provider rejects without
+    # the patch (unexpected keyword)
+    grep -q "def _create_deadline_stop" "${g}/nemo_gym/sandbox/providers/opensandbox/provider.py" 2>/dev/null \
+        && ok "Gym patch 0040: total deadline for a sandbox create (create.deadline_s)" \
+        || bad "Gym patch 0040 missing (_create_deadline_stop in sandbox/providers/opensandbox/provider.py)"
+    # 0041: infra rollouts are masked also without token capture (job 5365870: 45 verifier-pod failures would
+    # have trained as reward 0)
+    grep -q "harbor_mask_infra" "${g}/responses_api_agents/harbor_agent/app.py" 2>/dev/null \
+        && ok "Gym patch 0041: infra rollouts masked (harbor_mask_infra)" \
+        || bad "Gym patch 0041 missing (harbor_mask_infra in harbor_agent/app.py)"
+    # 0042: a length reply is cut by the context only within max(256, 1%) of the limit (job 5365870: 22+ of 73
+    # "cuts" had room left); "prompt does not fit" only for a rejected first prompt
+    grep -q "def context_cut_margin" "${g}/responses_api_agents/harbor_agent/custom_agents/llms/nemo_gym_llm.py" 2>/dev/null \
+        && ok "Gym patch 0042: context cut only near the context limit" \
+        || bad "Gym patch 0042 missing (context_cut_margin in harbor_agent/custom_agents/llms/nemo_gym_llm.py)"
     # 0031: image_auth (from image_auth_file, Kostas' 0013) only for one registry, not Docker Hub
     grep -q "def _image_registry" "${g}/nemo_gym/sandbox/providers/opensandbox/provider.py" 2>/dev/null \
         && ok "Gym patch 0031: image_auth_registry" \

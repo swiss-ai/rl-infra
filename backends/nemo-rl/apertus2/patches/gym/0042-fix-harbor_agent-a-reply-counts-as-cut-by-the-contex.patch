@@ -1,0 +1,584 @@
+From 2e67d0a83a56d817b3e2650b64743edb85b0061e Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Mon, 16 Nov 2026 15:10:09 +0000
+Subject: [PATCH 42/42] fix(harbor_agent): a reply counts as cut by the context
+ only near the context limit
+
+0037 counted a reply with finish_reason length as cut by the context
+ceiling when it had fewer tokens than the output limit, or when prompt
++ reply reached model_info.max_input_tokens, and then ended the episode
+as a context overflow. The first condition also fires far from the
+ceiling: the NeMo-RL Apertus 2 chat endpoint reports length for any
+output without a reply frame (apply_apertus2_output_to_chat_response_
+choices), and vLLM's own length needs max_tokens = min(requested,
+max_model_len - len(prompt)) to be reached. In job 5365870 0037 ended
+73 episodes this way; at least 22 had prompt + reply well below 24576
+even with one token per observation character (one first call: 1163
+prompt + 232 reply tokens, then labelled "prompt does not fit" and the
+rollout masked although its 7 siblings scored 6 x 1.0).
+
+New rule: a length reply is cut by the context only if prompt +
+completion (server usage, else token ids) is within max(256, 1% of the
+limit) tokens of max_input_tokens. The clamp makes a real cut end at
+the limit exactly; the margin absorbs tokens counted on one side only.
+Any other length reply is an ordinary truncation (truncation_retry
+resample, then max_consecutive_truncations). Without the prompt size or
+the limit it is not a cut. Both errors now carry the numbers ("P prompt
++ C completion = T tokens; output limit O, context limit L").
+
+"prompt does not fit" is now used only when the model server rejected
+the first prompt itself (Gym's fake response; in 5365870 the 60 fake
+responses match the endpoint's 60 "Prompt length (24582-24615) fills
+or exceeds" warnings): NemoGymLLM sets prompt_over_context_limit and
+Terminus2NemoGym writes it to agent_error_flags.json. Flags written
+before this change fall back to "no context cut on the first call".
+
+Offline replay over 5365870 (prompt of the cut call not recorded;
+bounds from the last answered call's usage and the next observation):
+of 0037's 73 cuts, 22 are cuts under the new rule, 22 are not, 29
+depend on the observation's token count (point estimate at 3 chars per
+token: 45 cut, 28 not).
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ responses_api_agents/harbor_agent/README.md   |  12 +-
+ .../custom_agents/llms/nemo_gym_llm.py        | 109 ++++++++----
+ .../custom_agents/terminus_2_nemo_gym.py      |   6 +-
+ .../custom_agents/test_terminus_2_nemo_gym.py | 157 ++++++++++++++++--
+ .../harbor_agent/failure_classes.py           |   8 +-
+ .../tests/test_failure_classes.py             |  41 +++++
+ 6 files changed, 277 insertions(+), 56 deletions(-)
+
+diff --git a/responses_api_agents/harbor_agent/README.md b/responses_api_agents/harbor_agent/README.md
+index fa397a94b..d873141ee 100644
+--- a/responses_api_agents/harbor_agent/README.md
++++ b/responses_api_agents/harbor_agent/README.md
+@@ -542,10 +542,14 @@ response, and the class metrics count masked rollouts too. Without it, a rollout
+ when it has no output items, and with capture when the trial failed or has no verifier result.
+ 
+ `Terminus2NemoGym` option `context_limit_truncation` (`overflow` by default, or `resample`): a reply with
+-`finish_reason: length` that has fewer tokens than the output limit, or whose prompt + reply reach
+-`model_info.max_input_tokens` (from the model server's `usage`), was cut by the context ceiling. `overflow`
+-ends the episode as a context overflow (like a prompt that does not fit; the verifier still runs);
+-`resample` treats it like any other truncation (`truncation_retry`, then the cap).
++`finish_reason: length` whose prompt + reply (from the model server's `usage`) come within max(256, 1%) tokens of
++`model_info.max_input_tokens` was cut by the context ceiling (the NeMo-RL endpoint clamps `max_tokens` to the
++room left, so the sum then equals the limit). `overflow` ends the episode as a context overflow (the verifier
++still runs); `resample` treats it like any other truncation (`truncation_retry`, then the cap). Any other
++`length` reply is an ordinary truncation; the Apertus 2 endpoint also reports `length` for an output without a
++reply frame, well below both limits. Both errors carry the prompt, completion and limit numbers. The detail
++"prompt does not fit" is used only when the model server rejected the first prompt itself
++(`prompt_over_context_limit` in `agent_error_flags.json`).
+ 
+ ### On-policy corrections for multi-turn training
+ 
+diff --git a/responses_api_agents/harbor_agent/custom_agents/llms/nemo_gym_llm.py b/responses_api_agents/harbor_agent/custom_agents/llms/nemo_gym_llm.py
+index bc1a4b757..e21096b8c 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/llms/nemo_gym_llm.py
++++ b/responses_api_agents/harbor_agent/custom_agents/llms/nemo_gym_llm.py
+@@ -12,7 +12,9 @@
+ # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
++import math
+ import re
++from dataclasses import dataclass
+ from typing import Any, cast
+ 
+ import httpx
+@@ -52,6 +54,36 @@ _THINK_CLOSE = "</think>"
+ _THINK_PATTERN = re.compile(r"<think>(.*?)</think>", re.DOTALL)
+ 
+ 
++def context_cut_margin(context_limit: int) -> int:
++    """How far below the context limit a "length" reply still counts as cut by it: max(256, 1% of the limit).
++
++    With the endpoint's clamp the sum is exactly the limit; the margin absorbs tokens counted on one side only
++    (e.g. template or frame tokens outside usage; none known, UNVERIFIED) and is small against the output limit
++    (256 of 6144 at 24k), so a reply that stopped this close to the ceiling would not get much further anyway.
++    """
++    return max(256, math.ceil(context_limit / 100))
++
++
++@dataclass(frozen=True)
++class _LengthNumbers:
++    """Token numbers of a reply that finished with "length"; None where the response or the config lacks them."""
++
++    prompt: int | None
++    completion: int | None
++    output_limit: int | None
++    context_limit: int | None
++
++    def text(self) -> str:
++        def show(value: int | None) -> str:
++            return "?" if value is None else str(value)
++
++        total = "?" if self.prompt is None or self.completion is None else str(self.prompt + self.completion)
++        return (
++            f"{show(self.prompt)} prompt + {show(self.completion)} completion = {total} tokens; "
++            f"output limit {show(self.output_limit)}, context limit {show(self.context_limit)}"
++        )
++
++
+ class NemoGymLLM(BaseLLM):
+     """LLM backend that calls NeMo Gym model servers via chat completions."""
+ 
+@@ -106,6 +138,8 @@ class NemoGymLLM(BaseLLM):
+         self.context_limit_truncation = "overflow"
+         self.context_limit_truncations = 0
+         self.last_truncation_at_context_limit = False
++        # Set when the model server rejected the prompt itself (it fills the context; the fake response below).
++        self.prompt_over_context_limit = False
+         # Calls answered with a reply (not truncated, not overflowed); 0 at the end = the prompt never fit.
+         self.answered_calls = 0
+ 
+@@ -163,8 +197,12 @@ class NemoGymLLM(BaseLLM):
+         # and returns a fake 200 with id="chtcmpl-123" and content=None.
+         if response_dict.get("id") == "chtcmpl-123":
+             self.context_length_exceeded = True
++            self.prompt_over_context_limit = True
++            context_limit = self._model_info.get("max_input_tokens")
++            limit_text = f": the prompt fills the context limit {context_limit}" if context_limit else ""
+             raise ContextLengthExceededError(
+-                f"Model {self._model_name} context length exceeded (detected fake response id='chtcmpl-123')"
++                f"Model {self._model_name} context length exceeded{limit_text} "
++                "(detected fake response id='chtcmpl-123')"
+             )
+ 
+         choices = response_dict.get("choices", [])
+@@ -212,18 +250,19 @@ class NemoGymLLM(BaseLLM):
+                 content = parts[1] if len(parts) > 1 else ""
+ 
+         if isinstance(choice, dict) and choice.get("finish_reason") == "length":
+-            cut_by_context = self._cut_by_context_limit(payload, response_dict)
+-            self.last_truncation_at_context_limit = cut_by_context is not None
+-            if cut_by_context is not None:
++            numbers = self._length_numbers(payload, response_dict)
++            cut_by_context = self._cut_by_context_limit(numbers)
++            self.last_truncation_at_context_limit = cut_by_context
++            if cut_by_context:
+                 self.context_limit_truncations += 1
+                 if self.context_limit_truncation == "overflow":
+                     self.context_length_exceeded = True
+                     raise ContextLengthExceededError(
+-                        f"Model {self._model_name} reply was cut by the context limit ({cut_by_context}); "
++                        f"Model {self._model_name} reply was cut by the context limit ({numbers.text()}); "
+                         "ending the episode as a context overflow"
+                     )
+             raise OutputLengthExceededError(
+-                f"Model {self._model_name} hit max_tokens limit. "
++                f"Model {self._model_name} hit max_tokens limit ({numbers.text()}). "
+                 "Response was truncated. Consider increasing max_tokens if possible.",
+                 truncated_response=content,
+             )
+@@ -258,16 +297,12 @@ class NemoGymLLM(BaseLLM):
+             logprobs=logprobs,
+         )
+ 
+-    def _cut_by_context_limit(self, payload: dict[str, Any], response_dict: dict[str, Any]) -> str | None:
+-        """For a reply with finish_reason "length": why it was cut by the context ceiling, or None.
++    def _length_numbers(self, payload: dict[str, Any], response_dict: dict[str, Any]) -> "_LengthNumbers":
++        """The token numbers of a reply with finish_reason "length" (None where unknown).
+ 
+-        The NeMo-RL endpoint clamps max_tokens to max_model_len - len(prompt), so near the end of the context a
+-        reply stops at the ceiling, and a resample of the same prompt hits the same ceiling (job 5359900: 72 of 73
+-        truncation loops had < max_new_tokens of room left, median 90 tokens). Uses the server's usage numbers
+-        (Terminus2's own token count misses the thinking kept in the token-in prompt), else the returned token
+-        ids. Cut by the context: fewer completion tokens than the output limit (the request's max_tokens, else
+-        model_info.max_output_tokens), or prompt + completion reaching model_info.max_input_tokens. Without the
+-        numbers or the limits: None (treated as an ordinary truncation).
++        Prompt and completion from the server's usage numbers (Terminus2's own token count misses the thinking
++        kept in the token-in prompt), else the returned token ids. Output limit: the request's max_tokens, else
++        model_info.max_output_tokens. Context limit: model_info.max_input_tokens.
+         """
+         usage = response_dict.get("usage") if isinstance(response_dict.get("usage"), dict) else {}
+         choices = response_dict.get("choices") or [{}]
+@@ -281,26 +316,32 @@ class NemoGymLLM(BaseLLM):
+             ids = message.get(ids_key)
+             return len(ids) if isinstance(ids, list) else None
+ 
+-        prompt_tokens = count("prompt_tokens", "prompt_token_ids")
+-        completion_tokens = count("completion_tokens", "generation_token_ids")
+-        if completion_tokens is None:
+-            return None
++        def positive(value: Any) -> int | None:
++            return value if isinstance(value, int) and value > 0 else None
+ 
+-        output_limit = payload.get("max_tokens") or payload.get("max_completion_tokens")
+-        if not (isinstance(output_limit, int) and output_limit > 0):
+-            output_limit = self._model_info.get("max_output_tokens")
+-        if isinstance(output_limit, int) and output_limit > 0 and completion_tokens < output_limit:
+-            return f"{completion_tokens} completion tokens < output limit {output_limit}"
+-
+-        context_limit = self._model_info.get("max_input_tokens")
+-        if (
+-            isinstance(context_limit, int)
+-            and context_limit > 0
+-            and prompt_tokens is not None
+-            and prompt_tokens + completion_tokens >= context_limit
+-        ):
+-            return f"{prompt_tokens} prompt + {completion_tokens} completion tokens >= context limit {context_limit}"
+-        return None
++        return _LengthNumbers(
++            prompt=count("prompt_tokens", "prompt_token_ids"),
++            completion=count("completion_tokens", "generation_token_ids"),
++            output_limit=positive(payload.get("max_tokens") or payload.get("max_completion_tokens"))
++            or positive(self._model_info.get("max_output_tokens")),
++            context_limit=positive(self._model_info.get("max_input_tokens")),
++        )
++
++    @staticmethod
++    def _cut_by_context_limit(numbers: "_LengthNumbers") -> bool:
++        """Whether a reply with finish_reason "length" was cut by the context ceiling.
++
++        The NeMo-RL endpoint clamps max_tokens to max_model_len - len(prompt), so a reply cut by the ceiling has
++        prompt + completion = the context limit, and a resample of the same prompt meets the same ceiling (job
++        5359900: 72 of 73 truncation loops). Cut: prompt + completion within CONTEXT_CUT_MARGIN of
++        model_info.max_input_tokens. A shorter length reply had room left: the Apertus 2 endpoint also ends an
++        output without a reply frame with "length" (job 5365870: 22 of 0037's 73 "cuts" ended well below the
++        limit, one at 1163 + 232 tokens); it is an ordinary truncation (resampled). Without the numbers or the
++        limit: not a cut.
++        """
++        if numbers.prompt is None or numbers.completion is None or numbers.context_limit is None:
++            return False
++        return numbers.prompt + numbers.completion >= numbers.context_limit - context_cut_margin(numbers.context_limit)
+ 
+     def get_model_context_limit(self) -> int:
+         fallback_context_limit = 1000000
+diff --git a/responses_api_agents/harbor_agent/custom_agents/terminus_2_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/terminus_2_nemo_gym.py
+index f67709131..3a7fddc03 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/terminus_2_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/terminus_2_nemo_gym.py
+@@ -62,8 +62,9 @@ class Terminus2NemoGymOptions(Terminus2Options):
+     )
+     context_limit_truncation: Literal["overflow", "resample"] = Field(
+         default="overflow",
+-        description="A reply cut by the context ceiling (fewer tokens than the output limit, or prompt + reply "
+-        "reaching model_info.max_input_tokens, from the model server's usage numbers): 'overflow' ends the episode "
++        description="A reply cut by the context ceiling (finish_reason length with prompt + reply within "
++        "max(256, 1%) tokens of model_info.max_input_tokens, from the model server's usage numbers; a shorter "
++        "length reply is an ordinary truncation): 'overflow' ends the episode "
+         "as a context overflow at once (ContextLengthExceededError; the verifier still runs; with enable_summarize "
+         "Terminus2 summarizes instead); 'resample' treats it like any truncation (truncation_retry, then the "
+         "max_consecutive_truncations cap: the same prompt meets the same ceiling every time).",
+@@ -299,6 +300,7 @@ class Terminus2NemoGym(Terminus2):
+                 flags["context_limit_truncations"] = getattr(llm, "context_limit_truncations", 0)
+                 flags["last_truncation_at_context_limit"] = getattr(llm, "last_truncation_at_context_limit", False)
+                 flags["answered_model_calls"] = getattr(llm, "answered_calls", None)
++                flags["prompt_over_context_limit"] = getattr(llm, "prompt_over_context_limit", False)
+             (self.logs_dir / "agent_error_flags.json").write_text(json.dumps(flags))
+         except Exception:
+             pass  # Don't let flag-writing failures break the agent
+diff --git a/responses_api_agents/harbor_agent/custom_agents/test_terminus_2_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/test_terminus_2_nemo_gym.py
+index 5291092bf..d5df3fe50 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/test_terminus_2_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/test_terminus_2_nemo_gym.py
+@@ -206,7 +206,7 @@ REPLY_1 = '{"analysis": "1", "plan": "p", "commands": [], "task_complete": false
+ REPLY_2 = '{"analysis": "2", "plan": "p", "commands": [], "task_complete": false}'
+ 
+ 
+-def _completion(content, prompt_ids, generation_ids, finish_reason="stop"):
++def _completion(content, prompt_ids, generation_ids, finish_reason="stop", usage=None):
+     message = {
+         "role": "assistant",
+         "content": content,
+@@ -214,7 +214,8 @@ def _completion(content, prompt_ids, generation_ids, finish_reason="stop"):
+         "generation_token_ids": generation_ids,
+         "generation_log_probs": [-0.5] * len(generation_ids),
+     }
+-    usage = {"prompt_tokens": len(prompt_ids), "completion_tokens": len(generation_ids)}
++    # the server's usage numbers; tests at the real context size pass them instead of 24k-long id lists
++    usage = usage or {"prompt_tokens": len(prompt_ids), "completion_tokens": len(generation_ids)}
+     return {"id": "chatcmpl-1", "choices": [{"message": message, "finish_reason": finish_reason}], "usage": usage}
+ 
+ 
+@@ -297,10 +298,16 @@ async def test_truncation_retry_harbor_keeps_harbors_error_message(tmp_path) ->
+ # Job 5359900: 72 of 73 truncation loops had less room left than max_new_tokens (median 90 tokens): the endpoint
+ # clamps max_tokens to max_model_len - len(prompt), so the reply stops at the context ceiling, and a resample of the
+ # same prompt meets the same ceiling, 8 times. A reply cut by the ceiling now ends the episode as a context overflow.
+-CONTEXT_MODEL_INFO = {"max_input_tokens": 24, "max_output_tokens": 10}
++CONTEXT_MODEL_INFO = {"max_input_tokens": 24576, "max_output_tokens": 6144}
+ ENDLESS = '{"analysis": "a reply that never ends'
+ 
+ 
++def _cut(prompt_tokens, completion_tokens):
++    """A length-finished reply with the server's usage numbers (the id lists stay short)."""
++    usage = {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens}
++    return _completion(ENDLESS, [1, 2, 3], [8, 8], finish_reason="length", usage=usage)
++
++
+ def _context_agent(tmp_path, replies, **kwargs):
+     # as in Gym's training config (configs/harbor_agent_opensandbox_training.yaml); with it on, Terminus2 answers a
+     # ContextLengthExceededError by summarizing instead of ending the episode
+@@ -312,38 +319,118 @@ def _context_agent(tmp_path, replies, **kwargs):
+ 
+ @pytest.mark.asyncio
+ @pytest.mark.parametrize(
+-    "prompt_ids, completion_ids",
++    "prompt_tokens, completion_tokens",
+     [
+-        pytest.param(list(range(20)), [8] * 4, id="prompt+reply-reach-the-context-limit"),
+-        pytest.param(list(range(5)), [8] * 3, id="reply-shorter-than-the-output-limit"),
++        # the endpoint clamps max_tokens to max_model_len - len(prompt): prompt + reply = the limit exactly
++        pytest.param(24000, 576, id="prompt+reply-reach-the-context-limit"),
++        # within the margin max(256, 1% of the limit) = 256 below the limit
++        pytest.param(24100, 220, id="prompt+reply-within-the-margin"),
++        pytest.param(18432, 6144, id="reply-at-the-output-limit-reaching-the-context-limit"),
+     ],
+ )
+ async def test_a_reply_cut_by_the_context_limit_ends_the_episode_as_an_overflow(
+-    tmp_path, prompt_ids, completion_ids
++    tmp_path, prompt_tokens, completion_tokens
+ ) -> None:
+     from harbor.llms.base import ContextLengthExceededError
+ 
+     agent, requests = _context_agent(
+-        tmp_path,
+-        [_completion(ENDLESS, prompt_ids, completion_ids, finish_reason="length"), _completion(REPLY_1, [1], [2])],
++        tmp_path, [_cut(prompt_tokens, completion_tokens), _completion(REPLY_1, [1], [2])]
+     )
+     chat = Chat(agent._llm)
+ 
+-    with pytest.raises(ContextLengthExceededError, match="cut by the context limit"):
++    with pytest.raises(ContextLengthExceededError, match="cut by the context limit") as caught:
+         await agent._query_llm(chat, "do the task")
+ 
++    total = prompt_tokens + completion_tokens
++    assert f"{prompt_tokens} prompt + {completion_tokens} completion = {total} tokens" in str(caught.value)
++    assert "context limit 24576" in str(caught.value)
+     assert len(requests) == 1  # no resample
+     assert chat.messages == []
+     assert agent._llm.context_length_exceeded is True
+     assert agent._llm.context_limit_truncations == 1
++    assert agent._llm.prompt_over_context_limit is False
+ 
+ 
++# Job 5365870: 0037 called every length reply shorter than the output limit a context cut. 22 of its 73 cuts had
++# prompt + reply well below the limit (the Apertus 2 endpoint also reports `length` for an output without a reply
++# frame), e.g. a first call of 1163 + 232 tokens, then labelled "prompt does not fit" and masked.
+ @pytest.mark.asyncio
+-async def test_a_reply_cut_by_the_output_limit_with_room_left_is_still_resampled(tmp_path) -> None:
++@pytest.mark.parametrize(
++    "prompt_tokens, completion_tokens",
++    [
++        pytest.param(1163, 232, id="5365870-first-call"),
++        pytest.param(12431, 452, id="5365870-mid-episode"),
++        pytest.param(24000, 319, id="just-outside-the-margin"),
++    ],
++)
++async def test_a_short_length_reply_with_room_left_is_an_ordinary_truncation(
++    tmp_path, prompt_tokens, completion_tokens
++) -> None:
+     agent, requests = _context_agent(
+-        tmp_path,
+-        [_completion(ENDLESS, [1, 2], [8] * 10, finish_reason="length"), _completion(REPLY_1, [1, 2], [3, 4])],
++        tmp_path, [_cut(prompt_tokens, completion_tokens), _completion(REPLY_1, [1], [2])]
++    )
++    chat = Chat(agent._llm)
++
++    assert (await agent._query_llm(chat, "do the task")).content == REPLY_1
++
++    assert len(requests) == 2  # resampled (truncation_retry), the episode goes on
++    assert requests[1]["messages"] == requests[0]["messages"]
++    assert agent._llm.context_length_exceeded is False
++    assert agent._llm.last_truncation_at_context_limit is False
++    assert agent._llm.context_limit_truncations == 0
++
++
++@pytest.mark.asyncio
++async def test_an_ordinary_truncation_reports_its_numbers() -> None:
++    from harbor.llms.base import OutputLengthExceededError
++
++    llm = NemoGymLLM(model_name="test-model", api_base="http://localhost:8000/v1", collect_rollout_details=True)
++    llm._model_info = dict(CONTEXT_MODEL_INFO)
++
++    async def post(payload, timeout_sec=None):
++        return _cut(1163, 232)
++
++    llm._post_chat_completions = post
++    with pytest.raises(OutputLengthExceededError) as caught:
++        await llm.call("do the task")
++
++    assert "1163 prompt + 232 completion = 1395 tokens" in str(caught.value)
++    assert "output limit 6144" in str(caught.value)
++    assert "context limit 24576" in str(caught.value)
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("total_below_limit, cut", [(1000, True), (1400, False)])
++async def test_the_margin_grows_with_the_context_limit(tmp_path, total_below_limit, cut) -> None:
++    # 1% of 131072 = 1311 tokens > 256
++    agent, requests = _context_agent(
++        tmp_path, [_cut(131072 - total_below_limit - 500, 500), _completion(REPLY_1, [1], [2])]
+     )
++    agent._llm._model_info = {"max_input_tokens": 131072, "max_output_tokens": 6144}
++    chat = Chat(agent._llm)
++
++    if cut:
++        with pytest.raises(Exception, match="cut by the context limit"):
++            await agent._query_llm(chat, "do the task")
++    else:
++        assert (await agent._query_llm(chat, "do the task")).content == REPLY_1
++    assert agent._llm.context_length_exceeded is cut
++
++
++@pytest.mark.asyncio
++async def test_without_the_prompt_size_a_short_length_reply_is_an_ordinary_truncation(tmp_path) -> None:
++    reply = _cut(0, 232)
++    reply["usage"] = {"completion_tokens": 232}
++    del reply["choices"][0]["message"]["prompt_token_ids"]
++    agent, requests = _context_agent(tmp_path, [reply, _completion(REPLY_1, [1], [2])])
++
++    assert (await agent._query_llm(Chat(agent._llm), "do the task")).content == REPLY_1
++    assert agent._llm.context_length_exceeded is False
++
++
++@pytest.mark.asyncio
++async def test_a_reply_cut_by_the_output_limit_with_room_left_is_still_resampled(tmp_path) -> None:
++    agent, requests = _context_agent(tmp_path, [_cut(9000, 6144), _completion(REPLY_1, [1, 2], [3, 4])])
+     chat = Chat(agent._llm)
+ 
+     assert (await agent._query_llm(chat, "do the task")).content == REPLY_1
+@@ -365,7 +452,7 @@ async def test_without_usage_numbers_or_limits_a_truncation_is_an_ordinary_one(t
+ 
+ @pytest.mark.asyncio
+ async def test_context_limit_truncation_resample_keeps_the_old_behaviour(tmp_path) -> None:
+-    clamp = _completion(ENDLESS, list(range(20)), [8] * 4, finish_reason="length")
++    clamp = _cut(24000, 576)
+     agent, requests = _context_agent(
+         tmp_path, [clamp] * 3, context_limit_truncation="resample", max_consecutive_truncations=3
+     )
+@@ -397,7 +484,7 @@ async def test_the_context_overflow_ends_the_episode_and_is_classified(tmp_path,
+         tmp_path,
+         [
+             _completion(REPLY_1, [1, 2], [3, 4]),
+-            _completion(ENDLESS, list(range(20)), [8] * 4, finish_reason="length"),
++            _cut(24000, 576),
+         ],
+     )
+     chat = Chat(agent._llm)
+@@ -415,10 +502,50 @@ async def test_the_context_overflow_ends_the_episode_and_is_classified(tmp_path,
+     assert flags["context_length_exceeded"] is True
+     assert flags["context_limit_truncations"] == 1
+     assert flags["answered_model_calls"] == 1
++    assert flags["prompt_over_context_limit"] is False
+     result = classify_rollout({"verifier_result": {"rewards": {"reward": 0.0}}}, flags)
+     assert result.failure_class == "context_overflow"
+ 
+ 
++# The Gym model server answers a prompt that fills the context (vLLM 400) with a fake response; in job 5365870 the
++# endpoint logged 60 "Prompt length (24582-24615) fills or exceeds" = the 60 fake-response overflows.
++FAKE_OVERFLOW = {"id": "chtcmpl-123", "choices": [{"message": {"content": None}, "finish_reason": "stop"}]}
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize(
++    "replies, prompt_does_not_fit",
++    [
++        pytest.param([FAKE_OVERFLOW], True, id="first-prompt-rejected"),
++        pytest.param([_cut(24000, 576)], False, id="first-reply-cut-at-the-limit"),
++    ],
++)
++async def test_prompt_does_not_fit_only_when_the_prompt_alone_is_over_the_limit(
++    tmp_path, monkeypatch, replies, prompt_does_not_fit
++) -> None:
++    import json
++
++    from responses_api_agents.harbor_agent.failure_classes import classify_rollout
++
++    agent, _ = _context_agent(tmp_path, replies)
++    chat = Chat(agent._llm)
++
++    async def one_turn(self, instruction, environment, context):
++        await self._query_llm(chat, instruction)
++        raise AssertionError("the episode should have ended")
++
++    monkeypatch.setattr(Terminus2, "run", one_turn)
++    await agent.run("do the task", environment=MagicMock(), context=AgentContext())
++
++    flags = json.loads((tmp_path / "agent_error_flags.json").read_text())
++    assert flags["answered_model_calls"] == 0
++    assert flags["prompt_over_context_limit"] is prompt_does_not_fit
++    detail = classify_rollout({"verifier_result": {"rewards": {"reward": 0.0}}}, flags).detail
++    assert detail.startswith("prompt does not fit: ") is prompt_does_not_fit
++    if prompt_does_not_fit:
++        assert "context limit 24576" in detail
++
++
+ @pytest.mark.asyncio
+ async def test_the_error_that_ended_the_episode_is_recorded_masked(tmp_path, monkeypatch) -> None:
+     import json
+diff --git a/responses_api_agents/harbor_agent/failure_classes.py b/responses_api_agents/harbor_agent/failure_classes.py
+index 58c873e2e..0697b0f73 100644
+--- a/responses_api_agents/harbor_agent/failure_classes.py
++++ b/responses_api_agents/harbor_agent/failure_classes.py
+@@ -247,7 +247,13 @@ def classify_rollout(
+     # 3. How the agent's episode ended (Terminus2NemoGym catches these so the verifier still runs).
+     if end_type in _CONTEXT_TYPES or flags.get("context_length_exceeded"):
+         detail = short_error(end_type or "ContextLengthExceededError", end_message)
+-        if flags.get("answered_model_calls") == 0:
++        # Only when the model server rejected the first prompt itself (it fills the context); a first reply cut at
++        # the ceiling had a prompt that fit. Flags written before 0042 lack prompt_over_context_limit: there a cut
++        # is marked by last_truncation_at_context_limit (job 5365870: a 1163-token prompt was labelled this way).
++        prompt_over_limit = flags.get("prompt_over_context_limit")
++        if prompt_over_limit is None:
++            prompt_over_limit = not flags.get("last_truncation_at_context_limit")
++        if flags.get("answered_model_calls") == 0 and prompt_over_limit:
+             detail = "prompt does not fit: " + detail
+         return FailureClassification("context_overflow", detail)
+     if end_type == "TruncationLoopError":
+diff --git a/responses_api_agents/harbor_agent/tests/test_failure_classes.py b/responses_api_agents/harbor_agent/tests/test_failure_classes.py
+index 615776182..8ec914d8c 100644
+--- a/responses_api_agents/harbor_agent/tests/test_failure_classes.py
++++ b/responses_api_agents/harbor_agent/tests/test_failure_classes.py
+@@ -233,6 +233,47 @@ def test_classify_rollout(trial_result, flags, expected_class, detail_part) -> N
+     assert detail_part in result.detail
+ 
+ 
++_FIRST_CALL_CUT = {  # job 5365870, trial 111321_749bfd2d: flags written by 0037
++    "context_length_exceeded": True,
++    "end_reason": "ContextLengthExceededError",
++    "end_message": "Model m reply was cut by the context limit (232 completion tokens < output limit 6144); "
++    "ending the episode as a context overflow",
++    "context_limit_truncations": 1,
++    "last_truncation_at_context_limit": True,
++    "answered_model_calls": 0,
++}
++
++
++@pytest.mark.parametrize(
++    "flags, prompt_does_not_fit",
++    [
++        pytest.param(_FIRST_CALL_CUT, False, id="0037-flags-first-reply-cut"),
++        pytest.param({**_FIRST_CALL_CUT, "prompt_over_context_limit": False}, False, id="first-reply-cut"),
++        pytest.param(
++            {
++                "context_length_exceeded": True,
++                "end_reason": "ContextLengthExceededError",
++                "end_message": "Model m context length exceeded (detected fake response id='chtcmpl-123')",
++                "answered_model_calls": 0,
++                "prompt_over_context_limit": True,
++            },
++            True,
++            id="first-prompt-rejected",
++        ),
++        pytest.param(
++            {**_FIRST_CALL_CUT, "answered_model_calls": 4, "prompt_over_context_limit": True},
++            False,
++            id="prompt-over-the-limit-mid-episode",
++        ),
++    ],
++)
++def test_prompt_does_not_fit_only_when_the_prompt_alone_is_over_the_limit(flags, prompt_does_not_fit) -> None:
++    result = classify_rollout(_trial(), flags)
++
++    assert result.failure_class == "context_overflow"
++    assert result.detail.startswith("prompt does not fit: ") is prompt_does_not_fit
++
++
+ def test_harbor_job_errors_are_infra_only_when_they_look_like_it() -> None:
+     connect = classify_rollout(None, {}, ConnectionRefusedError("[Errno 111] Connection refused"))
+     config = classify_rollout(None, {}, ValueError("Invalid kwargs for agent 'x': Unknown option 'y'."))
+-- 
+2.56.0
+

@@ -1,0 +1,183 @@
+From 832faab97116514852198469195076434fdc3512 Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Mon, 16 Nov 2026 15:03:23 +0000
+Subject: [PATCH 41/42] fix(harbor_agent): mask infra rollouts also without
+ token capture
+
+Without training-token capture _should_mask masked a rollout only when
+it had no output items. A trial whose separate verifier pod never
+started after a complete episode has a full trajectory, no verifier
+result and failure class infra, and was trained as reward 0. Job
+5365870 (rl-registry outage, HTTP 504 POD_READY_TIMEOUT, pod Pending):
+45 such rollouts; 6 were trained in step 3 (advantage 0 there), and the
+untrained step-4 batch held a group with 6 unverified zeros next to a
+1.0 that they would have pushed down. A sandbox that died during the
+episode (14 rollouts of job 5358015, verifier ran, reward 0) is the
+same case.
+
+New config flag harbor_mask_infra (default true): every rollout of
+failure class infra (0037's classify_rollout, computed before the mask
+decision) sets instance_config.mask_sample, with and without capture.
+The response still carries failure_class, failure_detail and the
+failure_<class> fields. NeMo-RL drops it from the loss on the existing
+path (instance_config.mask_sample -> mask_sample -> loss_multiplier 0,
+counted in num_mask_sample_filtered), as for the 9 masked rows of step
+2 in job 5365870. False keeps the old rule.
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ responses_api_agents/harbor_agent/README.md   |  6 ++
+ responses_api_agents/harbor_agent/app.py      | 22 +++++--
+ .../harbor_agent/tests/test_app.py            | 57 +++++++++++++++++++
+ 3 files changed, 81 insertions(+), 4 deletions(-)
+
+diff --git a/responses_api_agents/harbor_agent/README.md b/responses_api_agents/harbor_agent/README.md
+index f0b7bff38..fa397a94b 100644
+--- a/responses_api_agents/harbor_agent/README.md
++++ b/responses_api_agents/harbor_agent/README.md
+@@ -535,6 +535,12 @@ start or later, or a reply was cut by the context ceiling), `model_truncation_lo
+ (`max_consecutive_truncations` replies in a row hit the output limit with room left), `other` (type kept in the
+ detail; also no verifier result), else `ok`.
+ 
++`harbor_mask_infra` (default `true`) sets `instance_config.mask_sample` for every `infra` rollout, with or
++without training-token capture, also when it has a full trajectory or a verifier result (e.g. the verifier's
++sandbox never started after a complete episode): its reward is not a measurement. The class fields stay in the
++response, and the class metrics count masked rollouts too. Without it, a rollout is masked without capture only
++when it has no output items, and with capture when the trial failed or has no verifier result.
++
+ `Terminus2NemoGym` option `context_limit_truncation` (`overflow` by default, or `resample`): a reply with
+ `finish_reason: length` that has fewer tokens than the output limit, or whose prompt + reply reach
+ `model_info.max_input_tokens` (from the model server's `usage`), was cut by the context ceiling. `overflow`
+diff --git a/responses_api_agents/harbor_agent/app.py b/responses_api_agents/harbor_agent/app.py
+index 5ebb29db4..22cbdc9e8 100644
+--- a/responses_api_agents/harbor_agent/app.py
++++ b/responses_api_agents/harbor_agent/app.py
+@@ -115,6 +115,11 @@ class HarborAgentConfig(BaseResponsesAPIAgentConfig):
+     # Also mask rollouts whose agent hit its timeout (AgentTimeoutError), even when the verifier
+     # ran. Off by default: such a rollout then trains with the verifier's reward.
+     harbor_mask_agent_timeout: bool = False
++    # Mask rollouts whose failure class is `infra` (failure_classes.py: sandbox create/start failures, a sandbox
++    # that died during the episode, the model server unreachable, ...), with or without token capture. Their
++    # reward is not a measurement: in job 5365870 the separate verifier pod never started after 45 complete
++    # episodes, which would otherwise train as reward 0. False = the mask ignores the failure class.
++    harbor_mask_infra: bool = True
+ 
+     # --- Job output ---
+     # Directory where Harbor writes job results and trial artifacts.
+@@ -412,8 +417,11 @@ class HarborAgent(SimpleResponsesAPIAgent):
+                 # single one otherwise aborts the whole training step. Flag it so
+                 # the trainer can drop it from the gradient instead; NeMo-RL
+                 # reads this exact path (instance_config.mask_sample), which is
+-                # also how anyswe_agent reports sandbox failures.
+-                instance_config={"mask_sample": self._should_mask(trial_result, output_items)},
++                # also how anyswe_agent reports sandbox failures. An `infra` rollout
++                # is masked too (harbor_mask_infra): its reward is not a measurement.
++                instance_config={
++                    "mask_sample": self._should_mask(trial_result, output_items, failure_class=failure.failure_class)
++                },
+                 context_length_exceeded_error=int(agent_error_flags.get("context_length_exceeded", False)),
+                 memory_limit_exceeded_error=int(agent_error_flags.get("memory_limit_exceeded", False)),
+                 agent_timeout_error=int(_exception_type(trial_result) == "AgentTimeoutError"),
+@@ -485,7 +493,9 @@ class HarborAgent(SimpleResponsesAPIAgent):
+         sanitized = sanitized.strip("._")
+         return sanitized or "unknown"
+ 
+-    def _should_mask(self, trial_result: Optional[dict], output_items: list) -> bool:
++    def _should_mask(
++        self, trial_result: Optional[dict], output_items: list, failure_class: Optional[str] = None
++    ) -> bool:
+         """Whether the trainer should drop this rollout from the gradient.
+ 
+         Without training-token capture the tokens come from the output items, so a rollout without
+@@ -493,8 +503,12 @@ class HarborAgent(SimpleResponsesAPIAgent):
+         (and masks it itself when no call chain was captured); agents such as OpenCode write no ATIF
+         trajectory at all, so empty output is expected there. The rollout is still masked when the
+         trial failed or the verifier never produced a result, since its reward then means nothing.
+-        With `harbor_mask_agent_timeout`, a trial that ended in AgentTimeoutError is masked as well.
++        With `harbor_mask_agent_timeout`, a trial that ended in AgentTimeoutError is masked as well. With
++        `harbor_mask_infra` (default), a rollout of failure class `infra` is masked in both modes, also when it has
++        output items or a verifier result.
+         """
++        if self.config.harbor_mask_infra and failure_class == "infra":
++            return True
+         if self.config.harbor_mask_agent_timeout and _exception_type(trial_result) == "AgentTimeoutError":
+             return True
+         if not self._token_id_capture_enabled():
+diff --git a/responses_api_agents/harbor_agent/tests/test_app.py b/responses_api_agents/harbor_agent/tests/test_app.py
+index d492038e2..c65c79e7d 100644
+--- a/responses_api_agents/harbor_agent/tests/test_app.py
++++ b/responses_api_agents/harbor_agent/tests/test_app.py
+@@ -510,6 +510,52 @@ class TestApp:
+         assert (dumped["failure_class"], dumped["failure_other"]) == ("other", 1)
+         assert dumped["failure_detail"].startswith("Harbor job failed: ValueError: Invalid kwargs")
+ 
++    # job 5365870: the separate verifier pod never left Pending (registry outage) after a complete agent episode
++    _VERIFIER_POD_FAILED = {
++        **DEFAULT_TRIAL_RESULT,
++        "verifier_result": None,
++        "exception_info": {
++            "exception_type": "SandboxApiException",
++            "exception_message": 'Create sandbox failed: HTTP 504: {"code":"KUBERNETES::POD_READY_TIMEOUT","message":'
++            '"Timeout waiting for sandbox 1f0c to be Running with IP. Elapsed: 600.2s, Last state: Pending"}',
++            "exception_traceback": "Traceback (most recent call last):\nopensandbox.exceptions.SandboxApiException: "
++            "Create sandbox failed: HTTP 504\n",
++        },
++    }
++
++    async def test_run_masks_an_infra_rollout_with_a_full_trajectory_without_capture(self, capsys):
++        # 45 such rollouts in job 5365870 were trained as reward 0: without capture only empty output was masked
++        server = _make_server()
++        assert server.config.harbor_mask_infra is True
++        with _harbor_run_mocks(trial_result=self._VERIFIER_POD_FAILED, trajectory=DEFAULT_TRAJECTORY):
++            response = await server.run(_make_run_request())
++
++        assert len(response.response.output) == 6
++        assert response.instance_config == {"mask_sample": True}
++        dumped = response.model_dump()
++        assert (dumped["failure_class"], dumped["failure_infra"]) == ("infra", 1)
++        assert "POD_READY_TIMEOUT" in dumped["failure_detail"]
++        assert "failure_class=infra reward=0.0" in capsys.readouterr().out
++
++    async def test_run_masks_an_infra_rollout_even_when_the_verifier_scored_it(self):
++        # job 5358015: the sandbox died during the episode, the verifier still ran and scored 0
++        server = _make_server()
++        flags = {"end_reason": "SandboxApiException", "end_message": "Get command status failed: HTTP 502"}
++        trial_result = {**DEFAULT_TRIAL_RESULT, "verifier_result": {"rewards": {"reward": 0.0}}}
++        with _harbor_run_mocks(trial_result=trial_result, trajectory=DEFAULT_TRAJECTORY, agent_error_flags=flags):
++            response = await server.run(_make_run_request())
++
++        assert response.model_dump()["failure_class"] == "infra"
++        assert response.instance_config == {"mask_sample": True}
++
++    async def test_run_harbor_mask_infra_off_keeps_the_old_mask(self):
++        server = _make_server(harbor_mask_infra=False)
++        with _harbor_run_mocks(trial_result=self._VERIFIER_POD_FAILED, trajectory=DEFAULT_TRAJECTORY):
++            response = await server.run(_make_run_request())
++
++        assert response.model_dump()["failure_class"] == "infra"
++        assert response.instance_config == {"mask_sample": False}
++
+     @pytest.mark.parametrize(
+         "model_name, expected",
+         [
+@@ -586,6 +632,17 @@ class TestApp:
+         assert server._should_mask(other_error, output) is False
+         assert server._should_mask(verified, output) is False
+ 
++    @pytest.mark.parametrize("token_id_capture", [False, True])
++    @pytest.mark.parametrize("mask_infra", [True, False])
++    def test_mask_infra_follows_the_failure_class(self, token_id_capture: bool, mask_infra: bool) -> None:
++        server = _make_server(token_id_capture=token_id_capture, harbor_mask_infra=mask_infra)
++        server.server_client.global_config_dict = {"token_id_capture": {"enabled": token_id_capture}}
++        verified = {"verifier_result": {"rewards": {"reward": 0.0}}}
++        output = [{"type": "message"}]
++        assert server._should_mask(verified, output, failure_class="infra") is mask_infra
++        for other_class in ("ok", "context_overflow", "agent_timeout", "other", None):
++            assert server._should_mask(verified, output, failure_class=other_class) is False
++
+     def test_model_base_url_capture_needs_agent_opt_in(self) -> None:
+         server = _make_server()
+         server.server_client.global_config_dict = {"token_id_capture": {"enabled": True}}
+-- 
+2.56.0
+
