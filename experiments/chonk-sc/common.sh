@@ -1,4 +1,4 @@
-# Shared by check.sh, run-a.sh, run-b.sh and run-s.sh (sourced, not run). Defines how runs A, B and S compose
+# Shared by check.sh, run-a.sh, run-b.sh, run-s.sh and run-agent-v.sh (sourced, not run). Defines how runs A, B, S and OV compose
 # their configs (the same files, in the same order, as ../../run.sh and ../../run-harbor-osb.sh
 # write them) and the static checks of the NeMo-RL clone and the Gym checkout.
 # Needs HERE (this directory) and ROOT (the rl-infra checkout) set by the caller.
@@ -26,6 +26,99 @@ sft_task_copy() {
     grep -q '^env:' "$1" && ! grep -qE '^(defaults|script):' "$1" || { echo "sft_task_copy: unexpected ${SFT_TASK}" >&2; return 1; }
 }
 
+# Run OV (run-agent-v.sh AGENT=opencode): OpenCode inside each pod on Kostas' verified tasks (the task file of
+# run V), on the SC path: an in-pod agent only makes OpenAI-compatible HTTP calls, so its token IDs come from Gym's
+# token capture at the model endpoint, which only the SC entrypoint turns on (NeMo-RL
+# single_controller_utils/setup.py token_capture; the Gym entrypoint of run V has none). Another in-pod agent is
+# one more AGENT value: a case in agent_v_tag, agent_v_overlays and check_gym_agents (and check.py).
+VERIFIED_TASK="${ROOT}/envs/harbor-verified-sft.yaml"
+CAPTURE_SC="${ROOT}/experiments/harbor-capture-sc"
+
+# verified_task_copy <out.yaml>: the verified task file without its `defaults:` and `script:` lines (as
+# sft_task_copy; run-agent-v.sh puts the recipe first itself).
+verified_task_copy() {
+    grep -vE '^(defaults|script):' "${VERIFIED_TASK}" > "$1"
+    grep -q '^env:' "$1" && ! grep -qE '^(defaults|script):' "$1" || { echo "verified_task_copy: unexpected ${VERIFIED_TASK}" >&2; return 1; }
+}
+
+# agent_v_tag <agent>: the run's short name (run OV = opencode); unknown agents fail here first.
+agent_v_tag() {
+    case "$1" in
+        opencode) echo ov ;;
+        *) echo "agent_v_tag: AGENT must be opencode (run OV), not '$1'" >&2; return 1 ;;
+    esac
+}
+
+# agent_v_agent <tag>: the inverse (check.sh RUNS=ov).
+agent_v_agent() {
+    case "$1" in
+        ov) echo opencode ;;
+        *) echo "agent_v_agent: no in-pod agent run '$1'" >&2; return 1 ;;
+    esac
+}
+
+# agent_v_defaults: run-agent-v.sh's knobs with their defaults (check.sh RUNS=ov checks the same values).
+# CTX 24576 = run V's 24k layout (20 nodes: 16 trainer EP32 + 4 vLLM, trainer data-parallel size 32);
+# CTX 16384 = the 12-node layout (8 trainer EP16, data-parallel size 16). RECIPE overrides (then the batch is
+# not checked against the data-parallel size). SMOKE=1: one step, one sample per data-parallel rank.
+agent_v_defaults() {
+    : "${CTX:=24576}"
+    if [[ -n "${RECIPE:-}" ]]; then
+        AGENT_V_RECIPE="$(realpath "${RECIPE}")" AGENT_V_DP=""
+    elif (( CTX > 16384 )); then
+        AGENT_V_RECIPE="${ROOT}/recipes/apertus2-chonk-sft19374-alps-vllm-adamw-tools-20n.yaml" AGENT_V_DP=32
+    else
+        AGENT_V_RECIPE="${ROOT}/recipes/apertus2-chonk-sft19374-alps-vllm-adamw-tools.yaml" AGENT_V_DP=16
+    fi
+    if [[ "${SMOKE:-0}" == 1 ]]; then
+        : "${STEPS:=1}" "${PROMPTS:=$(( ${AGENT_V_DP:-32} / 8 ))}" "${JOB_TIME:=02:30:00}"
+    fi
+    : "${STEPS:=10}" "${PROMPTS:=8}" "${SANDBOXES:=64}" "${GATEWAY_PROXY:=0}" "${MODEL_CALLS:=1}"
+    : "${HARBOR_ROOT:=${SCRATCH}/osb/harbor_verified}"
+    [[ "${GATEWAY_PROXY}" == [01] ]] || { echo "agent_v_defaults: GATEWAY_PROXY must be 0 or 1, not ${GATEWAY_PROXY}" >&2; return 1; }
+    export CTX STEPS PROMPTS SANDBOXES GATEWAY_PROXY MODEL_CALLS HARBOR_ROOT AGENT_V_RECIPE AGENT_V_DP
+}
+
+# agent_v_overlays <agent>: the overlays after the task copy, in merge order, one per line.
+#   run-b-harbor-sc.yaml run-s-sft.yaml     SC, token capture, the SFT model, pod labels, credentials by file
+#   <agent overlay>, tunnel-sc.yaml          the agent in the pod (model URL = the tunnel's pod end), the tunnel
+#   run-agent-v.yaml                        what the verified tasks need on SC for any in-pod agent
+#   run-<tag>.yaml                          the agent's settings for these tasks (run-ov.yaml: WORKDIR, 1740 s)
+agent_v_overlays() {
+    printf '%s\n' "${HERE}/run-b-harbor-sc.yaml" "${HERE}/run-s-sft.yaml"
+    case "$1" in
+        opencode) printf '%s\n' "${CAPTURE_SC}/opencode-sc.yaml" "${CAPTURE_SC}/tunnel-sc.yaml" \
+                      "${HERE}/run-agent-v.yaml" "${HERE}/run-ov.yaml" ;;
+        *) echo "agent_v_overlays: AGENT must be opencode, not $1" >&2; return 1 ;;
+    esac
+}
+
+# agent_v_args <train.jsonl> <cred file> <harbor jobs dir>: fills AGENT_V_ARGS with the command-line overrides
+# run-agent-v.sh passes (after agent_v_defaults), as run-v.sh / run-v-24k.sh pass theirs.
+agent_v_args() {
+    local p="env.nemo_gym.harbor_agent.responses_api_agents.harbor_agent"
+    AGENT_V_ARGS=(
+        grpo.max_num_steps="${STEPS}"
+        grpo.num_prompts_per_step="${PROMPTS}" policy.train_global_batch_size="$(( PROMPTS * 8 ))"
+        policy.max_total_sequence_length="${CTX}"
+        policy.sequence_packing.train_mb_tokens="${CTX}" policy.sequence_packing.logprob_mb_tokens="${CTX}"
+        data.train.data_path="$1"
+        registry_cred_file="$2"
+        "${p}.harbor_jobs_dir=$3"
+        "${p}.concurrency=${SANDBOXES}"
+    )
+    # as run-v-24k.sh: vLLM refuses max_model_len > max_position_embeddings (16384) without it
+    (( CTX <= 16384 )) || AGENT_V_ARGS+=("++policy.generation.vllm_cfg.env_vars.VLLM_ALLOW_LONG_MAX_MODEL_LEN=\"'1'\"")
+    # GATEWAY_PROXY as in experiments/osb-reach: 0 = through the ingress gateway (use_server_proxy false, the task
+    # file's value, as run V), 1 = through the OpenSandbox server proxy (runs S/O, the tunnel's tested path)
+    case "${GATEWAY_PROXY}" in
+        0) AGENT_V_ARGS+=(env.nemo_gym.sandbox.opensandbox.connection.use_server_proxy=false) ;;
+        1) AGENT_V_ARGS+=(env.nemo_gym.sandbox.opensandbox.connection.use_server_proxy=true) ;;
+        *) echo "agent_v_args: GATEWAY_PROXY must be 0 or 1, not ${GATEWAY_PROXY}" >&2; return 1 ;;
+    esac
+    [[ "${MODEL_CALLS}" == 1 ]] || AGENT_V_ARGS+=(env.nemo_gym.observability_enabled=false)
+}
+
 # compose_cfg <a|b> <out.yaml>: the top-level config the launcher writes.
 #   A: ../../run.sh writes   defaults: [RECIPE, TASK]           with TASK = run-a-gsm8k.yaml
 #   B: ../../run-harbor-osb.sh writes defaults: [RECIPE, TASK, OVERLAY...]
@@ -50,7 +143,14 @@ compose_cfg() {
         # W: run O on SWE-Lego (run-s.sh AGENT=opencode TASKS=swe-lego): + run-s-swe-lego.yaml
         w) compose_cfg o "$2" || return 1
            printf '  - %s\n' "$(realpath "${HERE}/run-s-swe-lego.yaml")" >> "$2" ;;
-        *) echo "compose_cfg: run must be a, b, s, o or w" >&2; return 1 ;;
+        # OV: run-agent-v.sh AGENT=opencode (run-harbor-osb.sh writes RECIPE, TASK, OVERLAY...); needs
+        # agent_v_defaults first (the recipe follows CTX)
+        ov) local o agent
+           agent="$(agent_v_agent "$1")" || return 1
+           verified_task_copy "${2%.yaml}-task.yaml" || return 1
+           printf 'defaults:\n  - %s\n  - %s\n' "${AGENT_V_RECIPE}" "$(realpath "${2%.yaml}-task.yaml")" > "$2"
+           while read -r o; do printf '  - %s\n' "$(realpath "${o}")" >> "$2"; done < <(agent_v_overlays "${agent}") ;;
+        *) echo "compose_cfg: run must be a, b, s, o, w or ov" >&2; return 1 ;;
     esac
 }
 
@@ -227,5 +327,28 @@ check_gym_capture() {
     if (( fails )); then
         echo "  fix: bash ${APERTUS2_DIR}/setup-gym.sh"
     fi
+    return "${fails}"
+}
+
+# check_gym_agents <agent>: the in-pod agent (opencode: runs O/OV) and the per-pod model tunnel are in the Gym
+# checkout (after check_gym_capture). Returns the number of failures.
+check_gym_agents() {
+    local g="${NEMO_RL_DIR}/3rdparty/Gym-workspace/Gym" fails=0
+    local ca="${g}/responses_api_agents/harbor_agent/custom_agents"
+    ok()  { echo "  ok    $*"; }
+    bad() { echo "  FAIL  $*"; fails=$((fails + 1)); }
+    grep -q server_start_script "${g}/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/model_tunnel.py" 2>/dev/null \
+        && ok "Gym patches 0016/0017: per-pod model tunnel (chisel), server started through exec" \
+        || bad "Gym patches 0016/0017 missing (server_start_script in custom_envs/nemo_gym_sandbox/model_tunnel.py)"
+    case "$1" in
+        opencode)
+            [[ -f "${ca}/opencode_pod/install-opencode-binary.sh.j2" ]] && grep -q "class OpenCodeNemoGym" "${ca}/opencode_nemo_gym.py" 2>/dev/null \
+                && ok "Gym patch 0026: OpenCodeNemoGym with the pinned binary install" \
+                || bad "Gym patch 0026 missing (OpenCodeNemoGym, opencode_pod/install-opencode-binary.sh.j2)"
+            grep -q opencode_workdir "${ca}/opencode_nemo_gym.py" 2>/dev/null \
+                && ok "Gym patch 0029: opencode_workdir (unset: the task's WORKDIR)" \
+                || bad "Gym patch 0029 missing (opencode_workdir in custom_agents/opencode_nemo_gym.py)" ;;
+        *) bad "check_gym_agents: no checks for agent '$1'" ;;
+    esac
     return "${fails}"
 }

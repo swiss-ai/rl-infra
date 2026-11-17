@@ -1,0 +1,19 @@
+# Run OV (run-agent-v.sh AGENT=opencode): OpenCode on the verified tasks. Merged last, after
+# ../harbor-capture-sc/opencode-sc.yaml (micro tasks: /app, 870 s) and run-agent-v.yaml.
+# - Working directory: the verified tasks keep their repository in the image's WORKDIR, which differs per task,
+#   also within a campaign (first terminal prompt of run V's Terminus-2 trials, jobs 5359900/5365870, 981
+#   trajectories: /testbed (R2E-Gym, SWE-Gym, SWE-Lego, SWE-rebench, SWE-smith, MultiLang), /workspace (SWE-Next),
+#   /workspace/<repo> (DeNovoSWE, Scale-SWE), /app/<repo> (SWE-Dev), /app (Terminal-Lego, LiteCoder),
+#   /home/<repo> (Multi-SWE-RL), / or /home/user (endless-terminals)). An exec without cwd starts there
+#   (Terminus-2's tmux is started the same way), so opencode_workdir stays unset; a task with WORKDIR / gets
+#   OpenCode's "failed to initialize fff" warning (job 5314432) and the whole file system as its project.
+# - Time: Harbor's agent cap is 1800 s (the tasks allow 3000 s); OpenCode is ended at 1740 s so its exit status
+#   and opencode.txt are recorded and the verifier runs (as run-s-swe-lego.yaml). OPENCODE_TIMEOUT_SEC overrides.
+env:
+  nemo_gym:
+    harbor_agent:
+      responses_api_agents:
+        harbor_agent:
+          harbor_agent_kwargs:
+            opencode_workdir: null
+            opencode_timeout_sec: ${oc.decode:${oc.env:OPENCODE_TIMEOUT_SEC,1740}}

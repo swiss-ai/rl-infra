@@ -1,4 +1,4 @@
-# Apertus 2 Chonk on NeMo-RL's Single-Controller path (step 0, run A, run B, run S)
+# Apertus 2 Chonk on NeMo-RL's Single-Controller path (step 0, run A, run B, run S, run OV)
 
 Implements the run sequence of the feasibility analysis
 `research/reports/2026-11-04-chonk-single-controller-feasibility.md` (workspace, section 6):
@@ -12,6 +12,8 @@ i.e. vLLM DP4 per node through NVIDIA-NeMo/RL#2517) trained through
 | `run-a-gsm8k.yaml`, `run-a.sh` | run A: GSM8K, no Gym, no capture |
 | `run-b-harbor-sc.yaml`, `run-b.sh` | run B: SC rerun of Daint job 5184052 (Harbor micro-tasks, Terminus-2, token capture) |
 | `run-s-sft.yaml`, `run-s.sh` | run S: run B on the SFT checkpoint (16k layout, Apertus 2 message format) |
+| `run-v.sh`, `run-v-24k.sh` | run V: Terminus-2 on Kostas' verified tasks, Gym entrypoint (not SC), 24k on 20 nodes |
+| `run-agent-v.sh`, `run-agent-v.yaml`, `run-ov.yaml` | run OV: OpenCode in the pod on run V's verified tasks, SC + token capture, 24k on 20 nodes |
 | `common.sh` | config composition and the clone / Gym checks, shared by the scripts |
 
 Both runs: 3 steps, `async_rl` sampler `in_order` with lookahead 0 (synchronous), one chunk per
@@ -255,6 +257,36 @@ Watch: the solve rate (the SFT model scored 0.93 on the micro tasks); `maximum c
 limit); whether OpenCode's `bash` finds the repository's Python (the tasks' `test.sh` puts
 `/opt/conda/envs/testbed/bin` on PATH itself; UNVERIFIED that the sandbox exec has it); sandbox start
 (one 1-1.4 GB image per task).
+
+## Run OV: OpenCode on the verified tasks (`run-agent-v.sh AGENT=opencode`)
+
+Run V's tasks (`../../envs/harbor-verified-sft.yaml`: Kostas' verified tasks, separate verifier pods, images from
+rl-registry with the credentials file, gateway, create deadline 1200 s, infra rollouts masked) with OpenCode in each
+pod instead of Terminus-2. OpenCode only makes HTTP calls, so its tokens come from Gym's token capture, which only
+the SC entrypoint turns on: the run goes through `run-harbor-osb.sh` with `examples/run_grpo_single_controller.py`
+(as run O), not run V's Gym entrypoint. Layout of `run-v-24k.sh`: 24576 tokens, 20 nodes (16 trainer EP32 + 4
+vLLM), packing micro-batches of 24576 tokens, `VLLM_ALLOW_LONG_MAX_MODEL_LEN`; `CTX=16384` takes the 12-node recipe.
+8 prompts x 8 rollouts, at most 64 sandboxes (`SANDBOXES`), synchronous (lookahead 0, as runs S/O; run V's age 2
+has no counterpart here). Config: task copy + `run-b-harbor-sc.yaml` `run-s-sft.yaml`
+`../harbor-capture-sc/opencode-sc.yaml` `tunnel-sc.yaml` `run-agent-v.yaml` `run-ov.yaml` (`common.sh`
+`agent_v_overlays`), plus the launcher's overrides (`agent_v_args`). OpenCode runs in the task image's WORKDIR
+(`opencode_workdir` unset: the repository lives in `/testbed`, `/workspace/<repo>`, `/app/<repo>`, `/home/<repo>`, ...
+depending on the task), ended at 1740 s under Harbor's 1800 s cap. Harbor trial dirs and the model-call capture:
+`$SCRATCH/harbor-jobs/<run>/` (`model-calls/`). Another in-pod agent is one more `AGENT` value (`common.sh`
+`agent_v_tag`, `agent_v_overlays`, `check_gym_agents`; its `run-<tag>.yaml`; `check.py`).
+
+```bash
+RUNS=ov bash experiments/chonk-sc/check.sh                    # step 0 (SMOKE=1 to check the smoke values)
+SMOKE=1 AGENT=opencode DRY_RUN=1 bash experiments/chonk-sc/run-agent-v.sh   # setup + job script, no submission
+SMOKE=1 AGENT=opencode bash experiments/chonk-sc/run-agent-v.sh   # 1 step, 4 x 8 = 32 (trainer data-parallel size 32)
+AGENT=opencode bash experiments/chonk-sc/run-agent-v.sh           # 10 steps, 8 x 8, JOB_TIME 08:00:00
+GATEWAY_PROXY=1 ...       # sandboxes and tunnel through the OpenSandbox server proxy (if the gymtunnel gateway test fails)
+```
+
+What to look at: `train step N/N`; `failure_<class>` per step (OpenCode writes no `agent_error_flags.json`, so only
+`ok`, `infra`, `agent_timeout`, `verifier_timeout` and `other` can occur; a context overflow ends OpenCode and is
+`ok` with the verifier's reward); masked and rejected rollouts (capture: unresolved parents, poisoned rows);
+HTTP 400 context-length answers in `model-calls/`; OpenCode exit 124 (1740 s); reward per campaign.
 
 ## Open risks (from the feasibility report, ranked)
 

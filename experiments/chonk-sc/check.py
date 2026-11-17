@@ -297,11 +297,17 @@ def expect(name, got, want):
 
 
 print("  --- plan")
-expect("cluster.num_nodes", cl["num_nodes"], 12)
+# run OV (run-agent-v.sh): the expected values are the launcher's knobs, which check.sh exports
+# (common.sh agent_v_defaults) and passes as the same overrides (agent_v_args)
+AV = EXPECT in ("ov",)
+ENV = os.environ
+if AV:
+    av_ctx, av_steps, av_prompts = int(ENV["CTX"]), int(ENV["STEPS"]), int(ENV["PROMPTS"])
+expect("cluster.num_nodes", cl["num_nodes"], (20 if av_ctx > 16384 else 12) if AV else 12)
 expect("vLLM nodes", gen_nodes, 4)
 expect("vLLM TP/EP", (vl["tensor_parallel_size"], vl["expert_parallel_size"]), (1, 4))
 expect("vllm_cfg.async_engine", vl["async_engine"], True)
-expect("grpo.max_num_steps", g.max_num_steps, 3)
+expect("grpo.max_num_steps", g.max_num_steps, av_steps if AV else 3)
 expect("sampler", (a.sampler.name, a.sampler.max_lookahead_versions), ("in_order", 0))
 expect("one chunk per step (min_groups_for_streaming_train)", a.min_groups_for_streaming_train, prompts)
 expect("max_inflight_prompts", a.max_inflight_prompts, prompts)
@@ -320,8 +326,8 @@ if EXPECT == "a":
     expect("token_capture.enabled", mc.token_capture.enabled, False)
 else:
     hcfg = mc.env["nemo_gym"]["harbor_agent"]["responses_api_agents"]["harbor_agent"]
-    expect("prompts x generations", (prompts, gens), (8, 8))
-    expect("train_global_batch_size", p["train_global_batch_size"], 64)
+    expect("prompts x generations", (prompts, gens), (av_prompts, 8) if AV else (8, 8))
+    expect("train_global_batch_size", p["train_global_batch_size"], av_prompts * 8 if AV else 64)
     expect("env.should_use_nemo_gym", use_gym, True)
     expect("token_capture.enabled", mc.token_capture.enabled, True)
     expect("rollout_failure infra/data attempts", (rf.max_infra_attempts_per_prompt, rf.max_data_attempts_per_prompt), (2, 2))
@@ -330,6 +336,77 @@ else:
         expect("max_new_tokens", gen["max_new_tokens"], 1024)
         expect("rollout_timeout_s", rf.nemo_gym.rollout_timeout_s, 1800)
         expect("stall_timeout_s", a.stall_watchdog.stall_timeout_s, 2100)
+    elif AV:
+        # run OV: the verified task file (run V) on SC with an in-pod agent (run-agent-v.yaml header)
+        osb = mc.env["nemo_gym"]["sandbox"]["opensandbox"]
+        kw = hcfg["harbor_agent_kwargs"]
+        spo = hcfg["harbor_environment_kwargs"]["sandbox_provider_options"]
+        ng = mc.env["nemo_gym"]
+        vm = ng["policy_model"]["responses_api_models"]["vllm_model"]
+        tun = hcfg["harbor_environment_kwargs"].get("model_tunnel") or {}
+        dp = ENV.get("AGENT_V_DP")
+        trainer_gpus = (cl["num_nodes"] - gen_nodes) * cl["gpus_per_node"]
+        pp = mg.get("pipeline_model_parallel_size") or 1
+        tp, cp = mg.get("tensor_model_parallel_size") or 1, mg.get("context_parallel_size") or 1
+        expect("trainer PP/EP", (pp, mg.get("expert_model_parallel_size")), (2, 32 if av_ctx > 16384 else 16))
+        if dp:
+            expect("trainer data-parallel size (GPUs / TP / PP / CP)", trainer_gpus // (tp * pp * cp), int(dp))
+            expect("batch is a multiple of the data-parallel size", p["train_global_batch_size"] % int(dp), 0)
+        expect("max_total_sequence_length = CTX", p["max_total_sequence_length"], av_ctx)
+        expect("packing train/logprob mb tokens = CTX",
+               (p["sequence_packing"].get("train_mb_tokens"), p["sequence_packing"].get("logprob_mb_tokens")), (av_ctx, av_ctx))
+        if av_ctx > 16384:
+            expect("VLLM_ALLOW_LONG_MAX_MODEL_LEN for the vLLM workers (as run-v-24k.sh)",
+                   str((vl.get("env_vars") or {}).get("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "")).strip("'\""), "1")
+        expect("vllm max_model_len follows CTX", vl.get("max_model_len"), av_ctx)
+        expect("max_new_tokens", gen["max_new_tokens"], 6144)
+        expect("output_format", gen.get("output_format"), "apertus2")
+        expect("stop_token_ids", gen.get("stop_token_ids"), [12])
+        expect("vllm_cfg.logprobs_mode (see run-s-sft.yaml)", vl.get("logprobs_mode"), "processed_logprobs")
+        expect("model is the SFT export staged by the launcher", p["model_name"].endswith("/models/chonk-lc-16k-v0.1-ep1-iter_0019374"), True)
+        expect("rollout_timeout_s (run-agent-v.yaml)", rf.nemo_gym.rollout_timeout_s, 6600)
+        expect("stall_timeout_s", a.stall_watchdog.stall_timeout_s, 6900)
+        expect("training rows: the filtered verified rows", mc.data["train"]["data_path"], ENV.get("AGENT_V_TRAIN"))
+        expect("dataset alias verified -> HARBOR_ROOT/tasks",
+               (hcfg["harbor_datasets"].get("verified") or {}).get("local_dataset_path"), f"{ENV.get('HARBOR_ROOT')}/tasks")
+        expect("image_auth: credentials file for rl-registry only, no password in the config",
+               ("image_auth" in spo, spo.get("image_auth_file"), spo.get("image_auth_registry")),
+               (False, ENV.get("RL_REGISTRY_CRED_FILE"), "rl-registry.swissai.svc.cscs.ch"))
+        expect("secure_access", spo.get("secure_access"), True)
+        expect("registry_cred_file", mc.get("registry_cred_file") if isinstance(mc, dict) else getattr(mc, "registry_cred_file", None),
+               ENV.get("RL_REGISTRY_CRED_FILE"))
+        expect("OpenSandbox key only as a file path (api_key null)", (osb["connection"].get("api_key"), bool(osb["connection"].get("api_key_file"))), (None, True))
+        expect("use_server_proxy (GATEWAY_PROXY)", osb["connection"].get("use_server_proxy"), ENV.get("GATEWAY_PROXY") == "1")
+        expect("create.deadline_s (Gym 0040)", (osb.get("create") or {}).get("deadline_s"), 1200)
+        expect("pod label run = NEMO_GYM_RUN_ID (the reaper's filter)", osb["attribution"].get("run"), ENV.get("NEMO_GYM_RUN_ID"))
+        expect("pod label harbor-dataset", (hcfg["harbor_environment_kwargs"].get("sandbox_metadata") or {}).get("harbor-dataset"), "verified")
+        expect("harbor concurrency = SANDBOXES", hcfg["concurrency"], int(ENV["SANDBOXES"]))
+        expect("harbor agent / verifier max timeout",
+               (hcfg.get("harbor_agent_max_timeout"), hcfg.get("harbor_verifier_max_timeout")), (1800, 1200))
+        expect("harbor_environment_build_timeout_multiplier", hcfg.get("harbor_environment_build_timeout_multiplier"), 5.0)
+        expect("harbor_mask_infra (Gym 0041)", hcfg.get("harbor_mask_infra"), True)
+        expect("harbor_jobs_dir", hcfg.get("harbor_jobs_dir"), ENV.get("AGENT_V_JOBS"))
+        expect("model URL is the tunnel's pod end", (hcfg.get("harbor_model_base_url"), tun.get("pod_port")),
+               ("http://127.0.0.1:8000", 8000))
+        expect("chisel dir", tun.get("chisel_dir"), ENV.get("CHISEL_DIR"))
+        expect("harbor_agent_name null", hcfg.get("harbor_agent_name"), None)
+        expect("max_turns (task file)", kw.get("max_turns"), 30)
+        expect("interleaved_thinking", kw.get("interleaved_thinking"), False)
+        expect("model_info (context, per-turn output)",
+               (kw["model_info"]["max_input_tokens"], kw["model_info"]["max_output_tokens"]), (av_ctx, 6144))
+        if EXPECT == "ov":
+            expect("agent", hcfg.get("harbor_agent_import_path", "").rsplit(":", 1)[-1], "OpenCodeNemoGym")
+            expect("OpenCode version / install", (kw.get("version"), kw.get("opencode_install")), ("1.17.11", "binary"))
+            expect("opencode_workdir unset (the task's WORKDIR, run-ov.yaml)", kw.get("opencode_workdir"), None)
+            expect("OpenCode timeout below the agent timeout", kw.get("opencode_timeout_sec"), 1740)
+        expect("sampling_overrides = train profile",
+               dict(vm.get("sampling_overrides") or {}),
+               {"temperature": gen["temperature"], "top_p": gen["top_p"], "max_tokens": gen["max_new_tokens"]})
+        expect("stop_token_ids travel with each request", (vm.get("extra_body") or {}).get("stop_token_ids"), [12])
+        expect("uses_interleaved_reasoning (workaround, job 5316800)", vm.get("uses_interleaved_reasoning"), False)
+        cap = str(ng.get("model_call_capture_dir") or "")
+        expect("Gym model-call capture (MODEL_CALLS), dir next to the trial dirs",
+               (ng.get("observability_enabled"), cap), (ENV.get("MODEL_CALLS") == "1", f"{ENV.get('AGENT_V_JOBS')}/model-calls"))
     else:
         # run S: main's SFT layout and format (recipes/apertus2-chonk-sft-vllm-adamw-tools.yaml,
         # envs/harbor-osb-sft.yaml) with run-s-sft.yaml on top

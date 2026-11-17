@@ -1,0 +1,62 @@
+# In-pod agent runs (run-agent-v.sh; run OV = OpenCode): an agent inside each pod on the verified tasks of run V
+# (../../envs/harbor-verified-sft.yaml without its defaults/script lines), on the Single Controller with token
+# capture. Merged by ../../run-harbor-osb.sh after
+#   recipe   apertus2-chonk-sft19374-alps-vllm-adamw-tools-20n.yaml (CTX 24576; 12-node recipe at 16384)
+#   task     the verified task copy: tasks, alias `verified`, registry credentials by file, separate verifier
+#            pods, gateway (use_server_proxy false), create.deadline_s 1200, harbor_mask_infra, timeout caps
+#            1800/1200 s, build timeout x5, max_turns 30
+#   run-b-harbor-sc.yaml run-s-sft.yaml    SC, token capture, the SFT model, pod labels from NEMO_GYM_*
+#   opencode-sc.yaml (the agent's overlay), tunnel-sc.yaml    the agent in the pod, the per-pod tunnel
+# and before the agent's own run-<tag>.yaml (run-ov.yaml). Nothing here is agent-specific. run-agent-v.sh passes
+# the rest on the command line (steps, prompts, batch, CTX, data path, credentials, Harbor jobs dir, concurrency,
+# gateway switch).
+#
+# Why SC and not run V's Gym entrypoint: an in-pod agent writes no token IDs (OpenCode no ATIF trajectory at
+# all), so the tokens can only come from Gym's capture at the model endpoint, which only
+# NeMo-RL's SC setup turns on (single_controller_utils/setup.py token_capture -> environments/nemo_gym.py
+# token_id_capture). Without it harbor_agent masks every rollout without output items (app.py _should_mask).
+
+grpo:
+  # SC refuses the legacy async block (run-b-harbor-sc.yaml sets it null too); run V's age 2 has no SC
+  # equivalent here: lookahead 0 (synchronous), as runs S/O
+  async_grpo: null
+
+async_rl:
+  rollout_failure:
+    nemo_gym:
+      # one prompt group, worst case: agent pod create (create.deadline_s 1200 + the attempt in flight, <= 600)
+      # + agent (1800 cap) + verifier pod create (the same <= 1800) + verifier (1200 cap) = 6600 s. A step lasts
+      # as long as its slowest group (5359900, Terminus-2: longest trajectory per step 535-1060 s).
+      rollout_timeout_s: 6600
+  stall_watchdog:
+    # must exceed rollout_timeout_s
+    stall_timeout_s: 6900
+
+env:
+  nemo_gym:
+    # Gym's model-call capture: every request and response body at the policy_model endpoint, per rollout, next
+    # to the Harbor trial dirs (run-agent-v.sh: $SCRATCH/harbor-jobs/<run>). Shows per-turn lengths, context
+    # overflows (HTTP 400) and 4xx bodies, which the failure classes cannot (OpenCode writes no
+    # agent_error_flags.json). MODEL_CALLS=0 turns it off.
+    observability_enabled: true
+    model_call_capture_dir: ${oc.env:SCRATCH}/harbor-jobs/${oc.env:NEMO_GYM_RUN_ID}/model-calls
+    policy_model:
+      responses_api_models:
+        vllm_model:
+          # LIMITATION, workaround of job 5316800 (run-s-opencode.yaml header): echoed thinking is dropped instead
+          # of sent as `reasoning`, which apertus-common's from_openai refuses when a history is encoded again.
+          # The agent echoes the reply with its <think> block; keep until the apertus-common fix is merged.
+          uses_interleaved_reasoning: false
+          # The train profile on every engine request, whatever the agent sends (opencode-sc.yaml sets the same
+          # for OpenCode, which sends no temperature).
+          sampling_overrides:
+            temperature: ${policy.generation.temperature}
+            top_p: ${policy.generation.top_p}
+            max_tokens: ${policy.generation.max_new_tokens}
+    harbor_agent:
+      responses_api_agents:
+        harbor_agent:
+          harbor_environment_kwargs:
+            sandbox_metadata:
+              # the task file's label; kubectl -l harbor-dataset=verified
+              harbor-dataset: verified
