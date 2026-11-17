@@ -10,6 +10,8 @@
 #   SCRIPT=examples/run_vlm_grpo.py for vision-language models (default: examples/run_grpo.py)
 #   PARTITION, JOB_TIME, ACCOUNT, USE_RESERVATION, EXCLUDE_NODES override the configuration.
 #   DEPENDENCY=afterok:<jobid> starts the job only after another one succeeded.
+#   BATCH_SCRIPT=<file> submits that batch script instead of ray.sub; it gets ray.sub's path in RAY_SUB and runs
+#                it (lean-kimina/in_job.sbatch: a Kimina server inside the job). It needs ray.sub's #SBATCH lines.
 #   PREFLIGHT=0 skips the config check (preflight.sh) done before submission.
 #   PIN_FILE, DRIVER_PYTHON select another NeMo-RL source/image stack (see apertus2/launch.sh).
 #   DRY_RUN=1 prints the sbatch command and the container setup instead of submitting.
@@ -95,6 +97,8 @@ if [[ "${CONTAINER_RUNTIME}" == pyxis ]] && ! grep -q PYXIS_EXTRA_ARGS "${NEMO_R
 fi
 
 mkdir -p "${OUT}/slurm" "${OUT}/results" "${OUT}/logs"
+export RAY_SUB="${NEMO_RL_DIR}/ray.sub"
+BATCH_SCRIPT="${BATCH_SCRIPT:-${RAY_SUB}}"
 
 SBATCH_FLAGS=(--nodes="${NODES}" --account="${ACCOUNT}" --partition="${PARTITION}"
               --time="${JOB_TIME}" --job-name="nrl-${RUN}" --output="${OUT}/slurm/%j-${RUN}.out")
@@ -145,8 +149,8 @@ export GPUS_PER_NODE RAY_SINGLE_SRUN="${RAY_SINGLE_SRUN:-1}" BASE_LOG_DIR="${OUT
 
 if [[ "${DRY_RUN:-0}" == 1 ]]; then
     echo "== DRY_RUN: site ${SITE}, runtime ${CONTAINER_RUNTIME}; would run in ${OUT}/slurm:"
-    printf '  sbatch'; printf ' %q' "${SBATCH_FLAGS[@]}" "${NEMO_RL_DIR}/ray.sub"; echo
-    for v in EDF CONTAINER MOUNTS PYXIS_EXTRA_ARGS GPUS_PER_NODE RAY_SINGLE_SRUN SRUN_MEM_BIND NUMA_WATCH BASE_LOG_DIR COMMAND; do
+    printf '  sbatch'; printf ' %q' "${SBATCH_FLAGS[@]}" "${BATCH_SCRIPT}"; echo
+    for v in RAY_SUB EDF CONTAINER MOUNTS PYXIS_EXTRA_ARGS GPUS_PER_NODE RAY_SINGLE_SRUN SRUN_MEM_BIND NUMA_WATCH BASE_LOG_DIR COMMAND; do
         [[ -n "${!v:-}" ]] && echo "  ${v}=${!v}"
     done
     if [[ "${CONTAINER_RUNTIME}" == pyxis ]]; then
@@ -158,6 +162,6 @@ fi
 
 # ray.sub writes logs and helper files into the submit dir, so submit from scratch.
 cd "${OUT}/slurm"
-submitted="$(sbatch "${SBATCH_FLAGS[@]}" "${NEMO_RL_DIR}/ray.sub")"
+submitted="$(sbatch "${SBATCH_FLAGS[@]}" "${BATCH_SCRIPT}")"
 echo "${submitted}"
 if [[ -n "${PREFLIGHT_OUT}" ]]; then mv "${PREFLIGHT_OUT}" "${OUT}/slurm/${submitted##* }-${RUN}.preflight.txt"; fi

@@ -1,34 +1,39 @@
 #!/bin/bash
-# Train on the Lean task (envs/lean-kimina-sft.yaml) with a Kimina server of its own: submits the training job
-# through run.sh, then the server job with --dependency=after:<training>, and prints both job IDs.
-#   DRY_RUN=1 bash backends/nemo-rl/lean-kimina/train.sh [overrides...]   setup, preflight and both sbatch commands
-#   bash backends/nemo-rl/lean-kimina/train.sh [overrides...]             submits both
+# Train on the Lean task (envs/lean-kimina-sft.yaml) with a Kimina server of its own, through run.sh.
+#   DRY_RUN=1 bash backends/nemo-rl/lean-kimina/train.sh [overrides...]   setup, preflight and the sbatch command(s)
+#   bash backends/nemo-rl/lean-kimina/train.sh [overrides...]             submits
 # Overrides go to run.sh as usual (e.g. grpo.max_num_steps=3). See RUNBOOK.md for a first run.
 #
-# Why this order: a server job submitted first may start hours before the training, or end before it. Here the
-# server waits for the training to start, on debug (it starts 1-node jobs within about a minute), and the
-# training reads the server's address and key at job start through endpoint.sh, which waits for a live server.
-# The server job (server_watch_job.sh) stops when the training is over, and cancels a training whose Ray head is
-# not up after HEAD_LIMIT seconds or whose server died.
+# SERVER=in-job (default): the server runs inside the training job, on its first node (the Ray head), started by
+# in_job.sbatch before ray.sub; it lives and ends with the job, also across a requeue. No extra node, no debug
+# job. The training reads the server's address and key at job start through endpoint.sh, which waits for a live
+# server.
+# SERVER=debug: the server is a 1-node job of its own on debug (server_watch_job.sh), submitted after the
+# training with --dependency=after:<training>; it stops when the training is over, and cancels a training whose
+# Ray head is not up after HEAD_LIMIT seconds or whose server died. Debug limits it to 1:30 h and one job per user.
 #
 # Settings (environment):
 #   RECIPE           run.sh's recipe; default the task's own. For an SFT checkpoint, a recipe that names its
 #                    sft_export, e.g. recipes/apertus2-chonk-sftv02-18315-vllm-adamw-code.yaml.
-#   RUN              run name; default lean-kimina-<date>-<time>. The server's endpoint and log go to
+#   RUN              run name; default lean-kimina-<date>-<time>. The server's endpoint and logs go to
 #                    $SCRATCH/lean-kimina/runs/<RUN>/.
-#   PARTITION        training partition, default normal (never preempted). preemptable starts sooner but was
-#                    preempted after about 22 min; the run is then over (no requeue: its server would be gone).
-#   JOB_TIME         training time limit, default 01:20:00.
-#   SERVER_PARTITION default debug; SERVER_TIME default 01:30:00 (debug's maximum). It must cover JOB_TIME, as
-#                    the server starts at the earliest with the training.
-#   HEAD_LIMIT       seconds the server job gives the training's Ray head, default 600.
-#   MAX_REPLS        the server's REPLs, default 128 (about 2 GB each).
-# Debug runs one job per user: while another debug job of yours runs, the server waits, and the training waits
-# for it in endpoint.sh for at most 30 min (KIMINA_ENDPOINT_WAIT), then fails.
+#   PARTITION        training partition, default normal (never preempted, at most 12 h). On preemptable (at most
+#                    1 day) an in-job run is requeued when preempted and resumes from its last checkpoint.
+#   JOB_TIME         training time limit; default 12:00:00 in-job, 01:20:00 with SERVER=debug. In-job, the run
+#                    saves by JOB_TIME - 30 min (checkpointing.checkpoint_must_save_by; an override of it wins).
+#   MAX_REPLS        the server's REPLs (and the Gym's requests in flight); default 64 in-job, on a node it shares
+#                    with the training (the fork measured 64 as fast as 128 for 2,048 proofs), 128 with
+#                    SERVER=debug. About 2 GB each.
+#   HEAD_LIMIT       seconds the training's Ray head may take to come up before the job is cancelled, default 600.
+#   In-job only: KIMINA_PORT (default 1120: ray.sub keeps 1150-8999 for itself), KIMINA_RESTARTS (default 3),
+#                KIMINA_MEMBIND (default 0-3, the CPU NUMA nodes; empty: none), KIMINA_NICE (default 5).
+#   SERVER=debug only: SERVER_PARTITION (default debug) and SERVER_TIME (default 01:30:00), which must cover
+#                JOB_TIME. While another debug job of yours runs, the server waits, and the training waits for it in
+#                endpoint.sh for at most 30 min (KIMINA_ENDPOINT_WAIT), then fails.
 set -euo pipefail
 LEAN_KIMINA_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "${LEAN_KIMINA_DIR}/../../.." && pwd)"
-# sbatch passes the whole environment into both jobs, and ray.sub prints most of it: keep secrets out. W&B reads
+# sbatch passes the whole environment into the jobs, and ray.sub prints most of it: keep secrets out. W&B reads
 # its key from WANDB_KEY_FILE (see site.env.example).
 unset WANDB_API_KEY HF_TOKEN OPENAI_API_KEY
 source "${ROOT}/sites/load.sh" && rl_infra_load "${LEAN_KIMINA_DIR}/env"
@@ -38,8 +43,14 @@ source "${LEAN_KIMINA_DIR}/kimina.sh"
 rows="${HEADER_ROWS:-${LEAN_DATA}/data/train.v434.jsonl}"
 [[ -s "${rows}" ]] || { echo "ERROR: no training rows ${rows}; run setup-data.sh first" >&2; exit 1; }
 
+SERVER="${SERVER:-in-job}"
+[[ "${SERVER}" == in-job || "${SERVER}" == debug ]] || { echo "ERROR: SERVER is in-job or debug, not ${SERVER}" >&2; exit 1; }
 RUN="${RUN:-lean-kimina-$(date +%Y%m%d-%H%M%S)}"
-JOB_TIME="${JOB_TIME:-01:20:00}"
+if [[ "${SERVER}" == in-job ]]; then
+    JOB_TIME="${JOB_TIME:-12:00:00}"; MAX_REPLS="${MAX_REPLS:-64}"
+else
+    JOB_TIME="${JOB_TIME:-01:20:00}"; MAX_REPLS="${MAX_REPLS:-128}"
+fi
 SERVER_TIME="${SERVER_TIME:-01:30:00}"
 SERVER_PARTITION="${SERVER_PARTITION:-debug}"
 DIR="${SCRATCH}/lean-kimina/runs/${RUN}"
@@ -53,18 +64,18 @@ secs() {
     echo $(( d * 86400 + 10#${BASH_REMATCH[1]} * 3600 + 10#${BASH_REMATCH[2]} * 60 + 10#${BASH_REMATCH[3]} ))
 }
 jt="$(secs "${JOB_TIME}")"; st="$(secs "${SERVER_TIME}")"
-if [[ -n "${jt}" && -n "${st}" ]] && (( st < jt )); then
+if [[ "${SERVER}" == debug && -n "${jt}" && -n "${st}" ]] && (( st < jt )); then
     echo "ERROR: SERVER_TIME ${SERVER_TIME} is shorter than JOB_TIME ${JOB_TIME}: the server would end first" >&2
     exit 1
 fi
 
-# The server job: server_job.sh with the watch, after the training job $1. Sets server_flags.
+# SERVER=debug: the server job, server_job.sh with the watch, after the training job $1. Sets server_flags.
 read -r -a site_extra <<< "${SBATCH_EXTRA}"
 server_sbatch() {
     server_flags=(--parsable --nodes=1 --exclusive --no-requeue ${site_extra[@]+"${site_extra[@]}"}
         --account="${ACCOUNT}" --partition="${SERVER_PARTITION}" --time="${SERVER_TIME}" --dependency="after:$1"
         --job-name="lean-kimina-${RUN}" --output="${DIR}/logs/%j-kimina.out"
-        --export="ALL,LEAN_KIMINA_DIR=${LEAN_KIMINA_DIR},ROOT=${ROOT},ENDPOINT_FILE=${ENDPOINT},MAX_REPLS=${MAX_REPLS:-128},PORT=${PORT:-8000},HEADER_ROWS=${rows},TRAIN_JOB=$1,TRAIN_LOGS=${OUT}/slurm/$1-logs,HEAD_LIMIT=${HEAD_LIMIT:-600}"
+        --export="ALL,LEAN_KIMINA_DIR=${LEAN_KIMINA_DIR},ROOT=${ROOT},ENDPOINT_FILE=${ENDPOINT},MAX_REPLS=${MAX_REPLS},PORT=${PORT:-8000},HEADER_ROWS=${rows},TRAIN_JOB=$1,TRAIN_LOGS=${OUT}/slurm/$1-logs,HEAD_LIMIT=${HEAD_LIMIT:-600}"
         "${LEAN_KIMINA_DIR}/server_watch_job.sh")
 }
 
@@ -73,18 +84,34 @@ K=env.nemo_gym.math_formal_lean.resources_servers.math_formal_lean
 train_args=(
     "${K}.kimina_url="'$(KIMINA_ENDPOINT_FILE='"${ENDPOINT}"' bash '"${LEAN_KIMINA_DIR}"'/endpoint.sh url)'
     "${K}.kimina_api_key="'$(KIMINA_ENDPOINT_FILE='"${ENDPOINT}"' bash '"${LEAN_KIMINA_DIR}"'/endpoint.sh key)'
-    "${K}.kimina_max_inflight=${MAX_REPLS:-128}"
-    "$@"
+    "${K}.kimina_max_inflight=${MAX_REPLS}"
 )
-# --no-requeue after launch.sh's --requeue (added for preemptable) wins: a requeued run would restart against a
-# server that is gone.
-export RUN JOB_TIME PARTITION="${PARTITION:-normal}" SBATCH_EXTRA="${SBATCH_EXTRA:+${SBATCH_EXTRA} }--no-requeue"
+export RUN JOB_TIME PARTITION="${PARTITION:-normal}"
+if [[ "${SERVER}" == in-job ]]; then
+    # Save 30 min before the time limit (given before the overrides, so one there wins).
+    if [[ -n "${jt}" ]] && (( jt > 3600 )); then
+        m=$(( jt - 1800 ))
+        train_args+=("checkpointing.checkpoint_must_save_by=$(printf '%02d:%02d:%02d:%02d' \
+            $((m / 86400)) $((m % 86400 / 3600)) $((m % 3600 / 60)) $((m % 60)))")
+    fi
+    # in_job.sbatch's settings reach the job through sbatch's environment, under KIMINA_ names (ray.sub reads
+    # PORT as Ray's own port).
+    export BATCH_SCRIPT="${LEAN_KIMINA_DIR}/in_job.sbatch" KIMINA_DIR="${LEAN_KIMINA_DIR}" KIMINA_RL_INFRA="${ROOT}" \
+        KIMINA_ENDPOINT_FILE="${ENDPOINT}" KIMINA_HEADER_ROWS="${rows}" KIMINA_REPLS="${MAX_REPLS}" \
+        KIMINA_HEAD_LIMIT="${HEAD_LIMIT:-600}"
+else
+    # --no-requeue after launch.sh's --requeue (added for preemptable) wins: a requeued run would restart against
+    # a server that is gone.
+    export SBATCH_EXTRA="${SBATCH_EXTRA:+${SBATCH_EXTRA} }--no-requeue"
+fi
+train_args+=("$@")
 # run.sh runs from the repository root below; a relative RECIPE is meant from where train.sh was started.
 [[ -z "${RECIPE:-}" ]] || export RECIPE="$(realpath "${RECIPE}")"
 
 cd "${ROOT}"
 if [[ "${DRY_RUN:-0}" == 1 ]]; then
     DRY_RUN=1 bash run.sh envs/lean-kimina-sft.yaml "${train_args[@]}"
+    [[ "${SERVER}" == in-job ]] && exit 0
     echo
     echo "== the server job (submitted after the training, which is <training job> here):"
     server_sbatch '<training job>'
@@ -92,22 +119,35 @@ if [[ "${DRY_RUN:-0}" == 1 ]]; then
     exit 0
 fi
 
+mkdir -p "${DIR}/logs"
 out="$(bash run.sh envs/lean-kimina-sft.yaml "${train_args[@]}" | tee /dev/stderr)"
 train_job="$(grep -oE "^Run .* is job [0-9]+\.$" <<< "${out}" | grep -oE '[0-9]+\.$' | tr -d .)" || true
 [[ -n "${train_job}" ]] || { echo "ERROR: no training job ID in run.sh's output; no server submitted" >&2; exit 1; }
 
-mkdir -p "${DIR}/logs"
+if [[ "${SERVER}" == in-job ]]; then
+    cat << INFO
+
+Training ${train_job} (${PARTITION}, ${JOB_TIME}) with its Kimina server inside the job.
+  After it starts, check:
+    ${OUT}/slurm/${train_job}-logs/STARTED_RAY_HEAD     (about 1 min after the start)
+    ${OUT}/slurm/${train_job}-${RUN}.out                ([kimina ...] lines)
+    ${DIR}/logs/${train_job}-r0-kimina-0.out            (server up, ${MAX_REPLS} REPLs, controls passed)
+    ${OUT}/slurm/${train_job}-logs/ray-driver.log       ("kimina-endpoint: ... answered", then the steps)
+INFO
+    exit 0
+fi
+
 server_sbatch "${train_job}"
 if ! server_job="$(sbatch "${server_flags[@]}")"; then
     echo "ERROR: the server job was not submitted; cancelling training ${train_job}, which would have no verifier" >&2
     scancel "${train_job}"
     exit 1
 fi
-cat << EOF
+cat << INFO
 
 Training ${train_job} (${PARTITION}) and its Kimina server ${server_job} (${SERVER_PARTITION}, starts after it).
   After the training starts, check:
     ${OUT}/slurm/${train_job}-logs/STARTED_RAY_HEAD     (about 1 min after the start)
     ${DIR}/logs/${server_job}-kimina.out                ([watch ...] lines)
     ${OUT}/slurm/${train_job}-logs/ray-driver.log       ("kimina-endpoint: ... answered", then the steps)
-EOF
+INFO

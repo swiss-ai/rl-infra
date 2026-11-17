@@ -6,21 +6,23 @@ its tests; this file is the procedure. Everything here runs on a Clariden login 
 
 ## What runs
 
-| Job | Size | Partition | What |
-|---|---|---|---|
-| Training | 16 nodes: 8 Megatron trainers, 8 vLLM | `normal` (default) | NeMo-RL GRPO through `run.sh`; Gym's `math_formal_lean` sends every proof to the server |
-| Kimina server | 1 node, 128 Lean REPLs | `debug` (default) | `server_job.sh` plus a watch on the training (`server_watch_job.sh`) |
+One job of 16 nodes (8 Megatron trainers, 8 vLLM), on `normal` by default: NeMo-RL GRPO through `run.sh`, with
+the Kimina server (64 Lean REPLs) inside it. Gym's `math_formal_lean` sends every proof to the server.
 
-`train.sh` submits both: first the training, then the server with `--dependency=after:<training>`, so the
-server starts when the training starts. At job start the training reads the server's address and key through
-`endpoint.sh`, which waits for a live server. The server job:
-- stops when the training has left the queue;
-- cancels the training if its Ray head is not up 10 minutes after the server started;
-- cancels the training if the server dies.
+`train.sh` submits the job with `in_job.sbatch` as its batch script. On the first node (the Ray head) it starts
+the server outside the container, then runs NeMo-RL's `ray.sub`. At job start the training reads the server's
+address and key through `endpoint.sh`, which waits for a live server. The server:
+- ends with the job, and starts again with it when a preempted job is requeued;
+- restarts up to 3 times under the same address and key if it dies; after that the job is cancelled;
+- shares its node with the training: port 1120, memory on the CPU NUMA nodes, a lower CPU priority.
 
-The server goes on `debug` because debug starts a 1-node job within about a minute. Debug has two limits that
-shape everything here: **at most 1:30 h**, which limits a training to about 1:20 h, and **one running job per
-user**.
+The job is also cancelled if its Ray head is not up 10 minutes after it started.
+
+The run can be as long as the partition allows: 12 h on `normal`; 1 day on `preemptable`, where a preempted run
+is requeued and resumes from its last checkpoint. It saves by `JOB_TIME` - 30 min.
+
+`SERVER=debug` runs the server as a 1-node debug job of its own instead (how the runs of 2026-11-15 worked). It
+limits the training to about 1:20 h and takes your one running debug job; see the comments in `train.sh`.
 
 ## Status (2026-11-17)
 
@@ -36,8 +38,10 @@ Not yet shown in one run:
 - the task's 16,384 tokens through a whole run;
 - validation;
 - checkpoint saving;
-- `train.sh` itself, which puts together the hand-made scripts of those runs, and its server watch. Both are
-  tested only locally, with stand-ins for Slurm. The watch's first real use is a run queued on 2026-11-16.
+- `train.sh` itself, which puts together the hand-made scripts of those runs, and the server inside the job
+  (`in_job.sbatch`). Both are tested only locally, with stand-ins for Slurm, ray.sub and the server.
+- checkpoint saving on this task. Other Chonk GRPO runs in rl-infra save (about 1.5 TB per checkpoint with
+  AdamW) and resume.
 
 ## Once per account
 
@@ -120,31 +124,39 @@ harmless:
 A short run: 3 steps of 32 prompts × 16 rollouts, validation at start, no checkpoints.
 
     RECIPE=recipes/apertus2-chonk-sftv02-18315-vllm-adamw-code.yaml RUN=lean-kimina-v02-smoke-$(date +%Y%m%d) \
-        bash backends/nemo-rl/lean-kimina/train.sh \
+        JOB_TIME=01:30:00 bash backends/nemo-rl/lean-kimina/train.sh \
         grpo.max_num_steps=3 grpo.num_prompts_per_step=32 \
         grpo.val_at_start=true grpo.val_at_end=false grpo.val_period=1000 \
         checkpointing.enabled=false
+
+A long run: 12 h, a checkpoint every 10 steps, validation every 20.
+
+    RECIPE=recipes/apertus2-chonk-sftv02-18315-vllm-adamw-code.yaml RUN=lean-kimina-v02-$(date +%Y%m%d) \
+        bash backends/nemo-rl/lean-kimina/train.sh \
+        grpo.num_prompts_per_step=32 checkpointing.save_period=10 grpo.val_period=20
 
 Use `DRY_RUN=1` first. These settings change the defaults (the comments in `train.sh` list all of them):
 
 | Setting | Default | Note |
 |---|---|---|
-| `PARTITION` | `normal` | Never preempted, but 16 nodes waited 9.5 h once. `preemptable` started within minutes, but preempted runs after about 22 min |
-| `JOB_TIME` | `01:20:00` | Must fit inside `SERVER_TIME` |
-| `SERVER_PARTITION`, `SERVER_TIME` | `debug`, `01:30:00` | Debug's maximum |
+| `PARTITION` | `normal` | Never preempted, at most 12 h, but 16 nodes waited 9.5 h once (median 7 h for 12-h jobs in 2026-11). `preemptable` starts sooner, up to 1 day, but preempts: about half of 5–16-node runs lasted under 1 h |
+| `JOB_TIME` | `12:00:00` | The run saves by `JOB_TIME` - 30 min |
+| `MAX_REPLS` | `64` | The server's REPLs, on a node shared with the training |
 | `RUN` | `lean-kimina-<date>-<time>` | The server's files go to `$SCRATCH/lean-kimina/runs/<RUN>/` |
 
 `train.sh` takes your secrets out of the jobs' environment (sbatch passes it on, and ray.sub prints it).
 
-**Before you submit, keep debug free.** While another debug job of yours runs, the server waits. The training
-then waits for it in `endpoint.sh`, for at most 30 min, and fails.
+Debug stays free for your own jobs: nothing here uses it. With `SERVER=debug`, keep debug free before you
+submit: while another debug job of yours runs, the server waits, and the training waits for it in `endpoint.sh`
+for at most 30 min, then fails.
 
 ### After the training starts
 
 | When | Look at | Good sign |
 |---|---|---|
-| ~1 min | `$SCRATCH/nemo-rl/slurm/<training>-logs/STARTED_RAY_HEAD` | The file exists. If not, the server job cancels the training after 10 min |
-| ~2 min | `$SCRATCH/lean-kimina/runs/<RUN>/logs/<server>-kimina.out` | Server up (about 40–70 s, 128 REPLs, controls passed); `[watch ...] the Ray head ... is up` |
+| ~1 min | `$SCRATCH/nemo-rl/slurm/<training>-logs/STARTED_RAY_HEAD` | The file exists. If not, the job is cancelled after 10 min |
+| ~2 min | `$SCRATCH/nemo-rl/slurm/<training>-<RUN>.out` | `[kimina ...] the Ray head is up`, and no `[kimina ...] the server ended` |
+| ~2 min | `$SCRATCH/lean-kimina/runs/<RUN>/logs/<training>-r0-kimina-0.out` | Server up (about 40–70 s, 64 REPLs, controls passed) |
 | ~3 min | `$SCRATCH/nemo-rl/slurm/<training>-logs/ray-driver.log` | `kimina-endpoint: http://<server node>:8000 answered` |
 | ~11 min | the same | `Starting async GRPO training`, then "Training Results" blocks per step (Loss, Avg Reward) |
 
@@ -161,9 +173,9 @@ The outputs:
 
 ### Stopping
 
-- `scancel <training>`. The server job sees it within about a minute and ends by itself.
-- A training cancelled **before it started** leaves the server pending forever (`DependencyNeverSatisfied`):
-  `scancel` it too.
+- `scancel <training>`. The server ends with it.
+- With `SERVER=debug`: the server job sees it within about a minute and ends by itself. A training cancelled
+  **before it started** leaves that server pending forever (`DependencyNeverSatisfied`): `scancel` it too.
 
 ### Weights & Biases (optional)
 
@@ -176,12 +188,14 @@ The outputs:
 ## Known problems and lessons
 
 - **Head node container never started** (job 3949635): 16 nodes idled for 1:30 h, because ray.sub waits for the
-  Ray head without a limit. The server job's watch now cancels such a training after 10 min.
+  Ray head without a limit. Such a training is now cancelled after 10 min (`in_job.sbatch`, or the debug
+  server's watch).
 - **Stale file handle in the flashinfer cache** on a cold `$SCRATCH/.cache/flashinfer`: 32 vLLM workers compile
   the same kernel at once (job 3947435). A rerun on the now warm cache did not show it.
 - **Preemption:** `--time-min` does not protect a preemptable job. Clariden has `PreemptExemptTime=NONE` and
-  `GraceTime=240`, so only `normal` is safe. `train.sh` adds `--no-requeue`, so a preempted run ends instead of
-  restarting against a server that is gone.
+  `GraceTime=240`, so only `normal` is safe from it. A preempted in-job run is requeued and starts its server
+  again; it resumes from its last checkpoint and loses the steps since. With `SERVER=debug`, `train.sh` adds
+  `--no-requeue`, so a preempted run ends instead of restarting against a server that is gone.
 - **Slurm's start estimates** (`squeue --start`, `sbatch --test-only`) were off by hours, both ways.
 - **sbatch refuses a partition list** (`normal,preemptable`).
 - **Concurrent runs share** `$SCRATCH/vllm_cache_<n>` and `$SCRATCH/.cache`. It worked, but a cold cache broke a
@@ -190,7 +204,6 @@ The outputs:
   Keep the task's 16,384.
 - **The v0.1 checkpoint** (`recipes/apertus2-chonk-sftv01-19374-vllm-adamw-code.yaml`) had no Lean in its SFT
   data and scored 0 on every rollout. Use v0.2 or later.
-- **Longer runs** than about 1:20 h need a server outside debug. Not tried yet. A server on `normal` with
-  `SERVER_PARTITION=normal SERVER_TIME=<longer>` can start long after the training, past `endpoint.sh`'s 30 min.
-  Starting the server first with `start.sh` and passing its endpoint by hand (the steps in `README.md`) avoids
-  that, but drops the watch.
+- **Ports inside the job:** `ray.sub` keeps 1150–8999 (Ray, Gym 5000–5999, vLLM 7000–8999) and reads `PORT`
+  as Ray's own port. The in-job server uses 1120 (`KIMINA_PORT`), and `train.sh` passes its settings under
+  `KIMINA_` names only.

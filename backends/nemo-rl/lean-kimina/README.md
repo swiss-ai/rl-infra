@@ -14,8 +14,8 @@ sandbox's result format, so scoring and correction prompts are unchanged. The ta
 **Status (2026-11-17):** `setup.sh`, the data job and the server job have run on Clariden, with the REPLs in
 bubblewrap; see [Tested](#tested). Short GRPO runs of Chonk on the task have run with the server (see
 [Training runs](#training-runs-clariden-2026-11-15)). **To train, follow [`RUNBOOK.md`](RUNBOOK.md)**: it
-starts from an account that never ran the stack, and uses `train.sh`, which submits the training and its
-server together.
+starts from an account that never ran the stack, and uses `train.sh`, which submits the training with its
+server inside the job (or, with `SERVER=debug`, as a debug job of its own).
 
 ## Before the first run: Lean and Mathlib
 
@@ -36,16 +36,25 @@ matter for speed.
     bash backends/nemo-rl/lean-kimina/setup.sh                       # once, login node, ~2 min
     PARTITION=debug bash backends/nemo-rl/lean-kimina/setup-data.sh  # once, one node, < 30 min; prints the job
     RECIPE=recipes/apertus2-chonk-sftv02-18315-vllm-adamw-code.yaml \
-        bash backends/nemo-rl/lean-kimina/train.sh [overrides...]    # the training, then its server on debug
+        bash backends/nemo-rl/lean-kimina/train.sh [overrides...]    # the training, its server inside the job
 
 `RUNBOOK.md` has the whole procedure, including the one-time setup of the Apertus 2 stack.
-- **`train.sh`** submits the training through `run.sh`, then the server with `--dependency=after:<training>`.
-  - The training's command carries `$(… endpoint.sh url|key)` unexpanded. They run at job start and wait for a
-    live server, so neither job needs the other's queue time.
-  - The server job, `server_watch_job.sh`, stops the server when the training has left the queue. It cancels the
-    training if its Ray head is not up after `HEAD_LIMIT` (600 s), or if the server dies.
-  - Every run has its own endpoint, in `$SCRATCH/lean-kimina/runs/<RUN>/`.
-- **`start.sh`** starts a server alone, for runs longer than a debug job: the training then gets
+- **`train.sh`** submits the training through `run.sh`. The training's command carries `$(… endpoint.sh url|key)`
+  unexpanded; they run at job start and wait for a live server. Every run has its own endpoint, in
+  `$SCRATCH/lean-kimina/runs/<RUN>/`. Two ways to run the server:
+  - **In the job (`SERVER=in-job`, the default).** `launch.sh` submits `in_job.sbatch` instead of NeMo-RL's
+    `ray.sub`. On the job's first node (the Ray head) it starts `server_job.sh` outside the container, with 64
+    REPLs on port 1120 (`ray.sub` keeps 1150–8999), its memory on the CPU NUMA nodes (`numactl --membind=0-3`)
+    and a lower CPU priority; then it runs `ray.sub` unchanged. The server ends with the job, restarts up to 3
+    times under the same address and key if it dies, and starts again with a requeued job, so a run can be as
+    long as its partition allows (12 h on `normal`, 1 day on `preemptable`, requeued after a preemption). The
+    job is cancelled if the server cannot be restarted or the Ray head is not up after `HEAD_LIMIT` (600 s).
+    Log lines start with `[kimina ...]`; the server's output is in `runs/<RUN>/logs/<job>-r<restart>-kimina-<n>.out`.
+  - **A debug job (`SERVER=debug`).** The server is a 1-node job submitted after the training with
+    `--dependency=after:<training>`. Its watch (`server_watch_job.sh`) stops it when the training has left the
+    queue, and cancels the training if its Ray head is not up after `HEAD_LIMIT` or the server dies. Debug's
+    1:30 h limits the training to about 1:20 h, and it takes your one running debug job.
+- **`start.sh`** starts a server alone (tests): the training then gets
   `kimina_url=$(cat $SCRATCH/lean-kimina/endpoint)` and `kimina_api_key=$(cat $SCRATCH/lean-kimina/endpoint.key)`.
   That puts the key on the submitted command line, and nothing stops the server after the run (`scancel` it).
 
@@ -182,5 +191,6 @@ that `train.sh` and `endpoint.sh` now hold, with the training first and the serv
   - a run with rewards that finishes;
   - the task's 16,384 tokens through a whole run;
   - validation;
-  - checkpoint saving;
-  - `train.sh` itself on Clariden.
+  - checkpoint saving on this task (other Chonk GRPO runs in rl-infra save and resume);
+  - `train.sh` itself on Clariden, and the server inside the job (`in_job.sbatch`); both are tested only
+    locally, with stand-ins for Slurm, ray.sub and the server.
