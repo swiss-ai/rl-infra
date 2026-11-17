@@ -16,6 +16,7 @@ bubblewrap; see [Tested](#tested). Short GRPO runs of Chonk on the task have run
 [Training runs](#training-runs-clariden-2026-11-15)). **To train, follow [`RUNBOOK.md`](RUNBOOK.md)**: it
 starts from an account that never ran the stack, and uses `train.sh`, which submits the training with its
 server inside the job (or, with `SERVER=debug`, as a debug job of its own).
+The run of 2026-11-17 (Goedel-Prover problems, 9 nodes) is `run-goedel-9n.sh`; RUNBOOK.md says why each setting.
 
 ## Before the first run: Lean and Mathlib
 

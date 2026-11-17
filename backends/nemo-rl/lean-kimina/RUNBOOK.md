@@ -185,6 +185,40 @@ The outputs:
 - CSCS asks for `WANDB_DIR=/capstor/store/cscs/swissai/infra01/wandb_logs/<github-user>/`, which rl-infra does
   not set yet.
 
+## The Goedel run (2026-11-17)
+
+Clariden job 3965303, submitted on 2026-11-17; not yet started when this was written. `run-goedel-9n.sh` repeats
+it as one command (`DRY_RUN=1` first). It needs everything above, including `validation.v434.jsonl`.
+
+| Setting | Value | Why |
+|---|---|---|
+| Model | Chonk SFT v0.2, iteration 18315 | the first Chonk with Lean in its SFT data |
+| Nodes | 9: 8 Megatron trainers, 1 vLLM; `normal`, 12 h | the trainers hold AdamW (state offloaded to CPU memory); in the 14 days to 2026-11-17, 12-h `normal` jobs of 5–8 nodes waited a median of 3.3 h, of 13–16 nodes 22.7 h |
+| Kimina | inside the job, 16 REPLs of at most 8 GB | the first node is also a trainer and the Ray head: about 80 GB to spare at its lowest (run 3948553) |
+| Training rows | 2,357 Goedel-Prover RL V2 statements (`data/goedel-train-s1.v434.jsonl.gz`) | v0.2 proves 14–16 % of Goedel statements on the first try, 3.1 % of the Nemotron-Math-Proofs v1 rows, which were chosen as hard (`initial_success_count` 1–3) |
+| Sampling | temperature 1.0, top_p 1.0 | at 0.6 / 0.95, 38 % of rollouts reached the length limit, 76 % of those in literal repetition loops; at 1.0, 16 % and 5 %; first-try rate about the same (14.0 against 14.6 %) |
+| Length | 16,000 new tokens; 16,384 with the prompt, the checkpoint's context | of rollouts still running at 14,000 tokens, 0 of 195 (temperature 1.0) and 3 of 471 (0.6) ended in a verified proof |
+| Proof check | 120 s (`compilation_timeout`; Gym's default is 30 s) | 1,983 replies of chonk-tests' Goedel evaluation, checked again with 1,200 s: correct proofs took a median 1.8 s, p95 28.7 s, p99 108 s, at most 587 s. 30 / 60 / 120 / 300 s keep 95.1 / 97.0 / 99.0 / 99.8 % of them; 120 s keeps about a third of the 16 REPLs busy |
+| Step | 32 statements × 16 rollouts, one optimizer step; AdamW, constant learning rate 2e-6 | |
+| Validation | miniF2F test (212 statements), at the start, every 20 steps and at the end | |
+| Checkpoints | every 10 steps, all kept (about 1.5 TB each), the last by 11:30 h | insurance against a crash, and the first save is an early test of saving on Alps |
+
+How the training rows were made, from Goedel-LM/RL_dataset_V2 at revision `5c99dce`:
+1. `goedel_rows.py --cache <dir> --n 3000 --seed 1 --exclude-sample 500:0 --exclude-statements
+   $SCRATCH/lean/data/validation.v434.jsonl <rows>` (needs pyarrow; downloads 336 MB once): 3,000 of the 49,913
+   distinct statements, then 2,570 rows. Dropped: 392 statements with a `let ... :=` (Gym's proof assembly cuts
+   them, so they score 0 whatever the model writes), 33 of the 500 that chonk-tests evaluates on, 5 duplicates;
+   none is in miniF2F.
+2. The rows whose statement elaborates on Lean v4.34.0 + Mathlib. The run's file was checked with the `lean`
+   command line (chonk-tests' `proofnet.py check-statements`), which kept 2,357. Here the check is
+   `validate_statements.py` against a Kimina server (`start.sh`) on the same Lean and Mathlib; it has not been
+   run on these rows, so it may keep a slightly different set. Given the run's kept rows, `goedel_rows.py`
+   reproduces the committed file byte for byte (sha256 `47e7b602...`, checked by `run-goedel-9n.sh`).
+
+Versions: this branch of rl-infra; NeMo-RL, Megatron, Bridge and Gym at `../apertus2/pin`; Lean v4.34.0 and
+Mathlib from `site.env`. The run's Kimina install is at 97d7683; `pin` names b3c6c3e, which only adds exiting when
+the server's start-up fails.
+
 ## Known problems and lessons
 
 - **Head node container never started** (job 3949635): 16 nodes idled for 1:30 h, because ray.sub waits for the
