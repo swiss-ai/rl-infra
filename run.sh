@@ -23,6 +23,8 @@ source "${ROOT}/sites/load.sh" && rl_infra_load "${APERTUS2_DIR}/env"
 export ACCOUNT PARTITION="${PARTITION:-${RUN_PARTITION:-${DEFAULT_PARTITION}}}" JOB_TIME="${JOB_TIME:-05:00:00}" SCRATCH
 # HOME inside the container is not yours; task files find your files under ${oc.env:RL_USER_HOME}.
 export RL_USER_HOME="${HOME}"
+# The pods' user label (task files: ${oc.env:NEMO_GYM_USER,rl-infra}); run-harbor-osb.sh exports the same.
+export NEMO_GYM_USER="${NEMO_GYM_USER:-${USER}}"
 mkdir -p "${OUT}/configs"
 # pydeps.sh replaces an overlay when its list changes, and running jobs import from it, so a task
 # with a script gets an overlay of its own.

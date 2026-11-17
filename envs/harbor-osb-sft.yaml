@@ -8,7 +8,7 @@
 #   python3.12 envs/validate_micro_tasks.py $SCRATCH/harbor/micro/tasks --api-key-file ~/.opensandbox_token
 #   bash run.sh envs/harbor-osb-sft.yaml \
 #       env.nemo_gym.sandbox.opensandbox.connection.api_key_file=$HOME/.opensandbox_token
-# The pods of a run carry the labels user=rl-infra and run=<run name> and live at most sandbox_ttl_s;
+# The pods of a run carry the labels user=$USER (NEMO_GYM_USER, run.sh; rl-infra without it) and run=<run name> and live at most sandbox_ttl_s;
 # to delete the ones a run leaves behind, see experiments/runs.md.
 defaults: ../recipes/apertus2-chonk-sft-vllm-adamw-tools.yaml
 script: examples/nemo_gym/run_grpo_nemo_gym.py
@@ -131,10 +131,10 @@ env:
           # Given at launch: HOME inside the container is not yours.
           api_key_file: ???
           transport_backend: httpx
-        # Labels on every pod. The driver sees neither $USER nor Slurm's variables in the container, so
-        # the run name tells a run's pods apart.
+        # Labels on every pod. The driver does not see $USER in the container: run.sh exports it as
+        # NEMO_GYM_USER (rl-infra when unset); the run name tells a run's pods apart.
         attribution:
-          user: rl-infra
+          user: ${oc.env:NEMO_GYM_USER,rl-infra}
           workload: harbor-micro
           run: ${logger.wandb.name}
     harbor_agent:

@@ -62,7 +62,7 @@ env:
           # the task file sets api_key null and asks for the key's file; the key itself never enters
           # the config (run-s.sh exports the absolute path, HOME in the container is not the user's)
           api_key_file: ${oc.env:OPENSANDBOX_API_KEY_FILE}
-        # the task file labels the pods user=rl-infra, run=${logger.wandb.name}; without W&B that name
+        # the task file labels the pods user=${NEMO_GYM_USER} (rl-infra if unset), run=${logger.wandb.name}; without W&B that name
         # is the recipe's constant, and ../../envs/reap_after.sh deletes by NEMO_GYM_RUN_ID and
         # NEMO_GYM_USER, which run-harbor-osb.sh exports, as for run B
         attribution:
