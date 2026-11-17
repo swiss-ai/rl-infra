@@ -6,8 +6,10 @@
 #   kimina_wait <url> <seconds>                  wait until /health answers (1 if the server died, its start-up
 #                                                failed, or time ran out)
 #   kimina_confinable                            0 if bubblewrap can confine REPLs on this node
-# The server settings are the ones measured on Clariden (the fork's docs/MANY_CORE_NODES.md). KIMINA_MAX_REPL_MEM
-# (default 32G) caps one REPL's memory; in_job.sbatch sets it lower, on a node it shares with the training.
+# The server settings are the ones measured on Clariden (the fork's docs/MANY_CORE_NODES.md). MAX_REPL_MEM is an
+# address-space limit (RLIMIT_AS) per REPL, not a memory limit: Lean maps all of Mathlib into it, so a low value makes
+# every import fail and the server's start-up with it. Upstream raised its default from 8G to 12G for Lean v4.26;
+# every run here used 32G. Do not lower it without testing an import of Mathlib at the pinned Lean.
 
 LEAN_KIMINA_DIR="${LEAN_KIMINA_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 
@@ -48,7 +50,7 @@ kimina_serve() {
         LEAN_SERVER_ENVIRONMENT=prod LEAN_SERVER_LOG_LEVEL=WARNING \
         LEAN_SERVER_REPL_PATH="${repl_path}" LEAN_SERVER_PROJECT_DIR="${KIMINA_STAGE_DIR}" \
         LEAN_SERVER_MAX_REPLS="${repls}" LEAN_SERVER_INIT_REPLS="${init}" \
-        LEAN_SERVER_MAX_REPL_MEM="${KIMINA_MAX_REPL_MEM:-32G}" LEAN_SERVER_MAX_WAIT=3600 LEAN_SERVER_HEADER_TIMEOUT=900 \
+        LEAN_SERVER_MAX_REPL_MEM=32G LEAN_SERVER_MAX_WAIT=3600 LEAN_SERVER_HEADER_TIMEOUT=900 \
         LEAN_SERVER_LOG_SNIPPETS=false LEAN_SERVER_MONITOR_REPLS=false LEAN_SERVER_PREWARM=true \
         LEAN_SERVER_CHECK_HEADER=true LEAN_SERVER_DIRECT_EXEC=true \
         LEAN_SERVER_LEAN_PATH="${KIMINA_LEAN_PATH}" LEAN_SERVER_LEAN_SYSROOT="${KIMINA_LEAN_SYSROOT}" \

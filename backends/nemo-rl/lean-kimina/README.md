@@ -45,8 +45,8 @@ matter for speed.
   `$SCRATCH/lean-kimina/runs/<RUN>/`. Two ways to run the server:
   - **In the job (`SERVER=in-job`, the default).** `launch.sh` submits `in_job.sbatch` instead of NeMo-RL's
     `ray.sub`. On the job's first node (the Ray head) it starts `server_job.sh` outside the container, with 16
-    REPLs on port 1120 (each capped at 8 GB; the node is also a trainer and the Ray head, with about 80 GB to
-    spare at its lowest) (`ray.sub` keeps 1150–8999), its memory on the CPU NUMA nodes (`numactl --membind=0-3`)
+    REPLs on port 1120 (the node is also a trainer and the Ray head, with about 80 GB to spare at its
+    lowest) (`ray.sub` keeps 1150–8999), its memory on the CPU NUMA nodes (`numactl --membind=0-3`)
     and a lower CPU priority; then it runs `ray.sub` unchanged. The server ends with the job, restarts up to 3
     times under the same address and key if it dies, and starts again with a requeued job, so a run can be as
     long as its partition allows (12 h on `normal`, 1 day on `preemptable`, requeued after a preemption). The

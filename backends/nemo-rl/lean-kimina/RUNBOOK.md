@@ -194,7 +194,7 @@ it as one command (`DRY_RUN=1` first). It needs everything above, including `val
 |---|---|---|
 | Model | Chonk SFT v0.2, iteration 18315 | the first Chonk with Lean in its SFT data |
 | Nodes | 9: 8 Megatron trainers, 1 vLLM; `normal`, 12 h | the trainers hold AdamW (state offloaded to CPU memory); in the 14 days to 2026-11-17, 12-h `normal` jobs of 5–8 nodes waited a median of 3.3 h, of 13–16 nodes 22.7 h |
-| Kimina | inside the job, 16 REPLs of at most 8 GB | the first node is also a trainer and the Ray head: about 80 GB to spare at its lowest (run 3948553) |
+| Kimina | inside the job, 16 REPLs | the first node is also a trainer and the Ray head: about 80 GB to spare at its lowest (run 3948553) |
 | Training rows | 2,357 Goedel-Prover RL V2 statements (`data/goedel-train-s1.v434.jsonl.gz`) | v0.2 proves 14–16 % of Goedel statements on the first try, 3.1 % of the Nemotron-Math-Proofs v1 rows, which were chosen as hard (`initial_success_count` 1–3) |
 | Sampling | temperature 1.0, top_p 1.0 | at 0.6 / 0.95, 38 % of rollouts reached the length limit, 76 % of those in literal repetition loops; at 1.0, 16 % and 5 %; first-try rate about the same (14.0 against 14.6 %) |
 | Length | 16,000 new tokens; 16,384 with the prompt, the checkpoint's context | of rollouts still running at 14,000 tokens, 0 of 195 (temperature 1.0) and 3 of 471 (0.6) ended in a verified proof |

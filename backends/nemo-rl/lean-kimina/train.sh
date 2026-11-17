@@ -24,7 +24,6 @@
 #   MAX_REPLS        the server's REPLs (and the Gym's requests in flight); default 16 in-job, 128 with
 #                    SERVER=debug. About 2.2 GB each at peak. In-job they share the first node with a trainer and the
 #                    Ray head, which had only ~80 GB free at its lowest (run 3948553); see in_job.sbatch.
-#                    KIMINA_MAX_REPL_MEM caps one REPL (default 8G in-job).
 #   HEAD_LIMIT       seconds the training's Ray head may take to come up before the job is cancelled, default 600.
 #   In-job only: KIMINA_PORT (default 1120: ray.sub keeps 1150-8999 for itself), KIMINA_RESTARTS (default 3),
 #                KIMINA_MEMBIND (default 0-3, the CPU NUMA nodes; empty: none), KIMINA_NICE (default 5).
