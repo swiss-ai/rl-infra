@@ -2,7 +2,8 @@
 # Reuse the already staged, owned runtime; never run setup/fetch/patch on existing checkouts.
 export SAFETY_EXPERIMENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export APERTUS2_DIR="${SAFETY_EXPERIMENT_DIR}/../../backends/nemo-rl/apertus2"
-export SITE=hangang USER="${USER:-hanint14}" SCRATCH="${SCRATCH:-/scratch/${USER:-hanint14}}"
+export SITE=hangang USER="${USER:-$(id -un)}"
+export SCRATCH="${SCRATCH:-/scratch/${USER}}"
 export PROJECTS_DIR="${PROJECTS_DIR:-${SCRATCH}/safetygym/src}"
 export SHARED="${SCRATCH}"
 export OUT="${OUT:-${SCRATCH}/safetygym/runs}"
