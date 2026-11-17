@@ -1,0 +1,110 @@
+# Native rl-infra recipe: 12 total nodes = 8 Megatron trainers + 4 vLLM rollout nodes.
+defaults: ../../recipes/apertus2-chonk-vllm-adamw.yaml
+
+grpo:
+  max_num_steps: 4553  # One full-batch epoch; all source rows remain available to the loader.
+  val_period: 25
+  val_at_start: true
+  val_at_end: true
+  max_val_samples: null  # Gym validates exactly the physically prepared 500/1000 rows.
+  val_batch_size: null
+  val_num_generations_per_prompt: 1
+
+checkpointing:
+  metric_name: null
+  keep_top_k: 0
+  ft_keep_latest_k: 2
+  save_period: 50
+  save_optimizer: true
+  save_data_plane: false
+  load_replay_buffer: true
+  checkpoint_must_save_by: ${oc.env:SAFETY_CHECKPOINT_DEADLINE}
+
+policy:
+  model_name: ${oc.env:SAFETY_CHONK_MODEL}
+  # Apertus 2 Chonk checkpoint supports a 16k total prompt+generation context.
+  max_total_sequence_length: 16384
+  logprob_chunk_size: 512
+  generation:
+    # Per-request completion cap; total prompt+completion stays within 16k.
+    max_new_tokens: 2048
+    stop_strings: null
+    vllm_cfg:
+      expose_http_server: true
+      max_model_len: ${policy.max_total_sequence_length}
+      cap_max_tokens_to_context: true
+      http_server_serving_chat_kwargs:
+        chat_template: ${policy.tokenizer.chat_template}
+    vllm_kwargs:
+      enable_chunked_prefill: true
+  megatron_cfg:
+    activation_checkpointing: true
+    defer_fp32_logits: true
+    pipeline_model_parallel_size: 2
+    expert_model_parallel_size: 16
+    checkpoint:
+      async_save: false
+    env_vars:
+      CUDA_ENABLE_COREDUMP_ON_EXCEPTION: '0'
+      NRL_MEM_HISTORY: '0'
+      NRL_LOG_LEVEL: INFO
+      NCCL_DEBUG: WARN
+  generation_batch_size: 32
+  sequence_packing:
+    train_mb_tokens: 16384
+    logprob_mb_tokens: 16384
+
+data:
+  _override_: true
+  max_input_seq_length: null
+  shuffle: true
+  num_workers: 0
+  use_multiple_dataloader: false
+  train:
+    dataset_name: NemoGymDataset
+    data_path: ${oc.env:SAFETY_DATA_DIR}/train.jsonl
+  validation:
+    dataset_name: NemoGymDataset
+    data_path: ${oc.env:SAFETY_DATA_DIR}/validation.jsonl
+  default:
+    dataset_name: NemoGymDataset
+    env_name: nemo_gym
+    processor: nemo_gym_data_processor
+    prompt_file: null
+    system_prompt_file: null
+
+env:
+  _override_: true
+  should_use_nemo_gym: true
+  # False enables a separate per-step train_data JSONL dump in this pinned backend.
+  should_log_nemo_gym_responses: true
+  should_mask_flagged_samples: true
+  rollout_dir: ${checkpointing.checkpoint_dir}/rollouts
+  nemo_gym:
+    uv_cache_dir: ${oc.env:JOB_UV_CACHE_DIR}
+    skip_venv_if_present: true
+    port_range_low: 5000
+    port_range_high: 5999
+    is_trajectory_collection: false
+    use_absolute_ip: true
+    config_paths:
+    - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+    - resources_servers/jailbreak_detection/configs/safety_judge_model.yaml
+    - resources_servers/jailbreak_detection/configs/jailbreak_detection_nemotron_combined_reward_tp8.yaml
+    - resources_servers/over_refusal_detection/configs/over_refusal_detection.yaml
+    - ${oc.env:SAFETY_EXPERIMENT_DIR}/gym.yaml
+    - ${oc.env:SAFETY_JUDGE_CONFIG}
+    policy_model:
+      responses_api_models:
+        vllm_model:
+          extra_body:
+            stop: ["\nUser:", "\nAssistant:"]
+            stop_token_ids: [2, 0]
+            detokenize_stop_sequence: true
+
+logger:
+  wandb_enabled: false  # WANDB_PROJECT enables stock launcher's credential handling.
+  tensorboard_enabled: true
+  num_val_samples_to_print: 0
+  wandb:
+    log_nemo_gym_full_result_tables: false
