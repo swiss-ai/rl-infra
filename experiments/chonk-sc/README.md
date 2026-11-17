@@ -281,6 +281,7 @@ SMOKE=1 AGENT=opencode DRY_RUN=1 bash experiments/chonk-sc/run-agent-v.sh   # se
 SMOKE=1 AGENT=opencode bash experiments/chonk-sc/run-agent-v.sh   # 1 step, 4 x 8 = 32 (trainer data-parallel size 32)
 AGENT=opencode bash experiments/chonk-sc/run-agent-v.sh           # 10 steps, 8 x 8, JOB_TIME 08:00:00
 GATEWAY_PROXY=1 ...       # sandboxes and tunnel through the OpenSandbox server proxy (if the gymtunnel gateway test fails)
+REGISTRY_CHECK=pod ...    # before setup also start one test pod (default 1: manifest pull check only; 0: skip)
 ```
 
 What to look at: `train step N/N`; `failure_<class>` per step (OpenCode writes no `agent_error_flags.json`, so only

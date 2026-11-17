@@ -140,8 +140,22 @@ runs on the login node (or any node that reaches the API), at most WAIT_S (900 s
 
     cd ~/rl-infra && python3 experiments/osb-reach/pending.py      # task.toml default: $SCRATCH/osb/swe_lego_v05/tasks/adamchainz__time-machine-298
 
-Every case sends the run's placeholder registry credentials (`image_auth` anonymous/unused, as run-s-sft.yaml)
-unless it says noauth.
+Every case sends registry credentials unless it says noauth: RL_REGISTRY_USERNAME/PASSWORD if set, else the
+`name:password` line of RL_REGISTRY_CRED_FILE (~/.rl_registry_cred), else the old anonymous/unused placeholder.
+The image and the swe-full resources come from the task.toml's `[environment]` table (the agent pod; verified
+tasks also have a `[verifier.environment]`). Exit 0 when every case reached Running.
+
+## Registry or capacity? (`registry-diag.sh`, before rerunning a run whose pods stayed Pending)
+
+Job 5374114 (run OV smoke): all 64 creates Pending for 600 s, on 4 rl-registry images. One command on the login
+node (~15 min) runs `registry_check.sh` on a verified task's agent and verifier image, then `pending.py --cases
+small,swe-small,swe-full` on it; the header says how to read the result. Log: `$SCRATCH/osb-reach/registry-diag-<date>.log`.
+
+    cd ~/rl-infra && bash experiments/osb-reach/registry-diag.sh [task-regex]     # default: sdmetrics
+
+`registry_check.sh` exits 0 when the robot account may pull the image (1 otherwise). `registry_precheck.sh
+<train.jsonl> <harbor_data_dir>` checks the first task's images with it; run-v.sh and run-agent-v.sh call it before
+setup and refuse to submit when it fails (REGISTRY_CHECK=0 skips it, =pod also starts one test pod).
 
 | Case | Image | Resources | |
 |---|---|---|---|

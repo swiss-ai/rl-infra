@@ -11,6 +11,8 @@
 # Result lines: "manifest with token -> HTTP 200" = pull allowed, 401/403/404 = not. The token is issued even
 # for wrong credentials (2026-11-11); its `sub` says whether they were accepted ('' = anonymous) and
 # `access` what they allow ("actions": [] = no pull permission on the repository).
+# Exit 0 when the robot account (C) may pull the image (manifest HTTP 200); without a credentials file, when
+# an anonymous pull (A) may; 1 otherwise (also: registry unreachable, no token URL).
 set -uo pipefail
 IMAGE="${1:-rl-registry.swissai.svc.cscs.ch/swe_lego_v05_1/adamchainz__time-machine-298@sha256:cc8246f55a927fcb7b7739ab45721d11f99b86611704afcab826d65e5415900c}"
 HOST="${IMAGE%%/*}"
@@ -32,6 +34,7 @@ service="$(sed -nE 's/.*service="([^"]+)".*/\1/p' <<< "${www}")"
 try() {  # $1 label, $2 curl config text for the token request (stdin), rest: extra curl args
     local label="$1" conf="$2"; shift 2
     local body code token
+    TRY_CODE=none
     body="$(curl -sS -m 30 -G -w '\n%{http_code}' -K - "$@" "${realm}" <<< "${conf}" \
         --data-urlencode "service=${service}" --data-urlencode "scope=repository:${REPO}:pull" 2>&1)"
     code="$(tail -n1 <<< "${body}")"
@@ -44,10 +47,12 @@ import base64, json, sys
 part = sys.argv[1].split(".")[1]
 claims = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
 print("sub=%r access=%s" % (claims.get("sub", ""), json.dumps(claims.get("access"))))' "${token}" 2>/dev/null || echo "(not a JWT)")"
-    echo "${label}: manifest with token -> HTTP $(curl -sS -m 30 -o /dev/null -I -w '%{http_code}' -K - \
+    TRY_CODE="$(curl -sS -m 30 -o /dev/null -I -w '%{http_code}' -K - \
         -H "${ACCEPT}" "${URL}" <<< "header = \"Authorization: Bearer ${token}\"")"
+    echo "${label}: manifest with token -> HTTP ${TRY_CODE}"
 }
 try "2. A anonymous" ""
+ANON_CODE="${TRY_CODE}"
 try "3. B anonymous/unused (the old placeholder image_auth)" \
     "user = \"${RL_REGISTRY_USERNAME:-anonymous}:${RL_REGISTRY_PASSWORD:-unused}\""
 cred_file="${RL_REGISTRY_CRED_FILE:-${HOME}/.rl_registry_cred}"
@@ -56,6 +61,7 @@ if [[ -r "${cred_file}" ]]; then
     [[ "${cred}" == ?*:?* ]] || { echo "4. C ${cred_file}: not one name:password line"; exit 1; }
     cred="${cred//\\/\\\\}"; cred="${cred//\"/\\\"}"   # curl config quoting
     try "4. C robot account (${cred_file}, name ${cred%%:*})" "user = \"${cred}\""
+    ROBOT_CODE="${TRY_CODE}"
     # the projects the account can see (this Harbor treats wrong credentials as anonymous: only `public`)
     api="$(curl -sS -m 30 -w '\n%{http_code}' -K - "https://${HOST}/api/v2.0/projects?page_size=100" \
         <<< "user = \"${cred}\"" 2>&1)"
@@ -65,3 +71,7 @@ if [[ -r "${cred_file}" ]]; then
 else
     echo "4. C no ${cred_file}"
 fi
+if [[ -n "${ROBOT_CODE:-}" ]]; then verdict="${ROBOT_CODE}" who="the robot account"; else verdict="${ANON_CODE}" who="anonymous"; fi
+if [[ "${verdict}" == 200 ]]; then echo "== PULL OK: ${who} may pull ${IMAGE##*/}"; exit 0; fi
+echo "== PULL NOT ALLOWED: ${who} got manifest HTTP ${verdict} for ${IMAGE}"
+exit 1

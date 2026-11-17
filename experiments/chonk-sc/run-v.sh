@@ -12,7 +12,8 @@
 # (02:00:00), PARTITION (normal), DRIVER_RETRIES (0), RL_REGISTRY_CRED_FILE (~/.rl_registry_cred), OPENSANDBOX_API_KEY_FILE (~/.opensandbox_token),
 # APERTUS_COMMON_URL (SSH, as run-s.sh), EXCLUDE_CAMPAIGNS (regex, default swe-rebench-v2\.1-rl; empty = all),
 # EXCLUDE_TASKS (regex on the task part after `<campaign>__`, default the 5 tasks whose verifier timed out in
-# job 5356101; empty = none), RECIPE (default recipes/apertus2-chonk-sft19374-alps-vllm-adamw-tools.yaml).
+# job 5356101; empty = none), RECIPE (default recipes/apertus2-chonk-sft19374-alps-vllm-adamw-tools.yaml),
+# REGISTRY_CHECK (1: the first task's images must be pullable before submitting; pod: plus one test pod; 0: skip).
 # Harbor trial dirs: $SCRATCH/harbor-jobs/<RUN>.
 # At most SANDBOXES (64) pods on Breithorn, to leave room for the other tenants: harbor_agent concurrency is one
 # semaphore around the whole trial, and with [verifier] environment_mode = "separate" Harbor stops the agent pod
@@ -65,6 +66,10 @@ if (( ${#DROP[@]} )); then
     echo "== left out $(( $(wc -l < "${HARBOR_ROOT}/train.jsonl") - $(wc -l < "${TRAIN}") )) rows" \
         "(campaigns /${EXCLUDE_CAMPAIGNS}/, tasks /${EXCLUDE_TASKS}/); training on ${TRAIN}"
 fi
+
+# fail before setup and the queue wait when Breithorn cannot pull the task images (job 5374114: every pod
+# Pending, 10.7 node-hours for nothing); REGISTRY_CHECK=0 skips it, =pod also starts one test pod
+bash "${ROOT}/experiments/osb-reach/registry_precheck.sh" "${TRAIN}" "${HARBOR_ROOT}" || exit 1
 
 # exported before use: in `RUN=x bash run.sh ... $RUN` the argument's $RUN is expanded by the calling shell first
 export RUN="${RUN:-sft19374-harbor-verified-$(date +%Y%m%d-%H%M%S)}"

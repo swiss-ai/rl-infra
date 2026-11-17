@@ -26,7 +26,9 @@
 # OPENCODE_TIMEOUT_SEC (1740), OPENCODE_VERSION, OPENCODE_DEBUG, CHISEL_DIR ($SCRATCH/chisel),
 # and as run-v.sh: VERIFIED_STORE, HARBOR_ROOT ($SCRATCH/osb/harbor_verified), COLLECT_ARGS, EXCLUDE_CAMPAIGNS,
 # EXCLUDE_TASKS, RL_REGISTRY_CRED_FILE (~/.rl_registry_cred), OPENSANDBOX_API_KEY_FILE (~/.opensandbox_token);
-# as run-s.sh: SFT_MODEL_SRC, SFT_EDF_NAME, ACCOUNT, PARTITION (normal), DRIVER_RETRIES (0), OVERLAY.
+# as run-s.sh: SFT_MODEL_SRC, SFT_EDF_NAME, ACCOUNT, PARTITION (normal), DRIVER_RETRIES (0), OVERLAY;
+# REGISTRY_CHECK (1: before setup, the robot account must be able to pull the first task's images, else no
+# submission; pod: also one test pod with the task's resources, up to 600 s; 0: skip; ../osb-reach/registry_precheck.sh).
 # Harbor trial dirs: $SCRATCH/harbor-jobs/<RUN> (as run V). Pods carry run=<RUN> (reaper filter).
 set -euo pipefail
 
@@ -86,6 +88,10 @@ if (( ${#DROP[@]} )); then
     echo "== left out $(( $(wc -l < "${HARBOR_ROOT}/train.jsonl") - $(wc -l < "${TRAIN}") )) rows" \
         "(campaigns /${EXCLUDE_CAMPAIGNS}/, tasks /${EXCLUDE_TASKS}/); training on ${TRAIN}"
 fi
+
+# fail before setup and the queue wait when Breithorn cannot pull the task images (job 5374114: every pod
+# Pending, 10.7 node-hours for nothing); REGISTRY_CHECK=0 skips it, =pod also starts one test pod
+bash "${ROOT}/experiments/osb-reach/registry_precheck.sh" "${TRAIN}" "${HARBOR_ROOT}" || exit 1
 
 # exported before use (run-harbor-osb.sh reads RUN; the pods' run label is NEMO_GYM_RUN_ID = RUN)
 export RUN="${RUN:-chonk-sc-${TAG}-${AGENT}-ctx${CTX}-$(date +%Y%m%d-%H%M%S)}"

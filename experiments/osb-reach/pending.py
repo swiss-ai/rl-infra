@@ -17,10 +17,16 @@ run-s-sft.yaml) unless it says noauth. The cases tell the causes apart:
 swe-small runs, swe-full stays Pending: scheduling/quota (swe-req running = the fix). Both stay Pending:
 the image (pull); swe-full-noauth running = the credentials.
 
-Standard library only; the API key is read from a file and never printed.
+The task's image and its resources (swe-full, swe-req, swe-full-noauth) come from the task.toml's [environment]
+section (the agent pod), not from [verifier.environment]: verified tasks with a separate verifier have both.
+Registry credentials: RL_REGISTRY_USERNAME/RL_REGISTRY_PASSWORD if set, else the `name:password` line of
+RL_REGISTRY_CRED_FILE (default ~/.rl_registry_cred), else anonymous/unused (the old placeholder).
+Exit 0 when every case reached Running, 1 otherwise.
+
+Standard library only; the API key and the registry password are read from files and never printed.
   python3 experiments/osb-reach/pending.py [--task-toml $SCRATCH/osb/swe_lego_v05/tasks/<task>/task.toml]
 Env: OPENSANDBOX_API_KEY_FILE (default ~/.opensandbox_token), OPENSANDBOX_DOMAIN
-(default https://opensandbox-gvisor.breithorn.svc.cscs.ch), WAIT_S (default 900).
+(default https://opensandbox-gvisor.breithorn.svc.cscs.ch), WAIT_S (default 900), RL_REGISTRY_CRED_FILE.
 """
 
 import argparse
@@ -74,10 +80,7 @@ def run_case(name, image, cpu, mem_mib, disk_gib, requests, auth, key, tag, wait
     if requests:
         body["resourceRequests"] = {"cpu": requests[0], "memory": f"{requests[1]}Mi"}
     if auth:
-        body["image"]["auth"] = {
-            "username": os.environ.get("RL_REGISTRY_USERNAME", "anonymous"),
-            "password": os.environ.get("RL_REGISTRY_PASSWORD", "unused"),
-        }
+        body["image"]["auth"] = {"username": REGISTRY_AUTH[0], "password": REGISTRY_AUTH[1]}
     log(name, f"create {image} cpu={cpu} memory={mem_mib}Mi ephemeral-storage={disk_gib}Gi "
               f"requests={requests} image_auth={'yes' if auth else 'no'}")
     created = {}
@@ -150,11 +153,18 @@ def main():
 
     key_file = os.path.expanduser(os.environ.get("OPENSANDBOX_API_KEY_FILE", "~/.opensandbox_token"))
     key = open(key_file).read().strip()
-    toml = open(a.task_toml).read()
-    m = re.search(r'^docker_image = "([^"]+)"', toml, re.M)
-    if not m:
-        sys.exit(f"no docker_image in {a.task_toml}")
-    swe_image = m.group(1)
+    env = environment_section(open(a.task_toml).read())
+    if "docker_image" not in env:
+        sys.exit(f"no docker_image in the [environment] section of {a.task_toml}")
+    swe_image = env["docker_image"]
+    # the task's own agent-pod resources (fallback: the SWE-Lego tasks' 4 CPU / 4096 MiB / 10 GiB)
+    t_cpu = str(env.get("cpus", "4")).rstrip("0").rstrip(".") or "4"
+    t_mem = int(float(env.get("memory_mb", 4096)))
+    t_disk = max(1, -(-int(float(env.get("storage_mb", 10240))) // 1024))
+    global REGISTRY_AUTH
+    REGISTRY_AUTH, auth_src = registry_auth()
+    print(f"task {a.task_toml}: image {swe_image}, cpu {t_cpu}, memory {t_mem}Mi, disk {t_disk}Gi; "
+          f"registry credentials from {auth_src} (name {REGISTRY_AUTH[0]})", flush=True)
     wait_s = int(os.environ.get("WAIT_S", "900"))
     tag = f"osb-pending-{time.strftime('%Y%m%d-%H%M%S')}"
 
@@ -164,9 +174,9 @@ def main():
         # image, cpu limit, memory MiB, disk GiB, (cpu, memory MiB) requests, image_auth
         "small": ("python:3.12-slim", "1", 1024, 2, None, True),
         "swe-small": (swe_image, "1", 1024, 2, None, True),
-        "swe-full": (swe_image, "4", 4096, 10, None, True),
-        "swe-req": (swe_image, "4", 4096, 10, ("0.5", 512), True),
-        "swe-full-noauth": (swe_image, "4", 4096, 10, None, False),
+        "swe-full": (swe_image, t_cpu, t_mem, t_disk, None, True),
+        "swe-req": (swe_image, t_cpu, t_mem, t_disk, ("0.5", 512), True),
+        "swe-full-noauth": (swe_image, t_cpu, t_mem, t_disk, None, False),
     }
     results = {}
     threads = [
@@ -180,9 +190,41 @@ def main():
     print("== summary")
     for c in a.cases.split(","):
         print(f"  {c:16s} {results.get(c)}")
+    return 0 if all(str(results.get(c, "")).startswith("Running") for c in a.cases.split(",")) else 1
+
+
+def environment_section(toml):
+    """key = value pairs of the [environment] table only (standard library before tomllib; flat values)."""
+    out, section = {}, None
+    for line in toml.splitlines():
+        line = line.strip()
+        if line.startswith("["):
+            section = line.strip("[] ")
+            continue
+        m = re.match(r'^([A-Za-z_][\w-]*)\s*=\s*(.+?)\s*(#.*)?$', line)
+        if section == "environment" and m:
+            out[m.group(1)] = m.group(2).strip('"')
+    return out
+
+
+def registry_auth():
+    """(name, password) and where they came from; the password is never printed."""
+    if os.environ.get("RL_REGISTRY_USERNAME"):
+        return (os.environ["RL_REGISTRY_USERNAME"], os.environ.get("RL_REGISTRY_PASSWORD", "")), "RL_REGISTRY_USERNAME/PASSWORD"
+    path = os.path.expanduser(os.environ.get("RL_REGISTRY_CRED_FILE", "~/.rl_registry_cred"))
+    try:
+        line = open(path).readline().strip()
+    except OSError:
+        line = ""
+    if ":" in line and line.split(":", 1)[0] and line.split(":", 1)[1]:
+        name, pw = line.split(":", 1)
+        return (name, pw), path
+    return ("anonymous", "unused"), "the anonymous/unused placeholder"
 
 
 API = os.environ.get("OPENSANDBOX_DOMAIN", "https://opensandbox-gvisor.breithorn.svc.cscs.ch").rstrip("/") + "/v1"
 
+REGISTRY_AUTH = ("anonymous", "unused")
+
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
