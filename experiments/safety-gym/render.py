@@ -19,6 +19,9 @@ mounts = [
     (str(adapter), '/opt/nemo-rl/nemo_rl/environments/nemo_gym.py'),
     (os.environ['SAFETY_UV_BIN'] + '/uv', '/usr/local/bin/uv'),
     (os.environ['SAFETY_UV_BIN'] + '/uvx', '/usr/local/bin/uvx'),
+    # Bind the metadata overlay and shared weights at their absolute paths, read-only.
+    (os.environ['SAFETY_CHONK_MODEL'], os.environ['SAFETY_CHONK_MODEL'] + ':ro'),
+    (os.environ['SAFETY_CHONK_SOURCE'], os.environ['SAFETY_CHONK_SOURCE'] + ':ro'),
 ]
 template = template.replace(marker, marker + ''.join('  ' + json.dumps(a + ':' + b) + ',\n' for a, b in mounts))
 template = template.replace('PYTHONPATH = "', 'PYTHONPATH = "' + str(here) + ':', 1)
