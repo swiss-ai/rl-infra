@@ -1,0 +1,18 @@
+# apertus2-chonk-sftv02-18315-vllm-adamw-code.yaml on 9 nodes: the same 8 trainer nodes (AdamW needs them for its
+# state), vLLM on 1 node instead of 8. A smaller job waits less on Clariden's normal partition (14 days to
+# 2026-11-17: 12-h jobs of 5-8 nodes waited a median 3.3 h, of 13-16 nodes 22.7 h); generation is slower, as one
+# node serves every rollout (Chonk fits one node: the sampler in chonk-lean-sampling serves it on 4 GPUs).
+defaults: apertus2-chonk-sftv02-18315-vllm-adamw-code.yaml
+
+# run.sh reads sft_export and cluster.num_nodes from this file alone, not from its defaults.
+sft_export: ../../../../capstor/store/cscs/swissai/infra01/apertus_checkpoints/v2/hf/chonk/posttraining/chonk-lc-16k-v0.2-iter_0018315
+
+# 8 trainer nodes and 1 vLLM node.
+cluster:
+  num_nodes: 9
+
+policy:
+  generation:
+    colocated:
+      resources:
+        num_nodes: 1
