@@ -7,7 +7,7 @@ its tests; this file is the procedure. Everything here runs on a Clariden login 
 ## What runs
 
 One job of 16 nodes (8 Megatron trainers, 8 vLLM), on `normal` by default: NeMo-RL GRPO through `run.sh`, with
-the Kimina server (64 Lean REPLs) inside it. Gym's `math_formal_lean` sends every proof to the server.
+the Kimina server (16 Lean REPLs) inside it. Gym's `math_formal_lean` sends every proof to the server.
 
 `train.sh` submits the job with `in_job.sbatch` as its batch script. On the first node (the Ray head) it starts
 the server outside the container, then runs NeMo-RL's `ray.sub`. At job start the training reads the server's
@@ -141,7 +141,7 @@ Use `DRY_RUN=1` first. These settings change the defaults (the comments in `trai
 |---|---|---|
 | `PARTITION` | `normal` | Never preempted, at most 12 h, but 16 nodes waited 9.5 h once (median 7 h for 12-h jobs in 2026-11). `preemptable` starts sooner, up to 1 day, but preempts: about half of 5–16-node runs lasted under 1 h |
 | `JOB_TIME` | `12:00:00` | The run saves by `JOB_TIME` - 30 min |
-| `MAX_REPLS` | `64` | The server's REPLs, on a node shared with the training |
+| `MAX_REPLS` | `16` | The server's REPLs, on the first node, which is also a trainer and the Ray head (about 80 GB to spare at its lowest in run 3948553; a REPL takes about 2.2 GB at peak) |
 | `RUN` | `lean-kimina-<date>-<time>` | The server's files go to `$SCRATCH/lean-kimina/runs/<RUN>/` |
 
 `train.sh` takes your secrets out of the jobs' environment (sbatch passes it on, and ray.sub prints it).
@@ -156,7 +156,7 @@ for at most 30 min, then fails.
 |---|---|---|
 | ~1 min | `$SCRATCH/nemo-rl/slurm/<training>-logs/STARTED_RAY_HEAD` | The file exists. If not, the job is cancelled after 10 min |
 | ~2 min | `$SCRATCH/nemo-rl/slurm/<training>-<RUN>.out` | `[kimina ...] the Ray head is up`, and no `[kimina ...] the server ended` |
-| ~2 min | `$SCRATCH/lean-kimina/runs/<RUN>/logs/<training>-r0-kimina-0.out` | Server up (about 40–70 s, 64 REPLs, controls passed) |
+| ~2 min | `$SCRATCH/lean-kimina/runs/<RUN>/logs/<training>-r0-kimina-0.out` | Server up (about 40–70 s, 16 REPLs, controls passed) |
 | ~3 min | `$SCRATCH/nemo-rl/slurm/<training>-logs/ray-driver.log` | `kimina-endpoint: http://<server node>:8000 answered` |
 | ~11 min | the same | `Starting async GRPO training`, then "Training Results" blocks per step (Loss, Avg Reward) |
 

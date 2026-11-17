@@ -9,14 +9,18 @@
 #   4. cancels the job if the Ray head is not up KIMINA_HEAD_LIMIT seconds after the job started (in run 3949635
 #      the head's container never started, and ray.sub waits for it without a limit).
 # The server's memory stays on the Grace CPUs' NUMA nodes (KIMINA_MEMBIND), off the GPUs' memory, and it runs
-# at a lower CPU priority than the training. A requeued job starts all of this again.
+# at a lower CPU priority than the training. It is small, because the first node is also a trainer and the
+# training's Ray head: in run 3948553 that node bottomed out at 80 GB free of the job's 450 GB per node
+# (trainer nodes at 104-142 GB, vLLM nodes above 350 GB). A warm REPL holds about 2.2 GB at peak and the Lean
+# copy in /dev/shm 9 GB, so 16 REPLs (KIMINA_REPLS) take about 44 GB; each REPL is capped at
+# KIMINA_MAX_REPL_MEM (8G). A requeued job starts all of this again.
 # Each action is logged with "[kimina ...]" in the job's output.
 # The #SBATCH lines are ray.sub's; launch.sh gives the rest on the command line.
 #SBATCH --exclusive
 #SBATCH --dependency=singleton
 set -uo pipefail
 : "${RAY_SUB:?}" "${KIMINA_DIR:?}" "${KIMINA_RL_INFRA:?}" "${KIMINA_ENDPOINT_FILE:?}" "${KIMINA_HEADER_ROWS:?}"
-REPLS="${KIMINA_REPLS:-64}"
+REPLS="${KIMINA_REPLS:-16}"
 RESTARTS="${KIMINA_RESTARTS:-3}"
 HEAD_LIMIT="${KIMINA_HEAD_LIMIT:-600}"
 MEMBIND="${KIMINA_MEMBIND-0-3}"
@@ -45,6 +49,7 @@ serve() {
         say "server start ${n} on $(hostname):${KIMINA_PORT:-1120}, ${REPLS} REPLs, log ${LOGS}/${TAG}-kimina-${n}.out"
         env LEAN_KIMINA_DIR="${KIMINA_DIR}" ROOT="${KIMINA_RL_INFRA}" ENDPOINT_FILE="${KIMINA_ENDPOINT_FILE}" \
             MAX_REPLS="${REPLS}" PORT="${KIMINA_PORT:-1120}" HEADER_ROWS="${KIMINA_HEADER_ROWS}" KEEP_KEY=1 \
+            KIMINA_MAX_REPL_MEM="${KIMINA_MAX_REPL_MEM:-8G}" \
             SERVER_LOG="${LOGS}/${TAG}-server-${n}.log" \
             ${membind[@]+"${membind[@]}"} nice -n "${KIMINA_NICE:-5}" bash "${KIMINA_DIR}/server_job.sh" \
             > "${LOGS}/${TAG}-kimina-${n}.out" 2>&1 &
