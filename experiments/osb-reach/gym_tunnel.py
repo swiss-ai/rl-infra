@@ -8,7 +8,7 @@ server start, node client, GET /health through the tunnel), then tunnel_probe.py
 127.0.0.1:8000 (short), ModelTunnel.close(), stop.
 
     python3 gym_tunnel.py
-env: GYM_DIR, CHISEL_DIR, CHISEL_VERSION, TUNNELS (32), OLD_START (1: the fire-and-forget server start
+env: GYM_DIR, CHISEL_DIR, CHISEL_VERSION, TUNNELS (32), GATEWAY_PROXY (1; 0 = through the ingress gateway), OLD_START (1: the fire-and-forget server start
      of job 5245999, to check whether it loses against the exec service), STREAM_S (5), IDLE_S (5)
 """
 
@@ -102,9 +102,13 @@ async def main() -> int:
     )["sandbox"]
     # as the training runs (terminus-sc.yaml): the pooled aiohttp client breaks inside Ray workers
     raw["opensandbox"].setdefault("connection", {})["transport_backend"] = os.environ.get("TRANSPORT", "httpx")
+    # GATEWAY_PROXY=0: the tunnel's WebSocket goes through the ingress gateway (use_server_proxy false, as
+    # envs/harbor-verified-sft.yaml); 1 (default here): through the OpenSandbox server proxy, as all tests before.
+    raw["opensandbox"]["connection"]["use_server_proxy"] = (os.environ.get("GATEWAY_PROXY") or "1") == "1"
     metadata = dict(raw.get("default_metadata", {}))
     log.info(
-        "background_exec=%s, transport=%s, %d tunnels, image %s",
+        "use_server_proxy=%s, background_exec=%s, transport=%s, %d tunnels, image %s",
+        raw["opensandbox"]["connection"]["use_server_proxy"],
         raw["opensandbox"].get("operations", {}).get("background_exec"),
         raw["opensandbox"]["connection"]["transport_backend"],
         TUNNELS,

@@ -33,7 +33,7 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, resolve_provider_config 
 IMAGE = os.environ.get("REACH_IMAGE", "python:3.12-slim")
 N = int(os.environ.get("GATEWAY_N") or "16")
 LONG_S = int(os.environ.get("LONG_S") or "75")
-PROXY = os.environ.get("GATEWAY_PROXY", "0") == "1"
+PROXY = (os.environ.get("GATEWAY_PROXY") or "0") == "1"
 EXECD_PORT = 44772  # opensandbox.constants.DEFAULT_EXECD_PORT; checked against the SDK below
 
 # force: importing nemo_gym already installed a WARNING root handler (see gym_tunnel.py)

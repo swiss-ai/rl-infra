@@ -4,6 +4,7 @@
 #   OLD_START=1 bash experiments/osb-reach/run.sh             # job 5245999's server start, for comparison
 #   REACH_TESTS="tcp ws tunnel" bash experiments/osb-reach/run.sh
 #   REACH_TESTS=gateway bash experiments/osb-reach/run.sh     # use_server_proxy: false (GATEWAY_PROXY=1 compares)
+#   GATEWAY_PROXY=0 bash experiments/osb-reach/run.sh         # gymtunnel through the ingress gateway
 # tests: tcp = pod -> node TCP; ws = node -> pod HTTP/WebSocket via the OpenSandbox proxy;
 #        tunnel = chisel reverse tunnel per sandbox, pod 127.0.0.1:8000 -> node (standalone scripts);
 #        gymtunnel = the same through Gym's model_tunnel.py (patch 0016 in the NeMo-RL clone's Gym).
@@ -28,7 +29,7 @@ export GYM_DIR=/opt/nemo-rl/3rdparty/Gym-workspace/Gym
 export REACH_PORT="${REACH_PORT:-}" EXTRA_TARGETS="${EXTRA_TARGETS:-}" REACH_PYTHON="${REACH_PYTHON:-}" \
     REACH_TESTS="${REACH_TESTS:-gymtunnel}" OLD_START="${OLD_START:-0}" WS_PORT="${WS_PORT:-8765}" HOLD_S="${HOLD_S:-60}" \
     TUNNELS="${TUNNELS:-}" GYM_TUNNEL_TIMEOUT_S="${GYM_TUNNEL_TIMEOUT_S:-}" STREAM_S="${STREAM_S:-}" IDLE_S="${IDLE_S:-}" \
-    GATEWAY_N="${GATEWAY_N:-}" LONG_S="${LONG_S:-}" GATEWAY_PROXY="${GATEWAY_PROXY:-0}" GATEWAY_TIMEOUT_S="${GATEWAY_TIMEOUT_S:-}"
+    GATEWAY_N="${GATEWAY_N:-}" LONG_S="${LONG_S:-}" GATEWAY_PROXY="${GATEWAY_PROXY:-}" GATEWAY_TIMEOUT_S="${GATEWAY_TIMEOUT_S:-}"
 # Gym server venvs of the Harbor runs (run-harbor-osb.sh default); reach_node.sh takes the
 # harbor_agent one, which has the OpenSandbox SDK.
 export NEMO_GYM_VENV_DIR="${NEMO_GYM_VENV_DIR:-${HARBOR_ROOT:-${SCRATCH}/osb/harbor_micro}/venvs}"
