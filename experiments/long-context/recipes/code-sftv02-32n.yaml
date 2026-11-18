@@ -1,0 +1,16 @@
+# Competitive coding (rl-infra-main recipes/apertus2-chonk-sft-vllm-adamw-code.yaml) on the SFT v0.2 checkpoint
+# (iteration 18,315): 32 nodes = 16 trainer + 16 vLLM.
+defaults: ../../../recipes/apertus2-chonk-sft-vllm-adamw-code.yaml
+
+# run.sh reads sft_export and cluster.num_nodes from this file only, not from its defaults.
+sft_export: chonk-sft/models/chonk-lc-16k-v0.2-iter_0018315
+
+cluster:
+  num_nodes: 32
+
+policy:
+  model_name: ${oc.env:SCRATCH}/models/chonk-lc-16k-v0.2-iter_0018315
+  generation:
+    colocated:
+      resources:
+        num_nodes: 16

@@ -1,0 +1,16 @@
+# The 33-node SFT v0.2 recipe with a judge node (recipes/apertus2-chonk-sftv02-18315-vllm-adamw-dapo-32n-judge1.yaml, run 5) with twice the vLLM nodes:
+# 49 nodes = 16 trainer + 32 vLLM + 1 judge. Run 5 was limited by generation (459 s per step at 16K with 16 vLLM
+# nodes, of which the trainer needs about 110 s), and 32K answers are about 1.4 times longer.
+defaults: ../../../recipes/apertus2-chonk-sftv02-18315-vllm-adamw-dapo-32n-judge1.yaml
+
+# run.sh reads sft_export and cluster.num_nodes from this file only, not from its defaults.
+sft_export: chonk-sft/models/chonk-lc-16k-v0.2-iter_0018315
+
+cluster:
+  num_nodes: 49
+
+policy:
+  generation:
+    colocated:
+      resources:
+        num_nodes: 32
