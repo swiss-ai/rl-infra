@@ -2,7 +2,7 @@
 # Submit SafetyGym training and its native SML judge in one Slurm heterogeneous job.
 set -euo pipefail
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
+HERE="${SAFETY_EXPERIMENT_DIR:-$(cd "$(dirname "$0")" && pwd)}"
 mode="${1:---help}"
 case "$mode" in
   --submit|--test-only|--allocation) shift ;;
