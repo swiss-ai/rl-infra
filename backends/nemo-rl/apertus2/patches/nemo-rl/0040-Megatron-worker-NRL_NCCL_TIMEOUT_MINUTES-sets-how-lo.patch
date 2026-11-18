@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Tue, 17 Nov 2026 21:09:00 +0900
+Subject: [PATCH 40/46] Megatron worker: NRL_NCCL_TIMEOUT_MINUTES sets how long
+ a collective waits for its peers
+
+The trainer ranks start a training step when their node has received its shard of the batch. With 8192 sequences padded to 128K tokens the nodes receive it up to 25 minutes apart, and the first collective of the step timed out after 10 minutes on the ranks that started first. The variable sets the timeout of the default process group and of the groups Megatron creates; unset, nothing changes.
+---
+ nemo_rl/models/megatron/setup.py | 27 ++++++++++++++++++++++++++-
+ 1 file changed, 26 insertions(+), 1 deletion(-)
+
+diff --git a/nemo_rl/models/megatron/setup.py b/nemo_rl/models/megatron/setup.py
+index af3cff8dc..281f90315 100644
+--- a/nemo_rl/models/megatron/setup.py
++++ b/nemo_rl/models/megatron/setup.py
+@@ -21,6 +21,7 @@ import time
+ import warnings
+ from collections.abc import Mapping
+ from dataclasses import fields, is_dataclass, replace
++from datetime import timedelta
+ from typing import Any, Callable, Optional, TypeVar, cast
+ 
+ import torch
+@@ -442,6 +443,17 @@ def configure_refit_environment(config) -> None:
+         os.environ["NCCL_CUMEM_ENABLE"] = "0" if backend == "sglang" else "1"
+ 
+ 
++def nccl_timeout_minutes() -> Optional[int]:
++    """NRL_NCCL_TIMEOUT_MINUTES: how long a collective waits for its peers (default: 10 minutes).
++
++    The trainer ranks start a training step when their node has received its shard of the batch.
++    With a large batch of long sequences the nodes receive it more than 10 minutes apart, and the
++    first collective of the step then times out on the ranks that started first.
++    """
++    value = os.environ.get("NRL_NCCL_TIMEOUT_MINUTES")
++    return int(value) if value else None
++
++
+ def setup_distributed(config) -> None:
+     """Handle NCCL settings, dtype mapping, and basic config setup."""
+     configure_refit_environment(config)
+@@ -451,7 +463,16 @@ def setup_distributed(config) -> None:
+     # Ensure clean slate before import
+     destroy_parallel_state()
+     # Initialize process group
+-    torch.distributed.init_process_group("nccl")
++    timeout_minutes = nccl_timeout_minutes()
++    if timeout_minutes:
++        timeout = timedelta(minutes=timeout_minutes)
++        # Groups created later without a timeout of their own take this module default.
++        torch.distributed.distributed_c10d.default_pg_nccl_timeout = timeout
++        torch.distributed.init_process_group("nccl", timeout=timeout)
++        if os.environ.get("RANK", "0") == "0":
++            print(f"NCCL collective timeout: {timeout_minutes} minutes (NRL_NCCL_TIMEOUT_MINUTES)", flush=True)
++    else:
++        torch.distributed.init_process_group("nccl")
+ 
+ 
+ def validate_and_set_config(
+@@ -2028,6 +2049,10 @@ def _create_megatron_config(
+         )
+ 
+     dist_cfg = DistributedInitConfig()
++    timeout_minutes = nccl_timeout_minutes()
++    if timeout_minutes:
++        # Megatron gives this timeout to the groups it creates (data, context, pipeline parallel).
++        dist_cfg.distributed_timeout_minutes = timeout_minutes
+     if "use_gloo_process_groups" in config["megatron_cfg"]:
+         dist_cfg.use_gloo_process_groups = config["megatron_cfg"][
+             "use_gloo_process_groups"
+-- 
+2.51.0
+

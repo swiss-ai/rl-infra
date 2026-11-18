@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Tue, 17 Nov 2026 21:18:22 +0900
+Subject: [PATCH 41/46] ray.sub: RAY_NODE_NAME_SUFFIX puts Ray on another
+ network than the node name resolves to
+
+On KISTI Hangang a node name resolves to the 1 Gbit management Ethernet, and Ray then moves every object over it: the shards of a training batch of 8192 sequences padded to 128K tokens reach the 16 trainer nodes over about 25 minutes. With RAY_NODE_NAME_SUFFIX=-hsn0 the head is started on its first 400 Gbit Slingshot address and the workers take the address of the interface that reaches it. Unset, nothing changes.
+---
+ ray.sub | 23 ++++++++++++++---------
+ 1 file changed, 14 insertions(+), 9 deletions(-)
+
+diff --git a/ray.sub b/ray.sub
+index 0c11c6acf..fe1546e1e 100644
+--- a/ray.sub
++++ b/ray.sub
+@@ -467,42 +467,47 @@ ip_addresses_array=()
+ log_phase "resolving ${#nodes_array[@]} node hostname(s) to IPs"
+ for node in $nodes; do
+     # Try multiple methods to get IP address - ENHANCED VERSION v2.0
+-    echo "[DEBUG] Resolving hostname: $node using enhanced resolution methods"
++    # RAY_NODE_NAME_SUFFIX: resolve "<node><suffix>" instead of the node name, to put Ray on another
++    # network than the one the node name resolves to. On KISTI Hangang the node name is the 1 Gbit
++    # management Ethernet and "<node>-hsn0" the first 400 Gbit Slingshot interface. The head gets that
++    # address; a worker takes the address of the interface that reaches the head.
++    lookup="${node}${RAY_NODE_NAME_SUFFIX:-}"
++    echo "[DEBUG] Resolving hostname: $lookup using enhanced resolution methods"
+     ip_address=""
+-    
++
+     # Method 1: Try host command
+     echo "[DEBUG] Method 1: host command"
+-    ip_address=$(host $node 2>/dev/null | awk '/has address/ { print $4 }' | head -1 || true)
++    ip_address=$(host $lookup 2>/dev/null | awk '/has address/ { print $4 }' | head -1 || true)
+     echo "[DEBUG] host result: '$ip_address'"
+     
+     # Method 2: If host fails, try getent
+     if [[ -z "$ip_address" ]]; then
+         echo "[DEBUG] Method 2: getent hosts"
+-        ip_address=$(getent hosts $node 2>/dev/null | awk '{ print $1 }' | head -1 || true)
++        ip_address=$(getent hosts $lookup 2>/dev/null | awk '{ print $1 }' | head -1 || true)
+         echo "[DEBUG] getent result: '$ip_address'"
+     fi
+     
+     # Method 3: If getent fails, try nslookup
+     if [[ -z "$ip_address" ]]; then
+         echo "[DEBUG] Method 3: nslookup"
+-        ip_address=$(nslookup $node 2>/dev/null | awk '/^Address: / { print $2 }' | head -1 || true)
++        ip_address=$(nslookup $lookup 2>/dev/null | awk '/^Address: / { print $2 }' | head -1 || true)
+         echo "[DEBUG] nslookup result: '$ip_address'"
+     fi
+     
+     # Method 4: If all DNS methods fail, try ping to extract IP
+     if [[ -z "$ip_address" ]]; then
+         echo "[DEBUG] Method 4: ping"
+-        ip_address=$(ping -c 1 $node 2>/dev/null | grep "PING" | sed 's/.*(\([^)]*\)).*/\1/' || true)
++        ip_address=$(ping -c 1 $lookup 2>/dev/null | grep "PING" | sed 's/.*(\([^)]*\)).*/\1/' || true)
+         echo "[DEBUG] ping result: '$ip_address'"
+     fi
+     
+     # If still no IP, use the hostname itself (might work if it's already an IP or resolvable)
+     if [[ -z "$ip_address" ]]; then
+-        echo "[WARNING] Could not resolve IP for $node, using hostname as fallback"
++        echo "[WARNING] Could not resolve IP for $lookup, using hostname as fallback"
+         ip_address=$node
+     fi
+-    
+-    echo "[INFO] Node: $node -> IP: $ip_address"
++
++    echo "[INFO] Node: $lookup -> IP: $ip_address"
+     # Add the IP address to the array
+     ip_addresses_array+=("$ip_address")
+ done
+-- 
+2.51.0
+
