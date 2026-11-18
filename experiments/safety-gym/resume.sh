@@ -12,12 +12,12 @@ if [[ "${SAFETY_PROFILE}" == legacy ]]; then
 else
   SAFETY_COALLOCATE="${SAFETY_COALLOCATE:-1}"
   if [[ "$SAFETY_COALLOCATE" == 1 ]]; then
-    RUN="${RUN:-adaptive-multiturn-jailbreak-v2}"
+    RUN="${RUN:-adaptive-multiturn-jailbreak-v3}"
   else
     RUN="${RUN:-msafetemp-adaptive-stage1-72h-retry1}"
   fi
   SAFETY_ADAPTIVE_ROOT="${SAFETY_ADAPTIVE_ROOT:-/scratch/${USER}/safetygym-adaptive}"
-  ADAPTIVE_GYM_COMMIT="${ADAPTIVE_GYM_COMMIT:-4585785d80b382690c01df3e614b71b60d5ae7f3}"
+  ADAPTIVE_GYM_COMMIT="${ADAPTIVE_GYM_COMMIT:-4d2160425ccbf7fdbec719507975002eea4919fa}"
   OUT="${OUT:-${SAFETY_ADAPTIVE_ROOT}/runs}"
   SAFETY_ADAPTIVE_USER_OUT="${OUT}"
   SAFETY_DATA_SOURCE="${SAFETY_DATA_SOURCE:-${SAFETY_ADAPTIVE_ROOT}/data/route-e1e8a681}"
