@@ -159,7 +159,7 @@ fi
 echo 'One training job: 12 nodes (8 trainer + 4 rollout), 48 GPUs. Judges are separate jobs.'
 [[ "$mode" != --dry-run ]] || echo "Preview directories use /tmp. Actual OUT=${real_out}; no dataset or model copied."
 # Overrides are passed last, exactly as the stock launcher supports.
-if [[ "${SAFETY_PROFILE}" != legacy ]]; then
+if [[ "${SAFETY_PROFILE}" != legacy && "${mode}" == --submit ]]; then
   mkdir -p "$(dirname "${SAFETY_ADAPTIVE_TRAINING_JOB_FILE}")"
   rm -f "${SAFETY_ADAPTIVE_TRAINING_JOB_FILE}"
   submitted="$(bash "${APERTUS2_DIR}/launch.sh" "${train_config}" 12 "$RUN" \

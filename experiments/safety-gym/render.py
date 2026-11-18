@@ -90,6 +90,8 @@ else:
     os.environ['SAFETY_JUDGE_CONFIG'] = str(secret_path)
 names = [name for name in os.environ if name.startswith('SAFETY_')]
 names += ['JOB_UV_CACHE_DIR', 'HF_HUB_OFFLINE', 'TRANSFORMERS_OFFLINE']
+if feature_profile and os.environ.get('WANDB_BASE_URL'):
+    names.append('WANDB_BASE_URL')
 if os.environ.get('JUDGE_CONFIG'):
     names.append('JUDGE_CONFIG')
 os.environ['HF_HUB_OFFLINE'] = os.environ['TRANSFORMERS_OFFLINE'] = '1'
