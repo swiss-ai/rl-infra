@@ -38,6 +38,12 @@ else
   [[ -s "${SAFETY_ADAPTIVE_ROOT}/native-runtime-manifest.json" ]] || { echo 'Feature native runtime manifest is missing.' >&2; exit 1; }
   [[ -d "${SAFETY_GYM_SITE_PACKAGES}" ]] || { echo 'Prepared Gym site-packages for the NRL policy interpreter are missing.' >&2; exit 1; }
   [[ -s "${SAFETY_GYM_DIR}/responses_api_agents/adaptive_safety/app.py" ]] || { echo 'Feature Gym export is missing the adaptive agent.' >&2; exit 1; }
+  for path in "${VLLM_RUNNER}" "${VLLM_APERTUS2}"; do
+    [[ -s "$path" ]] || { echo "Pinned vLLM bind source is missing: $path" >&2; exit 1; }
+  done
+  source "${APERTUS2_DIR}/pin"
+  [[ "$(git hash-object "${VLLM_RUNNER}")" == "${VLLM_RUNNER_BLOB}" ]] || {
+    echo 'Staged vLLM runner does not match the pinned image override.' >&2; exit 1; }
   case "${SAFETY_RESUME:-0}" in 0|1) ;; *) echo 'SAFETY_RESUME must be 0 or 1.' >&2; exit 2 ;; esac
   adaptive_run_dir="${OUT}/results/${RUN}"
   adaptive_run_manifest="${adaptive_run_dir}/adaptive-objective-manifest.json"

@@ -36,6 +36,8 @@ case "${SAFETY_PROFILE}" in
     export MEGATRON_DIR="${SAFETY_ADAPTIVE_ROOT}/src/Megatron-LM-MoE"
     export BRIDGE_DIR="${SAFETY_ADAPTIVE_ROOT}/src/Megatron-Bridge"
     export PYDEPS_APERTUS2="${SAFETY_ADAPTIVE_ROOT}/src/apertus-common"
+    export VLLM_RUNNER="${SAFETY_ADAPTIVE_ROOT}/tools/gpu_model_runner.py"
+    export VLLM_APERTUS2="${SAFETY_ADAPTIVE_ROOT}/tools/apertus2.py"
     export SAFETY_UV_BIN="${SAFETY_ADAPTIVE_ROOT}/cache/gym-test-venv/bin"
     ;;
   *) echo "Unknown SAFETY_PROFILE: ${SAFETY_PROFILE}" >&2; return 2 ;;

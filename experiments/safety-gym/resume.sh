@@ -10,7 +10,7 @@ SAFETY_RESUME=1
 if [[ "${SAFETY_PROFILE}" == legacy ]]; then
   RUN="${RUN:-msafetemp-chonk-16k}"
 else
-  RUN="${RUN:-msafetemp-adaptive-stage1-72h}"
+  RUN="${RUN:-msafetemp-adaptive-stage1-72h-retry1}"
   SAFETY_ADAPTIVE_ROOT="${SAFETY_ADAPTIVE_ROOT:-/scratch/${USER}/safetygym-adaptive}"
   ADAPTIVE_GYM_COMMIT="${ADAPTIVE_GYM_COMMIT:-1508cb2aa7000225c3d47fc49b0d67246ccc7c90}"
   OUT="${OUT:-${SAFETY_ADAPTIVE_ROOT}/runs}"
