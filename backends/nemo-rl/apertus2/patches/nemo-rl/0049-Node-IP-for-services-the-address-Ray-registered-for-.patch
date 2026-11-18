@@ -1,0 +1,54 @@
+From e6d801bcd619b00901b1793abec1d2bd5a710817 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Thu, 19 Nov 2026 06:57:06 +0900
+Subject: [PATCH] Node IP for services: the address Ray registered for this
+ node
+
+With RAY_NODE_NAME_SUFFIX set, _get_node_ip_local() returned the address of "<node><suffix>"
+(hsn0 on KISTI Hangang). ray.sub gives that address to the head only; a worker registers the
+address of its interface that reaches the head, one of four Slingshot interfaces. vLLM URLs then
+named hsn0 while Ray knew the node by another address, and env.nemo_gym.place_on_generation_node
+found no node for the URL: jobs 1306028 and 1306032 failed at setup, three attempts each. Inside a
+Ray process the function now returns the NodeManagerAddress of its own node, which is on Slingshot
+as well; outside one, the name lookup as before.
+---
+ nemo_rl/distributed/virtual_cluster.py | 20 ++++++++++++++++----
+ 1 file changed, 16 insertions(+), 4 deletions(-)
+
+diff --git a/nemo_rl/distributed/virtual_cluster.py b/nemo_rl/distributed/virtual_cluster.py
+index b3f3d3c54..539d5414f 100644
+--- a/nemo_rl/distributed/virtual_cluster.py
++++ b/nemo_rl/distributed/virtual_cluster.py
+@@ -239,13 +239,25 @@ def _get_node_ip_and_free_port(
+ def _get_node_ip_local() -> str:
+     """IP address of this node for services other nodes connect to (Gym servers, ports).
+ 
+-    With RAY_NODE_NAME_SUFFIX set (ray.sub resolves "<node><suffix>" for Ray), the address of
+-    "<node><suffix>", so that these services use the same network as Ray. Ray's own guess is the
+-    source address of the default route or the address the node name resolves to, which on
+-    some clusters is a slow management network.
++    With RAY_NODE_NAME_SUFFIX set (ray.sub resolves "<node><suffix>" for Ray), the address Ray
++    registered for this node, so that these services use the same network as Ray. Ray's own guess is
++    the source address of the default route or the address the node name resolves to, which on
++    some clusters is a slow management network. ray.sub gives the head "<node><suffix>" and a worker
++    the address of its interface that reaches the head, which on KISTI Hangang is any of the four
++    Slingshot interfaces; other code finds a service's node by that registered address
++    (env.nemo_gym.place_on_generation_node compares a vLLM URL with the nodes' NodeManagerAddress).
++    Outside a Ray process, the address of "<node><suffix>".
+     """
+     suffix = os.environ.get("RAY_NODE_NAME_SUFFIX", "")
+     if suffix:
++        if ray.is_initialized():
++            try:
++                node_id = ray.get_runtime_context().get_node_id()
++                for node in ray.nodes():
++                    if node["NodeID"] == node_id and node["Alive"]:
++                        return node["NodeManagerAddress"]
++            except Exception:  # noqa: BLE001 - fall back to the name lookup below
++                pass
+         try:
+             return socket.gethostbyname(socket.gethostname().split(".")[0] + suffix)
+         except OSError:
+-- 
+2.43.0
+
