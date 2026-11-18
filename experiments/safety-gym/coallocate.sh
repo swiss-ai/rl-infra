@@ -16,10 +16,10 @@ RUN="${1:-}"; (($# == 0)) || shift
 export RUN SAFETY_PROFILE="${SAFETY_PROFILE:-adaptive}"
 export SAFETY_RESUME="${SAFETY_RESUME:-0}"
 [[ "$SAFETY_PROFILE" != legacy ]] || { echo 'Coallocation is only supported for adaptive profiles.' >&2; exit 2; }
-export JOB_TIME=74:00:00
-export CHECKPOINT_DEADLINE=03:00:00:00
+export JOB_TIME=48:00:00
+export CHECKPOINT_DEADLINE=01:22:00:00
 export SAFETY_ADAPTIVE_JUDGE_WAIT_SECONDS=3600
-export SAFETY_JUDGE_TIME=74:00:00 SAFETY_JUDGE_MAX_JOB_TIME=74:00:00
+export SAFETY_JUDGE_TIME=48:00:00 SAFETY_JUDGE_MAX_JOB_TIME=48:00:00
 source "${HERE}/environment.sh"
 source "${HERE}/../../sites/load.sh"
 rl_infra_load "${APERTUS2_DIR}/env"

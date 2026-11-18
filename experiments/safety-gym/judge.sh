@@ -116,7 +116,7 @@ if action in ("submit", "coalloc-render"):
     parent = shlex.quote(str(Path(endpoint_file).parent))
     runtime_training_id = '"$SLURM_JOB_ID"' if action == "coalloc-render" else shlex.quote(training_job_id)
     judge_job_id = '"${SLURM_JOB_ID_HET_GROUP_1:-}"' if action == "coalloc-render" else '""'
-    expected_walltime_seconds = 266400 if judge_time == "74:00:00" else 259200
+    expected_walltime_seconds = {"74:00:00": 266400, "72:00:00": 259200, "48:00:00": 172800}[judge_time]
     args = " ".join([
         shlex.quote(endpoint_file),
         '"$SLURM_JOB_ID"',

@@ -12,12 +12,12 @@ if [[ "${SAFETY_PROFILE}" == legacy ]]; then
 else
   SAFETY_COALLOCATE="${SAFETY_COALLOCATE:-1}"
   if [[ "$SAFETY_COALLOCATE" == 1 ]]; then
-    RUN="${RUN:-msafetemp-adaptive-stage1-74h-coalloc-retry2}"
+    RUN="${RUN:-msafetemp-adaptive-stage1-coalloc-48h}"
   else
     RUN="${RUN:-msafetemp-adaptive-stage1-72h-retry1}"
   fi
   SAFETY_ADAPTIVE_ROOT="${SAFETY_ADAPTIVE_ROOT:-/scratch/${USER}/safetygym-adaptive}"
-  ADAPTIVE_GYM_COMMIT="${ADAPTIVE_GYM_COMMIT:-1508cb2aa7000225c3d47fc49b0d67246ccc7c90}"
+  ADAPTIVE_GYM_COMMIT="${ADAPTIVE_GYM_COMMIT:-4585785d80b382690c01df3e614b71b60d5ae7f3}"
   OUT="${OUT:-${SAFETY_ADAPTIVE_ROOT}/runs}"
   SAFETY_ADAPTIVE_USER_OUT="${OUT}"
   SAFETY_DATA_SOURCE="${SAFETY_DATA_SOURCE:-${SAFETY_ADAPTIVE_ROOT}/data/route-e1e8a681}"
@@ -27,8 +27,8 @@ JUDGE_KIND="${JUDGE_KIND:-oss}"
 JUDGE_URL="${JUDGE_URL:-http://node1878:8080/v1}"
 PARTITION="intTest"
 if [[ "${SAFETY_PROFILE}" != legacy && "${SAFETY_COALLOCATE:-0}" == 1 ]]; then
-  JOB_TIME="74:00:00"
-  CHECKPOINT_DEADLINE="03:00:00:00"
+  JOB_TIME="48:00:00"
+  CHECKPOINT_DEADLINE="01:22:00:00"
   SAFETY_ADAPTIVE_JUDGE_WAIT_SECONDS=3600
 else
   JOB_TIME="72:00:00"
