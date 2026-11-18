@@ -4,7 +4,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 sml_judge() {
-  local action="$1" user scratch root model_dir model_id served_name sml_bin sml_root environment render_dir endpoint_file workdir framework_args sml_config run_id
+  local action="$1" user scratch root model_dir model_id served_name sml_bin sml_root environment render_dir endpoint_file workdir framework_args sml_config run_id train_job_id
   user="${USER:-$(id -un)}"
   scratch="${SCRATCH:-/scratch/${user}}"
   root="${SAFETY_ADAPTIVE_ROOT:-${scratch}/safetygym-adaptive}"
@@ -50,6 +50,18 @@ chain:
 YAML
     chmod 600 "${sml_config}/config.yml"
   fi
+  if [[ -z "$endpoint_file" && -n "$run_id" ]]; then
+    endpoint_file="${root}/runtime/judge-endpoint-${run_id}.json"
+  fi
+  train_job_id="${SAFETY_JUDGE_AFTER_JOB_ID:-}"
+  if [[ "$action" == submit ]]; then
+    [[ -n "$run_id" ]] || { echo 'Set RUN for a per-run adaptive judge descriptor.' >&2; return 2; }
+    [[ -n "$endpoint_file" ]] || { echo 'Set SAFETY_ADAPTIVE_JUDGE_ENDPOINT_FILE (or RUN) for per-run endpoint discovery.' >&2; return 2; }
+    [[ "$train_job_id" =~ ^[0-9]+$ ]] || { echo 'SAFETY_JUDGE_AFTER_JOB_ID must be a Slurm training job ID.' >&2; return 2; }
+    [[ ! -e "$endpoint_file" ]] || { echo "Refusing to overwrite existing judge endpoint metadata: $endpoint_file" >&2; return 2; }
+    mkdir -p "$(dirname "$endpoint_file")"
+  fi
+
   framework_args="--model ${model_dir} --host 0.0.0.0 --max-model-len 32768 --gpu-memory-utilization 0.90 --tensor-parallel-size 1"
   local -a args=(advanced --partition "${SAFETY_KISTI_PARTITION:-intTest}" --account "${SML_ACCOUNT:-in0138}" \
     --framework vllm --environment "$environment" --container-runtime pyxis \
@@ -63,10 +75,12 @@ YAML
   "$sml_bin" "${args[@]}" --output-script "$render_dir"
   [[ -s "${render_dir}/master.sh" ]] || { echo "SML did not render ${render_dir}/master.sh" >&2; return 1; }
   python3.12 "${HERE}/../../../archive/safetygym/render_judge_kisti.py" "${render_dir}/master.sh"
-  python3.12 - "${render_dir}/master.sh" <<'PY'
+  python3.12 - "${render_dir}/master.sh" "$action" "$endpoint_file" "$run_id" "$model_id" "$train_job_id" <<'PY'
 from pathlib import Path
+import shlex
 import sys
 path = Path(sys.argv[1])
+action, endpoint_file, run_id, model_id, training_job_id = sys.argv[2:]
 text = path.read_text(encoding="utf-8")
 for old, new in (("#SBATCH --output=logs/%j/log.out", "#SBATCH --output=logs/%j.log"), ("#SBATCH --error=logs/%j/log.err", "#SBATCH --error=logs/%j.err")):
     if text.count(old) != 1:
@@ -74,6 +88,54 @@ for old, new in (("#SBATCH --output=logs/%j/log.out", "#SBATCH --output=logs/%j.
     text = text.replace(old, new)
 if "curl " in text or "https://" in text:
     raise SystemExit("External endpoint remains in sanitized local SML render")
+if action == "submit":
+    anchor = 'echo "Replica 0 head IP: $replica_0_head_ip"\n'
+    if text.count(anchor) != 1:
+        raise SystemExit("Refusing unexpected SML startup block; cannot publish judge descriptor")
+    parent = shlex.quote(str(Path(endpoint_file).parent))
+    args = " ".join([
+        shlex.quote(endpoint_file),
+        '"$SLURM_JOB_ID"',
+        '"$replica_0_head_ip"',
+        shlex.quote(model_id),
+        shlex.quote(run_id),
+        shlex.quote(training_job_id),
+    ])
+    insertion = f"""# Publish discovery metadata as soon as Slurm allocates the judge node.
+# The training runtime separately waits for /v1/models to advertise the model.
+mkdir -p {parent}
+python3 - {args} <<'__SAFETYGUM_JUDGE_ENDPOINT_EOF__'
+import json, os, sys, tempfile
+from datetime import datetime, timezone
+path, job_id, host, model, run_id, training_job_id = sys.argv[1:]
+record = {{
+    "job_id": job_id,
+    "training_job_id": training_job_id,
+    "host": host,
+    "base_url": f"http://{{host}}:8080/v1",
+    "model": model,
+    "run_id": run_id,
+    "expected_walltime_seconds": 259200,
+    "published_utc": datetime.now(timezone.utc).isoformat(),
+}}
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".judge-endpoint-")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        json.dump(record, stream, sort_keys=True)
+        stream.write("\\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+except BaseException:
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    raise
+__SAFETYGUM_JUDGE_ENDPOINT_EOF__
+"""
+    text = text.replace(anchor, anchor + insertion, 1)
 path.write_text(text, encoding="utf-8")
 PY
   bash -n "${render_dir}/master.sh"
@@ -83,13 +145,7 @@ PY
     return
   fi
 
-  if [[ -z "$endpoint_file" && -n "$run_id" ]]; then
-    endpoint_file="${root}/runtime/judge-endpoint-${run_id}.json"
-  fi
-  [[ -n "$endpoint_file" ]] || { echo 'Set SAFETY_ADAPTIVE_JUDGE_ENDPOINT_FILE (or RUN) for per-run endpoint discovery.' >&2; return 2; }
-  [[ ! -e "$endpoint_file" ]] || { echo "Refusing to overwrite existing judge endpoint metadata: $endpoint_file" >&2; return 2; }
-  mkdir -p "$(dirname "$endpoint_file")"
-  local sbatch_bin submit_output job_id train_job_id
+  local sbatch_bin submit_output job_id
   sbatch_bin="${SBATCH_BIN:-$(command -v sbatch || true)}"
   [[ -n "$sbatch_bin" && -x "$sbatch_bin" ]] || { echo 'sbatch not found; rendered SML script is ready.' >&2; return 2; }
   train_job_id="${SAFETY_JUDGE_AFTER_JOB_ID:-}"
@@ -103,57 +159,8 @@ PY
   }
   job_id="${submit_output%%;*}"
   [[ "$job_id" =~ ^[0-9]+$ ]] || { echo "Unexpected sbatch --parsable output: $submit_output" >&2; return 1; }
-  printf 'SML judge job submitted: %s\nServed model: %s\n' "$job_id" "$model_id"
-  local timeout start state node api_models
-  timeout="${SAFETY_JUDGE_READY_TIMEOUT_SECONDS:-900}"
-  start="$(date +%s)"
-  while (( $(date +%s) - start < timeout )); do
-    local status_line
-    status_line="$(squeue --jobs "$job_id" --noheader --format='%T %N' 2>/dev/null | head -n 1 || true)"
-    state="${status_line%% *}"
-    node="${status_line#* }"
-    if [[ "$state" =~ ^(FAILED|CANCELLED|TIMEOUT|COMPLETED|NODE_FAIL|OUT_OF_MEMORY)$ ]]; then
-      echo "Judge Slurm job ${job_id} entered ${state} before readiness." >&2; return 1;
-    fi
-    if [[ "$state" == RUNNING && "$node" != "$status_line" && "$node" != "(null)" && "$node" != "n/a" ]]; then
-      node="${node%%,*}"
-      if api_models="$(srun --jobid "$job_id" --overlap --nodes=1 --ntasks=1 --cpus-per-task=1 --nodelist="$node" \
-        curl --fail --silent --show-error --max-time 5 "http://${node}:8080/v1/models" 2>/dev/null)" && \
-        python3.12 -c 'import json,sys; expected=sys.argv[1]; data=json.load(sys.stdin); raise SystemExit(0 if any(x.get("id")==expected for x in data.get("data",[])) else 1)' "$model_id" <<<"$api_models"; then
-        python3.12 - "$endpoint_file" "$job_id" "$node" "$model_id" "$run_id" <<'PY'
-import json, os, sys, tempfile
-from datetime import datetime, timezone
-path, job_id, host, model, run_id = sys.argv[1:]
-record = {
-    "job_id": job_id,
-    "host": host,
-    "base_url": f"http://{host}:8080/v1",
-    "model": model,
-    "expected_walltime_seconds": 259200,
-    "readiness_verified_utc": datetime.now(timezone.utc).isoformat(),
-}
-if run_id:
-    record["run_id"] = run_id
-fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".judge-endpoint-")
-try:
-    with os.fdopen(fd, "w", encoding="utf-8") as stream:
-        json.dump(record, stream, sort_keys=True)
-        stream.write("\n")
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
-except BaseException:
-    try: os.unlink(tmp)
-    except FileNotFoundError: pass
-    raise
-PY
-        printf 'Ready: %s (job %s); endpoint metadata: %s\n' "http://${node}:8080/v1" "$job_id" "$endpoint_file"
-        return
-      fi
-    fi
-    sleep 10
-  done
-  echo "Timed out after ${timeout}s waiting for judge job ${job_id} and model ${model_id}; job remains submitted." >&2
-  return 1
+  printf 'SML judge job submitted: %s\nServed model: %s\nRun ID: %s\nDescriptor: %s (published by the allocated judge job at startup; training waits for /v1/models)\n' \
+    "$job_id" "$model_id" "$run_id" "$endpoint_file"
 }
 
 if [[ "${1:-}" == --sml-render || "${1:-}" == --sml-submit ]]; then
