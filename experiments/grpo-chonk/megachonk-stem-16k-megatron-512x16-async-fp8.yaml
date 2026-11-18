@@ -1,0 +1,33 @@
+defaults:
+  - megachonk-gsm8k-40n-megatron-128x16-2k-async-fp8.yaml
+  - grpo-skip-zero-adv-truncated-zero.yaml
+
+grpo:
+  num_prompts_per_step: 512
+  async_grpo:
+    max_trajectory_age_steps: 2
+
+loss_fn:
+  force_on_policy_ratio: true
+
+policy:
+  train_global_batch_size: 8192
+  max_total_sequence_length: 16384
+  logprob_chunk_size: 512
+  # Megatron requires a multiple of 2 x CP x TP (sequence parallel) = 32 for packed sequences.
+  make_sequence_length_divisible_by: 32
+  generation:
+    max_new_tokens: 16384
+    vllm_cfg:
+      env_vars:
+        VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+    vllm_kwargs:
+      max_num_seqs: 256
+  sequence_packing:
+    train_mb_tokens: 16384
+    logprob_mb_tokens: 16384
+  megatron_cfg:
+    defer_fp32_logits: true
+    context_parallel_size: 4
+    optimizer:
+      lr: 2.0e-6

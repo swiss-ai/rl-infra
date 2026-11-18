@@ -1,0 +1,12 @@
+defaults: apertus2-megachonk-vllm-adamw.yaml
+
+cluster:
+  num_nodes: 36
+
+policy:
+  generation:
+    colocated:
+      resources:
+        num_nodes: 4
+    vllm_cfg:
+      expert_parallel_size: 16

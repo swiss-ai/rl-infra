@@ -1,0 +1,14 @@
+# Debug layout for when 48 nodes are not free: the same trainer, one 4-node vLLM replica (TP4/EP16).
+# At 16K an engine then holds about 16 full-length answers, so use it with small batches only.
+defaults: apertus2-megachonk-vllm-adamw-stem16k.yaml
+
+cluster:
+  num_nodes: 36
+
+policy:
+  generation:
+    colocated:
+      resources:
+        num_nodes: 4
+    vllm_cfg:
+      expert_parallel_size: 16

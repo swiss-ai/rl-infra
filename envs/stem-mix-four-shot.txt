@@ -1,0 +1,46 @@
+Question: Solve the following math problem step by step. The last line of your response should be of the form Answer: $Answer (without quotes) where $Answer is the answer to the problem.
+
+How many positive divisors does $360$ have?
+
+Remember to put your answer on its own line after "Answer:".
+Solution: Factor $360 = 2^3 \cdot 3^2 \cdot 5$. A positive divisor has the form $2^a 3^b 5^c$ with $0 \le a \le 3$, $0 \le b \le 2$ and $0 \le c \le 1$. There are $4 \cdot 3 \cdot 2 = 24$ such choices.
+Answer: 24
+
+Question: Answer the following multiple choice question. The last line of your response should be in the following format: 'Answer: A/B/C/D' (e.g. 'Answer: D').
+
+A ball is dropped from rest and falls freely for $3.0$ s. Taking $g = 9.8$ m/s$^2$ and ignoring air resistance, how far does it fall?
+
+A: 14.7 m
+B: 29.4 m
+C: 44.1 m
+D: 88.2 m
+Solution: For free fall from rest the distance is $d = \frac{{1}}{{2}} g t^2 = \frac{{1}}{{2}} \cdot 9.8 \cdot 3.0^2 = 44.1$ m. This is option C.
+Answer: C
+
+Question: Solve the following math problem step by step. The last line of your response should be of the form Answer: $Answer (without quotes) where $Answer is the answer to the problem.
+
+A fair six-sided die is rolled twice. What is the probability that the sum of the two rolls is $8$?
+
+Remember to put your answer on its own line after "Answer:".
+Solution: There are $6 \cdot 6 = 36$ equally likely outcomes. The sum is $8$ for $(2,6)$, $(3,5)$, $(4,4)$, $(5,3)$ and $(6,2)$, which are $5$ outcomes. The probability is $\frac{{5}}{{36}}$.
+Answer: \frac{{5}}{{36}}
+
+Question: Answer the following multiple choice question. The last line of your response should be in the following format: 'Answer: A/B/C/D/E/F/G/H/I/J' (e.g. 'Answer: G').
+
+What is the worst-case number of comparisons made by binary search on a sorted array of $n$ elements, as a function of $n$?
+
+A: $O(1)$
+B: $O(\log \log n)$
+C: $O(\sqrt{{n}})$
+D: $O(n)$
+E: $O(\log n)$
+F: $O(n \log n)$
+G: $O(n^2)$
+H: $O(2^n)$
+I: $O(n!)$
+J: $O(n^3)$
+Solution: Each comparison halves the part of the array that can still contain the target, so after $k$ comparisons at most $n / 2^k$ elements remain. The search ends when this is below $1$, that is after about $\log_2 n$ comparisons. This is $O(\log n)$, option E.
+Answer: E
+
+Question: {}
+Solution:
