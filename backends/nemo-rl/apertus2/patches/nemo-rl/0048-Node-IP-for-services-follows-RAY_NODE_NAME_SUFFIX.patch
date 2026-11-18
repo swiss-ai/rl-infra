@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Wed, 18 Nov 2026 21:55:51 +0900
+Subject: [PATCH 48/48] Node IP for services follows RAY_NODE_NAME_SUFFIX
+
+_get_node_ip_local() returns the address of <node><RAY_NODE_NAME_SUFFIX> when the variable is set, so that services other nodes connect to (Gym servers, the ports of worker groups) use the same network as Ray (patch 0041). Ray guessed the management Ethernet on HANGANG, where the Gym servers listened on 10.161.* while Ray ran on Slingshot. Unchanged without the variable.
+---
+ nemo_rl/distributed/virtual_cluster.py | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/nemo_rl/distributed/virtual_cluster.py b/nemo_rl/distributed/virtual_cluster.py
+index e8ddcbf5e..b3f3d3c54 100644
+--- a/nemo_rl/distributed/virtual_cluster.py
++++ b/nemo_rl/distributed/virtual_cluster.py
+@@ -237,6 +237,19 @@ def _get_node_ip_and_free_port(
+ 
+ 
+ def _get_node_ip_local() -> str:
++    """IP address of this node for services other nodes connect to (Gym servers, ports).
++
++    With RAY_NODE_NAME_SUFFIX set (ray.sub resolves "<node><suffix>" for Ray), the address of
++    "<node><suffix>", so that these services use the same network as Ray. Ray's own guess is the
++    source address of the default route or the address the node name resolves to, which on
++    some clusters is a slow management network.
++    """
++    suffix = os.environ.get("RAY_NODE_NAME_SUFFIX", "")
++    if suffix:
++        try:
++            return socket.gethostbyname(socket.gethostname().split(".")[0] + suffix)
++        except OSError:
++            pass
+     # Get the IP address of the current node
+     node_ip = ray._private.services.get_node_ip_address()
+ 
+-- 
+2.51.0
+

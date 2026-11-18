@@ -103,6 +103,9 @@ case "${CKPT:-0}" in
                      checkpointing.metric_name=null checkpointing.save_optimizer=false) ;;
     *)       EXTRA+=(checkpointing.enabled=false) ;;
 esac
+# CKPT_FIRST=1 (default): a step that saves and validates saves first (NeMo-RL patch 0047), so that a failure during
+# the validation loses nothing.
+if [[ "${CKPT_FIRST:-1}" == 1 ]]; then EXTRA+=(++checkpointing.save_before_validation=true); fi
 # NCCL_MIN: minutes a collective of the trainer waits for its peers (default 10); needs NeMo-RL patch 0040.
 if [[ -n "${NCCL_MIN:-}" ]]; then
     EXTRA+=("++policy.megatron_cfg.env_vars.NRL_NCCL_TIMEOUT_MINUTES=\"'${NCCL_MIN}'\"")

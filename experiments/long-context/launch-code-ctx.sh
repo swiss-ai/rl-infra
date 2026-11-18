@@ -90,6 +90,9 @@ case "${CKPT:-file}" in
 esac
 # CKPT_EVERY: steps between checkpoints (the task file says 50; a 512-prompt pass has only 46 steps).
 if [[ -n "${CKPT_EVERY:-}" ]]; then EXTRA+=(checkpointing.save_period=${CKPT_EVERY}); fi
+# CKPT_FIRST=1 (default): a step that saves and validates saves first (NeMo-RL patch 0047). A failure during the
+# validation then loses nothing: job 1298910 failed in the validation of step 40 and resumed from step 20.
+if [[ "${CKPT_FIRST:-1}" == 1 ]]; then EXTRA+=(++checkpointing.save_before_validation=true); fi
 if [[ -n "${SAVE_BY:-}" ]]; then EXTRA+=("checkpointing.checkpoint_must_save_by=\"'${SAVE_BY}'\""); fi
 # PODS: OpenSandbox pods for the unit tests (the task file says 64, set for 128 prompts x 16); twice as many
 # submissions are kept in flight, so that no pod waits for work. 256 pods started cleanly and scaled linearly on

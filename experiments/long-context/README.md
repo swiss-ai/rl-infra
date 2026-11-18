@@ -26,6 +26,8 @@ The NeMo-RL patches are all opt-in or behaviour-preserving:
 | 0044 | Grouping columns in the rollout file: prompt group, task name, prompt index, prompt ordinal, generation weight version | always, when the file is written |
 | 0045 | vLLM FP8: KV-cache scales without `Attention.calculate_kv_scales` (removed in vLLM 0.28) | always |
 | 0046 | Load an HF export into vLLM through the refit path (FP8 quantization included) | used by `eval/run_val.py` |
+| 0047 | A step that saves and validates saves first | `checkpointing.save_before_validation` (the launchers set it, `CKPT_FIRST=0` turns it off) |
+| 0048 | Gym servers and other services advertise the address of `<node><RAY_NODE_NAME_SUFFIX>` | `RAY_NODE_NAME_SUFFIX` |
 
 ## Trainer layout per context length
 
@@ -68,6 +70,14 @@ the model has no position table, so the value is only that check. The launchers 
   host memory in the first training step (job 1299189, `srun: error: ... Out Of Memory`). `OFFHEAD=1` (patch 0042)
   keeps the trainer off that node, so it hosts vLLM workers; in job 1299941 the driver used 92 GB and 147 GB stayed
   free. Placement varies from job to job without it.
+- **Gym servers under load, and validation before saving.** In coding runs NeMo-RL sends every rollout of a step
+  to Gym's agent server at once, and the servers of one node cannot accept the connections fast enough: the 64K run
+  (job 1298910) counted 11.5 million connections dropped from full accept queues on the Gym node and 10.4 million
+  retried requests in Gym. Validations, which add 3,220 rollouts to those of the next steps, slowed from 18 to 79
+  minutes. In the validation of step 40 Gym's model server received truncated vLLM responses, the agent server
+  answered HTTP 500, and the driver exited; the run resumed from the step-20 checkpoint, because the step-40
+  checkpoint is written after the validation. Patch 0047 saves first. The Gym servers also listened on the management
+  network (patch 0048 moves them to Slingshot), though in that run the traffic stayed within one node.
 - **Hang watchdog.** A 64K answer can take close to an hour and a 128K answer about two, so from 64K on the launchers
   raise the watchdog limits to 4 h (6 h during a validation).
 - **Unit tests for coding.** The OpenSandbox pods at CSCS stopped finishing commands on 17 Nov 2026; the 64K run then
