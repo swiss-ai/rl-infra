@@ -6,7 +6,7 @@ case "${SAFETY_PROFILE}" in
   legacy) ;;
   adaptive|single_turn_bridge|honeypot_single_turn|adaptive_honeypot)
     export SAFETY_ADAPTIVE_ROOT="${SAFETY_ADAPTIVE_ROOT:-/scratch/${USER}/safetygym-adaptive}"
-    ADAPTIVE_GYM_COMMIT="${ADAPTIVE_GYM_COMMIT:-7017aab3e68300d4b177bc900ecd27bebc3ae2a8}"
+    ADAPTIVE_GYM_COMMIT="${ADAPTIVE_GYM_COMMIT:-1508cb2aa7000225c3d47fc49b0d67246ccc7c90}"
     export SAFETY_GYM_COMMIT="${ADAPTIVE_GYM_COMMIT}"
     export SAFETY_GYM_DIR="${SAFETY_ADAPTIVE_ROOT}/src/Gym-${SAFETY_GYM_COMMIT}-py312"
     export GYM_VENV_DIR="${SAFETY_ADAPTIVE_ROOT}/cache/gym-server-venvs-${SAFETY_GYM_COMMIT}"
