@@ -4,7 +4,7 @@ GRPO on the Harbor verified tasks: SWE and terminal tasks from 15 validation cam
 against its own solution. The agent is Terminus-2 through Gym's `harbor_agent`. Every trial runs in a
 fresh OpenSandbox pod, and the task's tests, run in a second pod, give the reward. The task file is
 `envs/harbor-verified-sft.yaml`, and the starting point is the SFT checkpoint in
-`recipes/apertus2-chonk-sft19374-vllm-adamw-tools.yaml`, the task file's recipe.
+`recipes/apertus2-chonk-sft18315-v0.2-vllm-adamw-tools.yaml`, the task file's recipe.
 
 The commands below are for HANGANG and run from the repository root on a login node.
 
@@ -58,8 +58,7 @@ library; nothing is pulled, because every `task.toml` names digest-pinned images
 RUN=sft19374-harbor-verified-<name>
 RUN=$RUN EXCLUDE_NODES=node1903 JOB_TIME=24:00:00 WANDB_PROJECT=grpo-dev WANDB_ENTITY=apertus \
 bash run.sh envs/harbor-verified-sft.yaml \
-    harbor_data_dir=$HOME/projects/task_datasets/harbor_verified \
-    env.nemo_gym.harbor_agent.responses_api_agents.harbor_agent.harbor_jobs_dir=/appsdata/$USER/harbor-jobs/$RUN
+    harbor_data_dir=$HOME/projects/task_datasets/harbor_verified
 ```
 
 `DRY_RUN=1` shows the job without submitting it. On success, `run.sh` prints the job ID and the paths
@@ -71,7 +70,7 @@ way, e.g. `grpo.max_num_steps=50`.
 - **Training log**: `$SCRATCH/nemo-rl/slurm/<job id>-logs/ray-driver.log`. The driver's output is
   buffered, so step summaries can appear late. Grep it for `Total step time`, `Avg Reward` and
   `Collecting rollouts`.
-- **Trial results**: one `result.json` per trial under the `harbor_jobs_dir` given at launch.
+- **Trial results**: one `result.json` per trial under `$SCRATCH/nemo-rl/results/$RUN/harbor-jobs`.
   `exception_info.exception_type` says why a trial failed (`AgentTimeoutError`,
   `SandboxApiException`, …).
 - **W&B**: project `grpo-dev` under `apertus`, with the run named `$RUN`.
@@ -102,7 +101,6 @@ Config overrides, after the task file:
 | Argument | Why it is on the command line |
 |---|---|
 | `harbor_data_dir=$HOME/projects/task_datasets/harbor_verified` | Required, `???` in the task file. The tasks prepared in step 2. A per-user path, and the container's `HOME` is not yours. |
-| `env.nemo_gym.harbor_agent.responses_api_agents.harbor_agent.harbor_jobs_dir=/appsdata/$USER/harbor-jobs/$RUN` | Required on HANGANG. The default writes under the checkpoint directory in `/scratch`. Harbor writes about 35 files per trial, and the group's `/scratch` file quota is nearly full. |
 
 Environment variables, read by `run.sh` and `backends/nemo-rl/launch.sh` rather than the task file:
 
@@ -121,7 +119,7 @@ for a full training run.
 
 | Setting | Default | For a training run |
 |---|---|---|
-| Checkpointing | `checkpointing.enabled: false` | `checkpointing.enabled=true` (saves every 10 steps) |
+| Checkpointing | The weights every 20 steps, without the optimizer state, and only the latest kept: `enabled: true`, `save_period: 20`, `save_optimizer: false`, `keep_top_k: 1` | Keep. `checkpointing.enabled=false` for a test. A run resumed from these starts with a fresh optimizer. |
 | Validation | `grpo.val_period: 0`, `val_at_start: false`, `val_at_end: false` | `grpo.val_period=10 grpo.val_at_start=true grpo.val_at_end=true` |
 | Trajectory age | `grpo.async_grpo.max_trajectory_age_steps: 2` | Keep. A step's rollouts can start while the two previous steps' are still in flight, which keeps more sandboxes busy. |
 
@@ -129,7 +127,7 @@ The task file also sets the recipe and where your credentials are read from:
 
 | Setting | Default | To change |
 |---|---|---|
-| Recipe | `defaults: ../recipes/apertus2-chonk-sft19374-vllm-adamw-tools.yaml`, SFT checkpoint `iter_0019374` | `RECIPE=recipes/<recipe>.yaml` at launch, e.g. `apertus2-chonk-sft-vllm-adamw-tools.yaml` for `iter_0008075` |
+| Recipe | `defaults: ../recipes/apertus2-chonk-sft18315-v0.2-vllm-adamw-tools.yaml`, SFT checkpoint chonk-lc-16k-v0.2 `iter_0018315` | `RECIPE=recipes/<recipe>.yaml` at launch, e.g. `apertus2-chonk-sft19374-vllm-adamw-tools.yaml` for v0.1 `iter_0019374` |
 | Registry credentials | `registry_cred_file: ${oc.env:RL_USER_HOME}/.rl_registry_cred` | `registry_cred_file=<path>` |
 | OpenSandbox API key | `…connection.api_key_file: ${oc.env:RL_USER_HOME}/.opensandbox_token` | `env.nemo_gym.sandbox.opensandbox.connection.api_key_file=<path>` |
 
@@ -138,10 +136,10 @@ task file. Both files hold credentials and stay out of the repository.
 
 The task file also sets three fixes that runs need:
 
-- `harbor_agent.concurrency: 200`, the number of trials, and so pods, in flight at once. The previous
-  default, one per rollout in the batch, would be 512. At a cap of 250, up to about 240 sandboxes
-  waited to start, and running sandboxes failed readiness mid-trial (`HTTP 503 … sandbox not ready
-  (ready: 0/1)`). The sandbox nodes keep images in RAM, and every task has its own image.
+- `harbor_agent.concurrency: 300`, the number of trials, and so pods, in flight at once. The previous
+  default, one per rollout in the batch, would be 512. The cluster runs about 300 sandboxes at once
+  whatever the cap: it starts about 1.2 pods per second. Caps of 512 and 1024 only left 300 to 750
+  sandboxes waiting to start, which time out after 600 s (`POD_READY_TIMEOUT`) and are recreated.
 - `sandbox.opensandbox.connection.use_server_proxy: false`. Gym's `opensandbox.yaml` sets it to
   `true`, which sends every command through the OpenSandbox server. At about 190 sandboxes that
   server answered "no available server"; `false` goes through the ingress gateway instead.
