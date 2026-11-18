@@ -1,0 +1,72 @@
+adaptive_attacker_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      name: adaptive_attacker_model
+      base_url: ${oc.env:SAFETY_SWISSAI_API_BASE}
+      api_key: ""
+      api_key_file: /run/secrets/swissai.env
+      api_key_env_name: ${oc.env:SAFETY_SWISSAI_KEY_NAME}
+      model: ${oc.env:SAFETY_SWISSAI_ATTACKER_MODEL}
+      return_token_id_information: false
+      request_prompt_and_generation_token_ids: false
+      max_num_tries: 1
+      max_http_attempts: 1
+      endpoint_connection_retries: 1
+      connect_timeout_seconds: 10
+      request_timeout_seconds: 60
+      forward_request_chat_template_kwargs: true
+adaptive_validator_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      name: adaptive_validator_model
+      base_url: ${oc.env:SAFETY_SWISSAI_API_BASE}
+      api_key: ""
+      api_key_file: /run/secrets/swissai.env
+      api_key_env_name: ${oc.env:SAFETY_SWISSAI_KEY_NAME}
+      model: ${oc.env:SAFETY_SWISSAI_VALIDATOR_MODEL}
+      return_token_id_information: false
+      request_prompt_and_generation_token_ids: false
+      max_num_tries: 1
+      max_http_attempts: 1
+      endpoint_connection_retries: 1
+      connect_timeout_seconds: 10
+      request_timeout_seconds: 60
+adaptive_judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      name: adaptive_judge_model
+      base_url: ${oc.env:SAFETY_ADAPTIVE_JUDGE_BASE_URL}
+      api_key: EMPTY
+      model: ${oc.env:SAFETY_ADAPTIVE_JUDGE_MODEL}
+      return_token_id_information: false
+      request_prompt_and_generation_token_ids: false
+      max_num_tries: 1
+      max_http_attempts: 1
+      endpoint_connection_retries: 1
+      connect_timeout_seconds: 10
+      request_timeout_seconds: 60
+safety_judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      name: safety_judge_model
+      base_url: ${oc.env:SAFETY_ADAPTIVE_JUDGE_BASE_URL}
+      api_key: EMPTY
+      model: ${oc.env:SAFETY_ADAPTIVE_JUDGE_MODEL}
+      return_token_id_information: false
+      request_prompt_and_generation_token_ids: false
+      max_num_tries: 1
+      max_http_attempts: 1
+      endpoint_connection_retries: 1
+      connect_timeout_seconds: 10
+      request_timeout_seconds: 60
+judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.env:SAFETY_ADAPTIVE_JUDGE_BASE_URL}
+      openai_api_key: EMPTY
+      openai_model: ${oc.env:SAFETY_ADAPTIVE_JUDGE_MODEL}

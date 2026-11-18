@@ -84,6 +84,18 @@ def render_adapter(source):
     return source
 
 
+
+def render_adaptive_grpo(source):
+    """Feature-only GRPO mask and optimizer guard overlay."""
+    from adaptive_runtime_overlay import render_adaptive_grpo as render
+    return render(source)
+
+
+def render_adaptive_collector(source):
+    """Feature-only native prompt ordinal attestation overlay."""
+    from adaptive_runtime_overlay import render_adaptive_collector as render
+    return render(source)
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)

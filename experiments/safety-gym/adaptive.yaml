@@ -1,0 +1,23 @@
+# New adaptive profile. The legacy chonk.yaml is not modified.
+defaults: chonk.yaml
+
+grpo:
+  use_dynamic_sampling: false
+  skip_zero_advantage_groups: false
+  use_leave_one_out_baseline: false
+  async_grpo:
+    in_flight_weight_updates: false
+
+env:
+  should_mask_flagged_samples: true
+  nemo_gym:
+    mask_degenerate_rollouts: true
+    config_paths:
+      - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+      - resources_servers/jailbreak_detection/configs/safety_judge_model.yaml
+      - resources_servers/jailbreak_detection/configs/jailbreak_detection_nemotron_combined_reward_tp8.yaml
+      - resources_servers/over_refusal_detection/configs/over_refusal_detection.yaml
+      - ${oc.env:SAFETY_EXPERIMENT_DIR}/gym.yaml
+      - ${oc.env:SAFETY_JUDGE_CONFIG}
+      - ${oc.env:SAFETY_ADAPTIVE_GYM_CONFIG}
+      - ${oc.env:SAFETY_ADAPTIVE_MODELS_CONFIG}
