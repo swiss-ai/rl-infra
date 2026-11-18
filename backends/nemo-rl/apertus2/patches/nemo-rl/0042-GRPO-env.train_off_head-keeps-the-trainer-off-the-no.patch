@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Wed, 18 Nov 2026 04:41:44 +0900
+Subject: [PATCH 42/46] GRPO: env.train_off_head keeps the trainer off the node
+ the driver runs on
+
+ray.sub gives every node but the Ray head the resource off_head; with env.train_off_head the bundles of the train cluster ask for it, so the head node goes to the inference cluster. The driver holds the whole padded batch: with four trainer ranks and their CPU-offloaded optimizer state on the same node, 8,192 samples of 131,072 tokens ran it out of host memory (job 1299189), while inference workers need little host memory. Default unchanged.
+---
+ nemo_rl/algorithms/grpo.py | 9 +++++++++
+ ray.sub                    | 5 +++++
+ 2 files changed, 14 insertions(+)
+
+diff --git a/nemo_rl/algorithms/grpo.py b/nemo_rl/algorithms/grpo.py
+index a1aaae9c5..f14dc7542 100644
+--- a/nemo_rl/algorithms/grpo.py
++++ b/nemo_rl/algorithms/grpo.py
+@@ -1166,6 +1166,15 @@ def setup(
+                         flush=True,
+                     )
+ 
++        # env.train_off_head: keep the trainer off the node of the Ray head, where the driver
++        # runs, so that node goes to the inference cluster. ray.sub gives every other node the
++        # "off_head" resource. The driver holds the whole padded batch; with four trainer
++        # ranks and their CPU-offloaded optimizer state next to it, 8,192 samples of 131,072
++        # tokens ran the node out of host memory, while inference workers need little of it.
++        if node_resource_constraints is None and env_configs.get("train_off_head"):
++            node_resource_constraints = [{"off_head": 0.001}] * train_nodes
++            print("  ✓ Trainer nodes exclude the Ray head node (off_head)", flush=True)
++
+         # initialize train cluster
+         train_cluster = RayVirtualCluster(
+             name="grpo_train_cluster",
+diff --git a/ray.sub b/ray.sub
+index fe1546e1e..c9b7774ee 100644
+--- a/ray.sub
++++ b/ray.sub
+@@ -634,6 +634,11 @@ else
+   if [[ -n "\$TOPO_RANK" ]]; then
+     RAY_RESOURCES+=', \"topo_rank\": '\$TOPO_RANK
+   fi
++  # Every node but the head: a placement group that asks for "off_head" stays off the node
++  # the driver runs on (env.train_off_head in grpo.py).
++  if [[ "\${SLURMD_NODENAME:-\$(hostname -s)}" != "$head_node" ]]; then
++    RAY_RESOURCES+=', \"off_head\": 1'
++  fi
+ fi
+ RAY_RESOURCES+='}'
+ export RAY_RESOURCES
+-- 
+2.51.0
+

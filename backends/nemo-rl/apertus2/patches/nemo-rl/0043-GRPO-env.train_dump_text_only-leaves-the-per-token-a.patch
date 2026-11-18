@@ -1,0 +1,82 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Wed, 18 Nov 2026 01:21:44 +0900
+Subject: [PATCH 43/46] GRPO: env.train_dump_text_only leaves the per-token
+ arrays out of the per-step rollout dump
+
+The per-step train_data_step*.jsonl holds token ids, loss mask, advantages and log-probs of every sample, padded to the longest sample of the batch: about 6 GB per step for 8,192 samples at 16K tokens. With env.train_dump_text_only=true a sample keeps its text (prompt and answer), reward, length and sample mask. Default unchanged, apart from the order of the keys in a row.
+---
+ nemo_rl/algorithms/grpo.py | 41 +++++++++++++++++++++++++-------------
+ 1 file changed, 27 insertions(+), 14 deletions(-)
+
+diff --git a/nemo_rl/algorithms/grpo.py b/nemo_rl/algorithms/grpo.py
+index f14dc7542..22e2eac8a 100644
+--- a/nemo_rl/algorithms/grpo.py
++++ b/nemo_rl/algorithms/grpo.py
+@@ -2563,6 +2563,17 @@ def _should_log_nemo_gym_responses(master_config: MasterConfig) -> bool:
+     return should_log_nemo_gym_responses
+ 
+ 
++def _train_dump_text_only(master_config: MasterConfig) -> bool:
++    """env.train_dump_text_only: a lean per-step ``train_data_step*.jsonl``.
++
++    Each sample keeps its text (prompt and answer), reward, length and sample mask. The
++    per-token arrays (token ids, loss mask, advantages, log-probs) are left out: padded to
++    the longest sample of the batch, they are nearly all of the file (about 6 GB per step
++    for 8,192 samples at 16K tokens) and of the time it takes to write.
++    """
++    return bool(master_config.env.get("train_dump_text_only"))
++
++
+ def _write_latest_checkpoint_status(
+     checkpointer: CheckpointManager, last_checkpoint_step: int
+ ) -> None:
+@@ -4125,14 +4136,15 @@ def _grpo_train_impl(
+                     log_data["filtered_rewards"] = rewards.tolist()
+                     log_data["rewards"] = repeated_batch["total_reward"].tolist()
+                 log_data["input_lengths"] = input_lengths.tolist()
+-                log_data["token_ids"] = train_data["input_ids"].tolist()
+-                log_data["token_loss_mask"] = train_data["token_mask"].tolist()
+                 log_data["sample_loss_mask"] = train_data["sample_mask"].tolist()
+-                log_data["advantages"] = train_data["advantages"].tolist()
+-                log_data["generation_logprobs"] = train_data[
+-                    "generation_logprobs"
+-                ].tolist()
+-                log_data["prev_logprobs"] = train_data["prev_logprobs"].tolist()
++                if not _train_dump_text_only(master_config):
++                    log_data["token_ids"] = train_data["input_ids"].tolist()
++                    log_data["token_loss_mask"] = train_data["token_mask"].tolist()
++                    log_data["advantages"] = train_data["advantages"].tolist()
++                    log_data["generation_logprobs"] = train_data[
++                        "generation_logprobs"
++                    ].tolist()
++                    log_data["prev_logprobs"] = train_data["prev_logprobs"].tolist()
+ 
+                 logger.log_batched_dict_as_jsonl(
+                     log_data, f"train_data_step{total_steps + 1}.jsonl"
+@@ -6181,14 +6193,15 @@ def async_grpo_train(
+                     log_data["filtered_rewards"] = rewards.tolist()
+                     log_data["rewards"] = repeated_batch["total_reward"].tolist()
+                 log_data["input_lengths"] = input_lengths.tolist()
+-                log_data["token_ids"] = train_data["input_ids"].tolist()
+-                log_data["token_loss_mask"] = train_data["token_mask"].tolist()
+                 log_data["sample_loss_mask"] = train_data["sample_mask"].tolist()
+-                log_data["advantages"] = train_data["advantages"].tolist()
+-                log_data["generation_logprobs"] = train_data[
+-                    "generation_logprobs"
+-                ].tolist()
+-                log_data["prev_logprobs"] = train_data["prev_logprobs"].tolist()
++                if not _train_dump_text_only(master_config):
++                    log_data["token_ids"] = train_data["input_ids"].tolist()
++                    log_data["token_loss_mask"] = train_data["token_mask"].tolist()
++                    log_data["advantages"] = train_data["advantages"].tolist()
++                    log_data["generation_logprobs"] = train_data[
++                        "generation_logprobs"
++                    ].tolist()
++                    log_data["prev_logprobs"] = train_data["prev_logprobs"].tolist()
+                 logger.log_batched_dict_as_jsonl(
+                     log_data, f"train_data_step{step + 1}.jsonl"
+                 )
+-- 
+2.51.0
+

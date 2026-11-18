@@ -1,0 +1,105 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Wed, 18 Nov 2026 19:39:57 +0900
+Subject: [PATCH 44/46] GRPO: the per-step rollout dump names where each row
+ comes from
+
+train_data_step*.jsonl of async GRPO gets, per row: prompt_group (the prompt group within the step), task_name, prompt_idx (the prompt index in its dataset; the logger writes the row number as idx), prompt_ordinal (the ordinal of the prompt group in the run stream) and generation_weight_version (the weight version that generated it; ReplayBuffer.sample returns it per sampled group). The columns are built from the sampled groups; a failure while building them leaves them out and does not stop the step.
+---
+ .../algorithms/async_utils/replay_buffer.py   |  2 +
+ nemo_rl/algorithms/grpo.py                    | 59 +++++++++++++++++++
+ 2 files changed, 61 insertions(+)
+
+diff --git a/nemo_rl/algorithms/async_utils/replay_buffer.py b/nemo_rl/algorithms/async_utils/replay_buffer.py
+index 49d3f5186..38378f758 100644
+--- a/nemo_rl/algorithms/async_utils/replay_buffer.py
++++ b/nemo_rl/algorithms/async_utils/replay_buffer.py
+@@ -670,6 +670,8 @@ class ReplayBufferImpl(ReplayBufferProtocol):
+             return {
+                 "trajectories": sampled_items,
+                 "avg_trajectory_age": avg_trajectory_age,
++                # The weight version that generated each sampled group, in the same order.
++                "trajectory_versions": sampled_weights,
+             }
+ 
+     def size(self) -> int:
+diff --git a/nemo_rl/algorithms/grpo.py b/nemo_rl/algorithms/grpo.py
+index 22e2eac8a..d314c7a97 100644
+--- a/nemo_rl/algorithms/grpo.py
++++ b/nemo_rl/algorithms/grpo.py
+@@ -2574,6 +2574,46 @@ def _train_dump_text_only(master_config: MasterConfig) -> bool:
+     return bool(master_config.env.get("train_dump_text_only"))
+ 
+ 
++def _train_dump_grouping_columns(
++    trajectories: list[dict[str, Any]],
++    repeated_batch: Any,
++    trajectory_versions: Optional[list[int]],
++    num_rows: int,
++) -> dict[str, list]:
++    """Per-row columns that say where each row of ``train_data_step*.jsonl`` comes from.
++
++    Args:
++        trajectories: The sampled prompt groups, in the order their rows are concatenated.
++        repeated_batch: The training batch built from them.
++        trajectory_versions: The weight version that generated each group, if known.
++        num_rows: Rows of the dump; a column of another length is left out.
++
++    Returns:
++        prompt_group (the group's position in this step), task_name and prompt_idx (the
++        dataset and the prompt's index in it; the logger writes the row number as ``idx``),
++        prompt_ordinal (the group's ordinal in the run's stream of prompts) and
++        generation_weight_version, each where available.
++    """
++    group_sizes = [trajectory["batch"].size for trajectory in trajectories]
++
++    def per_row(values: list) -> list:
++        return [value for value, size in zip(values, group_sizes) for _ in range(size)]
++
++    columns = {"prompt_group": per_row(list(range(len(group_sizes))))}
++    for key, name in (("task_name", "task_name"), ("idx", "prompt_idx")):
++        if key in repeated_batch:
++            value = repeated_batch[key]
++            columns[name] = value.tolist() if hasattr(value, "tolist") else list(value)
++    ordinals = [trajectory.get(NEMO_GYM_TASK_INDEX_KEY) for trajectory in trajectories]
++    if ordinals and all(ordinal is not None for ordinal in ordinals):
++        columns["prompt_ordinal"] = per_row([int(ordinal) for ordinal in ordinals])
++    if trajectory_versions is not None and len(trajectory_versions) == len(group_sizes):
++        columns["generation_weight_version"] = per_row(
++            [int(version) for version in trajectory_versions]
++        )
++    return {name: value for name, value in columns.items() if len(value) == num_rows}
++
++
+ def _write_latest_checkpoint_status(
+     checkpointer: CheckpointManager, last_checkpoint_step: int
+ ) -> None:
+@@ -6194,6 +6234,25 @@ def async_grpo_train(
+                     log_data["rewards"] = repeated_batch["total_reward"].tolist()
+                 log_data["input_lengths"] = input_lengths.tolist()
+                 log_data["sample_loss_mask"] = train_data["sample_mask"].tolist()
++                # Where each row comes from, to group the rollouts afterwards: its prompt group
++                # within this step, the dataset and the prompt's index in it, the ordinal of the
++                # prompt group in the run's stream, and the weight version that generated it (the
++                # file name gives the step that trained on it). Bookkeeping only: a failure
++                # leaves the columns out and never stops the step.
++                try:
++                    log_data.update(
++                        _train_dump_grouping_columns(
++                            trajectories,
++                            repeated_batch,
++                            sample_result.get("trajectory_versions"),
++                            len(log_data["rewards"]),
++                        )
++                    )
++                except Exception as error:
++                    print(
++                        f"train_data dump: grouping columns left out ({error!r})",
++                        flush=True,
++                    )
+                 if not _train_dump_text_only(master_config):
+                     log_data["token_ids"] = train_data["input_ids"].tolist()
+                     log_data["token_loss_mask"] = train_data["token_mask"].tolist()
+-- 
+2.51.0
+
