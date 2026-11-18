@@ -12,7 +12,7 @@ if [[ "${SAFETY_PROFILE}" == legacy ]]; then
 else
   SAFETY_COALLOCATE="${SAFETY_COALLOCATE:-1}"
   if [[ "$SAFETY_COALLOCATE" == 1 ]]; then
-    RUN="${RUN:-msafetemp-adaptive-stage1-coalloc-48h}"
+    RUN="${RUN:-adaptive-multiturn-jailbreak-v1}"
   else
     RUN="${RUN:-msafetemp-adaptive-stage1-72h-retry1}"
   fi
