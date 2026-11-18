@@ -186,11 +186,10 @@ NeMo-RL changes, as patches applied by `setup.sh` (`backends/nemo-rl/apertus2/pa
 - `0050`: the `policy.megatron_cfg.distributed_timeout_minutes` key.
 - `0051`: the gradient-norm communicator in the NCCL warm-up.
 
-The runs also used two NeMo-RL changes that come with the long-context branch (`long-context`):
-`NRL_NCCL_TIMEOUT_MINUTES` (the megachonk YAML sets it to 60 in `megatron_cfg.env_vars`) and
-Ray on Slingshot in `ray.sub` (`RAY_NODE_NAME_SUFFIX`). Without them both settings are ignored
-without an error: the default process group keeps its 10-minute timeout and Ray stays on the
-1 Gbit network. The clone `~/projects/nemo-rl-apertus2-megachonk` has all four.
+The runs also use two NeMo-RL changes added with the long-context work: `0040`,
+`NRL_NCCL_TIMEOUT_MINUTES` (the megachonk YAML sets it to 60 in `megatron_cfg.env_vars`), and
+`0041`, Ray on Slingshot in `ray.sub` (`RAY_NODE_NAME_SUFFIX`, `-hsn0` by default on Hangang
+through `sites/hangang.env`). The clone `~/projects/nemo-rl-apertus2-megachonk` has all four.
 
 Other changes: `backends/nemo-rl/apertus2/driver.sh` (W&B console off, unbuffered stdout),
 `backends/nemo-rl/preflight.sh` (expert-parallel rule), `sites/hangang.env` (vLLM caches in the
