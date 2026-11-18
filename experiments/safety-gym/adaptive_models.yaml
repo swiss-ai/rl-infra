@@ -8,6 +8,9 @@ adaptive_attacker_model:
       api_key_file: /run/secrets/swissai.env
       api_key_env_name: ${oc.env:SAFETY_SWISSAI_KEY_NAME}
       model: ${oc.env:SAFETY_SWISSAI_ATTACKER_MODEL}
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
       return_token_id_information: false
       request_prompt_and_generation_token_ids: false
       uses_reasoning_parser: false
