@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Thu, 12 Nov 2026 02:05:11 +0900
+Subject: [PATCH 45/46] vLLM FP8: KV-cache scales without
+ Attention.calculate_kv_scales
+
+vLLM 0.28 removed Attention.calculate_kv_scales, so the patched BaseKVCacheMethod.process_weights_after_loading raised AttributeError at engine start whenever kv_cache_dtype was fp8. Read the attribute only where it exists, and fill the host copies of the scales that vLLM 0.28 keeps.
+---
+ nemo_rl/models/generation/vllm/quantization/fp8.py | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/nemo_rl/models/generation/vllm/quantization/fp8.py b/nemo_rl/models/generation/vllm/quantization/fp8.py
+index efd18368d..88ff9344b 100644
+--- a/nemo_rl/models/generation/vllm/quantization/fp8.py
++++ b/nemo_rl/models/generation/vllm/quantization/fp8.py
+@@ -1600,7 +1600,10 @@ def process_weights_after_loading_kv(self, layer) -> None:
+     # calculate them on the fly.
+     from vllm.platforms import current_platform
+ 
+-    if layer.kv_cache_dtype != "auto" and not layer.calculate_kv_scales:
++    # vLLM 0.28 removed Attention.calculate_kv_scales (on-the-fly calibration);
++    # static scales are the only mode there.
++    calculate_kv_scales = getattr(layer, "calculate_kv_scales", False)
++    if layer.kv_cache_dtype != "auto" and not calculate_kv_scales:
+         if layer.k_scale > 0.0 and layer.v_scale > 0.0:
+             # We prefer to use separate k_scale and v_scale if present
+             k_scale = layer.k_scale.to("cpu").tolist()
+@@ -1637,12 +1640,17 @@ def process_weights_after_loading_kv(self, layer) -> None:
+         layer._v_scale.copy_(v_scale)
+         layer._k_scale_float = k_scale
+         layer._v_scale_float = v_scale
++        # Host copies of the scales, in vLLM versions that keep them (0.28).
++        if hasattr(layer, "_k_scale_cpu"):
++            layer._k_scale_cpu.fill_(k_scale)
++            layer._v_scale_cpu.fill_(v_scale)
+ 
+     if layer.q_scale > 0.0:
+         q_scale = layer.q_scale
+         if current_platform.is_fp8_fnuz():
+             q_scale *= 2
+-        layer.calculate_kv_scales = False
++        if hasattr(layer, "calculate_kv_scales"):
++            layer.calculate_kv_scales = False
+     else:
+         q_scale = 1.0
+     if layer.prob_scale > 0.0:
+-- 
+2.51.0
+

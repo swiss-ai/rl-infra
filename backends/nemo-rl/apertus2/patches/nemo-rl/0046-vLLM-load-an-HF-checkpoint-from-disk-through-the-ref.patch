@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Thu, 12 Nov 2026 02:58:52 +0900
+Subject: [PATCH 46/46] vLLM: load an HF checkpoint from disk through the refit
+ path
+
+update_weights_from_hf_checkpoint feeds the checkpoint shards to the same loaders, FP8 quantization and finalization as a refit from the trainer. A standalone engine with precision fp8 needs it: vLLM own loader (load_format auto) skips the quantization and the model then emits token 0 only.
+---
+ .../models/generation/vllm/vllm_backend.py    | 28 +++++++++++++++++++
+ .../generation/vllm/vllm_worker_async.py      | 11 ++++++++
+ 2 files changed, 39 insertions(+)
+
+diff --git a/nemo_rl/models/generation/vllm/vllm_backend.py b/nemo_rl/models/generation/vllm/vllm_backend.py
+index c37bafbae..d42f71129 100644
+--- a/nemo_rl/models/generation/vllm/vllm_backend.py
++++ b/nemo_rl/models/generation/vllm/vllm_backend.py
+@@ -1565,6 +1565,34 @@ class VllmInternalWorkerExtension(RefitBuilderInterface):
+         torch.cuda.empty_cache()
+         return True
+ 
++    def update_weights_from_hf_checkpoint(self, model_path: str) -> bool:
++        """Load an HF checkpoint from disk through the refit path.
++
++        For a standalone engine started with dummy weights (benchmarks, checks
++        without a trainer): the same loaders, quantization and finalization as
++        a refit from the trainer, one safetensors shard at a time.
++
++        Args:
++            model_path: Directory holding the checkpoint's safetensors shards.
++        """
++        import glob
++
++        from safetensors import safe_open
++
++        shards = sorted(glob.glob(os.path.join(model_path, "*.safetensors")))
++        if not shards:
++            raise FileNotFoundError(f"No safetensors shards in {model_path}")
++        with self._weight_update_lifecycle("collective") as finalize:
++            for shard in shards:
++                with safe_open(shard, framework="pt", device=str(self.device)) as f:
++                    weights = [(name, f.get_tensor(name)) for name in f.keys()]
++                self._load_weights(weights)
++                del weights
++            finalize()
++        gc.collect()
++        torch.cuda.empty_cache()
++        return True
++
+     def update_weights_from_decoded_sparse_payload(
+         self, *payloads: bytes | str
+     ) -> dict[str, Any]:
+diff --git a/nemo_rl/models/generation/vllm/vllm_worker_async.py b/nemo_rl/models/generation/vllm/vllm_worker_async.py
+index 73e063da8..dae3b2c97 100644
+--- a/nemo_rl/models/generation/vllm/vllm_worker_async.py
++++ b/nemo_rl/models/generation/vllm/vllm_worker_async.py
+@@ -2016,6 +2016,17 @@ class VllmAsyncGenerationWorkerImpl(
+             traceback.print_exc()
+             return False
+ 
++    async def update_weights_from_hf_checkpoint_async(self, model_path: str) -> bool:
++        """Load an HF checkpoint from disk through the refit path (no trainer)."""
++        assert self.llm is not None, "vLLM is not initialized on this worker"
++        result_or_coro = await self.llm.collective_rpc(
++            "update_weights_from_hf_checkpoint", args=(model_path,)
++        )
++        if asyncio.iscoroutine(result_or_coro):
++            result_or_coro = await result_or_coro
++        worker_results = cast(list[bool], result_or_coro)
++        return bool(worker_results) and all(worker_results)
++
+     async def init_nccl_reshard_comm_group_async(
+         self,
+         rank_prefix: int,
+-- 
+2.51.0
+
