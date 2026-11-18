@@ -79,15 +79,26 @@ def test_native_grpo_baseline_excludes_invalid_rows():
         AdvEstimatorConfig(use_leave_one_out_baseline=False, normalize_rewards=True),
         ClippedPGLossConfig(),
     )
+    prompt_ids = torch.tensor([[9], [9], [9]])
+    mask = torch.ones((3, 4))
+    valid_mask = torch.tensor([1.0, 1.0, 0.0])
     result = estimator.compute_advantage(
-        prompt_ids=torch.tensor([[9], [9], [9]]),
+        prompt_ids=prompt_ids,
         rewards=torch.tensor([1.0, 0.0, -1.0]),
-        mask=torch.ones((3, 4)),
-        valid_mask=torch.tensor([1.0, 1.0, 0.0]),
+        mask=mask,
+        valid_mask=valid_mask,
+    )
+    changed_invalid_reward = estimator.compute_advantage(
+        prompt_ids=prompt_ids,
+        rewards=torch.tensor([1.0, 0.0, 1_000_000.0]),
+        mask=mask,
+        valid_mask=valid_mask,
     )
     assert result[0, 0] > 0 and result[1, 0] < 0
     assert torch.allclose(result[0], -result[1])
-    assert torch.equal(result[2], torch.zeros_like(result[2]))
+    # Invalid rows are not required to have zero *computed* advantages: sample_mask
+    # excludes them from policy loss. Their reward must not influence valid siblings.
+    assert torch.allclose(result[:2], changed_invalid_reward[:2])
 
 
 def test_native_grpo_singleton_and_all_invalid_groups_are_zero():
