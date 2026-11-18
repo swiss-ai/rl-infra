@@ -107,7 +107,13 @@ CODE_GEN=env.nemo_gym.code_gen.resources_servers.code_gen
 # must be the service's --workers: that many submissions are in flight.
 if [[ -n "${SANDBOX:-}" ]]; then
     [[ -z "${PODS:-}" ]] || { echo "ERROR: PODS and SANDBOX are two different test runners, give one" >&2; exit 1; }
-    [[ -s "${SANDBOX}" ]] || { echo "ERROR: ${SANDBOX} is missing: the sandbox service is not up (start.sh)" >&2; exit 1; }
+    # SANDBOX_JOB=<job id of start.sh>: the sandbox job is still queued; the run then starts after it (the server
+    # writes the endpoint file seconds after it starts, Gym reads it minutes into the run).
+    if [[ -n "${SANDBOX_JOB:-}" ]]; then
+        SBATCH_MORE="${SBATCH_MORE:-} --dependency=after:${SANDBOX_JOB}"
+    else
+        [[ -s "${SANDBOX}" ]] || { echo "ERROR: ${SANDBOX} is missing: the sandbox service is not up (start.sh), or give SANDBOX_JOB" >&2; exit 1; }
+    fi
     mkdir -p ${SCRATCH}/long-context/launch
     TASK=${SCRATCH}/long-context/launch/code-gen-sandbox-sft.yaml
     sed '/^          opensandbox:/,/^            num_pods:/d' "${INFRA}/envs/code-gen-osb-sft.yaml" > "${TASK}"
