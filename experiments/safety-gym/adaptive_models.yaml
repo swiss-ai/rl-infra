@@ -25,11 +25,9 @@ adaptive_validator_model:
     vllm_model:
       entrypoint: app.py
       name: adaptive_validator_model
-      base_url: ${oc.env:SAFETY_SWISSAI_API_BASE}
-      api_key: ""
-      api_key_file: /run/secrets/swissai.env
-      api_key_env_name: ${oc.env:SAFETY_SWISSAI_KEY_NAME}
-      model: ${oc.env:SAFETY_SWISSAI_VALIDATOR_MODEL}
+      base_url: ${oc.env:SAFETY_ADAPTIVE_JUDGE_BASE_URL}
+      api_key: EMPTY
+      model: ${oc.env:SAFETY_ADAPTIVE_JUDGE_MODEL}
       return_token_id_information: false
       request_prompt_and_generation_token_ids: false
       uses_reasoning_parser: false
