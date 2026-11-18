@@ -49,6 +49,10 @@ SETS = {
     "enigmata": ("enigmata/train/enigmata_v1.jsonl", "enigmata_val_x2.jsonl"),
     "scienceworld": ("scienceworld/sciworld_act_train.jsonl", "sciworld_act_dev_x4.jsonl"),
     "openqa": ("openqa/openqa_science.jsonl", "openqa_val_x2.jsonl"),
+    # The run's own validation sets, taken from its saved config as they are (repeats included).
+    "aime24": ("@val", "DAPOMathAIME2024"),
+    "gpqa": ("@val", "gpqa_diamond_x8.jsonl"),
+    "chem": ("@val", "chem_faithful/validation.jsonl"),
 }
 
 ap = argparse.ArgumentParser()
@@ -58,18 +62,31 @@ ap.add_argument("--name", required=True, help="W&B run name and results file nam
 ap.add_argument("--sets", default=",".join(SETS))
 ap.add_argument("--limit", type=int, default=0, help="debug: use only the first ROWS rows of every set")
 ap.add_argument("--gen-nodes", type=int, required=True)
+# The system frame's thinking level for every set and for generation: high (the user's rule since 2026-11-19) unless
+# told otherwise; run 5 itself trained and validated most sets at medium. The level is appended to the name.
+ap.add_argument("--thinking", choices=["medium", "high"], default="high")
 args = ap.parse_args()
 sets = args.sets.split(",")
+if not args.name.endswith("-" + args.thinking):
+    args.name = f"{args.name}-{args.thinking}"
 
 register_omegaconf_resolvers()
 cfg = OmegaConf.to_container(OmegaConf.load(RUN_CONFIG), resolve=True)
 
 # Data: the validation list becomes the evaluation sets; one tiny training entry keeps setup_response_data content.
-train = {os.path.relpath(t.get("data_path", ""), STEM_DATA): t for t in cfg["data"]["train"]}
+train = {os.path.relpath(t["data_path"], STEM_DATA): t for t in cfg["data"]["train"]
+         if t.get("data_path")}   # DAPO is loaded by name and has no data file
 os.makedirs(f"{LOGS}/limited", exist_ok=True)
+run_validation = deepcopy(cfg["data"]["validation"])
 validation, rows = [], 0
 for s in sets:
     src, path = SETS[s]
+    if src == "@val":
+        entry = deepcopy(next(v for v in run_validation
+                              if v.get("dataset_name") == path or (v.get("data_path") or "").endswith(path)))
+        validation.append(entry)
+        rows += {"DAPOMathAIME2024": 960}.get(path, 0) or sum(1 for _ in open(entry["data_path"]))
+        continue
     path = f"{BENCH}/{path}"
     if args.limit:
         small = f"{LOGS}/limited/{os.path.basename(path)}"
@@ -84,6 +101,36 @@ for s in sets:
     validation.append(entry)
     with open(path) as f:
         rows += sum(1 for _ in f)
+
+
+def frame_for(path: str) -> str:
+    """The system frame file of the chosen thinking level for a set or generation config that used `path`."""
+    if args.thinking == "medium" or not path:
+        return path
+    for medium in ("apertus2-system.json", "apertus2-system-sciworld-act.json"):
+        if path.endswith("/" + medium):
+            high = path[: -len(".json")] + "-high.json"
+            if os.path.exists(high):
+                return high
+            # No high copy next to it (the ScienceWorld frame of the data folder): one is written once, atomically.
+            high = f"{BENCH}/{medium[: -len('.json')]}-high.json"
+            if not os.path.exists(high):
+                frame = json.load(open(path))
+                frame["thinking"] = "high"
+                tmp = f"{high}.{os.getpid()}"
+                with open(tmp, "w") as f:
+                    json.dump(frame, f, separators=(",", ":"))
+                os.replace(tmp, high)
+            return high
+    if args.thinking not in path:
+        raise SystemExit(f"no {args.thinking} copy known for the system frame {path}")
+    return path
+
+
+for entry in validation:
+    entry["system_prompt_file"] = frame_for(entry.get("system_prompt_file") or "")
+cfg["data"]["default"]["system_prompt_file"] = frame_for(cfg["data"]["default"].get("system_prompt_file") or "")
+cfg["policy"]["generation"]["system_prompt_file"] = frame_for(cfg["policy"]["generation"].get("system_prompt_file") or "")
 cfg["data"]["validation"] = validation
 cfg["data"]["train"] = [deepcopy(validation[0])]
 cfg["data"]["use_multiple_dataloader"] = False
@@ -113,7 +160,8 @@ cfg["checkpointing"]["enabled"] = False
 
 master = MasterConfig(**cfg)
 print(f"Evaluating {args.model} (step {args.step}) on {sets}: {rows} rows, {args.gen_nodes} vLLM nodes, "
-      f"{judge_nodes} judge node(s)", flush=True)
+      f"{judge_nodes} judge node(s), thinking {args.thinking}; frames: "
+      f"{sorted(set(os.path.basename(e['system_prompt_file']) for e in validation))}", flush=True)
 
 init_ray()
 tokenizer = get_tokenizer(master.policy["tokenizer"])
@@ -143,7 +191,7 @@ elapsed = time.time() - t2
 logger.log_metrics(metrics, args.step, prefix="validation")
 logger.log_metrics(timings, args.step, prefix="timing/validation")
 
-out = {"name": args.name, "model": args.model, "step": args.step, "sets": sets, "rows": rows,
+out = {"name": args.name, "model": args.model, "step": args.step, "thinking": args.thinking, "sets": sets, "rows": rows,
        "gen_nodes": args.gen_nodes, "validation_s": round(elapsed, 1), "metrics": metrics, "timings": timings}
 os.makedirs(f"{LOGS}/results", exist_ok=True)
 with open(f"{LOGS}/results/{args.name}.json", "w") as f:

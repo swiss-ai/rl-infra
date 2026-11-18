@@ -1,0 +1,1 @@
+{"thinking":"high","tools":[{"name":"act","description":"Enter one command in the ScienceWorld simulator and return its answer.","schema":{"type":"object","properties":{"action":{"type":"string","description":"One command, for example \"open door to kitchen\"."}},"required":["action"]}}]}

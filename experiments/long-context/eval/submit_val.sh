@@ -4,6 +4,9 @@
 # included. Container, mounts and environment come from a dry run of launch-stem-ctx.sh with run 5's mix and the
 # NeMo-RL clone of setup.sh (patches 0045 and 0046 load the export into vLLM), so the job sees exactly what run 5 at 32K saw. Ray on Slingshot.
 #   SETS=aime25,math500,...  subset of run_val.py's sets (default all)     LIMIT=N  first N rows of every set (debug)
+#   THINKING=high (default, the user's rule since 2026-11-19) or medium: the system frame of every set; the level is
+#            appended to the evaluation's name.
+#   AFTER_CONVERT=1  the export is still being written by a conversion job that SBATCH_MORE's dependency waits for.
 #   JOB_TIME (default 03:00:00), SBATCH_MORE pass through.
 # Log: ${SCRATCH}/nemo-rl/slurm/<job>-logs/ray-driver.log   Results: ${SCRATCH}/nemo-rl/logs/eval-run5-32k/
 set -euo pipefail
@@ -14,7 +17,8 @@ CLONE=${NEMO_RL_DIR:-${PROJECTS_DIR:-${HOME}/projects}/nemo-rl-apertus2}
 grep -q update_weights_from_hf_checkpoint "${CLONE}/nemo_rl/models/generation/vllm/vllm_backend.py" || {
     echo "ERROR: ${CLONE} cannot load an export into vLLM (NeMo-RL patch 0046): rerun setup.sh" >&2; exit 1; }
 MODEL=${1:?HF export dir}; STEP=${2:?step}; NAME=${3:?name}; GEN=${4:-8}
-[[ -f "${MODEL}/config.json" ]] || { echo "ERROR: ${MODEL} is not an HF export (no config.json)" >&2; exit 1; }
+[[ -f "${MODEL}/config.json" || "${AFTER_CONVERT:-0}" == 1 ]] || {
+    echo "ERROR: ${MODEL} is not an HF export (no config.json); AFTER_CONVERT=1 if a conversion job writes it" >&2; exit 1; }
 SETS=${SETS:-aime25,aime26,math500,mmlu_pro,reasoning_gym,enigmata,scienceworld,openqa}
 JUDGE=0; [[ ",${SETS}," == *",openqa,"* ]] && JUDGE=1
 OUT=${SCRATCH}/long-context
@@ -27,7 +31,7 @@ while IFS= read -r line; do
     export "${BASH_REMATCH[1]}=${BASH_REMATCH[2]}"
 done < <(sed -n '/DRY_RUN: site/,$p' "${DRY}" | tail -n +3)
 grep -q "${CLONE}:/opt/nemo-rl" <<< "${MOUNTS}" || { echo "ERROR: the dry run does not mount ${CLONE}" >&2; exit 1; }
-EXTRA="--sets ${SETS}"; [[ -n "${LIMIT:-}" ]] && EXTRA+=" --limit ${LIMIT}"
+EXTRA="--sets ${SETS} --thinking ${THINKING:-high}"; [[ -n "${LIMIT:-}" ]] && EXTRA+=" --limit ${LIMIT}"
 export COMMAND="cd /opt/nemo-rl && RAY_DEDUP_LOGS=0 bash ${ROOT}/backends/nemo-rl/apertus2/driver.sh ${HERE}/run_val.py --model ${MODEL} --step ${STEP} --name ${NAME} --gen-nodes ${GEN} ${EXTRA}"
 export WANDB_KEY_FILE=${WANDB_KEY_FILE:-${HOME}/.wandb_api_key}
 export RAY_NODE_NAME_SUFFIX=-hsn0

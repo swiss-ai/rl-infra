@@ -17,6 +17,9 @@
 #              rl-kcp, with flash-linear-attention 0.5.2 from fla-0.5.2/ ahead of the image's); any CP that divides
 #              the ranks of a pipeline stage (16 with 8 trainer nodes, 32 with 16).
 #              0 (default): the pinned Megatron's scheme (heads split over the CP ranks): CP 1, 2 or 4.
+#   THINKING   high (default; the user's rule since 2026-11-19: high for training, its validations and every
+#              evaluation) or medium (the task file's frame): the system frame of every prompt, in training and in
+#              validation alike (policy.generation.system_prompt_file, envs/apertus2-system[-high].json).
 #   CAP        PyTorch's share of each trainer GPU (default 0.74; the task file says 0.78, set for 16K per GPU).
 #   STALENESS  grpo.async_grpo.max_trajectory_age_steps (default 2, as the earlier coding runs).
 #   STEPS      default: the task file's 184 (one pass over the training file).
@@ -67,13 +70,23 @@ if [[ "${KCP}" == 1 ]]; then
     sed "s/^MEGATRON_COMMIT=.*/MEGATRON_COMMIT=${KCP_COMMIT}/" "${INFRA}/backends/nemo-rl/apertus2/pin" > "${PIN_FILE}"
     # The stack's container spec with flash-linear-attention 0.5.2 (fla.ops.cp) ahead of the image's copy.
     export CONTAINER_SPEC=${SCRATCH}/long-context/launch/edf-kcp-main.toml.template
-    sed "s|:@@MEGATRON_DIR@@:|:@@MEGATRON_DIR@@:${KCP_FLA_DIR:-${PROJECTS_DIR:-${HOME}/projects}/fla-0.5.2}:|" \
+    # A missing directory would only show inside the job, as the image's older flash-linear-attention without fla.ops.cp.
+    FLA_DIR=${KCP_FLA_DIR:-${PROJECTS_DIR:-${HOME}/projects}/fla-0.5.2}
+    [[ -d "${FLA_DIR}/fla/ops/cp" ]] || {
+        echo "ERROR: ${FLA_DIR} has no flash-linear-attention 0.5.2 (fla/ops/cp); set KCP_FLA_DIR" >&2; exit 1; }
+    sed "s|:@@MEGATRON_DIR@@:|:@@MEGATRON_DIR@@:${FLA_DIR}:|" \
         "${INFRA}/backends/nemo-rl/apertus2/edf.toml.template" > "${CONTAINER_SPEC}"
     grep -q "fla-0.5.2" "${CONTAINER_SPEC}" || { echo "ERROR: could not add fla-0.5.2 to PYTHONPATH" >&2; exit 1; }
     EXTRA+=(++policy.megatron_cfg.model_overrides.linear_attention_cp_impl=kcp)
 elif (( CP != 1 && CP != 2 && CP != 4 )); then
     echo "ERROR: without KCP=1 the KDA layers split their 28 heads over the CP ranks: CP must be 1, 2 or 4" >&2; exit 1
 fi
+case "${THINKING:-high}" in
+    high)   EXTRA+=(policy.generation.system_prompt_file=${INFRA}/envs/apertus2-system-high.json) ;;
+    medium) EXTRA+=(policy.generation.system_prompt_file=${INFRA}/envs/apertus2-system.json) ;;
+    *)      echo "ERROR: THINKING must be high or medium" >&2; exit 1 ;;
+esac
+echo "Thinking ${THINKING:-high} in training and validation"
 if [[ -n "${STEPS:-}" ]]; then EXTRA+=(grpo.max_num_steps=${STEPS}); fi
 case "${VAL:-full}" in
     full) ;;
@@ -146,6 +159,18 @@ fi
 
 export RUN=${RUN:-sftv02-code-osb-$(( CTX / 1024 ))k-cp${CP}-${NODES}n}
 if [[ "${DEBUG}" == 1 && "${RUN}" != *-DEBUG ]]; then export RUN="${RUN}-DEBUG"; fi
+# The run reads a copy of the recipe made now (its defaults made absolute), not the file in this worktree: the job,
+# its driver_retry attempts and a requeue load the config anew each time they start, and the 128K run 1299941 read
+# code-sftv02-31n.yaml again after an edit (16 -> 15 vLLM nodes), built 17 trainer nodes and failed every retry.
+mkdir -p ${SCRATCH}/long-context/launch/recipes
+RECIPE_COPY=${SCRATCH}/long-context/launch/recipes/${RUN}-$(date +%Y%m%d-%H%M%S).yaml
+RECIPE_DEFAULTS=$(sed -n 's/^defaults: *//p' "${RECIPE}")
+[[ -n "${RECIPE_DEFAULTS}" ]] || { echo "ERROR: ${RECIPE} has no one-line defaults: entry to copy" >&2; exit 1; }
+[[ "${RECIPE_DEFAULTS}" == /* ]] || RECIPE_DEFAULTS=$(realpath -m "$(dirname "${RECIPE}")/${RECIPE_DEFAULTS}")
+[[ -f "${RECIPE_DEFAULTS}" ]] || { echo "ERROR: ${RECIPE_DEFAULTS} (defaults of ${RECIPE}) does not exist" >&2; exit 1; }
+sed "s|^defaults: .*|defaults: ${RECIPE_DEFAULTS}|" "${RECIPE}" > "${RECIPE_COPY}"
+export RECIPE=${RECIPE_COPY}
+echo "Recipe: ${RECIPE}"
 export JOB_TIME=${JOB_TIME:-03:00:00}
 # The hang watchdog (backends/nemo-rl/hang_watch.sh) stops a run whose driver log has not changed for 45 minutes,
 # or for 2 hours during a validation. A 64K answer takes close to an hour to generate and a 128K one about two, so

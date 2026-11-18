@@ -16,6 +16,11 @@
 #                run5: envs/stem-mix-run5.yaml, run 4 plus chemistry (per step DAPO, NuminaMath,
 #                multiple-choice science and openqa 96 each; Reasoning Gym, Enigmata, ScienceWorld and chemistry 32
 #                each), 1 judge node, staleness 3.
+#   THINKING     high (default; the user's rule since 2026-11-19: high for training, its validations and every
+#                evaluation): the run reads a copy of the task file in which every system frame, of training and
+#                validation entries and the default, is its high copy (envs/apertus2-system-high.json,
+#                envs/apertus2-system-sciworld-act-high.json), and the generation frame is the high one.
+#                medium: the task file as it is.
 #   STALENESS    grpo.async_grpo.max_trajectory_age_steps; default as the mix's run.
 #   TRAIN_NODES  8 or 16 trainer nodes (default 16); 16 vLLM nodes in both cases (plus the judge node for run4).
 #   GEN_NODES    vLLM nodes: 16 (default) or, for run5 with 16 trainer nodes, 32 (49 nodes in all).
@@ -78,7 +83,11 @@ if [[ "${KCP}" == 1 ]]; then
     sed "s/^MEGATRON_COMMIT=.*/MEGATRON_COMMIT=${KCP_COMMIT}/" "${INFRA}/backends/nemo-rl/apertus2/pin" > "${PIN_FILE}"
     # The stack's container spec with flash-linear-attention 0.5.2 (fla.ops.cp) ahead of the image's copy.
     export CONTAINER_SPEC=${SCRATCH}/long-context/launch/edf-kcp.toml.template
-    sed "s|:@@MEGATRON_DIR@@:|:@@MEGATRON_DIR@@:${KCP_FLA_DIR:-${PROJECTS_DIR:-${HOME}/projects}/fla-0.5.2}:|" \
+    # A missing directory would only show inside the job, as the image's older flash-linear-attention without fla.ops.cp.
+    FLA_DIR=${KCP_FLA_DIR:-${PROJECTS_DIR:-${HOME}/projects}/fla-0.5.2}
+    [[ -d "${FLA_DIR}/fla/ops/cp" ]] || {
+        echo "ERROR: ${FLA_DIR} has no flash-linear-attention 0.5.2 (fla/ops/cp); set KCP_FLA_DIR" >&2; exit 1; }
+    sed "s|:@@MEGATRON_DIR@@:|:@@MEGATRON_DIR@@:${FLA_DIR}:|" \
         "${INFRA}/backends/nemo-rl/apertus2/edf.toml.template" > "${CONTAINER_SPEC}"
     grep -q "fla-0.5.2" "${CONTAINER_SPEC}" || { echo "ERROR: could not add fla-0.5.2 to PYTHONPATH" >&2; exit 1; }
     EXTRA+=(++policy.megatron_cfg.model_overrides.linear_attention_cp_impl=kcp)
@@ -127,6 +136,39 @@ else
 fi
 export RUN=${RUN:-sftv02-stem-${MIX}-$(( CTX / 1024 ))k-cp${CP}-${TRAIN_NODES}t}
 if [[ "${DEBUG}" == 1 && "${RUN}" != *-DEBUG ]]; then export RUN="${RUN}-DEBUG"; fi
+# The run reads a copy of the recipe made now (its defaults made absolute), not the file in this worktree: the job,
+# its driver_retry attempts and a requeue load the config anew each time they start, and the 128K coding run 1299941
+# read its recipe again after an edit (16 -> 15 vLLM nodes) and failed every retry.
+STAMP=$(date +%Y%m%d-%H%M%S)
+mkdir -p ${SCRATCH}/long-context/launch/recipes
+RECIPE_COPY=${SCRATCH}/long-context/launch/recipes/${RUN}-${STAMP}.yaml
+RECIPE_DEFAULTS=$(sed -n 's/^defaults: *//p' "${RECIPE}")
+[[ -n "${RECIPE_DEFAULTS}" ]] || { echo "ERROR: ${RECIPE} has no one-line defaults: entry to copy" >&2; exit 1; }
+[[ "${RECIPE_DEFAULTS}" == /* ]] || RECIPE_DEFAULTS=$(realpath -m "$(dirname "${RECIPE}")/${RECIPE_DEFAULTS}")
+[[ -f "${RECIPE_DEFAULTS}" ]] || { echo "ERROR: ${RECIPE_DEFAULTS} (defaults of ${RECIPE}) does not exist" >&2; exit 1; }
+sed "s|^defaults: .*|defaults: ${RECIPE_DEFAULTS}|" "${RECIPE}" > "${RECIPE_COPY}"
+export RECIPE=${RECIPE_COPY}
+echo "Recipe: ${RECIPE}"
+case "${THINKING:-high}" in
+    high)
+        # Every frame path of the task file becomes the high copy in this worktree's envs/; a frame the two patterns
+        # miss stops the launch.
+        TASK_HIGH=${SCRATCH}/long-context/launch/recipes/${RUN}-${STAMP}-task-high.yaml
+        sed -e 's#[^[:space:]]*/apertus2-system\.json#${oc.env:RL_INFRA_DIR}/envs/apertus2-system-high.json#g' \
+            -e 's#[^[:space:]]*/apertus2-system-sciworld-act\.json#${oc.env:RL_INFRA_DIR}/envs/apertus2-system-sciworld-act-high.json#g' \
+            "${INFRA}/${TASK}" > "${TASK_HIGH}"
+        if grep -n "system_prompt_file:" "${TASK_HIGH}" | grep -v -e "-high\.json" -e ": *null" >&2; then
+            echo "ERROR: the frames above are not high copies (${TASK_HIGH})" >&2; exit 1
+        fi
+        for f in apertus2-system-high.json apertus2-system-sciworld-act-high.json; do
+            [[ -s "${INFRA}/envs/${f}" ]] || { echo "ERROR: ${INFRA}/envs/${f} is missing" >&2; exit 1; }
+        done
+        TASK=${TASK_HIGH}
+        EXTRA+=(policy.generation.system_prompt_file=${INFRA}/envs/apertus2-system-high.json) ;;
+    medium) ;;
+    *) echo "ERROR: THINKING must be high or medium" >&2; exit 1 ;;
+esac
+echo "Thinking ${THINKING:-high} in training and validation"
 # The NeMo-RL clone that setup.sh made. Slingshot (ray.sub), NRL_NCCL_TIMEOUT_MINUTES and env.train_dump_text_only
 # (DUMP=text) are NeMo-RL patches 0041, 0040 and 0043; the checks below stop a clone that lacks them.
 export NEMO_RL_DIR=${NEMO_RL_DIR:-${PROJECTS_DIR:-${HOME}/projects}/nemo-rl-apertus2}
