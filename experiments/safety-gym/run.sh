@@ -159,5 +159,39 @@ fi
 echo 'One training job: 12 nodes (8 trainer + 4 rollout), 48 GPUs. Judges are separate jobs.'
 [[ "$mode" != --dry-run ]] || echo "Preview directories use /tmp. Actual OUT=${real_out}; no dataset or model copied."
 # Overrides are passed last, exactly as the stock launcher supports.
-exec bash "${APERTUS2_DIR}/launch.sh" "${train_config}" 12 "$RUN" \
-  "checkpointing.checkpoint_must_save_by=${SAFETY_CHECKPOINT_DEADLINE}" "$@"
+if [[ "${SAFETY_PROFILE}" != legacy ]]; then
+  mkdir -p "$(dirname "${SAFETY_ADAPTIVE_TRAINING_JOB_FILE}")"
+  rm -f "${SAFETY_ADAPTIVE_TRAINING_JOB_FILE}"
+  submitted="$(bash "${APERTUS2_DIR}/launch.sh" "${train_config}" 12 "$RUN" \
+    "checkpointing.checkpoint_must_save_by=${SAFETY_CHECKPOINT_DEADLINE}" "$@")"
+  printf '%s\n' "${submitted}"
+  python3.12 - "${SAFETY_ADAPTIVE_TRAINING_JOB_FILE}" "${RUN}" "${submitted}" <<'PY'
+import json
+import os
+from pathlib import Path
+import re
+import sys
+import tempfile
+
+path, run_id, output = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+matches = re.findall(r"^Submitted batch job ([0-9]+)$", output, re.MULTILINE)
+if not matches:
+    raise SystemExit("Adaptive submit did not return a Slurm job ID; judge handoff sidecar was not written.")
+job_id = matches[-1]
+fd, temp_path = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        json.dump({"run_id": run_id, "training_job_id": job_id}, stream, sort_keys=True)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.chmod(temp_path, 0o600)
+    os.replace(temp_path, path)
+finally:
+    if os.path.exists(temp_path):
+        os.unlink(temp_path)
+PY
+else
+  exec bash "${APERTUS2_DIR}/launch.sh" "${train_config}" 12 "$RUN" \
+    "checkpointing.checkpoint_must_save_by=${SAFETY_CHECKPOINT_DEADLINE}" "$@"
+fi

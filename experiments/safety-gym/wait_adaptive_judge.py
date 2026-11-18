@@ -8,7 +8,7 @@ import urllib.request
 path, timeout_s = sys.argv[1], float(sys.argv[2])
 expected_model = os.environ.get("SAFETY_ADAPTIVE_JUDGE_MODEL", f"{os.environ['USER']}/openai/gpt-oss-safeguard-120b")
 expected_run_id = os.environ.get("SAFETY_RUN_ID")
-expected_training_job_id = os.environ.get("SLURM_JOB_ID")
+training_job_file = os.environ["SAFETY_ADAPTIVE_TRAINING_JOB_FILE"]
 deadline = time.monotonic() + timeout_s
 last = "endpoint discovery file is not ready"
 while time.monotonic() < deadline:
@@ -20,8 +20,13 @@ while time.monotonic() < deadline:
         base_url, model, job_id = payload.get("base_url"), payload.get("model"), payload.get("job_id")
         if expected_run_id and payload.get("run_id") != expected_run_id:
             raise ValueError("endpoint file belongs to a different adaptive run")
-        if not expected_training_job_id:
-            raise ValueError("SLURM_JOB_ID is unavailable; cannot bind judge to this training allocation")
+        with open(training_job_file, encoding="utf-8") as stream:
+            training = json.load(stream)
+        if not isinstance(training, dict) or training.get("run_id") != expected_run_id:
+            raise ValueError("training job sidecar belongs to a different adaptive run")
+        expected_training_job_id = training.get("training_job_id")
+        if not isinstance(expected_training_job_id, str) or not expected_training_job_id.isdecimal():
+            raise ValueError("training job sidecar has no valid Slurm job ID")
         if payload.get("training_job_id") != expected_training_job_id:
             raise ValueError("endpoint file belongs to a different training allocation")
         if not isinstance(job_id, str) or not job_id or model != expected_model:
