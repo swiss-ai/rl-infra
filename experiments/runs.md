@@ -604,3 +604,66 @@ RECIPE=recipes/apertus2-chonk-sft19374-vllm-adamw-tools.yaml bash run.sh envs/ha
   stayed idle 50 to 80% of the time with at most 9 requests in flight per engine. Many trials end at the 16k
   context (about 570 `ContextLengthExceededError` log lines for 382 trials), so a longer context is the first thing
   to try.
+
+## Long context: STEM mix at 32K, coding at 64K and 128K
+
+Launchers, layouts and lessons: `experiments/long-context/README.md`. All on SFT v0.2 (iteration 18,315), 512 prompts ×
+16 answers per step, one optimizer step, lr 2e-6, checkpoints with weights only.
+
+Run 3's mix at 32K, job 1291708, 32 nodes (16 trainer + 16 vLLM), 100 steps, staleness 2, before Ray on Slingshot:
+
+```bash
+MIX=run3 CP=4 CAP=0.74 STALENESS=2 STEPS=100 VAL=1 CKPT=weights DEBUG=0 JOB_TIME=1-12:00:00 SAVE_BY=01:11:30:00 \
+RUN=sftv02-stem-mix-run3-32k-32n bash experiments/long-context/launch-stem-ctx.sh 32768
+```
+
+- AIME 2024 / GPQA Diamond: 53.1 / 33.7 at step 0, 80.4 / 48.2 at step 20, 82.4 / 53.2 at 40, 83.4 / 52.5 at 60,
+  83.0 / 51.8 at 80, 82.9 / 53.1 at 100. Flat from step 40.
+- The driver froze in a TensorBoard plot write at step 47; the watchdog's stop request went unanswered for 3 hours,
+  and the retry resumed from the step-40 weights with a fresh optimizer state. 22 h 18 min in all.
+
+Run 5's mix at 32K, job 1299180, 49 nodes (16 trainer + 32 vLLM + 1 judge), 135 steps, staleness 4:
+
+```bash
+MIX=run5 GEN_NODES=32 CP=4 CAP=0.74 STALENESS=4 STEPS=135 VAL=1 CKPT=weights KEEP=10 DUMP=text NCCL_MIN=60 DEBUG=0 \
+JOB_TIME=2-00:00:00 SAVE_BY=01:23:30:00 RUN=sftv02-stem-mix-run5-32k-49n \
+bash experiments/long-context/launch-stem-ctx.sh 32768
+```
+
+- AIME 2024 / GPQA Diamond / chemistry: 50.5 / 33.0 / 6.1 at step 0, 80.5 / 52.3 / 47.2 at 20, 82.4 / 54.2 / 49.6 at
+  40, 83.2 / 58.5 / 50.4 at 60, 84.0 / 59.5 / 51.6 at 80, 84.4 / 60.3 / 52.9 at 100, 84.3 / 60.1 / 58.5 at 120,
+  84.3 / 61.3 / 56.5 at 135. The same mix at 16K with staleness 3 (job 1285729) ended at 79.1 / 56.4 / 50.0.
+- 15 h 31 min, no restart. A step took 270 s early and about 350 s late in the run (answers grew from 6,500 to
+  9,700 tokens), 263 s of it training; the trainer waited 17 s per step for answers (median).
+- 1,105,920 rollouts kept as text with rewards (`train_data_step<N>.jsonl`, 31 GB), 46.4% with reward 1. The grouping
+  columns of patch 0044 are missing from this run's files; `tools/rollout_index.py` rebuilds all of them but the
+  generation weight version.
+
+Coding at 64K, job 1298910, 32 nodes (16 + 16) plus a sandbox node, 46 steps (one pass), staleness 4, KCP with CP 8:
+
+```bash
+SANDBOX_ENDPOINT_FILE=$SCRATCH/code-sandbox/endpoint-64k.json SANDBOX_WORKERS=192 JOB_TIME=2-00:00:00 \
+    bash backends/nemo-rl/sandbox/start.sh
+NODES=32 KCP=1 CP=8 STALENESS=4 PROMPTS=512 STEPS=46 VAL=full CKPT=weights CKPT_EVERY=20 DEBUG=0 \
+JOB_TIME=2-00:00:00 SAVE_BY=01:23:30:00 RUN=sftv02-code-64k-512x16-32n \
+SANDBOX=$SCRATCH/code-sandbox/endpoint-64k.json \
+bash experiments/long-context/launch-code-ctx.sh 65536 checkpointing.keep_top_k=3
+```
+
+- LiveCodeBench (322 problems × 10): 61.0% at step 0, 64.6% at step 20. Batch reward 0.44 at step 1, about 0.51 by
+  step 36. About 950 s per step on Slingshot (1,240-1,590 s on the management network, job 1293154).
+- Running at the time of writing (step 40 of 46).
+
+Coding at 128K, job 1299941, the same with CP 16 and the trainer off the driver's node:
+
+```bash
+NODES=32 KCP=1 CP=16 OFFHEAD=1 STALENESS=4 PROMPTS=512 STEPS=46 VAL=full CKPT=weights CKPT_EVERY=20 DEBUG=0 \
+JOB_TIME=2-00:00:00 SAVE_BY=01:23:30:00 RUN=sftv02-code-128k-512x16-32n \
+SANDBOX=$SCRATCH/code-sandbox/endpoint-128k.json \
+bash experiments/long-context/launch-code-ctx.sh 131072 checkpointing.keep_top_k=3
+```
+
+- LiveCodeBench: 61.2% at step 0, 64.1% at step 20. About 1,090 s per step.
+- Without `OFFHEAD=1` the driver's node ran out of host memory in the first training step (job 1299189); on the
+  management network the first training step timed out twice (jobs 1293158, 1293163).
+- Running at the time of writing (step 28 of 46).
