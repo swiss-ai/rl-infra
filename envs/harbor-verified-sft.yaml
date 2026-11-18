@@ -11,11 +11,10 @@
 #       ~/projects/harbor_verified_tasks/capstor/store/cscs/swissai/infra01/datasets/swe_and_agentic_gym_datasets/harbor_verified_tasks \
 #       ~/projects/task_datasets/harbor_verified
 #   RUN=<run> bash run.sh envs/harbor-verified-sft.yaml \
-#       harbor_data_dir=$HOME/projects/task_datasets/harbor_verified \
-#       env.nemo_gym.harbor_agent.responses_api_agents.harbor_agent.harbor_jobs_dir=$HOME/harbor-jobs/<run>
-# On HANGANG, harbor_jobs_dir goes to home: Harbor writes about 35 files per trial, and the group's
-# /scratch file quota (5M, shared by in0138) is close to full. The recipe is the SFT checkpoint
-# iter_0019374; RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-tools.yaml starts from iter_0008075.
+#       harbor_data_dir=$HOME/projects/task_datasets/harbor_verified
+# Harbor's trial directories go next to the checkpoints in /scratch. The recipe is the SFT checkpoint
+# chonk-lc-16k-v0.2 iter_0018315; RECIPE=recipes/apertus2-chonk-sft19374-vllm-adamw-tools.yaml starts
+# from v0.1 iter_0019374.
 # A recipe on an SFT checkpoint needs swiss-ai/apertus-common, a private repository that setup.sh
 # clones over HTTPS when its checkout is missing or behind the pin. Without HTTPS credentials for
 # GitHub on the login node that fails with "could not read Username". Either run `gh auth setup-git`
@@ -24,7 +23,7 @@
 #       GIT_CONFIG_VALUE_0=https://github.com/swiss-ai/apertus-common.git
 # The pods of a run carry the labels user=rl-infra and run=<run name> and live at most sandbox_ttl_s;
 # to delete the ones a run leaves behind, see experiments/runs.md.
-defaults: ../recipes/apertus2-chonk-sft19374-vllm-adamw-tools.yaml
+defaults: ../recipes/apertus2-chonk-sft18315-v0.2-vllm-adamw-tools.yaml
 script: examples/nemo_gym/run_grpo_nemo_gym.py
 
 # train.jsonl, validation.jsonl and tasks/, as envs/prepare_harbor_verified_tasks.sh writes them.
@@ -37,7 +36,7 @@ grpo:
   # 64 trials, so 64 task pods (and up to 64 verifier pods), in flight.
   num_prompts_per_step: 64
   num_generations_per_prompt: 8
-  max_num_steps: 20
+  max_num_steps: 200
   max_num_epochs: 100
   # No validation by default. For a training run: val_period=10 val_at_start=true val_at_end=true.
   val_period: 0
@@ -60,9 +59,14 @@ grpo:
     max_trajectory_age_steps: 2
 
 checkpointing:
-  # No checkpoints by default. For a training run: checkpointing.enabled=true.
-  enabled: false
-  save_period: 10
+  # The weights every 20 steps, without the optimizer state; only the latest is kept. A run resumed
+  # from one starts with a fresh optimizer.
+  enabled: true
+  save_period: 20
+  save_optimizer: false
+  # Ranks by recency: there is no validation metric to rank by.
+  metric_name: null
+  keep_top_k: 1
 
 policy:
   # One optimizer step per step.
@@ -169,8 +173,9 @@ env:
           # One trial, and one pod, per in-flight rollout.
           # Was one pod per rollout in the batch:
           # concurrency: ${mul:${grpo.num_prompts_per_step},${grpo.num_generations_per_prompt}}
-          # Below the ~250 pods at which sandboxes queued to start and failed readiness mid-trial.
-          concurrency: 200
+          # About the ~300 sandboxes the cluster runs at once (it starts about 1.2 pods per second); a
+          # higher cap only adds sandboxes waiting to start, which time out after 600 s and are recreated.
+          concurrency: 300
           harbor_datasets:
             # The alias is the left half of every row's instance_id.
             verified:
