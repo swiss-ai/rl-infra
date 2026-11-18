@@ -1,0 +1,12 @@
+# Full-run quota bounds for one shared Gym actor and a 2,048-sample rollout batch.
+# At 64 active episodes, 32 waves of the 900-second episode ceiling plus 30 minutes
+# for admission/startup/checkpoint handoff fit within this finite queue bound.
+adaptive_safety_agent:
+  responses_api_agents:
+    adaptive_safety:
+      active_episode_limit: 64
+      attacker_permits: 64
+      shared_side_permits: 64
+      side_timeout_seconds: 300
+      episode_timeout_seconds: 900
+      admission_timeout_seconds: 30600

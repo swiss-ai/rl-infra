@@ -33,14 +33,23 @@ else
   esac
   [[ "${SAFETY_PROFILE}" == single_turn_bridge ]] && profile_args+=(--bridge-control)
   python3.12 "${HERE}/adaptive_bridge.py" profile "${profile_args[@]}"
-  [[ -s "${SAFETY_DATA_SOURCE}/manifest.json" && -s "${SAFETY_DATA_SOURCE}/adaptive_train.jsonl" && -s "${SAFETY_DATA_SOURCE}/adaptive_validation.jsonl" ]] || {
-    echo 'Adaptive immutable data view is missing its manifest or JSONL files.' >&2; exit 1; }
+  [[ -s "${SAFETY_DATA_SOURCE}/manifest.json" && -s "${SAFETY_DATA_SOURCE}/adaptive_train.jsonl" && -s "${SAFETY_ADAPTIVE_VALIDATION_FILE}" && -s "${SAFETY_ADAPTIVE_VALIDATION_FILE}.manifest.json" ]] || {
+    echo 'Adaptive immutable data/500-row validation view is missing its manifest or JSONL files.' >&2; exit 1; }
   [[ -s "${SAFETY_ADAPTIVE_ROOT}/native-runtime-manifest.json" ]] || { echo 'Feature native runtime manifest is missing.' >&2; exit 1; }
+  [[ -d "${SAFETY_GYM_SITE_PACKAGES}" ]] || { echo 'Prepared Gym site-packages for the NRL policy interpreter are missing.' >&2; exit 1; }
   [[ -s "${SAFETY_GYM_DIR}/responses_api_agents/adaptive_safety/app.py" ]] || { echo 'Feature Gym export is missing the adaptive agent.' >&2; exit 1; }
-  if [[ "$mode" == --submit && -e "${OUT}/results/${RUN}" ]]; then
-    echo 'Adaptive run IDs are immutable; choose a fresh RUN name instead of resuming.' >&2; exit 2
+  case "${SAFETY_RESUME:-0}" in 0|1) ;; *) echo 'SAFETY_RESUME must be 0 or 1.' >&2; exit 2 ;; esac
+  adaptive_run_dir="${OUT}/results/${RUN}"
+  adaptive_run_manifest="${adaptive_run_dir}/adaptive-objective-manifest.json"
+  if [[ -e "${adaptive_run_dir}" ]]; then
+    [[ "${SAFETY_RESUME:-0}" == 1 ]] || {
+      echo 'Adaptive run already exists; choose a fresh RUN/OUT for a new objective or set SAFETY_RESUME=1.' >&2; exit 2; }
+    [[ -s "${adaptive_run_manifest}" ]] || { echo 'Cannot resume adaptive run without its original objective manifest.' >&2; exit 2; }
+    compgen -G "${adaptive_run_dir}/step_*" >/dev/null || { echo 'Cannot resume adaptive run without a native checkpoint.' >&2; exit 2; }
+  else
+    [[ "${SAFETY_RESUME:-0}" == 0 ]] || { echo 'SAFETY_RESUME=1 requires the existing adaptive run directory.' >&2; exit 2; }
   fi
-  if [[ "$mode" == --submit && -e "${SAFETY_ADAPTIVE_JUDGE_ENDPOINT_FILE}" ]]; then
+  if [[ -e "${SAFETY_ADAPTIVE_JUDGE_ENDPOINT_FILE}" && "${SAFETY_RESUME:-0}" != 1 ]]; then
     echo 'Adaptive SML endpoint file already exists; choose a fresh RUN name.' >&2; exit 2
   fi
 fi
@@ -75,6 +84,68 @@ if [[ "$mode" != --dry-run && ! -s "$IMAGE_WORK" ]]; then
   echo "Set TRAIN_IMAGE to an existing owned compatible NeMo-RL image: $IMAGE_WORK is absent." >&2; exit 1
 fi
 export SAFETY_JUDGE_CONFIG="${JUDGE_CONFIG:-${runtime}/judge.yaml}"
+if [[ "${SAFETY_PROFILE}" != legacy && "$mode" != --dry-run ]]; then
+  manifest_inputs=(
+    --input "adaptive_data_manifest=${SAFETY_DATA_SOURCE}/manifest.json"
+    --input "adaptive_train=${SAFETY_DATA_SOURCE}/adaptive_train.jsonl"
+    --input "adaptive_validation=${SAFETY_ADAPTIVE_VALIDATION_FILE}"
+    --input "adaptive_validation_manifest=${SAFETY_ADAPTIVE_VALIDATION_FILE}.manifest.json"
+    --input "native_runtime_manifest=${SAFETY_ADAPTIVE_ROOT}/native-runtime-manifest.json"
+    --input "adaptive_config=${HERE}/adaptive.yaml"
+    --input "adaptive_limits=${HERE}/adaptive_limits.yaml"
+    --input "legacy_base_config=${HERE}/chonk.yaml"
+    --input "model_alias_config=${HERE}/adaptive_models.yaml"
+    --input "gym_agent_config=${SAFETY_ADAPTIVE_GYM_CONFIG}"
+    --input "gym_agent_app=${SAFETY_GYM_DIR}/responses_api_agents/adaptive_safety/app.py"
+    --input "gym_agent_policy=${SAFETY_GYM_DIR}/responses_api_agents/adaptive_safety/policy.py"
+    --input "gym_agent_prompts=${SAFETY_GYM_DIR}/responses_api_agents/adaptive_safety/prompts.yaml"
+    --input "gym_project=${SAFETY_GYM_DIR}/pyproject.toml"
+    --input "gym_dependency_lock=${SAFETY_GYM_DIR}/uv.lock"
+    --input "runtime_bridge=${HERE}/adaptive_bridge.py"
+    --input "runtime_overlay=${HERE}/adaptive_overlay.py"
+    --input "runtime_native_adapter=${HERE}/adaptive_runtime_overlay.py"
+    --input "runtime_compat=${HERE}/compat.py"
+    --input "runtime_renderer=${HERE}/render.py"
+    --input "runtime_driver=${HERE}/driver.sh"
+    --input "runtime_train_entrypoint=${HERE}/train.py"
+    --input "runtime_storage_logging=${HERE}/storage_logging.py"
+    --input "runtime_run_launcher=${HERE}/run.sh"
+    --input "runtime_environment=${HERE}/environment.sh"
+    --input "runtime_container_template=${APERTUS2_DIR}/edf.toml.template"
+    --input "runtime_python_dependencies=${APERTUS2_DIR}/pydeps.sh"
+    --input "model_config=${SAFETY_CHONK_MODEL}/config.json"
+    --input "model_weights_index=${SAFETY_CHONK_MODEL}/model.safetensors.index.json"
+    --input "model_tokenizer_config=${SAFETY_CHONK_MODEL}/tokenizer_config.json"
+    --input "model_tokenizer=${SAFETY_CHONK_MODEL}/tokenizer.json"
+  )
+  pinned_json="$(python3.12 - "$RUN" "${SAFETY_PROFILE}" <<'PY'
+import json, os, sys
+print(json.dumps({
+    "run_id": sys.argv[1],
+    "profile": sys.argv[2],
+    "gym_commit": os.environ.get("SAFETY_GYM_COMMIT", "unknown"),
+    "policy_model": os.environ.get("SAFETY_CHONK_SOURCE", ""),
+    "policy_model_overlay": os.environ.get("SAFETY_CHONK_MODEL", ""),
+    "attacker_model": os.environ.get("SAFETY_SWISSAI_ATTACKER_MODEL", ""),
+    "attacker_revision": os.environ.get("SAFETY_SWISSAI_MODEL_REVISION", "unknown"),
+    "judge_model": os.environ.get("SAFETY_ADAPTIVE_JUDGE_MODEL", ""),
+    "judge_revision": os.environ.get("SAFETY_ADAPTIVE_JUDGE_REVISION", "unknown"),
+    "validator_model": os.environ.get("SAFETY_SWISSAI_VALIDATOR_MODEL", ""),
+    "validator_revision": os.environ.get("SAFETY_SWISSAI_MODEL_REVISION", "unknown"),
+    "native_image": os.environ.get("IMAGE_WORK", ""),
+    "ordinal_curriculum": "attested-native-prompt-ordinal-or-frozen-stage-id",
+    "source_contract_schema": "safety-source-v1",
+    "validation_view": os.environ.get("SAFETY_ADAPTIVE_VALIDATION_FILE", ""),
+    "validation_samples": os.environ.get("SAFETY_VALIDATION_SAMPLES", "500"),
+}, sort_keys=True))
+PY
+)"
+  manifest_args=(manifest --output "${adaptive_run_manifest}" "${manifest_inputs[@]}" --pinned-json "${pinned_json}")
+  if [[ "${SAFETY_RESUME:-0}" == 1 ]]; then manifest_args+=(--resume); fi
+  if [[ "$mode" == --submit || "${SAFETY_RESUME:-0}" == 1 ]]; then
+    python3.12 "${HERE}/adaptive_bridge.py" "${manifest_args[@]}"
+  fi
+fi
 python3.12 "${HERE}/render.py" "$runtime"
 export CONTAINER_SPEC="${runtime}/container.toml"
 export NEMO_RL_DIR MEGATRON_DIR BRIDGE_DIR VLLM_RUNNER VLLM_APERTUS2 PIN_FILE

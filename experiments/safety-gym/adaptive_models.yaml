@@ -10,11 +10,12 @@ adaptive_attacker_model:
       model: ${oc.env:SAFETY_SWISSAI_ATTACKER_MODEL}
       return_token_id_information: false
       request_prompt_and_generation_token_ids: false
+      uses_reasoning_parser: false
       max_num_tries: 1
       max_http_attempts: 1
       endpoint_connection_retries: 1
       connect_timeout_seconds: 10
-      request_timeout_seconds: 60
+      request_timeout_seconds: 300
       forward_request_chat_template_kwargs: true
 adaptive_validator_model:
   responses_api_models:
@@ -28,11 +29,12 @@ adaptive_validator_model:
       model: ${oc.env:SAFETY_SWISSAI_VALIDATOR_MODEL}
       return_token_id_information: false
       request_prompt_and_generation_token_ids: false
+      uses_reasoning_parser: false
       max_num_tries: 1
       max_http_attempts: 1
       endpoint_connection_retries: 1
       connect_timeout_seconds: 10
-      request_timeout_seconds: 60
+      request_timeout_seconds: 300
 adaptive_judge_model:
   responses_api_models:
     vllm_model:
@@ -43,11 +45,12 @@ adaptive_judge_model:
       model: ${oc.env:SAFETY_ADAPTIVE_JUDGE_MODEL}
       return_token_id_information: false
       request_prompt_and_generation_token_ids: false
+      uses_reasoning_parser: false
       max_num_tries: 1
       max_http_attempts: 1
       endpoint_connection_retries: 1
       connect_timeout_seconds: 10
-      request_timeout_seconds: 60
+      request_timeout_seconds: 300
 safety_judge_model:
   responses_api_models:
     vllm_model:
@@ -58,11 +61,12 @@ safety_judge_model:
       model: ${oc.env:SAFETY_ADAPTIVE_JUDGE_MODEL}
       return_token_id_information: false
       request_prompt_and_generation_token_ids: false
+      uses_reasoning_parser: false
       max_num_tries: 1
       max_http_attempts: 1
       endpoint_connection_retries: 1
       connect_timeout_seconds: 10
-      request_timeout_seconds: 60
+      request_timeout_seconds: 300
 judge_model:
   responses_api_models:
     openai_model:
@@ -70,3 +74,8 @@ judge_model:
       openai_base_url: ${oc.env:SAFETY_ADAPTIVE_JUDGE_BASE_URL}
       openai_api_key: EMPTY
       openai_model: ${oc.env:SAFETY_ADAPTIVE_JUDGE_MODEL}
+      max_http_attempts: 1
+      max_rate_limit_wait_seconds: 0
+      upstream_max_num_tries: 1
+      upstream_request_timeout_seconds: 300
+      upstream_connect_timeout_seconds: 10

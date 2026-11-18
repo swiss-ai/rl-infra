@@ -14,7 +14,7 @@ if [[ "${SAFETY_PROFILE:-legacy}" == legacy ]]; then
     --source "${SAFETY_DATA_SOURCE}" --output "${SAFETY_DATA_DIR}" \
     --validation-samples "${SAFETY_VALIDATION_SAMPLES}"
 else
-  for path in "${SAFETY_DATA_SOURCE}/manifest.json" "${SAFETY_DATA_SOURCE}/adaptive_train.jsonl" "${SAFETY_DATA_SOURCE}/adaptive_validation.jsonl"; do
+  for path in "${SAFETY_DATA_SOURCE}/manifest.json" "${SAFETY_DATA_SOURCE}/adaptive_train.jsonl" "${SAFETY_ADAPTIVE_VALIDATION_FILE}" "${SAFETY_ADAPTIVE_VALIDATION_FILE}.manifest.json"; do
     [[ -s "${path}" ]] || { echo "Missing immutable adaptive input: ${path}" >&2; exit 2; }
   done
 fi

@@ -1,6 +1,12 @@
 # New adaptive profile. The legacy chonk.yaml is not modified.
 defaults: chonk.yaml
 
+data:
+  train:
+    data_path: ${oc.env:SAFETY_DATA_SOURCE}/adaptive_train.jsonl
+  validation:
+    data_path: ${oc.env:SAFETY_ADAPTIVE_VALIDATION_FILE}
+
 grpo:
   use_dynamic_sampling: false
   skip_zero_advantage_groups: false
@@ -20,4 +26,5 @@ env:
       - ${oc.env:SAFETY_EXPERIMENT_DIR}/gym.yaml
       - ${oc.env:SAFETY_JUDGE_CONFIG}
       - ${oc.env:SAFETY_ADAPTIVE_GYM_CONFIG}
+      - ${oc.env:SAFETY_ADAPTIVE_LIMITS_CONFIG}
       - ${oc.env:SAFETY_ADAPTIVE_MODELS_CONFIG}

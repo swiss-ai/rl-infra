@@ -6,15 +6,18 @@ case "${SAFETY_PROFILE}" in
   legacy) ;;
   adaptive|single_turn_bridge|honeypot_single_turn|adaptive_honeypot)
     export SAFETY_ADAPTIVE_ROOT="${SAFETY_ADAPTIVE_ROOT:-/scratch/${USER}/safetygym-adaptive}"
-    : "${ADAPTIVE_GYM_COMMIT:?Set ADAPTIVE_GYM_COMMIT to the reviewed adaptive Gym commit}"
+    ADAPTIVE_GYM_COMMIT="${ADAPTIVE_GYM_COMMIT:-7017aab3e68300d4b177bc900ecd27bebc3ae2a8}"
     export SAFETY_GYM_COMMIT="${ADAPTIVE_GYM_COMMIT}"
     export SAFETY_GYM_DIR="${SAFETY_ADAPTIVE_ROOT}/src/Gym-${SAFETY_GYM_COMMIT}-py312"
-    export GYM_VENV_DIR="${SAFETY_ADAPTIVE_ROOT}/cache/gym-test-venv"
+    export GYM_VENV_DIR="${SAFETY_ADAPTIVE_ROOT}/cache/gym-server-venvs-${SAFETY_GYM_COMMIT}"
+    export SAFETY_GYM_SITE_PACKAGES="${SAFETY_ADAPTIVE_ROOT}/cache/gym-test-venv/lib/python3.12/site-packages"
     export JOB_UV_CACHE_DIR="${SAFETY_ADAPTIVE_ROOT}/cache/uv-${SAFETY_GYM_COMMIT}"
     export PYDEPS="${SAFETY_ADAPTIVE_ROOT}/pydeps/gym-${SAFETY_GYM_COMMIT}"
     export OUT="${OUT:-${SAFETY_ADAPTIVE_ROOT}/runs}"
     export SAFETY_DATA_SOURCE="${SAFETY_DATA_SOURCE:-${SAFETY_ADAPTIVE_ROOT}/data/route-e1e8a681}"
+    export SAFETY_ADAPTIVE_VALIDATION_FILE="${SAFETY_ADAPTIVE_VALIDATION_FILE:-${SAFETY_DATA_SOURCE}/adaptive_validation_500.jsonl}"
     export SAFETY_ADAPTIVE_GYM_CONFIG="${SAFETY_ADAPTIVE_GYM_CONFIG:-${SAFETY_GYM_DIR}/responses_api_agents/adaptive_safety/configs/adaptive_safety.yaml}"
+    export SAFETY_ADAPTIVE_LIMITS_CONFIG="${SAFETY_ADAPTIVE_LIMITS_CONFIG:-${SAFETY_EXPERIMENT_DIR}/adaptive_limits.yaml}"
   export SAFETY_SWISSAI_ENV_FILE="${SAFETY_SWISSAI_ENV_FILE:-/home01/${USER}/safety-gym/.env}"
   export SAFETY_SWISSAI_KEY_NAME="SWISSAI_RESEARCH_API_KEY"
   export SAFETY_SWISSAI_API_BASE="https://api.swissai.svc.cscs.ch/v1"
@@ -63,7 +66,7 @@ if [[ "${SAFETY_PROFILE}" != legacy ]]; then
   export OUT="${SAFETY_ADAPTIVE_USER_OUT:-${SAFETY_ADAPTIVE_ROOT}/runs}"
   export SAFETY_GYM_COMMIT="${ADAPTIVE_GYM_COMMIT:?Set ADAPTIVE_GYM_COMMIT to the reviewed adaptive Gym commit}"
   export SAFETY_GYM_DIR="${SAFETY_ADAPTIVE_ROOT}/src/Gym-${SAFETY_GYM_COMMIT}-py312"
-  export GYM_VENV_DIR="${SAFETY_ADAPTIVE_ROOT}/cache/gym-test-venv"
+  export GYM_VENV_DIR="${SAFETY_ADAPTIVE_ROOT}/cache/gym-server-venvs-${SAFETY_GYM_COMMIT}"
   export JOB_UV_CACHE_DIR="${SAFETY_ADAPTIVE_ROOT}/cache/uv-${SAFETY_GYM_COMMIT}"
   export PYDEPS="${SAFETY_ADAPTIVE_ROOT}/pydeps/gym-${SAFETY_GYM_COMMIT}"
   export SAFETY_DATA_SOURCE="${SAFETY_DATA_SOURCE:-${SAFETY_ADAPTIVE_ROOT}/data/route-e1e8a681}"
@@ -75,6 +78,23 @@ if [[ "${SAFETY_PROFILE}" != legacy ]]; then
   export BRIDGE_DIR="${SAFETY_ADAPTIVE_ROOT}/src/Megatron-Bridge"
   export PYDEPS_APERTUS2="${SAFETY_ADAPTIVE_ROOT}/src/apertus-common"
 fi
+if [[ "${SAFETY_PROFILE}" != legacy ]]; then
+  export PYDEPS_GYM=""
+  gym_shared_venv="${SAFETY_ADAPTIVE_ROOT}/cache/gym-test-venv"
+  [[ -x "${gym_shared_venv}/bin/python" && -r "${gym_shared_venv}/bin/activate" ]] || {
+    echo "Feature Gym venv is incomplete: ${gym_shared_venv}" >&2; return 2; }
+  for server_path in     responses_api_models/vllm_model     responses_api_models/openai_model     resources_servers/jailbreak_detection     resources_servers/over_refusal_detection     responses_api_agents/adaptive_safety; do
+    target="${GYM_VENV_DIR}/${server_path}/.venv"
+    mkdir -p "$(dirname "${target}")"
+    if [[ -e "${target}" || -L "${target}" ]]; then
+      [[ -L "${target}" && "$(readlink -f "${target}")" == "$(readlink -f "${gym_shared_venv}")" ]] || {
+        echo "Unexpected Gym server venv; refusing to replace: ${target}" >&2; return 2; }
+    else
+      ln -s "${gym_shared_venv}" "${target}"
+    fi
+  done
+fi
+
 case "$JUDGE_KIND" in
   oss) judge_repo=openai/gpt-oss-safeguard-120b; judge_folder=gpt-oss-safeguard-120b ;;
   nemotron) judge_repo=nvidia/Nemotron-Content-Safety-Reasoning-4B; judge_folder=Nemotron-Content-Safety-Reasoning-4B ;;

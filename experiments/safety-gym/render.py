@@ -66,6 +66,18 @@ if feature_gym_adapter is not None:
     mounts.append((str(feature_client_adapter), '/opt/nemo-rl/3rdparty/Gym-workspace/Gym/nemo_gym/client/openai_client.py'))
 template = template.replace(marker, marker + ''.join('  ' + json.dumps(a + ':' + b) + ',\n' for a, b in mounts))
 template = template.replace('PYTHONPATH = "', 'PYTHONPATH = "' + str(here) + ':', 1)
+if feature_profile:
+    gym_site_packages = Path(os.environ['SAFETY_GYM_SITE_PACKAGES'])
+    if not gym_site_packages.is_dir():
+        raise RuntimeError(f'Prepared Gym site-packages are missing: {gym_site_packages}')
+    gym_pythonpath_anchor = '@@PYDEPS@@"\nPYDEPS ='
+    if template.count(gym_pythonpath_anchor) != 1:
+        raise RuntimeError('Unknown feature container PYTHONPATH template')
+    template = template.replace(
+        gym_pythonpath_anchor,
+        '@@PYDEPS@@:' + str(gym_site_packages) + '"\nPYDEPS =',
+        1,
+    )
 # This is a local vLLM service. Authenticated deployments may provide an existing
 # private Gym config path; no key is copied to the rendered container environment.
 secret = os.environ.get('JUDGE_CONFIG')
