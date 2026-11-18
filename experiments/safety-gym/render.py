@@ -88,8 +88,15 @@ else:
     secret_path.write_text('judge_api_key: EMPTY\n')
     secret_path.chmod(0o600)
     os.environ['SAFETY_JUDGE_CONFIG'] = str(secret_path)
+if feature_profile:
+    # The base NeMo-RL image defaults uv to the CSCS JFrog mirror, which Hangang cannot reach.
+    # Pin the adaptive container and any pip subprocesses to the public package index.
+    for name in ('UV_DEFAULT_INDEX', 'UV_INDEX_URL', 'PIP_INDEX_URL'):
+        os.environ[name] = 'https://pypi.org/simple'
 names = [name for name in os.environ if name.startswith('SAFETY_')]
 names += ['JOB_UV_CACHE_DIR', 'HF_HUB_OFFLINE', 'TRANSFORMERS_OFFLINE']
+if feature_profile:
+    names += ['UV_DEFAULT_INDEX', 'UV_INDEX_URL', 'PIP_INDEX_URL']
 if feature_profile and os.environ.get('WANDB_BASE_URL'):
     names.append('WANDB_BASE_URL')
 if os.environ.get('JUDGE_CONFIG'):
