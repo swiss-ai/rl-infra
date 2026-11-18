@@ -55,7 +55,7 @@ else
   else
     [[ "${SAFETY_RESUME:-0}" == 0 ]] || { echo 'SAFETY_RESUME=1 requires the existing adaptive run directory.' >&2; exit 2; }
   fi
-  if [[ -e "${SAFETY_ADAPTIVE_JUDGE_ENDPOINT_FILE}" && "${SAFETY_RESUME:-0}" != 1 ]]; then
+  if [[ -e "${SAFETY_ADAPTIVE_JUDGE_ENDPOINT_FILE}" && "${SAFETY_RESUME:-0}" != 1 && "${IN_ALLOCATION:-0}" != 1 ]]; then
     echo 'Adaptive SML endpoint file already exists; choose a fresh RUN name.' >&2; exit 2
   fi
 fi
@@ -166,6 +166,32 @@ echo 'One training job: 12 nodes (8 trainer + 4 rollout), 48 GPUs. Judges are se
 [[ "$mode" != --dry-run ]] || echo "Preview directories use /tmp. Actual OUT=${real_out}; no dataset or model copied."
 # Overrides are passed last, exactly as the stock launcher supports.
 if [[ "${SAFETY_PROFILE}" != legacy && "${mode}" == --submit ]]; then
+  if [[ "${IN_ALLOCATION:-0}" == 1 ]]; then
+    [[ "${SLURM_JOB_ID:-}" =~ ^[0-9]+$ ]] || { echo 'IN_ALLOCATION requires a Slurm job ID.' >&2; exit 2; }
+    mkdir -p "$(dirname "${SAFETY_ADAPTIVE_TRAINING_JOB_FILE}")"
+    python3.12 - "${SAFETY_ADAPTIVE_TRAINING_JOB_FILE}" "${RUN}" "${SLURM_JOB_ID}" "${SAFETY_RESUME:-0}" <<'PY'
+import json, os, sys, tempfile
+from pathlib import Path
+path, run_id, job_id, resume = Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
+if path.exists() and resume != "1":
+    raise SystemExit(f"Refusing to overwrite training job metadata: {path}")
+fd, temp_path = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        json.dump({"run_id": run_id, "training_job_id": job_id}, stream, sort_keys=True)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.chmod(temp_path, 0o600)
+    os.replace(temp_path, path)
+finally:
+    if os.path.exists(temp_path):
+        os.unlink(temp_path)
+PY
+    IN_ALLOCATION=1 bash "${APERTUS2_DIR}/launch.sh" "${train_config}" 12 "$RUN" \
+      "checkpointing.checkpoint_must_save_by=${SAFETY_CHECKPOINT_DEADLINE}" "$@"
+    exit $?
+  fi
   mkdir -p "$(dirname "${SAFETY_ADAPTIVE_TRAINING_JOB_FILE}")"
   rm -f "${SAFETY_ADAPTIVE_TRAINING_JOB_FILE}"
   submitted="$(bash "${APERTUS2_DIR}/launch.sh" "${train_config}" 12 "$RUN" \

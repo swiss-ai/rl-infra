@@ -156,8 +156,12 @@ if [[ "${DRY_RUN:-0}" == 1 ]]; then
     exit 0
 fi
 
-# ray.sub writes logs and helper files into the submit dir, so submit from scratch.
+# ray.sub writes logs and helper files into the submit dir, so run from scratch.
 cd "${OUT}/slurm"
-submitted="$(sbatch "${SBATCH_FLAGS[@]}" "${NEMO_RL_DIR}/ray.sub")"
-echo "${submitted}"
-if [[ -n "${PREFLIGHT_OUT}" ]]; then mv "${PREFLIGHT_OUT}" "${OUT}/slurm/${submitted##* }-${RUN}.preflight.txt"; fi
+if [[ "${IN_ALLOCATION:-0}" == 1 ]]; then
+    bash "${NEMO_RL_DIR}/ray.sub"
+else
+    submitted="$(sbatch "${SBATCH_FLAGS[@]}" "${NEMO_RL_DIR}/ray.sub")"
+    echo "${submitted}"
+    if [[ -n "${PREFLIGHT_OUT}" ]]; then mv "${PREFLIGHT_OUT}" "${OUT}/slurm/${submitted##* }-${RUN}.preflight.txt"; fi
+fi

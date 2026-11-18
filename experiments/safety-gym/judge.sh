@@ -14,9 +14,13 @@ sml_judge() {
   sml_root="${SAFETY_MODEL_LAUNCH_ROOT:-${root}/cache/model-launch}"
   sml_bin="${SML_BIN:-${root}/cache/sml-model-launch-venv/bin/sml}"
   environment="${SAFETY_SML_ENVIRONMENT:-${sml_root}/src/swiss_ai_model_launch/assets/envs/vllm_kisti.toml}"
-  render_dir="${SAFETY_SML_RENDER_DIR:-${root}/runtime/sml-judge-render}"
-  endpoint_file="${SAFETY_ADAPTIVE_JUDGE_ENDPOINT_FILE:-}"
   run_id="${RUN:-}"
+  endpoint_file="${SAFETY_ADAPTIVE_JUDGE_ENDPOINT_FILE:-}"
+  render_dir="${SAFETY_SML_RENDER_DIR:-${root}/runtime/sml-judge-render}"
+  if [[ "$action" == coalloc-render ]]; then
+    [[ "$run_id" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "RUN must be set to a safe per-run identifier for coallocation." >&2; return 2; }
+    render_dir="${root}/runtime/sml-judge-coalloc-${run_id}"
+  fi
   workdir="${SML_WORKING_DIR:-${scratch}/sml}"
   sml_config="${SML_CONFIG_DIR:-${root}/runtime/sml-config}"
   export SML_CONFIG_DIR="$sml_config"
@@ -62,44 +66,65 @@ YAML
     mkdir -p "$(dirname "$endpoint_file")"
   fi
 
+  judge_time="${SAFETY_JUDGE_TIME:-72:00:00}"
+  judge_max_job_time="${SAFETY_JUDGE_MAX_JOB_TIME:-72:00:00}"
+  if [[ "$action" == coalloc-render ]]; then
+    [[ -n "$run_id" && -n "$endpoint_file" ]] || { echo "Set RUN and SAFETY_ADAPTIVE_JUDGE_ENDPOINT_FILE for coallocation render." >&2; return 2; }
+    [[ ! -e "$render_dir" ]] || { echo "Refusing to overwrite existing coallocation render directory: $render_dir" >&2; return 2; }
+    judge_time="${SAFETY_JUDGE_TIME:-74:00:00}"
+    judge_max_job_time="${SAFETY_JUDGE_MAX_JOB_TIME:-74:00:00}"
+  fi
   framework_args="--model ${model_dir} --host 0.0.0.0 --max-model-len 32768 --gpu-memory-utilization 0.90 --tensor-parallel-size 1"
   local -a args=(advanced --partition "${SAFETY_KISTI_PARTITION:-intTest}" --account "${SML_ACCOUNT:-in0138}" \
     --framework vllm --environment "$environment" --container-runtime pyxis \
     --sbatch-arg='--comment=field=nlp;appl=vllm' --sbatch-arg=--gres=gpu:4 \
     --sbatch-arg=--propagate=NONE \
     --served-model-name "$served_name" --replicas 1 --nodes-per-replica 1 \
-    --time "${SAFETY_JUDGE_TIME:-72:00:00}" --max-job-time "${SAFETY_JUDGE_MAX_JOB_TIME:-72:00:00}" \
+    --time "$judge_time" --max-job-time "$judge_max_job_time" \
     --disable-opentela --disable-metrics --pre-launch-cmds "pip uninstall -y -q torchcodec || true" \
     --framework-args "$framework_args" --no-tui)
   mkdir -p "$render_dir" "$workdir/logs"
   "$sml_bin" "${args[@]}" --output-script "$render_dir"
   [[ -s "${render_dir}/master.sh" ]] || { echo "SML did not render ${render_dir}/master.sh" >&2; return 1; }
   python3.12 "${HERE}/../../../archive/safetygym/render_judge_kisti.py" "${render_dir}/master.sh"
-  python3.12 - "${render_dir}/master.sh" "$action" "$endpoint_file" "$run_id" "$model_id" "$train_job_id" <<'PY'
+  python3.12 - "${render_dir}/master.sh" "$action" "$endpoint_file" "$run_id" "$model_id" "$train_job_id" "$judge_time" <<'PY'
 from pathlib import Path
 import shlex
 import sys
 path = Path(sys.argv[1])
-action, endpoint_file, run_id, model_id, training_job_id = sys.argv[2:]
+action, endpoint_file, run_id, model_id, training_job_id, judge_time = sys.argv[2:]
 text = path.read_text(encoding="utf-8")
+if action == "coalloc-render":
+    launch_anchor = "srun --cpus-per-task=288"
+    if text.count(launch_anchor) != 2:
+        raise SystemExit(f"Refusing unexpected SML srun layout for coallocation (launch calls={text.count(launch_anchor)})")
+    text = text.replace(launch_anchor, "srun --het-group=1 --cpus-per-task=288")
+    health_anchor = '        "srun",\n        "--cpus-per-task=288",'
+    if text.count(health_anchor) != 1:
+        raise SystemExit("Refusing unexpected SML health-check srun layout for coallocation")
+    text = text.replace(health_anchor, '        "srun",\n        "--het-group=1",\n        "--cpus-per-task=288",', 1)
 for old, new in (("#SBATCH --output=logs/%j/log.out", "#SBATCH --output=logs/%j.log"), ("#SBATCH --error=logs/%j/log.err", "#SBATCH --error=logs/%j.err")):
     if text.count(old) != 1:
         raise SystemExit(f"Refusing unexpected SML log directive: {old}")
     text = text.replace(old, new)
 if "curl " in text or "https://" in text:
     raise SystemExit("External endpoint remains in sanitized local SML render")
-if action == "submit":
+if action in ("submit", "coalloc-render"):
     anchor = 'echo "Replica 0 head IP: $replica_0_head_ip"\n'
     if text.count(anchor) != 1:
         raise SystemExit("Refusing unexpected SML startup block; cannot publish judge descriptor")
     parent = shlex.quote(str(Path(endpoint_file).parent))
+    runtime_training_id = '"$SLURM_JOB_ID"' if action == "coalloc-render" else shlex.quote(training_job_id)
+    judge_job_id = '"${SLURM_JOB_ID_HET_GROUP_1:-}"' if action == "coalloc-render" else '""'
+    expected_walltime_seconds = 266400 if judge_time == "74:00:00" else 259200
     args = " ".join([
         shlex.quote(endpoint_file),
         '"$SLURM_JOB_ID"',
         '"$replica_0_head_ip"',
         shlex.quote(model_id),
         shlex.quote(run_id),
-        shlex.quote(training_job_id),
+        runtime_training_id,
+        judge_job_id,
     ])
     insertion = f"""# Publish discovery metadata as soon as Slurm allocates the judge node.
 # The training runtime separately waits for /v1/models to advertise the model.
@@ -107,15 +132,16 @@ mkdir -p {parent}
 python3 - {args} <<'__SAFETYGUM_JUDGE_ENDPOINT_EOF__'
 import json, os, sys, tempfile
 from datetime import datetime, timezone
-path, job_id, host, model, run_id, training_job_id = sys.argv[1:]
+path, job_id, host, model, run_id, training_job_id, judge_job_id = sys.argv[1:]
 record = {{
     "job_id": job_id,
     "training_job_id": training_job_id,
+    "judge_job_id": judge_job_id or job_id,
     "host": host,
     "base_url": f"http://{{host}}:8080/v1",
     "model": model,
     "run_id": run_id,
-    "expected_walltime_seconds": 259200,
+    "expected_walltime_seconds": {expected_walltime_seconds},
     "published_utc": datetime.now(timezone.utc).isoformat(),
 }}
 fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".judge-endpoint-")
@@ -139,9 +165,9 @@ __SAFETYGUM_JUDGE_ENDPOINT_EOF__
 path.write_text(text, encoding="utf-8")
 PY
   bash -n "${render_dir}/master.sh"
-  if [[ "$action" == render ]]; then
+  if [[ "$action" == render || "$action" == coalloc-render ]]; then
     printf 'Rendered SML judge script: %s/master.sh\nModel ID: %s\nTime: %s (single job; no consecutive chain)\n' \
-      "$render_dir" "$model_id" "${SAFETY_JUDGE_TIME:-72:00:00}"
+      "$render_dir" "$model_id" "$judge_time"
     return
   fi
 
@@ -163,10 +189,12 @@ PY
     "$job_id" "$model_id" "$run_id" "$endpoint_file"
 }
 
-if [[ "${1:-}" == --sml-render || "${1:-}" == --sml-submit ]]; then
-  action=render; [[ "$1" == --sml-submit ]] && action=submit
+if [[ "${1:-}" == --sml-render || "${1:-}" == --sml-submit || "${1:-}" == --sml-coalloc-render ]]; then
+  action=render
+  [[ "$1" == --sml-submit ]] && action=submit
+  [[ "$1" == --sml-coalloc-render ]] && action=coalloc-render
   shift
-  (($# == 0)) || { echo 'Usage: judge.sh --sml-render|--sml-submit' >&2; exit 2; }
+  (($# == 0)) || { echo 'Usage: judge.sh --sml-render|--sml-submit|--sml-coalloc-render' >&2; exit 2; }
   sml_judge "$action"
   exit $?
 fi
