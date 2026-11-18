@@ -8,6 +8,7 @@ import urllib.request
 path, timeout_s = sys.argv[1], float(sys.argv[2])
 expected_model = os.environ.get("SAFETY_ADAPTIVE_JUDGE_MODEL", f"{os.environ['USER']}/openai/gpt-oss-safeguard-120b")
 expected_run_id = os.environ.get("SAFETY_RUN_ID")
+expected_training_job_id = os.environ.get("SLURM_JOB_ID")
 deadline = time.monotonic() + timeout_s
 last = "endpoint discovery file is not ready"
 while time.monotonic() < deadline:
@@ -19,6 +20,10 @@ while time.monotonic() < deadline:
         base_url, model, job_id = payload.get("base_url"), payload.get("model"), payload.get("job_id")
         if expected_run_id and payload.get("run_id") != expected_run_id:
             raise ValueError("endpoint file belongs to a different adaptive run")
+        if not expected_training_job_id:
+            raise ValueError("SLURM_JOB_ID is unavailable; cannot bind judge to this training allocation")
+        if payload.get("training_job_id") != expected_training_job_id:
+            raise ValueError("endpoint file belongs to a different training allocation")
         if not isinstance(job_id, str) or not job_id or model != expected_model:
             raise ValueError("endpoint job ID or served model does not match the expected SML judge")
         if not isinstance(base_url, str) or not base_url.startswith("http://") or not base_url.endswith(":8080/v1"):
