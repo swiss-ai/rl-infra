@@ -45,7 +45,6 @@ Results so far (details in the sections below):
   the open question before a run of 200+ steps.
 
 Open:
-- the 736 mixed-reward rows are not in this repository yet (see "Tools of 2026-11-18");
 - `eval/run.sh` of the expert entry has run on the expert, not yet on `start` (its `start` row comes from the
   same pipeline's step-0 validations).
 
@@ -314,6 +313,7 @@ H1 step 40 is staged as `lean__lean-kimina-v02-abl-h1-20261118` in
 | `../../../recipes/apertus2-chonk-sftv02-18315-vllm-adamw-code-12n.yaml` | the 12-node layout: 8 Megatron trainers + 4 vLLM |
 | `ablations.sh <variant> [partition]` | the ablation launcher (h1, h2, h3, h8, h8s, nostd); `RUN`, `VAL_AT_START`, `EXTRA_OVERRIDES` for resumes |
 | `data/minif2f-corrected-x2.v434.jsonl.gz` | the validation file: corrected miniF2F, valid 244 + test 242, each twice (972 rows, sha256 `f8e04393...`); `ablations.sh` unpacks it |
+| `data/goedel-train-s1-mixed.v434.jsonl.gz` | the 736 training rows whose 16 rollouts had 1-15 correct in run 3965303 (from all 1,444 generated groups; sha256 `58f3256b...`), for h3, h8, h8s; `ablations.sh` unpacks it |
 | `status.sh <job>:<tag> ...` | status of running jobs: state, server start, steps, validations, checkpoints, fatal errors |
 | `val_report.py --val ... --baseline <RUN> <TAG>=<RUN> ...` | pass@1 per split for every validation of each run, paired against a pooled step-0 baseline |
 | `export_hf.sbatch` | HF export of a checkpoint (DeepEP off in a shadow `run_config.yaml`); then `compare_safetensors.py` |
@@ -322,13 +322,9 @@ H1 step 40 is staged as `lean__lean-kimina-v02-abl-h1-20261118` in
 | `expert-eval/run.sh`, `expert-eval/score.py` | copies of the expert entry's `eval/`, for reference: validate-only evaluation of an HF checkpoint, pinned to rl-infra 302695a. Run it from the entry, which also holds the validation file and the apertus-common bundle it needs |
 
 These were run on Clariden from copies with fixed paths; the versions here take the checkout, run and files as
-arguments and are only syntax-checked so far.
-
-### Not in this repository yet
-
-- `goedel-train-s1-mixed.v434.jsonl`, the 736 rows with mixed rewards in run 3965303 (variants h3, h8, h8s): on
-  Clariden at `$SCRATCH/lean/data/` of the account that ran them. It was made from the run's rollouts: the training
-  rows whose 16 rollouts had 1-15 rewards, from all 1,444 generated groups.
+arguments. `ablations.sh` was dry-run from a fresh clone on 2026-11-19 (variants h1 and h8s, empty `LEAN_DATA`:
+it unpacked all three data files with the expected checksums and passed preflight), and `val_report.py`
+reproduced the numbers of "Ablations" from the runs' logs; the other scripts are syntax-checked.
 
 ## Known problems and lessons
 

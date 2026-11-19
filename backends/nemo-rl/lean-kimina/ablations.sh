@@ -39,7 +39,8 @@ unpack() {  # unpack <name> <sha256>: data/<name>.gz -> $LEAN_DATA/data/<name>, 
 }
 ALL=$(unpack goedel-train-s1.v434.jsonl 47e7b60208716969386980210fa0530a30b17588d7f44690bb8e75f69e7e4f40)
 VAL=$(unpack minif2f-corrected-x2.v434.jsonl f8e04393118ba0236cb7cd33dc5b44d4a65df1e5f6f15e94c674bf3017964465)
-MIXED="${D}/goedel-train-s1-mixed.v434.jsonl"   # see RUNBOOK.md, "Not in this repository yet"
+# The 736 training rows whose 16 rollouts had mixed rewards (1-15 correct) in run 3965303, for h3, h8, h8s.
+MIXED=$(unpack goedel-train-s1-mixed.v434.jsonl 58f3256b630dfd6974af0677df8da0fbf459753a706ae6dc31dedd43c3cfecaa)
 
 rows=${ALL} start=false extra=()
 case ${variant} in
