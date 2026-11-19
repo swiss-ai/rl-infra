@@ -1,7 +1,7 @@
 # STEM expert, the official run: the mix of run 5 (512 prompts per step: 96 each from DAPO, NuminaMath, multiple
 # choice and openqa; 32 each from Reasoning Gym, Enigmata, ScienceWorld and chemistry), 135 steps (Enigmata's 4,002
 # rows run out at step 125 and its dataloader restarts), 32K context, thinking high everywhere, on the expensive tier.
-#   bash run.sh envs/stem/main.yaml                    (DEBUG=0 for a full run, which logs to W&B)
+#   bash run.sh envs/stem/main.yaml          full run (W&B); DEBUG=1 for a short debug run, DRY_RUN=1 to see it first
 # Development variants go to envs/stem/dev/ with `defaults: ../main.yaml`; a variant that wins moves its changes here.
 defaults: base.yaml
 size: expensive

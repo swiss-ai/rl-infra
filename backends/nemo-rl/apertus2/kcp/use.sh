@@ -6,8 +6,8 @@ _kcp_here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export MEGATRON_DIR="${KCP_MEGATRON_DIR:-${PROJECTS_DIR}/megatron-lm-moe-apertus2-kcp}"
 _kcp_fla="${KCP_FLA_DIR:-${PROJECTS_DIR}/fla-0.5.2}"
 if ! git -C "${MEGATRON_DIR}" rev-parse -q --verify rl-kcp > /dev/null 2>&1 || [[ ! -d "${_kcp_fla}/fla/ops/cp" ]]; then
-    if [[ "${PLAN:-0}" == 1 ]]; then
-        echo "KCP:     not set up yet (${MEGATRON_DIR} branch rl-kcp, ${_kcp_fla}); a real launch runs kcp/setup.sh first"
+    if [[ "${DRY_RUN:-0}" == 1 ]]; then
+        echo "KCP:     not set up yet (${MEGATRON_DIR} branch rl-kcp, ${_kcp_fla}); a launch runs kcp/setup.sh first"
         return 0
     fi
     echo "== KCP setup (once): ${MEGATRON_DIR}, ${_kcp_fla}"

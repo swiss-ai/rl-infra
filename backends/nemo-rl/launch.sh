@@ -57,7 +57,8 @@ if [[ "${PREFLIGHT:-1}" == 1 ]]; then
             cat "${PREFLIGHT_OUT}" >&2
             echo "ERROR: preflight failed, not submitting (PREFLIGHT=0 to override)" >&2; exit 1
         fi
-        grep "WARNING" "${PREFLIGHT_OUT}" >&2 || true
+        # A dry run shows the whole report, a launch only its warnings (the report goes next to the Slurm log).
+        if [[ "${DRY_RUN:-0}" == 1 ]]; then cat "${PREFLIGHT_OUT}"; else grep "WARNING" "${PREFLIGHT_OUT}" >&2 || true; fi
     else
         echo "WARNING: yq not found, config not checked" >&2
     fi

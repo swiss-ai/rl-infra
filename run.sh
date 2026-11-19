@@ -3,9 +3,16 @@
 #   bash run.sh <task.yaml> [overrides...]        e.g.  bash run.sh envs/stem/main.yaml
 # The task file says what to train on (datasets, environments, their shares of a step, steps,
 # validation) and, with the rl-infra keys below, which recipe, context and node tier the run uses.
-# Every run first brings the setup up to date; the first one clones the sources and stages the
-# model, later ones take seconds. DRY_RUN=1 shows the job without submitting it. Hydra overrides
-# after the task file win over everything.
+# Every launch first brings the setup up to date; the first one clones the sources and stages the
+# model, later ones take seconds. Hydra overrides after the task file win over everything.
+#
+# Three ways to run it:
+#   bash run.sh <task>             full run: submits the job, logs to W&B (refuses to start without it)
+#   DEBUG=1 bash run.sh <task>     debug run: the name ends in -DEBUG, and unless the command line says
+#                                  otherwise: 3 steps, no validation, no checkpoints, 2-hour limit
+#   DRY_RUN=1 bash run.sh <task>   either of the two, shown instead of run: nodes, context, the overrides
+#                                  made here, the config copies, preflight and the sbatch command; no
+#                                  setup (it may change the NeMo-RL clone), no job
 #
 # rl-infra keys (top level of a task file, inherited through `defaults` like any other key):
 #   recipe:    model and algorithm, a file under recipes/ (path relative to this repository)
@@ -17,10 +24,9 @@
 #   script:    entry point instead of examples/run_grpo.py (NeMo Gym tasks)
 # A task without `recipe:` names its recipe in `defaults` (the older layout).
 #
-# Environment: PLAN=1 prints nodes, context, overrides and the config copies, then stops (no setup,
-# no submission). RECIPE, SIZE and JOB_TIME replace the task's recipe, size and job_time. DEBUG=1
-# (default) marks a debug run: "-DEBUG" is appended to its name. DEBUG=0 is a full run and must log
-# to W&B (WANDB_PROJECT, WANDB_ENTITY, WANDB_KEY_FILE in site.env). RUN, PARTITION, ACCOUNT as usual.
+# Environment: RUN names the run (default: the task's path under envs/ and the time, e.g.
+# stem-main-20261120-081500). RECIPE, SIZE and JOB_TIME replace the task's recipe, size and job_time.
+# W&B: WANDB_PROJECT, WANDB_ENTITY and WANDB_KEY_FILE in site.env. PARTITION, ACCOUNT as usual.
 #
 # The job reads a copy of every config file made at launch (${OUT}/configs/<run>-<time>/), so an edit
 # made while it waits in the queue, runs or retries does not reach it.
@@ -42,12 +48,13 @@ task_key() { local v; v="$(yq r "${TMP}/task.yaml" "$1")"; [[ "${v}" == null ]] 
 TASK_RECIPE="$(task_key recipe)"
 CONTEXT="$(task_key context)"
 SIZE="${SIZE:-$(task_key size)}"
-JOB_TIME="${JOB_TIME:-$(task_key job_time)}"
+DEBUG="${DEBUG:-0}"; DRY_RUN="${DRY_RUN:-0}"
+# A debug run gets 2 hours unless JOB_TIME is given; the task's job_time is for its full run.
+if [[ "${DEBUG}" == 1 ]]; then JOB_TIME="${JOB_TIME:-02:00:00}"; else JOB_TIME="${JOB_TIME:-$(task_key job_time)}"; fi
 TASK_SCRIPT="$(task_key script)"
 TASK_PYDEPS="$(task_key pydeps)"
 
 # --- run name and W&B
-DEBUG="${DEBUG:-1}"
 if [[ -z "${RUN:-}" ]]; then
     # envs/stem/dev/mix-a.yaml -> stem-dev-mix-a-<time>
     if [[ "${TASK}" == "${ROOT}/envs/"* ]]; then name="${TASK#"${ROOT}"/envs/}"; else name="$(basename "${TASK}")"; fi
@@ -56,7 +63,7 @@ if [[ -z "${RUN:-}" ]]; then
 fi
 [[ "${DEBUG}" == 1 && "${RUN}" != *-DEBUG ]] && RUN="${RUN}-DEBUG"
 if [[ -z "${WANDB_PROJECT:-}" ]]; then
-    [[ "${DEBUG}" == 1 ]] || { echo "ERROR: a full run (DEBUG=0) must log to W&B: set WANDB_PROJECT in site.env" >&2; exit 1; }
+    [[ "${DEBUG}" == 1 ]] || { echo "ERROR: a full run must log to W&B: set WANDB_PROJECT in site.env (or DEBUG=1 for a debug run)" >&2; exit 1; }
     echo "WARNING: WANDB_PROJECT is not set: this debug run logs to TensorBoard only" >&2
 fi
 export RUN
@@ -122,6 +129,12 @@ if [[ -n "${CONTEXT}" ]]; then
     fi
 fi
 
+# --- debug run: short and without validation or checkpoints, unless the command line says otherwise
+if [[ "${DEBUG}" == 1 ]]; then
+    OVR+=(grpo.max_num_steps=3 grpo.val_at_start=false grpo.val_at_end=false grpo.val_period=1000
+          checkpointing.enabled=false)
+fi
+
 # --- time limit, and the checkpoint deadline before it
 JOB_TIME="${JOB_TIME:-05:00:00}"
 if [[ "$(cfg checkpointing.enabled)" == true ]]; then
@@ -182,12 +195,16 @@ echo "Task:    ${TASK}"
 echo "Recipe:  ${R}"
 echo "Nodes:   ${NODES} = ${TRAIN} trainer + ${GEN} vLLM + ${JUDGE} judge${SIZE:+ (tier ${SIZE})}"
 [[ -n "${CONTEXT}" ]] && echo "Context: ${CONTEXT} tokens: CP ${CP} (${SCHEME}), packing ${PACK}, memory fraction ${MEMFRAC}"
+echo "Run:     ${RUN} ($([[ "${DEBUG}" == 1 ]] && echo debug || echo full) run, time limit ${JOB_TIME})"
 echo "Config:  ${CFG}"
-# PLAN=1: show what the run would be, without setup (which may change the clone) or submission.
-if [[ "${PLAN:-0}" == 1 ]]; then
-    echo "Overrides made here (the command line's come after them):"
-    printf '  %s\n' "${OVR[@]}"
-    exit 0
+echo "Overrides made here (the command line's come after them and win):"
+printf '  %s\n' "${OVR[@]}"
+
+# --- dry run: preflight and the sbatch command, without setup (which may change the NeMo-RL clone)
+if [[ "${DRY_RUN}" == 1 ]]; then
+    [[ -e "${NEMO_RL_DIR}/.git" ]] || {
+        echo "ERROR: no NeMo-RL clone at ${NEMO_RL_DIR} yet: launch once without DRY_RUN, or run backends/nemo-rl/apertus2/setup.sh" >&2; exit 1; }
+    exec bash "${APERTUS2_DIR}/launch.sh" "${CFG}" "${NODES}" "${RUN}" "${OVR[@]}" "$@"
 fi
 
 LOG="${OUT}/setup.log"
@@ -197,9 +214,6 @@ echo "== setup (log: ${LOG})"
     > "${LOG}" 2>&1 || { tail -n 20 "${LOG}"; echo "ERROR: setup failed, see ${LOG}" >&2; exit 1; }
 cp "${LOG}" "${DIR}/setup.log"
 
-if [[ "${DRY_RUN:-0}" == 1 ]]; then
-    exec bash "${APERTUS2_DIR}/launch.sh" "${CFG}" "${NODES}" "${RUN}" "${OVR[@]}" "$@"
-fi
 submitted="$(bash "${APERTUS2_DIR}/launch.sh" "${CFG}" "${NODES}" "${RUN}" "${OVR[@]}" "$@" | tee /dev/stderr | grep -oE 'Submitted batch job [0-9]+')"
 jobid="${submitted##* }"
 echo

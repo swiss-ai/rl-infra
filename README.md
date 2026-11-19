@@ -132,9 +132,11 @@ use), and the checkpoint deadline 30 minutes before `job_time`. `RECIPE`, `SIZE`
 environment replace the task's values, and overrides on the command line win over everything.
 
 ```bash
-PLAN=1 bash run.sh envs/stem/main.yaml            # nodes, context, overrides and config copies; no setup, no job
-bash run.sh envs/stem/main.yaml grpo.max_num_steps=3 checkpointing.enabled=false     # debug run (name ends in -DEBUG)
-DEBUG=0 bash run.sh envs/stem/main.yaml           # full run; refuses to start without W&B (site.env)
+bash run.sh envs/stem/main.yaml                   # full run; refuses to start without W&B (site.env)
+DEBUG=1 bash run.sh envs/stem/main.yaml           # debug run: name ends in -DEBUG, 3 steps, no validation,
+                                                  # no checkpoints, 2 hours (the command line can change each)
+DRY_RUN=1 bash run.sh envs/stem/main.yaml         # shows nodes, context, overrides, config copies, preflight
+                                                  # and the sbatch command; no setup, no job (also with DEBUG=1)
 SIZE=ultra bash run.sh envs/stem/dev/<name>.yaml
 ```
 

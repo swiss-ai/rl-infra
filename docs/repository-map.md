@@ -86,7 +86,7 @@ bash run.sh envs/stem/main.yaml
 | `apertus2-chonk-sftv02-stemmix-run4-100-*.yaml` | run | Continuing from the run-4 checkpoint at step 100 (chemistry task) |
 
 Most recipes are a chain of small files ending in `experiments/grpo-chonk/` and NeMo-RL's
-`grpo_math_1B.yaml`; `PLAN=1 bash run.sh <task>` and the preflight report list the files of a run's chain.
+`grpo_math_1B.yaml`; `DRY_RUN=1 bash run.sh <task>` (its preflight report) lists the files of a run's chain.
 
 ## `backends/nemo-rl/` (launching NeMo-RL)
 
