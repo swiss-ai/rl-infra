@@ -650,9 +650,27 @@ SANDBOX=$SCRATCH/code-sandbox/endpoint-64k.json \
 bash experiments/long-context/launch-code-ctx.sh 65536 checkpointing.keep_top_k=3
 ```
 
-- LiveCodeBench (322 problems × 10): 61.0% at step 0, 64.6% at step 20. Batch reward 0.44 at step 1, about 0.51 by
+- LiveCodeBench (322 problems × 10): 61.0% at step 0, 64.6% at step 20 (thinking medium), 64.6% at step 40 (thinking
+  high; 474 of the 3,220 answers differ from step 20, the totals are equal). Batch reward 0.44 at step 1, about 0.51 by
   step 36. About 950 s per step on Slingshot (1,240-1,590 s on the management network, job 1293154).
-- Running at the time of writing (step 40 of 46).
+- Job 1298910 failed in the validation of step 40 (Gym's agent server overloaded, truncated vLLM responses, HTTP 500)
+  and its retry resumed from step 20, because the step-40 checkpoint is written after the validation. Since then a step
+  that saves and validates saves first (patch 0047, `CKPT_FIRST=1`), and Gym and the sandbox are on Slingshot (0048).
+- Resumed from step 20 at thinking high as job 1308624 (steps 1-20 ran at medium), about 1,000 s per step. Jobs
+  1306028 and 1306032 failed at setup before it: patch 0048 gave vLLM's URL the address of `<node>-hsn0`, which is not
+  the address Ray registers for a worker node, and `place_on_generation_node` found no node for it (fixed by 0049).
+
+```bash
+SANDBOX_ENDPOINT_FILE=$SCRATCH/code-sandbox/endpoint-64k-hsn.json SANDBOX_WORKERS=192 JOB_TIME=2-00:00:00 \
+    bash backends/nemo-rl/sandbox/start.sh
+NODES=32 KCP=1 CP=8 STALENESS=4 PROMPTS=512 STEPS=46 CKPT=weights CKPT_EVERY=20 THINKING=high DEBUG=0 \
+JOB_TIME=2-00:00:00 SAVE_BY=01:23:30:00 RUN=sftv02-code-64k-512x16-32n \
+SANDBOX=$SCRATCH/code-sandbox/endpoint-64k-hsn.json \
+bash experiments/long-context/launch-code-ctx.sh 65536 checkpointing.keep_top_k=3
+```
+
+- `KCP_FLA_DIR` names the flash-linear-attention 0.5.2 copy when it is not `${PROJECTS_DIR}/fla-0.5.2`.
+- Running at the time of writing (step 45 of 46).
 
 Coding at 128K, job 1299941, the same with CP 16 and the trainer off the driver's node:
 
@@ -663,7 +681,21 @@ SANDBOX=$SCRATCH/code-sandbox/endpoint-128k.json \
 bash experiments/long-context/launch-code-ctx.sh 131072 checkpointing.keep_top_k=3
 ```
 
-- LiveCodeBench: 61.2% at step 0, 64.1% at step 20. About 1,090 s per step.
+- LiveCodeBench: 61.2% at step 0, 64.1% at step 20 (thinking medium). About 1,090 s per step.
 - Without `OFFHEAD=1` the driver's node ran out of host memory in the first training step (job 1299189); on the
   management network the first training step timed out twice (jobs 1293158, 1293163).
-- Running at the time of writing (step 28 of 46).
+- Job 1299941 lost a Slingshot link at step 39 (NCCL `NET/OFI ... PTLTE_NOT_FOUND` on one trainer node). Its retries
+  read the recipe again after an edit (16 -> 15 vLLM nodes), built 17 trainer nodes and stopped (world size 68); the
+  launchers now copy the recipe at submission. The run resumed from step 20.
+- Resumed from step 20 at thinking high as job 1308640, about 1,115 s per step:
+
+```bash
+SANDBOX_ENDPOINT_FILE=$SCRATCH/code-sandbox/endpoint-128k-hsn.json SANDBOX_WORKERS=192 JOB_TIME=2-00:00:00 \
+    bash backends/nemo-rl/sandbox/start.sh
+NODES=32 KCP=1 CP=16 OFFHEAD=1 STALENESS=4 PROMPTS=512 STEPS=46 CKPT=weights CKPT_EVERY=20 THINKING=high DEBUG=0 \
+JOB_TIME=2-00:00:00 SAVE_BY=01:23:30:00 RUN=sftv02-code-128k-512x16-32n \
+SANDBOX=$SCRATCH/code-sandbox/endpoint-128k-hsn.json \
+bash experiments/long-context/launch-code-ctx.sh 131072 checkpointing.keep_top_k=3
+```
+
+- Running at the time of writing (step 36 of 46).
