@@ -1,8 +1,10 @@
 # Long context: GRPO at 32K, 64K and 128K tokens
 
 GRPO on the SFT v0.2 checkpoint of Apertus 2 "Chonk" with a context limit of 32K, 64K and 128K tokens instead of 16K,
-on KISTI HANGANG (November 2026). Two task families: the STEM mix (`launch-stem-ctx.sh`) and competitive coding on
-Gym's `code_gen` (`launch-code-ctx.sh`). Results and run commands are in `../runs.md`.
+on KISTI HANGANG (November 2026). Two task families: the STEM mix (`bash run.sh envs/stem/main.yaml`, which sets the
+context with its `context:` key) and competitive coding on Gym's `code_gen` (`launch-code-ctx.sh`). Results and run
+commands are in `../runs.md`; commands there that name `launch-stem-ctx.sh` refer to the commit before the
+restructure, where that launcher still exists.
 
 ## What is needed
 
@@ -10,8 +12,8 @@ Gym's `code_gen` (`launch-code-ctx.sh`). Results and run commands are in `../run
 |---|---|
 | NeMo-RL patches 0040-0046 | `backends/nemo-rl/apertus2/patches/nemo-rl/`, applied by `setup.sh` like the others |
 | Ray on Slingshot by default | `sites/hangang.env` (`RAY_NODE_NAME_SUFFIX=-hsn0`, read by patch 0041) |
-| KCP context parallelism, for more than 4 context-parallel ranks | `setup-kcp.sh` once, then `KCP=1` |
-| STEM-mix task files and recipes (`envs/stem-mix-run4.yaml`, `stem-mix-run5.yaml`, the `-32n` recipes) | the STEM-environment branch; `launch-stem-ctx.sh` needs it |
+| KCP context parallelism, for more than 4 context-parallel ranks | `backends/nemo-rl/apertus2/kcp/`: run.sh sets it up and uses it for a context above 32K (`contexts.tsv`); `launch-code-ctx.sh` with `KCP=1` |
+| STEM task files | `envs/stem/` (`base.yaml`, `main.yaml`, `dev/`; the earlier run files in `archive/`) |
 | Code sandbox node, for coding | `backends/nemo-rl/sandbox/start.sh`, then `SANDBOX=<endpoint file>` |
 | W&B key | `WANDB_KEY_FILE` (default `~/.wandb_api_key`); a full run (`DEBUG=0`) refuses to start without it |
 
@@ -45,9 +47,10 @@ over CP ranks; the measured limit is about 8,192 tokens per GPU.
 | 128K | 16 | KCP | 8 or 16 | 0.74 | works (job 1292002); used by the coding run |
 
 The pinned Megatron splits the 28 heads of the KDA layers over the CP ranks, so it allows CP 1, 2 or 4 only. KCP
-(Megatron-LM-MoE PR 112, ported onto the pinned commit in `kcp/`) keeps the tokens split instead and allows any CP that
-divides the ranks of a pipeline stage. It needs flash-linear-attention 0.5.2, newer than the image's; `setup-kcp.sh`
-installs it and the launchers put it first on `PYTHONPATH`. A cap of 0.74 (70.3 GB) leaves room for NCCL and Triton
+(Megatron-LM-MoE PR 112, ported onto the pinned commit in `backends/nemo-rl/apertus2/kcp/`) keeps the tokens split
+instead and allows any CP that divides the ranks of a pipeline stage. It needs flash-linear-attention 0.5.2, newer than
+the image's; `kcp/setup.sh` installs it and `kcp/use.sh` (run.sh) or the coding launcher put it first on `PYTHONPATH`.
+`backends/nemo-rl/apertus2/contexts.tsv` holds the rows of this table that run.sh applies. A cap of 0.74 (70.3 GB) leaves room for NCCL and Triton
 outside PyTorch, which reached 16 to 24 GB per GPU at long context.
 
 vLLM refuses a limit above the export's `max_position_embeddings` (16,384) unless `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`;
@@ -92,10 +95,8 @@ the model has no position table, so the value is only that check. The launchers 
 
 | File | Purpose |
 |---|---|
-| `launch-stem-ctx.sh <tokens>` | STEM mix (`MIX=run3`, `run4`, `run5`) with CP, KCP, node split, cap, staleness, checkpoints, rollout file (`DUMP=1` or `text`); see its header |
 | `launch-code-ctx.sh <tokens>` | Coding on `code_gen` with pods or a sandbox node, CP, KCP, `OFFHEAD`, `HEAD` (a dedicated driver node), node counts 12, 16, 31, 32 |
-| `recipes/` | Node layouts: coding 8+4, 8+8, 16+15 (with `HEAD=1`), 16+16; STEM 8+16, 8+16+judge, 16+32+judge |
-| `setup-kcp.sh`, `kcp/` | KCP Megatron checkout and flash-linear-attention 0.5.2 |
+| `recipes/` | Node layouts of the coding runs: 8+4, 8+8, 16+15 (with `HEAD=1`), 16+16 (STEM runs take a tier from `sizes/`) |
 | `convert_rl_ckpt.sh <run> <step> <name>` | NeMo-RL checkpoint to an HF export (one node, about 10 minutes; uses the shared converter of the SFT exports) |
 | `eval/` | Evaluation with vLLM only, see below |
 | `tools/rollout_index.py <exp dir>` | Per-step index of the rollout files: step, row, prompt group, dataset, row in the dataset file, reward, length (for files written before patch 0044) |

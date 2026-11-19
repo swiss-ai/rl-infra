@@ -1,0 +1,34 @@
+# GRPO on the Chonk SFT v0.2 checkpoint (iteration 18,315) with the algorithm of the STEM runs 4 and 5: 16 answers
+# per prompt, one optimizer step per GRPO step (global batch = prompts x 16), no log-prob pass (on-policy ratio),
+# lr 2e-6 constant, rollouts at most 4 weight versions old. These were command-line overrides of
+# experiments/long-context/launch-stem-ctx.sh before. Node counts come from the run's tier (sizes/), CP, packing and
+# memory from its `context:` (backends/nemo-rl/apertus2/contexts.tsv).
+defaults: apertus2-chonk-sftv02-18315-vllm-adamw-dapo-32n.yaml
+
+# run.sh reads sft_export from the merged config and stages the export to policy.model_name.
+sft_export: chonk-sft/models/chonk-lc-16k-v0.2-iter_0018315
+
+grpo:
+  num_prompts_per_step: 512
+  async_grpo:
+    max_trajectory_age_steps: 4
+
+loss_fn:
+  force_on_policy_ratio: true
+
+checkpointing:
+  # A step that saves and validates saves first (NeMo-RL patch 0047): a failure in the validation loses nothing.
+  save_before_validation: true
+
+policy:
+  train_global_batch_size: 8192
+  generation:
+    vllm_kwargs:
+      max_num_seqs: 256
+  megatron_cfg:
+    optimizer:
+      lr: 2.0e-6
+    env_vars:
+      TORCHINDUCTOR_COMPILE_THREADS: "1"
+      # Minutes a trainer collective waits for its peers (NeMo-RL patch 0040; default 10).
+      NRL_NCCL_TIMEOUT_MINUTES: "60"

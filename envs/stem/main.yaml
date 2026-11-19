@@ -1,0 +1,25 @@
+# STEM expert, the official run: the mix of run 5 (512 prompts per step: 96 each from DAPO, NuminaMath, multiple
+# choice and openqa; 32 each from Reasoning Gym, Enigmata, ScienceWorld and chemistry), 135 steps (Enigmata's 4,002
+# rows run out at step 125 and its dataloader restarts), 32K context, thinking high everywhere, on the expensive tier.
+#   bash run.sh envs/stem/main.yaml                    (DEBUG=0 for a full run, which logs to W&B)
+# Development variants go to envs/stem/dev/ with `defaults: ../main.yaml`; a variant that wins moves its changes here.
+defaults: base.yaml
+size: expensive
+job_time: 2-00:00:00
+
+grpo:
+  max_num_steps: 135
+
+checkpointing:
+  # Weights only (no optimizer state), every 20 steps, the last 10 kept.
+  enabled: true
+  save_period: 20
+  keep_top_k: 10
+  metric_name: null
+  save_optimizer: false
+
+env:
+  # Every step's rollouts as text (prompt, answer, reward, length), without the per-token arrays (NeMo-RL patch
+  # 0043): train_data_step<N>.jsonl in the log directory, about 200 MB per step at 32K.
+  should_log_nemo_gym_responses: false
+  train_dump_text_only: true

@@ -1,9 +1,0 @@
-# The run-4 STEM recipe (SFT v0.2, 16 vLLM nodes, 1 judge node) with 8 trainer nodes instead of 16:
-# 25 nodes = 8 trainer (PP2 x EP16, 16 ranks per pipeline stage) + 16 vLLM + 1 judge.
-defaults: ../../../recipes/apertus2-chonk-sftv02-18315-vllm-adamw-dapo-32n.yaml
-
-# run.sh reads sft_export and cluster.num_nodes from this file only, not from its defaults.
-sft_export: chonk-sft/models/chonk-lc-16k-v0.2-iter_0018315
-
-cluster:
-  num_nodes: 25
