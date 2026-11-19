@@ -10,12 +10,12 @@ only backend so far is [NeMo-RL](https://github.com/NVIDIA-NeMo/RL).
 
 ```bash
 git clone https://github.com/swiss-ai/rl-infra.git && cd rl-infra
-bash run.sh envs/gsm8k.yaml
+bash run.sh envs/math/gsm8k.yaml
 ```
 
 This trains Apertus 2 Chonk on GSM8K with GRPO, on 12 nodes of the cluster profile's account
 (`infra01` on Alps, `in0138` on HANGANG), in about an hour and a half, and saves the final weights. A new RL environment needs only a
-task file like `envs/gsm8k.yaml`, with its dataset, prompt and reward; the training recipe
+task file like `envs/math/gsm8k.yaml`, with its dataset, prompt and reward; the training recipe
 stays as it is. The first run also sets everything up, cloning the pinned sources and
 copying the 200 GB model to your scratch, so it takes a while to start; later runs start
 right away. `run.sh` prints where the training log, the metrics and the weights go, and
@@ -27,7 +27,7 @@ The sections below describe the general launcher underneath.
 DAPO-Math with AIME 2024 validation, on 8 trainer and 8 vLLM nodes:
 
 ```bash
-PARTITION=normal JOB_TIME=12:00:00 bash run.sh envs/dapo-math.yaml
+PARTITION=normal JOB_TIME=12:00:00 bash run.sh envs/math/dapo-math.yaml
 ```
 
 The task names its recipe in `defaults:`, and `RECIPE` still replaces it. This is a 12-hour job,
@@ -39,10 +39,10 @@ General chat on the UltraFeedback prompts, rewarded by an LLM judge on rubrics a
 AlpacaEval, on 8 trainer, 4 vLLM and 1 judge node of one job:
 
 ```bash
-python3.12 envs/prepare_ultrafeedback.py $SCRATCH/rubric-judge/ultrafeedback
-python3.12 envs/prepare_alpaca_eval.py $SCRATCH/rubric-judge/alpaca_eval
-bash envs/stage_judge_model.sh
-bash run.sh envs/ultrafeedback-rubric.yaml grpo.max_num_steps=3 grpo.val_at_start=false
+python3.12 envs/rubric/prepare_ultrafeedback.py $SCRATCH/rubric-judge/ultrafeedback
+python3.12 envs/rubric/prepare_alpaca_eval.py $SCRATCH/rubric-judge/alpaca_eval
+bash envs/tools/stage_judge_model.sh
+bash run.sh envs/rubric/ultrafeedback-rubric.yaml grpo.max_num_steps=3 grpo.val_at_start=false
 ```
 
 The task names its entry `script`, the NeMo Gym one, so `run.sh` also sets up Gym, without touching
@@ -53,7 +53,7 @@ The rubrics and their weights are in the task. Validation is AlpacaEval 2.0's pr
 references and judge prompt with the same judge model, reported as
 `validation/alpaca_eval_simple_agent/reward/mean`. Every rollout is saved to `<checkpoint_dir>/rollouts/`.
 The few-shot prompt is written into the data rows by the two `prepare_*` scripts, so changing
-`envs/ultrafeedback-few-shot.txt` means running them again.
+`envs/rubric/ultrafeedback-few-shot.txt` means running them again.
 
 To see how loaded the judge is, each replica writes its state to `<checkpoint_dir>/judge_stats.jsonl`
 every few seconds. `python3.12 backends/nemo-rl/apertus2/judge_stats.py <file> [start] [end]` sums it
@@ -73,16 +73,16 @@ prompt, so a lenient judge only moves its own prompts. Validation stays on `env.
 AlpacaEval stays comparable with one-judge runs. Each pool writes its own stats file and each agent logs
 its own metrics, so read the reward per agent.
 
-`envs/ultrafeedback-rubric-sft-3judges.yaml` runs three judges on the SFT checkpoint, 16 nodes in all:
+`envs/rubric/ultrafeedback-rubric-sft-3judges.yaml` runs three judges on the SFT checkpoint, 16 nodes in all:
 Qwen and Gemma 4 on one node each, and Nemotron 3 Super as one replica across two.
-`envs/ultrafeedback-rubric-sft-2judges.yaml` leaves Nemotron out, on 14 nodes. After the data steps at
-the top of `envs/ultrafeedback-rubric-sft.yaml`:
+`envs/rubric/ultrafeedback-rubric-sft-2judges.yaml` leaves Nemotron out, on 14 nodes. After the data steps at
+the top of `envs/rubric/ultrafeedback-rubric-sft.yaml`:
 
 ```bash
-bash envs/stage_judge_model.sh
+bash envs/tools/stage_judge_model.sh
 HF_REPO=google/gemma-4-26B-A4B-it CHECK_SCRIPT=download_model.sh bash backends/nemo-rl/apertus2/check_env_job.sh
 HF_REPO=nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8 CHECK_SCRIPT=download_model.sh bash backends/nemo-rl/apertus2/check_env_job.sh
-bash run.sh envs/ultrafeedback-rubric-sft-3judges.yaml grpo.max_num_steps=3
+bash run.sh envs/rubric/ultrafeedback-rubric-sft-3judges.yaml grpo.max_num_steps=3
 ```
 
 The commands of the full runs are in `experiments/runs.md`. Nemotron's first start builds its kernels
@@ -101,11 +101,71 @@ per rubric.
 
 For another judge, add a pool to `env.extra_judge_pools`, copy the three Gym entries at the end of the
 task file, and add its agent to `data.train.gym_agent_choices`. Set `cluster.num_nodes` and
-`sft_export` in a recipe of its own: `run.sh` reads both from that file alone, not through `defaults`.
+`sft_export` in a recipe of its own (or take a node tier, see below).
 Scores come from the judge's first token, so a judge that thinks first gets a noise score with no
 error. Turn thinking off with `chat_template_kwargs: {enable_thinking: false}`, and run
 `check_judge.sh`, which fails when under 95% of that token's probability is on a verdict. A replica
 across nodes needs the three settings in the Nemotron block, or vLLM hangs at start-up.
+
+## Task files, recipes, node tiers and context
+
+```
+envs/<domain>/          what to train on, one folder per expert: stem, math, code, agents, rubric, lean
+  base.yaml             every dataset, environment and validation set of the domain, defined once
+  main.yaml             the official run (defaults: base.yaml)
+  dev/<name>.yaml       development variants (defaults: ../main.yaml), e.g. another mix or thinking level
+  archive/              earlier run files, kept as they ran
+envs/frames/            system frames of the Apertus 2 format (thinking level, tools)
+envs/tools/             helpers shared by domains
+recipes/                model and algorithm (SFT export, lr, loss, async, FP8, optimizer)
+sizes/                  node tiers: cheap (8 trainer + 16 vLLM), expensive (16 + 32), ultra (32 + 64, batch x2)
+backends/nemo-rl/apertus2/contexts.tsv   CP, packing and memory per context length
+```
+
+A run is `bash run.sh <task file> [overrides]`. Besides NeMo-RL settings, a task file holds rl-infra
+keys, inherited through `defaults` like any other key: `recipe` (a file under `recipes/`), `context`
+(longest prompt + answer), `size` (a tier in `sizes/`), `job_time`, `pydeps` and `script`. From them
+`run.sh` derives the node counts (tier nodes plus the task's judge nodes), the batch (scaled by the
+tier's `batch_scale`, per-dataset shares included), CP, packing and the memory fraction (the first row
+of `contexts.tsv` at or above the context, so 50K gets the 64K settings; KCP above 32K, set up on first
+use), and the checkpoint deadline 30 minutes before `job_time`. `RECIPE`, `SIZE` and `JOB_TIME` in the
+environment replace the task's values, and overrides on the command line win over everything.
+
+```bash
+PLAN=1 bash run.sh envs/stem/main.yaml            # nodes, context, overrides and config copies; no setup, no job
+bash run.sh envs/stem/main.yaml grpo.max_num_steps=3 checkpointing.enabled=false     # debug run (name ends in -DEBUG)
+DEBUG=0 bash run.sh envs/stem/main.yaml           # full run; refuses to start without W&B (site.env)
+SIZE=ultra bash run.sh envs/stem/dev/<name>.yaml
+```
+
+The job reads copies of every config file of the run, made at launch in
+`$OUT/configs/<run>-<time>/` with the setup log next to them: editing a task or recipe while a job
+waits, runs or retries does not change it. The code (the NeMo-RL clone, Megatron) is read when the job
+starts, so leave the clone of a queued job alone. A thinking level, a mix or a context is a key in a
+run file; a list such as `data.train` is replaced whole when files merge, which is why `base.yaml`
+refers to `frames.<dataset>` and run files override those keys.
+
+## Developing NeMo-RL changes
+
+The NeMo-RL a run uses is the swiss-ai fork at the commit in `backends/nemo-rl/apertus2/pin`, the PRs
+listed there and the patches in `backends/nemo-rl/patches/` and `backends/nemo-rl/apertus2/patches/nemo-rl/`,
+applied in order by `setup.sh` into `~/projects/nemo-rl-apertus2`. A fresh clone of this repository
+needs nothing else. Work on NeMo-RL in a clone of your own and keep that shared one as setup made it:
+
+```bash
+git -C ~/projects/nemo-rl-apertus2 worktree add ~/projects/nemo-rl-<topic>        # or a separate clone
+# commit your change in ~/projects/nemo-rl-<topic>, then test it:
+NEMO_RL_DIR=~/projects/nemo-rl-<topic> bash run.sh envs/<domain>/dev/<name>.yaml grpo.max_num_steps=3
+# when it works, export each commit as the next patch and commit it here, on a branch for main:
+git -C ~/projects/nemo-rl-<topic> format-patch --start-number <next> -o backends/nemo-rl/apertus2/patches/nemo-rl/ <base>..HEAD
+```
+
+`setup.sh` applies to an existing clone only the patches whose subject it lacks, so the shared clone
+catches up on the next launch. Work that stays in a personal clone or worktree is lost to everyone
+else: every change a run depends on goes into this repository's patches, and files on main name only
+the pinned clone, never a personal one. To check that a patch series is complete, apply it to a fresh
+worktree at the pin (the PR merges, then every patch with `git am -3`) and compare the tree with the
+clone you tested on.
 
 ## How a NeMo-RL run is put together
 
