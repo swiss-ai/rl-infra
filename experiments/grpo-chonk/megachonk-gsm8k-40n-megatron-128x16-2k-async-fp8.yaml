@@ -1,0 +1,34 @@
+defaults:
+  - chonk-gsm8k-12n-megatron-128x16-2k-async.yaml
+  - generation-vllm-fp8.yaml
+
+policy:
+  model_name: ${oc.env:SCRATCH}/models/apertus2-megachonk-iter42000
+  make_sequence_length_divisible_by: 4
+  megatron_cfg:
+    tensor_model_parallel_size: 4
+    pipeline_model_parallel_size: 8
+    expert_model_parallel_size: 16
+    num_layers_in_first_pipeline_stage: 8
+    num_layers_in_last_pipeline_stage: 5
+    # The first training step compiles kernels stage by stage (about 70 s forward and 90 s backward
+    # per stage), so ranks of different stages meet in a collective more than 10 minutes apart.
+    # Both settings are needed: the first covers the groups Megatron creates, the second also the
+    # default process group, whose key-value store hands out the communicator ids.
+    distributed_timeout_minutes: 60
+    env_vars:
+      NRL_NCCL_TIMEOUT_MINUTES: "60"
+    optimizer:
+      optimizer_offload_fraction: 0.7
+    model_overrides:
+      moe_router_quantile_balancing_method: marin_histogram
+      moe_router_quantile_balancing_marin_num_bins: 10000
+  generation:
+    colocated:
+      resources:
+        num_nodes: 8
+    vllm_cfg:
+      tensor_parallel_size: 4
+      expert_parallel_size: 32
+    vllm_kwargs:
+      max_num_batched_tokens: 4096

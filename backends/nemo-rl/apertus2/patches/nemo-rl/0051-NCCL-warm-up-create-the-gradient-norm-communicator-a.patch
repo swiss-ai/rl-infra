@@ -1,0 +1,40 @@
+From 789205c621940d5c22f3a78b8a8c99e7e6764fdc Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Wed, 18 Nov 2026 19:35:28 +0900
+Subject: [PATCH 51/51] NCCL warm-up: create the gradient-norm communicator at
+ setup as well
+
+The optimizer step reduces the gradient norm over every rank of the distributed optimizer
+instance. Created lazily, that communicator is set up in the first optimizer step, which the
+last pipeline stage reaches minutes before the first stage while kernels compile stage by
+stage; its wait for the communicator id ran into the 10-minute key-value store timeout
+(Apertus 2 MegaChonk at 16K context, 8 pipeline stages). Warmed up with the other groups,
+it exists before training starts.
+---
+ nemo_rl/utils/nccl_warmup.py | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/nemo_rl/utils/nccl_warmup.py b/nemo_rl/utils/nccl_warmup.py
+index 3d54f10..5af891e 100644
+--- a/nemo_rl/utils/nccl_warmup.py
++++ b/nemo_rl/utils/nccl_warmup.py
+@@ -34,11 +34,16 @@ import torch.distributed as dist
+ # (data parallel with CP, expert data parallel) and finalize_model_grads (tensor+data
+ # parallel with CP, pipeline). Each communicator takes about 0.5 GiB of GPU memory, so
+ # groups training never touches (e.g. the without-CP twins) are left out.
++# The optimizer's gradient-norm all-reduce runs over every rank of the optimizer instance. Left
++# lazy, its communicator is set up in the first optimizer step, which the last pipeline stage
++# reaches minutes before the first one while kernels compile stage by stage; the wait for the
++# communicator id then runs into the 10-minute key-value store timeout.
+ _GROUPS = [
+     ("get_data_parallel_group", {"with_context_parallel": True}),
+     ("get_tensor_and_data_parallel_group", {"with_context_parallel": True}),
+     ("get_expert_data_parallel_group", {}),
+     ("get_pipeline_model_parallel_group", {}),
++    ("get_intra_distributed_optimizer_instance_group", {}),
+ ]
+ 
+ 
+-- 
+2.51.0
+

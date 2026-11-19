@@ -1,0 +1,43 @@
+# MegaChonk counterpart of chonk-dapo-16n-megatron-128x16-16k-async-pp2-dedup-fp8-skip-trunc0.yaml,
+# the recipe of the pretrained-Chonk AIME runs: the megachonk GSM8K recipe (128 prompts x 16,
+# 4 optimizer steps, staleness 1, log-prob pass) at 16K on DAPO-Math, validated on AIME 2024 x32,
+# with zero-advantage groups skipped and truncated answers rewarded 0. lr 2e-6 as in the best of
+# those runs (hangang-dapo-fp8-skip-trunc0-lr2e-6).
+defaults:
+  - megachonk-gsm8k-40n-megatron-128x16-2k-async-fp8.yaml
+  - grpo-skip-zero-adv-truncated-zero.yaml
+
+grpo:
+  max_num_steps: 1000000
+  max_val_samples: 960
+  val_batch_size: 960
+
+policy:
+  max_total_sequence_length: 16384
+  logprob_chunk_size: 512
+  # Megatron requires a multiple of 2 x CP x TP (sequence parallel) = 32 for packed sequences.
+  make_sequence_length_divisible_by: 32
+  generation:
+    max_new_tokens: 16384
+    vllm_cfg:
+      env_vars:
+        VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+    vllm_kwargs:
+      max_num_seqs: 256
+  sequence_packing:
+    train_mb_tokens: 16384
+    logprob_mb_tokens: 16384
+  megatron_cfg:
+    defer_fp32_logits: true
+    context_parallel_size: 4
+    optimizer:
+      lr: 2.0e-6
+
+data:
+  train:
+    dataset_name: DAPOMath17K
+    deduplicate: true
+  validation:
+    dataset_name: DAPOMathAIME2024
+  default:
+    prompt_file: null

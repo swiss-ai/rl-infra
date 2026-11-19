@@ -243,7 +243,13 @@ def main():
     Handler.max_request_bytes = args.max_request_bytes
     Handler.slots = threading.BoundedSemaphore(args.workers)
     server = Server(("0.0.0.0", 0), Handler)
-    host = socket.gethostbyname(socket.gethostname())
+    # The address clients use: that of "<node><RAY_NODE_NAME_SUFFIX>" when the site sets the suffix (HANGANG:
+    # -hsn0, Slingshot), so that the checks travel on the same network as Ray; else the node name.
+    name = socket.gethostname().split(".")[0] + os.environ.get("RAY_NODE_NAME_SUFFIX", "")
+    try:
+        host = socket.gethostbyname(name)
+    except OSError:
+        host = socket.gethostbyname(socket.gethostname())
     endpoint = {"url": f"http://{host}:{server.server_address[1]}", "token": Handler.token}
 
     # Only this user may read the token: the file is created private, then moved into place.

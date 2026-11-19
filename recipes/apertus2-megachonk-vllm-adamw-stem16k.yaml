@@ -1,0 +1,14 @@
+defaults: ../experiments/grpo-chonk/megachonk-stem-16k-megatron-512x16-async-fp8.yaml
+
+cluster:
+  num_nodes: 48
+
+checkpointing:
+  enabled: false
+  checkpoint_must_save_by: "01:23:30:00"
+
+policy:
+  generation:
+    colocated:
+      resources:
+        num_nodes: 16

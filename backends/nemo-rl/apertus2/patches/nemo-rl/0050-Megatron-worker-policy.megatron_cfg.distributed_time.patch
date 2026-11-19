@@ -1,0 +1,50 @@
+From e70ee38dafda5f9f8516b20f23ee8d1b712ece7f Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Wed, 18 Nov 2026 19:35:28 +0900
+Subject: [PATCH 50/51] Megatron worker:
+ policy.megatron_cfg.distributed_timeout_minutes sets the process-group
+ timeout
+
+The trainer compiles its kernels in the first training step, one pipeline stage after
+another (about 95 s per stage for Apertus 2 MegaChonk), so with eight stages the first stage
+waits in a collective for longer than the 10-minute default and the run dies. The key sets
+Megatron Bridge dist.distributed_timeout_minutes; omitted, nothing changes.
+---
+ nemo_rl/models/megatron/setup.py  | 4 ++++
+ nemo_rl/models/policy/__init__.py | 5 +++++
+ 2 files changed, 9 insertions(+)
+
+diff --git a/nemo_rl/models/megatron/setup.py b/nemo_rl/models/megatron/setup.py
+index 281f903..7cfefaf 100644
+--- a/nemo_rl/models/megatron/setup.py
++++ b/nemo_rl/models/megatron/setup.py
+@@ -2057,6 +2057,10 @@ def _create_megatron_config(
+         dist_cfg.use_gloo_process_groups = config["megatron_cfg"][
+             "use_gloo_process_groups"
+         ]
++    if "distributed_timeout_minutes" in config["megatron_cfg"]:
++        dist_cfg.distributed_timeout_minutes = config["megatron_cfg"][
++            "distributed_timeout_minutes"
++        ]
+ 
+     return ConfigContainer(
+         model=model_cfg,
+diff --git a/nemo_rl/models/policy/__init__.py b/nemo_rl/models/policy/__init__.py
+index 7efd0a4..3e5e1d1 100644
+--- a/nemo_rl/models/policy/__init__.py
++++ b/nemo_rl/models/policy/__init__.py
+@@ -517,6 +517,11 @@ class MegatronConfig(TypedDict):
+     # Create gloo process groups during Megatron distributed init.
+     # Omitted: use the Megatron Bridge default.
+     use_gloo_process_groups: NotRequired[bool]
++    # Timeout of the trainer's torch.distributed process groups, in minutes.
++    # Omitted: the Megatron default (10). With pipeline parallelism, the first
++    # stage waits for every later stage's first backward pass, and each stage
++    # compiles its kernels then, so many stages need more than the default.
++    distributed_timeout_minutes: NotRequired[int]
+     # Enable grouped GEMM for MoE experts via CUTLASS. Significant throughput
+     # gain when multiple experts are assigned per rank (num_local_experts > 1).
+     # Requires TE >= 1.11.0 for FP8 and Ampere (sm_80) or newer.
+-- 
+2.51.0
+

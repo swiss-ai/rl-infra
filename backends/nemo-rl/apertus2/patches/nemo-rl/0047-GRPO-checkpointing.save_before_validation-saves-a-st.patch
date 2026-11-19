@@ -1,0 +1,235 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Wed, 18 Nov 2026 21:55:51 +0900
+Subject: [PATCH 47/48] GRPO: checkpointing.save_before_validation saves a step
+ before validating it
+
+In async GRPO a step that both saves a checkpoint and validates validated first and saved after. A failure during the validation then lost every step since the previous checkpoint (64K coding run, job 1298910: the Gym servers failed in the validation of step 40 and the run resumed from step 20). With checkpointing.save_before_validation=true such a step saves first and validates after; the checkpoint then carries no validation metric, so it fits checkpoints kept by recency. Steps that save on the time limit and colocated generation keep the old order. Default off.
+---
+ nemo_rl/algorithms/grpo.py | 198 +++++++++++++++++++++++--------------
+ 1 file changed, 124 insertions(+), 74 deletions(-)
+
+diff --git a/nemo_rl/algorithms/grpo.py b/nemo_rl/algorithms/grpo.py
+index d314c7a97..2a4eb75c5 100644
+--- a/nemo_rl/algorithms/grpo.py
++++ b/nemo_rl/algorithms/grpo.py
+@@ -5898,85 +5898,120 @@ def async_grpo_train(
+                     and (step + 1) % val_period == 0
+                 ) or (val_at_end and is_last_step)
+ 
+-                payload_metrics: dict[str, int | float] = {}
+-                if should_run_validation:
+-                    # Stop new dispatch before separating the training and
+-                    # validation payload-metric intervals.
+-                    ray.get(trajectory_collector.pause.remote())
+-                    if master_config.grpo.debug_payload_metrics:
+-                        payload_metrics = merge_multimodal_payload_metrics(
+-                            [
+-                                drain_multimodal_payload_metrics(),
+-                                ray.get(
+-                                    trajectory_collector.drain_payload_metrics.remote()
+-                                ),
+-                            ]
+-                        )
++                # checkpointing.save_before_validation: a step that saves and validates saves
++                # first, so that a failure during the validation cannot lose the training of the
++                # step (the checkpoint then carries no validation metric). Steps that save on the
++                # time limit, and colocated generation, keep the old order.
++                validate_after_save = bool(
++                    master_config.checkpointing.get("save_before_validation", False)
++                    and should_run_validation
++                    and saving_this_step
++                    and not should_save_by_timeout
++                    and not colocated_inference
++                )
+ 
+-                # Run validation if it's a validation step or last step with val_at_end
+-                if should_run_validation:
+-                    # Timer only, no efficiency_span: validate() accounts this
+-                    # window as overhead (see the bucket_scope in validate), so
+-                    # an idle-bucketed span over the same interval would both
+-                    # contradict that label and, on the sync rollout path where
+-                    # the generate spans below carry it, be double-counted by a
+-                    # rollup that sums durations by rl.bucket. The metric has no
+-                    # such hierarchy and stays correct.
+-                    with timer.time("idle/validation"):
+-                        # No-op on an already-running engine;
+-                        # wakes the colocated engine when it stayed asleep for a save-bound step.
+-                        policy_generation.prepare_for_generation()
+-                        val_metrics, validation_timings = validate(
+-                            policy_generation,
+-                            val_dataloader,
+-                            tokenizer,
+-                            val_task_to_env,
+-                            step=step + 1,
+-                            master_config=master_config,
+-                            logger=logger,
+-                            processor=processor,
+-                        )
+-                        # An early stop triggers a save; must note before engine wake/resume.
+-                        early_stop_message = _validation_early_stop_message(
+-                            val_metrics,
+-                            stop_at_validation_threshold,
+-                            stop_at_validation_metric,
+-                        )
+-                        saving_this_step = will_save_checkpoint or (
+-                            master_config.checkpointing["enabled"]
+-                            and early_stop_message is not None
+-                        )
+-                        # Save-bound steps need the GPUs for checkpointing,
+-                        # so the engine must stand down; otherwise a colocated
+-                        # engine keeps serving (backend's call).
+-                        policy_generation.finish_generation(
+-                            release_gpu=saving_this_step
+-                        )
+-                        logger.log_metrics(
+-                            validation_timings, step + 1, prefix="timing/validation"
+-                        )
+-                        logger.log_metrics(val_metrics, step + 1, prefix="validation")
++                def _run_step_validation(
++                    should_run_validation, early_stop_message, saving_this_step
++                ):
++                    val_metrics, validation_timings = None, None
++                    payload_metrics: dict[str, int | float] = {}
++                    if should_run_validation:
++                        # Stop new dispatch before separating the training and
++                        # validation payload-metric intervals.
++                        ray.get(trajectory_collector.pause.remote())
+                         if master_config.grpo.debug_payload_metrics:
+-                            validation_payload_metrics = (
+-                                drain_multimodal_payload_metrics()
++                            payload_metrics = merge_multimodal_payload_metrics(
++                                [
++                                    drain_multimodal_payload_metrics(),
++                                    ray.get(
++                                        trajectory_collector.drain_payload_metrics.remote()
++                                    ),
++                                ]
+                             )
+-                            if validation_payload_metrics:
+-                                logger.log_metrics(
+-                                    validation_payload_metrics,
+-                                    step + 1,
+-                                    prefix="validation",
+-                                )
+-                        if early_stop_message is not None:
+-                            # Exit at the end of this step, after checkpointing.
+-                            print(early_stop_message, flush=True)
+ 
+-                        # Explicit GPU memory cleanup after validation in async mode
+-                        gc.collect()
+-                        torch.cuda.empty_cache()
++                    # Run validation if it's a validation step or last step with val_at_end
++                    if should_run_validation:
++                        # Timer only, no efficiency_span: validate() accounts this
++                        # window as overhead (see the bucket_scope in validate), so
++                        # an idle-bucketed span over the same interval would both
++                        # contradict that label and, on the sync rollout path where
++                        # the generate spans below carry it, be double-counted by a
++                        # rollup that sums durations by rl.bucket. The metric has no
++                        # such hierarchy and stays correct.
++                        with timer.time("idle/validation"):
++                            # No-op on an already-running engine;
++                            # wakes the colocated engine when it stayed asleep for a save-bound step.
++                            policy_generation.prepare_for_generation()
++                            val_metrics, validation_timings = validate(
++                                policy_generation,
++                                val_dataloader,
++                                tokenizer,
++                                val_task_to_env,
++                                step=step + 1,
++                                master_config=master_config,
++                                logger=logger,
++                                processor=processor,
++                            )
++                            # An early stop triggers a save; must note before engine wake/resume.
++                            early_stop_message = _validation_early_stop_message(
++                                val_metrics,
++                                stop_at_validation_threshold,
++                                stop_at_validation_metric,
++                            )
++                            saving_this_step = will_save_checkpoint or (
++                                master_config.checkpointing["enabled"]
++                                and early_stop_message is not None
++                            )
++                            # Save-bound steps need the GPUs for checkpointing,
++                            # so the engine must stand down; otherwise a colocated
++                            # engine keeps serving (backend's call).
++                            policy_generation.finish_generation(
++                                release_gpu=saving_this_step
++                            )
++                            logger.log_metrics(
++                                validation_timings, step + 1, prefix="timing/validation"
++                            )
++                            logger.log_metrics(val_metrics, step + 1, prefix="validation")
++                            if master_config.grpo.debug_payload_metrics:
++                                validation_payload_metrics = (
++                                    drain_multimodal_payload_metrics()
++                                )
++                                if validation_payload_metrics:
++                                    logger.log_metrics(
++                                        validation_payload_metrics,
++                                        step + 1,
++                                        prefix="validation",
++                                    )
++                            if early_stop_message is not None:
++                                # Exit at the end of this step, after checkpointing.
++                                print(early_stop_message, flush=True)
++
++                            # Explicit GPU memory cleanup after validation in async mode
++                            gc.collect()
++                            torch.cuda.empty_cache()
++
++                            if early_stop_message is None:
++                                # Resume trajectory collection after validation
++                                trajectory_collector.resume.remote()
++                    return (
++                        val_metrics,
++                        validation_timings,
++                        payload_metrics,
++                        early_stop_message,
++                        saving_this_step,
++                    )
+ 
+-                        if early_stop_message is None:
+-                            # Resume trajectory collection after validation
+-                            trajectory_collector.resume.remote()
++                (
++                    val_metrics,
++                    validation_timings,
++                    payload_metrics,
++                    early_stop_message,
++                    saving_this_step,
++                ) = _run_step_validation(
++                    should_run_validation and not validate_after_save,
++                    early_stop_message,
++                    saving_this_step,
++                )
+                 # Get flat advantages and token mask for masked metrics computation
+                 flat_advantages = train_data["advantages"]
+                 flat_token_mask = flat_messages["token_loss_mask"]
+@@ -6217,6 +6252,21 @@ def async_grpo_train(
+                         policy_generation.prepare_for_generation()
+                         ray.get(trajectory_collector.resume_after_refit.remote())
+ 
++                if validate_after_save:
++                    print(
++                        f"▶ Validation of step {step + 1} after its checkpoint "
++                        "(checkpointing.save_before_validation)",
++                        flush=True,
++                    )
++                    (
++                        val_metrics,
++                        validation_timings,
++                        deferred_payload_metrics,
++                        early_stop_message,
++                        _,
++                    ) = _run_step_validation(True, early_stop_message, saving_this_step)
++                    payload_metrics.update(deferred_payload_metrics)
++
+             # Logging
+             # Log training data (match sync GRPO logging payload for parity).
+             # NeMo Gym responses can be very large and expensive to log; when
+-- 
+2.51.0
+

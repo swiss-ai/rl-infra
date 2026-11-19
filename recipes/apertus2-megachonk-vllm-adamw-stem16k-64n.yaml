@@ -1,0 +1,10 @@
+defaults: apertus2-megachonk-vllm-adamw-stem16k.yaml
+
+cluster:
+  num_nodes: 64
+
+policy:
+  generation:
+    colocated:
+      resources:
+        num_nodes: 32

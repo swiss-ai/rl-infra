@@ -1,0 +1,1491 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Mon, 16 Nov 2026 09:19:02 +0900
+Subject: [PATCH] Port the KCP context-parallel path for KDA (Megatron-LM-MoE
+ PR 112) onto the NeMo-RL integration pin
+
+---
+ megatron/core/doc_aware_cp.py                 | 143 ++++++++++
+ megatron/core/doc_aware_cp_plan.py            | 209 ++++++++++++++
+ .../core/extensions/transformer_engine.py     |  49 ++++
+ megatron/core/packed_seq_params.py            |   3 +
+ megatron/core/ssm/cp_relayout.py              | 183 +++++++++++++
+ megatron/core/ssm/gated_delta_net.py          |  45 ++-
+ megatron/core/ssm/kimi_delta_attention.py     | 256 +++++++++++++-----
+ megatron/core/transformer/attention.py        |   9 +
+ .../core/transformer/transformer_block.py     |  22 +-
+ .../core/transformer/transformer_config.py    |  47 +++-
+ megatron/core/utils.py                        |  94 ++++++-
+ 11 files changed, 959 insertions(+), 101 deletions(-)
+ create mode 100644 megatron/core/doc_aware_cp.py
+ create mode 100644 megatron/core/doc_aware_cp_plan.py
+ create mode 100644 megatron/core/ssm/cp_relayout.py
+
+diff --git a/megatron/core/doc_aware_cp.py b/megatron/core/doc_aware_cp.py
+new file mode 100644
+index 000000000..53fde6ebf
+--- /dev/null
++++ b/megatron/core/doc_aware_cp.py
+@@ -0,0 +1,143 @@
++# Copyright (c) 2026, ETH Zurich / Swiss AI Initiative.
++"""Document-aware context parallelism inside a fixed CP group (``--cp-doc-aware``).
++
++Short documents stay whole on one CP rank and pay no CP communication; only long
++documents are split over the CP group. The per-sample assignment is
++``doc_aware_cp_plan.plan_doc_aware``; this module turns it into this rank's batch
++slice and the ``DocAwareLayout`` that the layers read from ``PackedSeqParams.doc_aware``:
++
++* every rank holds ``seq_len`` tokens, ``[local documents | padding | long zigzag]``,
++  so pipeline p2p shapes and the MoE dispatch are those of an ordinary CP batch;
++* ``TEDotProductAttention`` runs the local part without CP and the long part with
++  the CP group (TE's THD ring, per-document zigzag);
++* KCP (KDA) runs on the plan's virtual buffer. If no document crosses a CP slice of
++  it, KDA runs locally without the state exchange; if the layout already is the
++  virtual buffer's slicing, the relayout is skipped.
++"""
++from typing import Any, Dict, Optional
++
++import torch
++
++from megatron.core.doc_aware_cp_plan import DocAwarePlan, plan_doc_aware
++from megatron.core.packed_seq_params import PackedSeqParams
++
++
++class DocAwareLayout:
++    """One micro-batch's document-aware layout, as seen by CP rank ``cp_rank``."""
++
++    def __init__(self, plan: DocAwarePlan, cp_rank: int, device):
++        self.plan = plan
++        self.cp_rank = cp_rank
++        self.device = device
++        self.local_len = plan.local_len
++        self.seq_len = plan.seq_len
++        self.has_local = plan.local_len > 0
++        self.has_long = plan.long_len > 0
++        local_cu = torch.from_numpy(plan.local_cu[cp_rank]).to(torch.int32)
++        self.local_params = _thd_params(local_cu.to(device), plan.local_max[cp_rank])
++        long_cu = torch.from_numpy(plan.long_cu).to(torch.int32)
++        self.long_params = _thd_params(long_cu.to(device), plan.long_max)
++        self.virtual_cu_cpu = torch.from_numpy(plan.virtual_cu)
++        self.virtual_cu = self.virtual_cu_cpu.to(device)
++        # Filled lazily by the first KDA layer of the micro-batch, shared by the others.
++        self.kcp_state = None
++
++    def kcp(self, group, sp_size: int, cp_group, conv1d_kernel_size: int):
++        """(relayout plan, FLA cp_context or None, local cu_seqlens or None) for KCP.
++
++        ``cp_context`` is None when no document crosses a CP slice of the virtual
++        buffer: every rank then runs KDA on its own slice with ``local_cu``.
++        """
++        if self.kcp_state is None:
++            from megatron.core.ssm.cp_relayout import build_layout_relayout_plan
++
++            plan = self.plan
++            relayout_plan = build_layout_relayout_plan(
++                plan.virtual_pos, plan.seq_len, sp_size, group, self.device, moves=plan.moves
++            )
++            if plan.spans:
++                from fla.ops.cp import build_cp_context
++
++                cp_context = build_cp_context(
++                    self.virtual_cu,
++                    group=cp_group,
++                    conv1d_kernel_size=conv1d_kernel_size,
++                    cu_seqlens_cpu=self.virtual_cu_cpu,
++                )
++                local = None
++            else:
++                start, stop = self.cp_rank * plan.seq_len, (self.cp_rank + 1) * plan.seq_len
++                cu = self.virtual_cu_cpu
++                cu = cu[(cu >= start) & (cu <= stop)] - start
++                cp_context, local = None, (cu.to(self.device), cu)
++            self.kcp_state = (relayout_plan, cp_context, local)
++        return self.kcp_state
++
++
++def _thd_params(cu_seqlens, max_seqlen):
++    return PackedSeqParams(
++        qkv_format="thd",
++        cu_seqlens_q=cu_seqlens,
++        cu_seqlens_kv=cu_seqlens,
++        cu_seqlens_q_padded=cu_seqlens,
++        cu_seqlens_kv_padded=cu_seqlens,
++        max_seqlen_q=int(max_seqlen),
++        max_seqlen_kv=int(max_seqlen),
++    )
++
++
++def get_doc_aware_batch_on_this_cp_rank(
++    batch: Dict[str, Any],
++    cu_seqlens: torch.Tensor,
++    cp_size: int,
++    cp_rank: int,
++    sp_size: int = 1,
++    local_multiple: int = 1,
++    max_local_len: Optional[int] = None,
++    max_padding: float = 0.01,
++):
++    """This CP rank's slice of a packed sample under the document-aware plan.
++
++    Every key of ``batch`` with a sequence dimension (dim 1, batch 1) is gathered into
++    the rank's layout; padding positions get zeros (``loss_mask`` 0) and are flagged in
++    ``padding_mask`` so MoE routing ignores them. Middle pipeline stages may hold no
++    token tensors: the plan only needs ``cu_seqlens``.
++
++    Returns the batch and the ``PackedSeqParams`` carrying the ``DocAwareLayout``.
++    """
++    cu_cpu = cu_seqlens.detach().to("cpu", torch.int64)
++    plan = plan_doc_aware(
++        cu_cpu.numpy(),
++        cp_size,
++        sp=sp_size,
++        local_multiple=local_multiple,
++        max_local_len=max_local_len,
++        max_padding=max_padding,
++    )
++    device = cu_seqlens.device
++    layout = DocAwareLayout(plan, cp_rank, device)
++    sources = torch.from_numpy(plan.sources[cp_rank]).to(device)
++    is_pad = sources < 0
++    gather = sources.clamp(min=0)
++
++    padding_mask = is_pad.unsqueeze(0)
++    if batch.get('padding_mask') is not None:
++        padding_mask = padding_mask | batch['padding_mask'].index_select(1, gather)
++    for key, data in batch.items():
++        if key in ('attention_mask', 'padding_mask') or data is None:
++            continue
++        data = data.index_select(1, gather)
++        batch[key] = data.masked_fill(is_pad.unsqueeze(0), 0)
++    batch['padding_mask'] = padding_mask
++
++    packed_seq_params = PackedSeqParams(
++        qkv_format="thd",
++        cu_seqlens_q=layout.virtual_cu,
++        cu_seqlens_kv=layout.virtual_cu,
++        cu_seqlens_q_padded=layout.virtual_cu,
++        cu_seqlens_kv_padded=layout.virtual_cu,
++        max_seqlen_q=max(plan.long_max, max(plan.local_max)),
++        max_seqlen_kv=max(plan.long_max, max(plan.local_max)),
++        doc_aware=layout,
++    )
++    return batch, packed_seq_params
+diff --git a/megatron/core/doc_aware_cp_plan.py b/megatron/core/doc_aware_cp_plan.py
+new file mode 100644
+index 000000000..a8097fc3e
+--- /dev/null
++++ b/megatron/core/doc_aware_cp_plan.py
+@@ -0,0 +1,209 @@
++# Copyright (c) 2026, ETH Zurich / Swiss AI Initiative.
++"""Document-aware context parallelism inside a fixed CP group: the per-sample plan.
++
++TE's THD context parallelism splits every document of a packed sample into ``2 * cp``
++zigzag chunks, so even a 500-token document pays the ring attention and, for KDA, the
++relayout and the state exchange. This plan keeps short documents whole on one CP rank
++and only splits the long ones:
++
++* every CP rank holds ``seq_len`` tokens: its *local* documents (whole, no CP
++  communication), padding up to ``local_len``, then its zigzag share of the *long*
++  documents (each padded to a multiple of ``2 * cp * sp``, exactly as today);
++* softmax attention runs once without CP on the local part and once with the CP group
++  on the long part;
++* KDA (KCP) runs on a *virtual* packed buffer ``[rank 0 local][rank 1 local]...[long
++  documents]`` cut into equal contiguous slices. A sample without long documents is
++  then already in that layout (no relayout) and no document crosses a slice boundary
++  (no state exchange).
++
++Local documents are assigned greedily (largest first, to the least-loaded rank). If the
++padding needed to equalise the ranks exceeds ``max_padding`` of the sample, the largest
++local document is demoted to the long set and the assignment is redone; in the limit
++every document is long, which is the per-document zigzag layout of plain THD CP.
++
++This module only uses numpy so the plan can be tested without torch.
++"""
++import heapq
++from dataclasses import dataclass
++from typing import List, Optional
++
++import numpy as np
++
++
++@dataclass
++class DocAwarePlan:
++    cp: int
++    sp: int
++    sample_len: int  # tokens of the original sample
++    local_len: int  # tokens of local documents + local padding on every rank
++    long_len: int  # tokens of long documents (incl. their padding) on every rank
++    seq_len: int  # local_len + long_len: tokens per CP rank
++    sources: np.ndarray  # [cp, seq_len] index into the sample, -1 = padding token
++    local_cu: List[np.ndarray]  # per rank: cu_seqlens of [0, local_len) (padding is a segment)
++    local_max: List[int]
++    long_cu: np.ndarray  # padded cu_seqlens of the long documents (global, TE THD CP)
++    long_max: int
++    virtual_cu: np.ndarray  # cu_seqlens of the virtual KCP buffer (cp * seq_len tokens)
++    virtual_pos: np.ndarray  # [cp, seq_len] position of each held token in the virtual buffer
++    spans: bool  # a virtual segment crosses a CP slice boundary (KCP must exchange states)
++    moves: bool  # the KCP relayout is not the identity
++    num_local_docs: int
++    num_long_docs: int
++
++
++def zigzag_positions(cu, cp, rank):
++    """Positions held by ``rank`` under TE's per-document zigzag (each length % 2cp == 0)."""
++    cu = np.asarray(cu, dtype=np.int64)
++    starts = cu[:-1]
++    width = (cu[1:] - starts) // (2 * cp)
++    if width.size == 0:
++        return np.zeros(0, dtype=np.int64)
++    chunk_starts = np.stack(
++        (starts + rank * width, starts + (2 * cp - 1 - rank) * width), axis=1
++    ).reshape(-1)
++    widths = np.repeat(width, 2)
++    offsets = np.cumsum(widths) - widths
++    return np.arange(int(widths.sum()), dtype=np.int64) + np.repeat(chunk_starts - offsets, widths)
++
++
++def _round_up(x, m):
++    return -(-x // m) * m
++
++
++def _assign(lengths, local_ids, cp):
++    """Largest-first greedy assignment of local documents to the least-loaded rank."""
++    heap = [(0, r) for r in range(cp)]
++    bins = [[] for _ in range(cp)]
++    for i in sorted(local_ids, key=lambda i: (-lengths[i], i)):
++        load, r = heapq.heappop(heap)
++        bins[r].append(i)
++        heapq.heappush(heap, (load + int(lengths[i]), r))
++    loads = np.zeros(cp, dtype=np.int64)
++    for load, r in heap:
++        loads[r] = load
++    return [sorted(b) for b in bins], loads
++
++
++def plan_doc_aware(
++    cu_seqlens,
++    cp: int,
++    sp: int = 1,
++    local_multiple: int = 1,
++    max_local_len: Optional[int] = None,
++    max_padding: float = 0.01,
++) -> DocAwarePlan:
++    """Plan one packed sample (``cu_seqlens`` over ``[0, sample_len)``) for ``cp`` ranks.
++
++    Args:
++        cu_seqlens: document boundaries of the sample, starting at 0.
++        cp: context-parallel size.
++        sp: sequence-parallel (TP) size; per-rank lengths stay divisible by it.
++        local_multiple: every rank's token count is also a multiple of this (FP8: 16).
++        max_local_len: documents longer than this are always split (default: sample/cp).
++        max_padding: largest acceptable padding, as a fraction of the sample, before the
++            largest local document is demoted to the long set.
++    """
++    cu = np.asarray(cu_seqlens, dtype=np.int64).reshape(-1)
++    lengths = cu[1:] - cu[:-1]
++    keep = lengths > 0
++    starts, lengths = cu[:-1][keep], lengths[keep]
++    sample_len = int(cu[-1])
++    n = len(lengths)
++    align = 2 * cp * sp
++    quantum = sp * local_multiple
++    if max_local_len is None:
++        max_local_len = sample_len // cp
++    # Local candidates, largest first: a trial demotes the k largest to the long set.
++    candidates = sorted(
++        (i for i in range(n) if lengths[i] <= max_local_len), key=lambda i: (-lengths[i], i)
++    )
++    budget = max_padding * sample_len
++
++    def trial(k):
++        local_ids = candidates[k:]
++        local_set = set(local_ids)
++        long_ids = [i for i in range(n) if i not in local_set]
++        long_padded = np.array(
++            [_round_up(int(lengths[i]), align) for i in long_ids], dtype=np.int64
++        )
++        long_len = int(long_padded.sum()) // cp
++        bins, loads = _assign(lengths, local_ids, cp)
++        seq_len = _round_up(int(loads.max()) + long_len, quantum)
++        ok = cp * seq_len - sample_len <= budget or not local_ids
++        return ok, (local_ids, long_ids, long_padded, long_len, bins, seq_len)
++
++    # Smallest k (approximately: the padding is not monotonic in k) that fits the budget:
++    # exponential search, then bisection.
++    ok, result = trial(0)
++    if not ok:
++        lo, hi = 0, 1
++        while True:
++            hi = min(hi, len(candidates))
++            ok, result = trial(hi)
++            if ok:
++                break
++            lo, hi = hi, 2 * hi
++        while hi - lo > 1:
++            mid = (lo + hi) // 2
++            ok_mid, result_mid = trial(mid)
++            if ok_mid:
++                hi, result = mid, result_mid
++            else:
++                lo = mid
++    local_ids, long_ids, long_padded, long_len, bins, seq_len = result
++
++    local_len = seq_len - long_len
++    long_cu = np.concatenate(([0], np.cumsum(long_padded))).astype(np.int64)
++    long_starts = long_cu[:-1]
++    # Source index of every token of the padded long buffer (-1 = its padding tail).
++    long_src = np.full(int(long_cu[-1]), -1, dtype=np.int64)
++    for j, i in enumerate(long_ids):
++        long_src[long_starts[j] : long_starts[j] + lengths[i]] = np.arange(
++            starts[i], starts[i] + lengths[i]
++        )
++
++    sources = np.full((cp, seq_len), -1, dtype=np.int64)
++    virtual_pos = np.empty((cp, seq_len), dtype=np.int64)
++    local_cu, local_max, virtual_segments = [], [], []
++    for r in range(cp):
++        seg, pos = [0], 0
++        for i in bins[r]:
++            sources[r, pos : pos + lengths[i]] = np.arange(starts[i], starts[i] + lengths[i])
++            pos += int(lengths[i])
++            seg.append(pos)
++        if pos < local_len:
++            seg.append(local_len)  # the padding is its own segment
++        seg = np.asarray(seg, dtype=np.int64)
++        local_cu.append(seg)
++        local_max.append(int((seg[1:] - seg[:-1]).max()) if len(seg) > 1 else 0)
++        virtual_segments.append(seg[1:] + r * local_len)
++        zz = zigzag_positions(long_cu, cp, r)
++        sources[r, local_len:] = long_src[zz]
++        virtual_pos[r, :local_len] = r * local_len + np.arange(local_len)
++        virtual_pos[r, local_len:] = cp * local_len + zz
++    virtual_cu = np.concatenate([[0]] + virtual_segments + [cp * local_len + long_cu[1:]])
++    virtual_cu = np.unique(virtual_cu)  # drops the empty segments of zero-length local parts
++    # A segment crosses a slice boundary if a boundary lies strictly inside it.
++    boundaries = np.arange(1, cp) * seq_len
++    inside = np.searchsorted(virtual_cu, boundaries, side="left")
++    spans = bool(np.any(virtual_cu[np.minimum(inside, len(virtual_cu) - 1)] != boundaries))
++    moves = bool(np.any(virtual_pos != np.arange(cp * seq_len).reshape(cp, seq_len)))
++    return DocAwarePlan(
++        cp=cp,
++        sp=sp,
++        sample_len=sample_len,
++        local_len=local_len,
++        long_len=long_len,
++        seq_len=seq_len,
++        sources=sources,
++        local_cu=local_cu,
++        local_max=local_max,
++        long_cu=long_cu,
++        long_max=int(long_padded.max()) if len(long_padded) else 0,
++        virtual_cu=virtual_cu,
++        virtual_pos=virtual_pos,
++        spans=spans,
++        moves=moves,
++        num_local_docs=len(local_ids),
++        num_long_docs=len(long_ids),
++    )
+diff --git a/megatron/core/extensions/transformer_engine.py b/megatron/core/extensions/transformer_engine.py
+index a83343860..24b4b1520 100644
+--- a/megatron/core/extensions/transformer_engine.py
++++ b/megatron/core/extensions/transformer_engine.py
+@@ -1519,6 +1519,7 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
+         # total_tokens and seq_idx are only for Mamba and should not be forwarded to TE attention.
+         self.kept_packed_seq_params.discard("total_tokens")
+         self.kept_packed_seq_params.discard("seq_idx")
++        self.kept_packed_seq_params.discard("doc_aware")
+ 
+         if config.qk_clip or config.log_max_attention_logit:
+             # qk-clip is only supported in TE 2.9.0 and later
+@@ -1557,6 +1558,11 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
+         num_splits: Optional[int] = None,
+     ) -> torch.Tensor:
+         """Forward."""
++        if packed_seq_params is not None and packed_seq_params.doc_aware is not None:
++            return self._doc_aware_forward(
++                query, key, value, attention_mask, attn_mask_type, attention_bias,
++                packed_seq_params.doc_aware, num_splits,
++            )
+         if packed_seq_params is not None:
+             # If Dynamic CP group is provided, update TE DPA CP group
+             if packed_seq_params.cp_group is not None:
+@@ -1648,6 +1654,49 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
+ 
+         return core_attn_out
+ 
++    def _doc_aware_forward(
++        self, query, key, value, attention_mask, attn_mask_type, attention_bias, layout, num_splits
++    ):
++        """Document-aware CP (megatron.core.doc_aware_cp): the rank's first ``local_len``
++        tokens are whole documents and attend without CP; the rest is the rank's zigzag
++        share of the long documents and goes through the CP group as usual."""
++        assert query.dim() == 3, "document-aware CP expects THD query/key/value [t, h, d]"
++        assert not (self.config.qk_clip or self.config.log_max_attention_logit), (
++            "document-aware CP does not support qk-clip / max-logit logging"
++        )
++        n = layout.local_len
++        both = layout.has_local and layout.has_long
++
++        def part(x, start, stop):
++            # TE accepts separate q/k/v buffers only at storage offset 0, so the second
++            # part of a mixed micro-batch is copied (one copy of its q, k, v per layer).
++            x = x[start:stop]
++            return x.clone() if both and x.storage_offset() != 0 else x
++
++        outputs = []
++        if layout.has_local:
++            cp = (self.cp_group, self.cp_global_ranks, self.cp_stream, self.cp_comm_type)
++            super().set_context_parallel_group(None, None, None, self.cp_comm_type)
++            try:
++                outputs.append(
++                    self.forward(
++                        part(query, 0, n), part(key, 0, n), part(value, 0, n),
++                        attention_mask, attn_mask_type, attention_bias,
++                        layout.local_params, num_splits,
++                    )
++                )
++            finally:
++                super().set_context_parallel_group(*cp)
++        if layout.has_long:
++            outputs.append(
++                self.forward(
++                    part(query, n, None), part(key, n, None), part(value, n, None),
++                    attention_mask, attn_mask_type, attention_bias,
++                    layout.long_params, num_splits,
++                )
++            )
++        return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=0)
++
+     def sharded_state_dict(
+         self,
+         prefix: str = '',
+diff --git a/megatron/core/packed_seq_params.py b/megatron/core/packed_seq_params.py
+index 322f12a41..8f6cedf12 100644
+--- a/megatron/core/packed_seq_params.py
++++ b/megatron/core/packed_seq_params.py
+@@ -1,5 +1,6 @@
+ # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+ from dataclasses import dataclass
++from typing import Any
+ 
+ import torch
+ import torch.distributed as dist
+@@ -24,6 +25,8 @@ class PackedSeqParams:
+     cp_group: dist.ProcessGroup = None
+     total_tokens: int = None
+     seq_idx: Tensor = None
++    # Document-aware CP layout of this micro-batch (megatron.core.doc_aware_cp), or None.
++    doc_aware: Any = None
+ 
+     def __post_init__(self):
+         """Pre-compute seq_idx for Mamba mixer CUDA graph compatibility.
+diff --git a/megatron/core/ssm/cp_relayout.py b/megatron/core/ssm/cp_relayout.py
+new file mode 100644
+index 000000000..40fa36857
+--- /dev/null
++++ b/megatron/core/ssm/cp_relayout.py
+@@ -0,0 +1,183 @@
++# Copyright (c) 2026, ETH Zurich / Swiss AI Initiative.
++"""Move context-parallel token shards between the attention layout and contiguous slices.
++
++Softmax attention keeps every document split into ``2 * cp`` zigzag chunks for load
++balance, and sequence parallelism then takes a contiguous slice of that. FLA's
++context-parallel delta-rule kernels instead want each rank to hold one contiguous
++slice of the packed sequence. A plan describes the permutation once per batch and a
++single all-to-all applies it in either direction.
++"""
++from dataclasses import dataclass
++
++import torch
++
++
++def zigzag_indices(cu_seqlens, cp_size, cp_rank):
++    """Global token ids held by ``cp_rank`` after TE's per-document zigzag partition."""
++    starts = cu_seqlens[:-1]
++    width = (cu_seqlens[1:] - starts) // (2 * cp_size)
++    chunk_starts = torch.stack(
++        (starts + cp_rank * width, starts + (2 * cp_size - 1 - cp_rank) * width), dim=1
++    ).flatten()
++    widths = width.repeat_interleave(2)
++    offsets = widths.cumsum(0) - widths
++    return torch.arange(int(widths.sum())) + (chunk_starts - offsets).repeat_interleave(widths)
++
++
++def _layout_indices(cu_seqlens, cp_size, sp_size, batch, rank):
++    """Global token ids of rank ``rank``'s ``[seq, batch]`` hidden states, flattened."""
++    cp_rank, sp_rank = divmod(rank, sp_size)
++    ids = zigzag_indices(cu_seqlens, cp_size, cp_rank).view(batch, sp_size, -1)
++    return ids[:, sp_rank].t().flatten()
++
++
++@dataclass
++class RelayoutPlan:
++    group: torch.distributed.ProcessGroup
++    send_order: torch.Tensor
++    receive_order: torch.Tensor
++    send_back: torch.Tensor
++    receive_back: torch.Tensor
++    input_splits: list
++    output_splits: list
++    # Every rank already holds its contiguous slice in order: relayouts are no-ops.
++    identity: bool = False
++
++
++def build_relayout_plan(cu_seqlens_cpu, cp_size, sp_size, batch, group, device):
++    """Plan the all-to-all for ``group.rank()``; ranks are ordered ``cp_rank * sp_size + sp_rank``."""
++    world = cp_size * sp_size
++    slice_len = int(cu_seqlens_cpu[-1]) // world
++    layouts = [_layout_indices(cu_seqlens_cpu, cp_size, sp_size, batch, r) for r in range(world)]
++    return _plan_from_layouts(layouts, slice_len, group, device)
++
++
++def build_layout_relayout_plan(virtual_pos, seq_len, sp_size, group, device, moves=True):
++    """Plan for an arbitrary layout: ``virtual_pos[cp_rank]`` gives, for each of the CP rank's
++    ``seq_len`` tokens in order, its position in the contiguous (KCP) buffer. Sequence
++    parallelism splits each CP rank's tokens into ``sp_size`` contiguous pieces."""
++    if not moves:
++        return RelayoutPlan(group, None, None, None, None, None, None, identity=True)
++    slice_len = seq_len // sp_size
++    pos = torch.as_tensor(virtual_pos).reshape(-1, sp_size, slice_len)
++    layouts = [pos[r // sp_size, r % sp_size] for r in range(pos.shape[0] * sp_size)]
++    return _plan_from_layouts(layouts, slice_len, group, device)
++
++
++def _plan_from_layouts(layouts, slice_len, group, device):
++    """``layouts[r]``: destination-buffer positions of rank r's tokens, in its local order."""
++    world = len(layouts)
++    rank = group.rank()
++    destinations = layouts[rank] // slice_len
++    send_order = torch.argsort(destinations, stable=True)
++    received = [ids[ids // slice_len == rank] for ids in layouts]
++    receive_order = torch.argsort(torch.cat(received))
++    return RelayoutPlan(
++        group,
++        send_order.to(device),
++        receive_order.to(device),
++        torch.argsort(receive_order).to(device),
++        torch.argsort(send_order).to(device),
++        torch.bincount(destinations, minlength=world).tolist(),
++        [ids.numel() for ids in received],
++    )
++
++
++def _relayout(x, plan, inverse):
++    if plan.identity:
++        return x
++    if inverse:
++        send = x.index_select(0, plan.send_back)
++        received = torch.empty_like(send)
++        torch.distributed.all_to_all_single(
++            received, send, plan.input_splits, plan.output_splits, group=plan.group
++        )
++        return received.index_select(0, plan.receive_back)
++    send = x.index_select(0, plan.send_order)
++    received = torch.empty_like(send)
++    torch.distributed.all_to_all_single(
++        received, send, plan.output_splits, plan.input_splits, group=plan.group
++    )
++    return received.index_select(0, plan.receive_order)
++
++
++class _Relayout(torch.autograd.Function):
++    @staticmethod
++    def forward(ctx, x, plan, inverse):
++        ctx.plan, ctx.inverse = plan, inverse
++        return _relayout(x, plan, inverse)
++
++    @staticmethod
++    def backward(ctx, grad):
++        return _relayout(grad, ctx.plan, not ctx.inverse), None, None
++
++
++def relayout(x, plan, inverse=False):
++    """Contiguous slice of the attention-layout tensor ``x`` (or back, with ``inverse``)."""
++    if plan.identity:
++        return x
++    return _Relayout.apply(x, plan, inverse)
++
++
++def _kcp_attention(layer):
++    """The layer's KCP attention module when it relayouts under CP, else None."""
++    attention = getattr(layer, "self_attention", None)
++    if getattr(attention, "_kcp", False) and getattr(attention, "cp_size", 1) > 1:
++        return attention
++    return None
++
++
++class BlockLayout:
++    """Keep a block's residual stream in the contiguous layout across runs of KCP layers.
++
++    A KCP layer relayouts its input to contiguous slices and its output back, two
++    all-to-alls of the hidden states per layer. Everything between two KCP layers (norms,
++    residual adds, MLP/MoE) is token-wise and does not care which rank holds which token,
++    so the residual stream can stay contiguous for a whole run of KCP layers and be
++    restored only before a layer that needs the attention layout (softmax attention) and
++    at the end of the block. The MoE routing ``padding_mask`` moves with the tokens.
++    """
++
++    def __init__(self, layers):
++        self.modules = [_kcp_attention(layer) for layer in layers]
++        self.plan = None
++        self.shape = None
++        self.zigzag_padding_mask = None
++
++    @staticmethod
++    def applies(layers, packed_seq_params):
++        """Only packed (THD, batch 1) inputs: the plan folds the batch into the sequence."""
++        return packed_seq_params is not None and any(_kcp_attention(l) for l in layers)
++
++    def before_layer(self, index, hidden_states, packed_seq_params, padding_mask):
++        """Hidden states and routing mask in the layout layer ``index`` wants."""
++        module = self.modules[index]
++        if module is not None:
++            module.kcp_external_layout = True
++            if self.plan is None:
++                seq_len, batch, hidden = hidden_states.shape
++                self.plan, _ = module._kcp_layout(hidden_states, packed_seq_params, seq_len, batch)
++                self.shape = hidden_states.shape
++                hidden_states = relayout(hidden_states.reshape(-1, 1, hidden), self.plan)
++                self.zigzag_padding_mask = padding_mask
++                if padding_mask is not None:
++                    # [b, s] bool -> [s * b, 1, 1] so the token permutation applies.
++                    moved = _relayout(
++                        padding_mask.transpose(0, 1).reshape(-1, 1, 1).to(torch.uint8),
++                        self.plan,
++                        inverse=False,
++                    )
++                    padding_mask = moved.reshape(1, -1).bool()
++                self.contiguous_padding_mask = padding_mask
++            return hidden_states, self.contiguous_padding_mask
++        if self.plan is not None:
++            hidden_states = self.finish(hidden_states)
++        return hidden_states, padding_mask
++
++    def finish(self, hidden_states):
++        """Restore the attention layout if the stream is contiguous."""
++        if self.plan is None:
++            return hidden_states
++        hidden_states = relayout(hidden_states, self.plan, inverse=True).view(self.shape)
++        self.plan = None
++        return hidden_states
+diff --git a/megatron/core/ssm/gated_delta_net.py b/megatron/core/ssm/gated_delta_net.py
+index f381166da..16f9384df 100644
+--- a/megatron/core/ssm/gated_delta_net.py
++++ b/megatron/core/ssm/gated_delta_net.py
+@@ -123,6 +123,7 @@ class GatedDeltaNet(MegatronModule):
+     # Shared by every layer (subclasses included): one entry per cu_seqlens object.
+     _cu_seqlens_int64_cache: deque = deque(maxlen=4)
+     _seq_idx_cache: deque = deque(maxlen=4)
++    _cu_seqlens_cpu_cache: deque = deque(maxlen=4)
+ 
+     def __init__(
+         self,
+@@ -176,6 +177,8 @@ class GatedDeltaNet(MegatronModule):
+         assert pg_collection is not None, "pg_collection must be provided for GatedDeltaNet"
+         self.pg_collection = pg_collection
+         self.cp_size = self.pg_collection.cp.size()
++        # Degree by which heads are split over CP: cp_size for a2a, 1 for KCP.
++        self.cp_shard = self.cp_size
+         self.tp_size = self.pg_collection.tp.size()
+         self.sp_size = self.tp_size if config.sequence_parallel else 1
+ 
+@@ -469,6 +472,24 @@ class GatedDeltaNet(MegatronModule):
+                 "(check `df -h /dev/shm`), not a KDA kernel bug."
+             )
+ 
++    @classmethod
++    def _cu_seqlens_cpu_for(cls, cu_seqlens: Tensor) -> Tensor:
++        """Host-side copy of `cu_seqlens`, reusing the same tensor across layers.
++
++        The FLA kernels derive their chunk index from `cu_seqlens`; from a CUDA
++        tensor that costs a device sync per call (see `_segmented_arange` in
++        fla/ops/utils/index.py), which they let callers avoid by passing
++        `cu_seqlens_cpu`. One copy per microbatch is shared by every KDA layer.
++        """
++        if cu_seqlens.device.type == "cpu":
++            return cu_seqlens
++        for source, host in cls._cu_seqlens_cpu_cache:
++            if source is cu_seqlens:
++                return host
++        host = cu_seqlens.detach().to("cpu", non_blocking=False)
++        cls._cu_seqlens_cpu_cache.append((cu_seqlens, host))
++        return host
++
+     @classmethod
+     def _seq_idx_for_cu_seqlens(cls, cu_seqlens: Tensor) -> Tensor:
+         """Per-token document id the CUDA conv backend wants, shared across layers."""
+@@ -542,7 +563,7 @@ class GatedDeltaNet(MegatronModule):
+         inference_context = deprecate_inference_params(inference_context, inference_params)
+ 
+         seq_len, batch, _ = hidden_states.shape
+-        seq_len = seq_len * self.sp_size * self.cp_size
++        seq_len = seq_len * self.sp_size * self.cp_shard
+ 
+         if inference_context is not None:
+             assert (
+@@ -604,10 +625,10 @@ class GatedDeltaNet(MegatronModule):
+         qkv, gate, beta, alpha = torch.split(
+             qkvzba,
+             [
+-                (self.qk_dim_local_tp + n_hh * self.qk_dim_local_tp + n_hh * self.v_dim_local_tp) // self.cp_size,
+-                self.v_dim_local_tp // self.cp_size,
+-                n_hh * num_v_heads_tp // self.cp_size,
+-                num_v_heads_tp // self.cp_size,
++                (self.qk_dim_local_tp + n_hh * self.qk_dim_local_tp + n_hh * self.v_dim_local_tp) // self.cp_shard,
++                self.v_dim_local_tp // self.cp_shard,
++                n_hh * num_v_heads_tp // self.cp_shard,
++                num_v_heads_tp // self.cp_shard,
+             ],
+             dim=-1,
+         )
+@@ -652,7 +673,7 @@ class GatedDeltaNet(MegatronModule):
+                 stride=self.conv1d.stride,
+                 padding=self.conv1d.padding,
+                 dilation=self.conv1d.dilation,
+-                groups=self.conv_dim_local_tp // self.cp_size,
++                groups=self.conv_dim_local_tp // self.cp_shard,
+             )
+             qkv = self.act_fn(conv_out[..., :seq_len])
+             qkv = qkv.transpose(1, 2)  # b, d, s -> b, s, d
+@@ -674,13 +695,13 @@ class GatedDeltaNet(MegatronModule):
+         # K and V into the seq dim, normalize Q and K independently, and GQA-expand.
+         nvtx_range_push(suffix="prepare_qkv_for_gated_delta_rule")
+         if n_hh > 1:
+-            qk_local = self.qk_dim_local_tp // self.cp_size
+-            v_local = self.v_dim_local_tp // self.cp_size
++            qk_local = self.qk_dim_local_tp // self.cp_shard
++            v_local = self.v_dim_local_tp // self.cp_shard
+             q_part, k_part, v_part = torch.split(
+                 qkv, [qk_local, n_hh * qk_local, n_hh * v_local], dim=-1,
+             )
+-            num_qk_heads_local = self.num_key_heads // self.tp_size // self.cp_size
+-            num_v_heads_local = self.num_value_heads // self.tp_size // self.cp_size
++            num_qk_heads_local = self.num_key_heads // self.tp_size // self.cp_shard
++            num_v_heads_local = self.num_value_heads // self.tp_size // self.cp_shard
+             # Q stays per-token: [b, s, qk_local] -> [b, s, num_qk_heads_local, key_head_dim]
+             query = q_part.reshape(batch, seq_len, num_qk_heads_local, self.key_head_dim).contiguous()
+             # K_n: [b, s, n*qk_local] -> [b, s, n, num_qk_heads_local, d_k] -> [b, s*n, num_qk_heads_local, d_k]
+@@ -886,7 +907,7 @@ class GatedDeltaNet(MegatronModule):
+         # Split qkv into query_key and value
+         query_key, value = torch.split(
+             qkv,
+-            [2 * self.qk_dim_local_tp // self.cp_size, self.v_dim_local_tp // self.cp_size],
++            [2 * self.qk_dim_local_tp // self.cp_shard, self.v_dim_local_tp // self.cp_shard],
+             dim=-1,
+         )
+ 
+@@ -907,7 +928,7 @@ class GatedDeltaNet(MegatronModule):
+             value = l2norm(value.contiguous())
+ 
+         # Split query and key
+-        split_size = self.qk_dim_local_tp // self.key_head_dim // self.cp_size
++        split_size = self.qk_dim_local_tp // self.key_head_dim // self.cp_shard
+         query, key = torch.split(query_key, [split_size, split_size], dim=2)
+ 
+         # Expand query and key if needed (grouped query attention)
+diff --git a/megatron/core/ssm/kimi_delta_attention.py b/megatron/core/ssm/kimi_delta_attention.py
+index 47b3ec72b..0b51c5996 100644
+--- a/megatron/core/ssm/kimi_delta_attention.py
++++ b/megatron/core/ssm/kimi_delta_attention.py
+@@ -20,6 +20,7 @@
+ # Megatron's distributed conventions.
+ 
+ import copy
++from collections import deque
+ import inspect
+ import logging
+ import math
+@@ -64,6 +65,7 @@ from megatron.core.ssm.gated_delta_net import (
+     tensor_a2a_cp2hp,
+     tensor_a2a_hp2cp,
+ )
++from megatron.core.ssm.cp_relayout import build_relayout_plan, relayout
+ from megatron.core.utils import deprecate_inference_params, is_using_quantization_scales
+ from megatron.core import tensor_parallel
+ 
+@@ -201,6 +203,7 @@ _KDA_SUPPORTS_FUSED_BETA_SIGMOID = _chunk_kda_supports(
+     "use_beta_sigmoid_in_kernel"
+ )
+ _KDA_SUPPORTS_FUSED_ALLOW_NEG_EIGVAL = _chunk_kda_supports("allow_neg_eigval")
++_KDA_SUPPORTS_CU_SEQLENS_CPU = _chunk_kda_supports("cu_seqlens_cpu")
+ 
+ # Needs both an implementation (only builds with a fused gate name the flag) and
+ # a way in for A_log, which FLA 0.5.x takes through **kwargs -- so A_log is
+@@ -230,6 +233,15 @@ def _fused_kda_gate_supports_lower_bound() -> bool:
+ 
+ _KDA_FUSED_GATE_SUPPORTS_LOWER_BOUND = _fused_kda_gate_supports_lower_bound()
+ 
++# fla.ops.cp: token-sharded context parallelism for the delta rule (KCP).
++try:
++    from fla.ops.cp import build_cp_context
++
++    HAVE_FLA_CP = _chunk_kda_supports("cp_context")
++except ImportError:
++    build_cp_context = None
++    HAVE_FLA_CP = False
++
+ logger = logging.getLogger(__name__)
+ _KDA_LEGACY_GATE_BIAS_WARNING_EMITTED = False
+ 
+@@ -512,6 +524,16 @@ class KimiDeltaAttention(GatedDeltaNet):
+         # installed FLA cannot. No clamp and no forced un-fusing.
+         self._safe_gate = self.config.linear_attention_safe_output_gate
+         self._gate_lower_bound = self.config.linear_attention_safe_output_gate_lower_bound
++        self._kcp = self.config.linear_attention_cp_impl == 'kcp'
++        if self._kcp and not HAVE_FLA_CP:
++            raise RuntimeError(
++                "linear_attention_cp_impl='kcp' needs a flash-linear-attention with fla.ops.cp."
++            )
++        # KCP shards tokens and keeps every head local; the a2a scheme splits heads over CP.
++        self.cp_shard = 1 if self._kcp else self.cp_size
++        self._kcp_unpacked = None
++        # Set by TransformerBlock when it keeps a run of KCP layers in the contiguous layout.
++        self.kcp_external_layout = False
+         if self._safe_gate and self._use_fused_decay_gate and not _KDA_SUPPORTS_SAFE_GATE_IN_KERNEL:
+             logger.warning(
+                 "linear_attention_safe_output_gate is on but the installed "
+@@ -750,6 +772,59 @@ class KimiDeltaAttention(GatedDeltaNet):
+         g = self._activate_decay_torch(alpha, A_log_local_cp, dt_bias_local_cp)
+         return g if self._decay_dtype is None else g.to(self._decay_dtype)
+ 
++    def _local_cp(self, param, split_sections=None):
++        """This rank's head slice of a parameter under a2a CP; the whole parameter under KCP."""
++        if self._kcp:
++            return param
++        return get_parameter_local_cp(
++            param, dim=0, cp_group=self.pg_collection.cp, split_sections=split_sections
++        )
++
++    # Shared by every layer: one relayout plan and FLA CP context per cu_seqlens object.
++    _kcp_cache: deque = deque(maxlen=4)
++
++    def _kcp_layout(self, hidden_states, packed_seq_params, seq_len, batch):
++        """Relayout plan and FLA CP context for this batch, built on the host once per batch."""
++        layout = getattr(packed_seq_params, "doc_aware", None)
++        if layout is not None:
++            # Document-aware CP: the plan and context live on the micro-batch's layout.
++            cp_group, tp_group = self.pg_collection.cp, self.pg_collection.tp
++            group = self.pg_collection.tp_cp if self.sp_size > 1 else cp_group
++            assert group.rank() == cp_group.rank() * self.sp_size + (
++                tp_group.rank() if self.sp_size > 1 else 0
++            )
++            plan, cp_context, _ = layout.kcp(group, self.sp_size, cp_group, self.conv_kernel_dim)
++            return plan, cp_context
++        device = hidden_states.device
++        total = seq_len * self.sp_size * self.cp_size
++        if packed_seq_params is None:
++            key = (seq_len, batch, device)
++            if self._kcp_unpacked is not None and self._kcp_unpacked[0] == key:
++                return self._kcp_unpacked[1:]
++            cu_seqlens_cpu = torch.arange(batch + 1, dtype=torch.int64) * total
++            cu_seqlens = cu_seqlens_cpu.to(device)
++        else:
++            cu_seqlens = self._resolve_packed_cu_seqlens(packed_seq_params, total, batch)
++            for source, plan, cp_context in self._kcp_cache:
++                if source is cu_seqlens:
++                    return plan, cp_context
++            cu_seqlens_cpu = self._cu_seqlens_cpu_for(cu_seqlens)
++        cp_group, tp_group = self.pg_collection.cp, self.pg_collection.tp
++        group = self.pg_collection.tp_cp if self.sp_size > 1 else cp_group
++        assert group.rank() == cp_group.rank() * self.sp_size + (tp_group.rank() if self.sp_size > 1 else 0)
++        plan = build_relayout_plan(cu_seqlens_cpu, self.cp_size, self.sp_size, batch, group, device)
++        cp_context = build_cp_context(
++            cu_seqlens,
++            group=cp_group,
++            conv1d_kernel_size=self.conv_kernel_dim,
++            cu_seqlens_cpu=cu_seqlens_cpu,
++        )
++        if packed_seq_params is None:
++            self._kcp_unpacked = (key, plan, cp_context)
++        else:
++            self._kcp_cache.append((cu_seqlens, plan, cp_context))
++        return plan, cp_context
++
+     @jit_fuser
+     def _activate_decay_torch(self, alpha, A_log_local_cp, dt_bias_local_cp):
+         """Torch fallback for `_activate_decay`; `alpha` already [b, s, h, d_k]."""
+@@ -865,6 +940,7 @@ class KimiDeltaAttention(GatedDeltaNet):
+         seq_len: int,
+         packed_seq_params=None,
+         cu_seqlens=None,
++        cp_context=None,
+     ):
+         # `qkv_fine` checkpoints the expensive post-projection path while keeping
+         # the fused input GEMM outside the checkpoint, matching the SwissAI KDA fix.
+@@ -882,11 +958,12 @@ class KimiDeltaAttention(GatedDeltaNet):
+                     seq_len=seq_len,
+                     packed_seq_params=packed_seq_params,
+                     cu_seqlens=cu_seqlens,
++                    cp_context=cp_context,
+                 ),
+                 projected,
+             )
+         return self._post_proj_to_attn_inputs(
+-            projected, batch, seq_len, packed_seq_params, cu_seqlens
++            projected, batch, seq_len, packed_seq_params, cu_seqlens, cp_context
+         )
+ 
+     def _post_proj_to_attn_inputs(
+@@ -896,6 +973,7 @@ class KimiDeltaAttention(GatedDeltaNet):
+         seq_len: int,
+         packed_seq_params=None,
+         cu_seqlens=None,
++        cp_context=None,
+     ):
+         """In_proj output -> chunk_kda inputs; the region `qkv_fine` recomputes."""
+         qkv_channels_split_sections = [
+@@ -912,36 +990,38 @@ class KimiDeltaAttention(GatedDeltaNet):
+ 
+         # Keep the logical outputs separate through CP. The CP helper already
+         # communicates split sections independently, so packing qkv/gate/beta/
+-        # alpha into a temporary qkvzba tensor only adds a full-size copy.
+-        qkv = tensor_a2a_cp2hp(
+-            qkv,
+-            seq_dim=0,
+-            head_dim=-1,
+-            cp_group=self.pg_collection.cp,
+-            split_sections=qkv_channels_split_sections,
+-            packed_seq_params=packed_seq_params,
+-        )
+-        gate = tensor_a2a_cp2hp(
+-            gate,
+-            seq_dim=0,
+-            head_dim=-1,
+-            cp_group=self.pg_collection.cp,
+-            packed_seq_params=packed_seq_params,
+-        )
+-        beta = tensor_a2a_cp2hp(
+-            beta,
+-            seq_dim=0,
+-            head_dim=-1,
+-            cp_group=self.pg_collection.cp,
+-            packed_seq_params=packed_seq_params,
+-        )
+-        alpha = tensor_a2a_cp2hp(
+-            alpha,
+-            seq_dim=0,
+-            head_dim=-1,
+-            cp_group=self.pg_collection.cp,
+-            packed_seq_params=packed_seq_params,
+-        )
++        # alpha into a temporary qkvzba tensor only adds a full-size copy. KCP
++        # already holds a contiguous token slice with every head, so it skips this.
++        if not self._kcp:
++            qkv = tensor_a2a_cp2hp(
++                qkv,
++                seq_dim=0,
++                head_dim=-1,
++                cp_group=self.pg_collection.cp,
++                split_sections=qkv_channels_split_sections,
++                packed_seq_params=packed_seq_params,
++            )
++            gate = tensor_a2a_cp2hp(
++                gate,
++                seq_dim=0,
++                head_dim=-1,
++                cp_group=self.pg_collection.cp,
++                packed_seq_params=packed_seq_params,
++            )
++            beta = tensor_a2a_cp2hp(
++                beta,
++                seq_dim=0,
++                head_dim=-1,
++                cp_group=self.pg_collection.cp,
++                packed_seq_params=packed_seq_params,
++            )
++            alpha = tensor_a2a_cp2hp(
++                alpha,
++                seq_dim=0,
++                head_dim=-1,
++                cp_group=self.pg_collection.cp,
++                packed_seq_params=packed_seq_params,
++            )
+ 
+         # Transpose separately: s b x --> b s x.
+         qkv = qkv.transpose(0, 1)
+@@ -954,23 +1034,25 @@ class KimiDeltaAttention(GatedDeltaNet):
+         # Convolution on qkv (Q, K, V all per-token for KDA — no DeltaProduct).
+         nvtx_range_push(suffix="conv1d")
+         seq_len = qkv.shape[1]
+-        conv1d_weight = get_parameter_local_cp(
+-            self.conv1d.weight, dim=0, cp_group=self.pg_collection.cp,
+-            split_sections=qkv_channels_split_sections,
+-        )
++        conv1d_weight = self._local_cp(self.conv1d.weight, qkv_channels_split_sections)
+         conv1d_bias = (
+-            get_parameter_local_cp(
+-                self.conv1d.bias, dim=0, cp_group=self.pg_collection.cp,
+-                split_sections=qkv_channels_split_sections,
+-            ) if self.conv_bias else None
++            self._local_cp(self.conv1d.bias, qkv_channels_split_sections)
++            if self.conv_bias else None
+         )
+-        if self.config.deterministic_mode:
++        if cp_context is not None:
++            # FLA exchanges the (kernel - 1)-token halo across the CP boundary and
++            # takes the local cu_seqlens from the context.
++            qkv, _ = causal_conv1d(
++                x=qkv, weight=conv1d_weight.squeeze(1), bias=conv1d_bias,
++                activation=self.activation, cp_context=cp_context,
++            )
++        elif self.config.deterministic_mode:
+             qkv = qkv.transpose(1, 2).contiguous()
+             conv_out = F.conv1d(
+                 input=qkv, weight=conv1d_weight, bias=conv1d_bias,
+                 stride=self.conv1d.stride, padding=self.conv1d.padding,
+                 dilation=self.conv1d.dilation,
+-                groups=self.conv_dim_local_tp // self.cp_size,
++                groups=self.conv_dim_local_tp // self.cp_shard,
+             )
+             qkv = self.act_fn(conv_out[..., :seq_len])
+             qkv = qkv.transpose(1, 2)
+@@ -1043,19 +1125,49 @@ class KimiDeltaAttention(GatedDeltaNet):
+ 
+         inference_context = deprecate_inference_params(inference_context, inference_params)
+ 
+-        seq_len, batch, _ = hidden_states.shape
+-        seq_len = seq_len * self.sp_size * self.cp_size
+-
+         if inference_context is not None:
+             if not self.training and inference_context.is_dynamic_batching():
+                 return self._dynamic_inference(hidden_states, inference_context)
+             raise NotImplementedError("KDA inference is supported only by the dynamic engine.")
+         assert self.n_hh == 1, "KDA does not have a DeltaProduct (n_householder>1) variant."
+ 
+-        # Cross-document masking. The conv and chunk_kda both run on the full
+-        # sequence (SP undone by in_proj's all-gather, CP by the cp2hp all-to-all),
+-        # so the dataloader's global cu_seqlens is what both kernels want.
+-        cu_seqlens = self._resolve_packed_cu_seqlens(packed_seq_params, seq_len, batch)
++        input_shape = hidden_states.shape
++        seq_len, batch, _ = input_shape
++        plan = cp_context = None
++        doc_aware = getattr(packed_seq_params, "doc_aware", None)
++        if doc_aware is not None and not (self._kcp and self.cp_size > 1):
++            raise NotImplementedError(
++                "Document-aware CP needs linear_attention_cp_impl='kcp' for KDA layers."
++            )
++        if self._kcp and self.cp_size > 1:
++            if self.initial_state_param is not None or self._carry_enabled:
++                raise NotImplementedError("KCP does not support a recurrent initial state.")
++            # Every rank takes one contiguous slice of the packed sequence, batch folded
++            # in; the kernels then run on the local slice and FLA merges the per-rank
++            # recurrent states.
++            plan, cp_context = self._kcp_layout(hidden_states, packed_seq_params, seq_len, batch)
++            external_layout, self.kcp_external_layout = self.kcp_external_layout, False
++            if external_layout:
++                # The transformer block already holds the residual stream in the contiguous
++                # layout (cp_relayout.BlockLayout), so this layer neither relayouts nor restores.
++                plan = None
++            else:
++                hidden_states = relayout(hidden_states.reshape(-1, 1, input_shape[-1]), plan)
++            seq_len, batch = hidden_states.shape[:2]
++            if cp_context is not None:
++                cu_seqlens = cp_context.cu_seqlens
++            else:
++                # Document-aware CP and no document crosses a CP slice: every rank runs
++                # KDA on its own slice, without the state exchange.
++                cu_seqlens, cu_seqlens_cpu = doc_aware.kcp_state[2]
++                if not any(src is cu_seqlens for src, _ in self._cu_seqlens_cpu_cache):
++                    self._cu_seqlens_cpu_cache.append((cu_seqlens, cu_seqlens_cpu))
++        seq_len = seq_len * self.sp_size * self.cp_shard
++        if cp_context is None and doc_aware is None:
++            # Cross-document masking. The conv and chunk_kda both run on the full
++            # sequence (SP undone by in_proj's all-gather, CP by the cp2hp all-to-all),
++            # so the dataloader's global cu_seqlens is what both kernels want.
++            cu_seqlens = self._resolve_packed_cu_seqlens(packed_seq_params, seq_len, batch)
+         if cu_seqlens is not None:
+             if self.config.deterministic_mode:
+                 raise NotImplementedError(
+@@ -1086,27 +1198,24 @@ class KimiDeltaAttention(GatedDeltaNet):
+                     seq_len=seq_len,
+                     packed_seq_params=packed_seq_params,
+                     cu_seqlens=cu_seqlens,
++                    cp_context=cp_context,
+                 ),
+                 hidden_states,
+             )
+         else:
+             query, key, value, gate, beta, alpha = self._in_proj_to_attn_inputs(
+-                hidden_states, batch, seq_len, packed_seq_params, cu_seqlens
++                hidden_states, batch, seq_len, packed_seq_params, cu_seqlens, cp_context
+             )
+ 
+         # FLA computes the vector decay from raw alpha, A_log, and dt_bias inside
+         # chunk_kda. Newer FLA versions can also fuse beta.float().sigmoid().
+         nvtx_range_push(suffix="g_and_beta")
+-        A_log_local_cp = get_parameter_local_cp(
+-            self.A_log, dim=0, cp_group=self.pg_collection.cp
+-        )
++        A_log_local_cp = self._local_cp(self.A_log)
+         # Stored flat but CP-sharded per head: view as [h, d_k] to slice, then
+         # flatten straight back -- every consumer wants it flat, and 0.4's
+         # autograd Function rejects a [h, d_k] grad.
+-        dt_bias_local_cp = get_parameter_local_cp(
+-            self.dt_bias.view(self.num_v_heads_local_tp, self.key_head_dim),
+-            dim=0,
+-            cp_group=self.pg_collection.cp,
++        dt_bias_local_cp = self._local_cp(
++            self.dt_bias.view(self.num_v_heads_local_tp, self.key_head_dim)
+         ).reshape(-1)
+         nvtx_range_pop(suffix="g_and_beta")
+ 
+@@ -1130,7 +1239,7 @@ class KimiDeltaAttention(GatedDeltaNet):
+             initial_state = None
+ 
+         log_state_stats = os.environ.get("APERTUS_LOG_STATE_STATS", "0") == "1"
+-        need_final_state = self._carry_enabled or log_state_stats
++        need_final_state = (self._carry_enabled or log_state_stats) and cp_context is None
+ 
+         # chunk_kda requires initial_state in float32 (asserted inside FLA).
+         initial_state_f32 = initial_state.float() if initial_state is not None else None
+@@ -1140,7 +1249,7 @@ class KimiDeltaAttention(GatedDeltaNet):
+         # state must escape, since the bookkeeping below must not run twice.
+         core_args = (query, key, value, gate, beta, alpha,
+                      A_log_local_cp, dt_bias_local_cp,
+-                     initial_state_f32, need_final_state, cu_seqlens)
++                     initial_state_f32, need_final_state, cu_seqlens, cp_context)
+         if self._recompute_core and torch.is_grad_enabled() and not need_final_state:
+             norm_out, last_recurrent_state = torch.utils.checkpoint.checkpoint(
+                 self._kda_core, *core_args, use_reentrant=False,
+@@ -1190,21 +1299,24 @@ class KimiDeltaAttention(GatedDeltaNet):
+         # Transpose back to sbhd, CP a2a HP→CP, output projection.
+         norm_out = norm_out.reshape(batch, seq_len, -1)
+         norm_out = norm_out.transpose(0, 1).contiguous()
+-        norm_out = tensor_a2a_hp2cp(
+-            norm_out,
+-            seq_dim=0,
+-            head_dim=-1,
+-            cp_group=self.pg_collection.cp,
+-            packed_seq_params=packed_seq_params,
+-        )
++        if not self._kcp:
++            norm_out = tensor_a2a_hp2cp(
++                norm_out,
++                seq_dim=0,
++                head_dim=-1,
++                cp_group=self.pg_collection.cp,
++                packed_seq_params=packed_seq_params,
++            )
+         nvtx_range_push(suffix="out_proj")
+         out, out_bias = self.out_proj(norm_out)
+         nvtx_range_pop(suffix="out_proj")
++        if plan is not None:
++            out = relayout(out, plan, inverse=True).view(input_shape)
+         return out, out_bias
+ 
+     def _kda_core(self, query, key, value, gate, beta, alpha,
+                   A_log_local_cp, dt_bias_local_cp,
+-                  initial_state_f32, need_final_state, cu_seqlens=None):
++                  initial_state_f32, need_final_state, cu_seqlens=None, cp_context=None):
+         """chunk_kda -> gated norm: the region that frees what the kernel saves.
+ 
+         Kept self-contained so it can be handed to `torch.utils.checkpoint`
+@@ -1226,8 +1338,14 @@ class KimiDeltaAttention(GatedDeltaNet):
+             initial_state=initial_state_f32,
+             output_final_state=need_final_state,
+         )
+-        if cu_seqlens is not None:
++        if cp_context is not None:
++            kda_kwargs["cp_context"] = cp_context
++        elif cu_seqlens is not None:
+             kda_kwargs["cu_seqlens"] = cu_seqlens
++            if _KDA_SUPPORTS_CU_SEQLENS_CPU and self.cp_size > 1:
++                # Lets FLA build its chunk index without a device sync (CP only, so the
++                # CP=1 path stays exactly main's).
++                kda_kwargs["cu_seqlens_cpu"] = self._cu_seqlens_cpu_for(cu_seqlens)
+ 
+         core_attn_out, last_recurrent_state = self.gated_delta_rule(
+             query, key, value, **kda_kwargs
+@@ -1514,7 +1632,7 @@ class KimiDeltaAttention(GatedDeltaNet):
+         """
+         query_key, value = torch.split(
+             qkv,
+-            [2 * self.qk_dim_local_tp // self.cp_size, self.v_dim_local_tp // self.cp_size],
++            [2 * self.qk_dim_local_tp // self.cp_shard, self.v_dim_local_tp // self.cp_shard],
+             dim=-1,
+         )
+         query_key = query_key.reshape(batch, seq_len, -1, self.key_head_dim)
+@@ -1529,7 +1647,7 @@ class KimiDeltaAttention(GatedDeltaNet):
+ 
+                 query_key = l2norm(query_key)
+ 
+-        split_size = self.qk_dim_local_tp // self.key_head_dim // self.cp_size
++        split_size = self.qk_dim_local_tp // self.key_head_dim // self.cp_shard
+         query, key = torch.split(query_key, [split_size, split_size], dim=2)
+ 
+         if self.num_value_heads // self.num_key_heads > 1:
+diff --git a/megatron/core/transformer/attention.py b/megatron/core/transformer/attention.py
+index d5af8a2f8..fc2bf879a 100644
+--- a/megatron/core/transformer/attention.py
++++ b/megatron/core/transformer/attention.py
+@@ -1075,6 +1075,15 @@ class Attention(MegatronModule, ABC):
+             rotary_pos_cos = None
+             rotary_pos_sin = None
+             rotary_pos_cos_sin = None
++        if (
++            rotary_pos_emb is not None
++            and packed_seq_params is not None
++            and packed_seq_params.doc_aware is not None
++        ):
++            raise NotImplementedError(
++                "Document-aware CP does not support RoPE yet (its local and long parts need "
++                "separate CP offsets); use NoPE (--no-rope-freq 1) or plain THD CP."
++            )
+ 
+         inference_context = deprecate_inference_params(inference_context, inference_params)
+ 
+diff --git a/megatron/core/transformer/transformer_block.py b/megatron/core/transformer/transformer_block.py
+index ec1004485..771448a49 100755
+--- a/megatron/core/transformer/transformer_block.py
++++ b/megatron/core/transformer/transformer_block.py
+@@ -19,6 +19,7 @@ from megatron.core.inference.contexts import BaseInferenceContext
+ from megatron.core.packed_seq_params import PackedSeqParams
+ from megatron.core.pipeline_parallel.utils import is_vp_first_stage, is_vp_last_stage
+ from megatron.core.process_groups_config import ProcessGroupCollection
++from megatron.core.ssm.cp_relayout import BlockLayout
+ from megatron.core.transformer.enums import InferenceCudaGraphScope, LayerType
+ from megatron.core.transformer.module import GraphableMegatronModule, MegatronModule
+ from megatron.core.transformer.spec_utils import ModuleSpec, build_module
+@@ -802,7 +803,20 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
+                     # No intermediate_hidden_states requested: just hidden_states
+                     hidden_states = checkpointed_result
+             else:
++                block_layout = None
++                if (
++                    self.config.linear_attention_cp_block_layout
++                    and inference_context is None
++                    and not extract_layer_indices
++                    and BlockLayout.applies(self.layers, packed_seq_params)
++                ):
++                    block_layout = BlockLayout(self.layers)
+                 for l_no, layer in enumerate(self.layers):
++                    layer_padding_mask = padding_mask
++                    if block_layout is not None:
++                        hidden_states, layer_padding_mask = block_layout.before_layer(
++                            l_no, hidden_states, packed_seq_params, padding_mask
++                        )
+                     # Get appropriate inner quantization context
+                     if use_inner_quantization_context:
+                         if self.config.fp8:
+@@ -832,7 +846,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
+                             inference_context=inference_context,
+                             packed_seq_params=packed_seq_params,
+                             sequence_len_offset=sequence_len_offset,
+-                            padding_mask=padding_mask,
++                            padding_mask=layer_padding_mask,
+                         )
+ 
+                     if (
+@@ -845,6 +859,12 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
+                     # Extract intermediate embeddings using global layer index
+                     if (l_no + layer_offset) in extract_layer_indices:
+                         intermediate_hidden_states.append(hidden_states)
++                if block_layout is not None:
++                    # The restored stream is a view; a pipeline stage's output must not be
++                    # one (schedules.deallocate_output_tensor).
++                    hidden_states = make_viewless_tensor(
++                        inp=block_layout.finish(hidden_states), requires_grad=True, keep_graph=True
++                    )
+ 
+         # Final layer norm.
+         if self.final_layernorm is not None:
+diff --git a/megatron/core/transformer/transformer_config.py b/megatron/core/transformer/transformer_config.py
+index ca7c10377..3a4df45e7 100644
+--- a/megatron/core/transformer/transformer_config.py
++++ b/megatron/core/transformer/transformer_config.py
+@@ -577,6 +577,18 @@ class TransformerConfig(ModelParallelConfig):
+     SiLU(scalar) over the output channels. The scalar form provides a softer, single-knob
+     gate that commutes with the linear read (per-head) and uses fewer effective dofs."""
+ 
++    linear_attention_cp_impl: Literal['a2a', 'kcp'] = 'a2a'
++    """Context-parallel scheme of the linear-attention layers. 'a2a' turns the sequence shard
++    into a head shard with an all-to-all around the kernel, so the per-TP-rank head counts must
++    divide the CP size. 'kcp' (KDA only) keeps tokens sharded and merges the per-rank recurrent
++    states through fla.ops.cp, with no head-count constraint."""
++
++    linear_attention_cp_block_layout: bool = False
++    """With linear_attention_cp_impl='kcp', keep the transformer block's residual stream in the
++    contiguous KCP layout across consecutive KDA layers (and the token-wise MLP/MoE between
++    them), relayouting only before softmax-attention layers and at the end of the block, instead
++    of twice inside every KDA layer. Packed (THD) inputs only."""
++
+     linear_attention_full_rank_output_gate: bool = False
+     """If True, the KDA output gate is a full-rank projection (hidden -> v_dim) fused into in_proj
+     and sharded on value heads, instead of the reference low-rank bottleneck (hidden ->
+@@ -1658,24 +1670,29 @@ class TransformerConfig(ModelParallelConfig):
+                 self.linear_num_value_heads % self.tensor_model_parallel_size == 0
+             ), "linear_num_value_heads must be a multiple of tensor_model_parallel_size."
+ 
+-            # Check context parallelism compatibility. GDN/KDA's CP all-to-all
++            # Check context parallelism compatibility. The a2a scheme
+             # (megatron/core/ssm/gated_delta_net.py) shards Q/K/V/gate/beta/alpha
+             # along the head dimension across CP ranks, so the per-TP-rank head
+             # counts must themselves divide evenly across CP ranks.
+-            assert (
+-                self.linear_num_key_heads // self.tensor_model_parallel_size
+-            ) % self.context_parallel_size == 0, (
+-                "linear_num_key_heads // tensor_model_parallel_size "
+-                f"({self.linear_num_key_heads // self.tensor_model_parallel_size}) must be a "
+-                f"multiple of context_parallel_size ({self.context_parallel_size})."
+-            )
+-            assert (
+-                self.linear_num_value_heads // self.tensor_model_parallel_size
+-            ) % self.context_parallel_size == 0, (
+-                "linear_num_value_heads // tensor_model_parallel_size "
+-                f"({self.linear_num_value_heads // self.tensor_model_parallel_size}) must be a "
+-                f"multiple of context_parallel_size ({self.context_parallel_size})."
+-            )
++            if self.linear_attention_cp_impl == 'kcp':
++                assert (
++                    self.experimental_attention_variant == 'kda'
++                ), "linear_attention_cp_impl='kcp' is only implemented for KDA."
++            else:
++                assert (
++                    self.linear_num_key_heads // self.tensor_model_parallel_size
++                ) % self.context_parallel_size == 0, (
++                    "linear_num_key_heads // tensor_model_parallel_size "
++                    f"({self.linear_num_key_heads // self.tensor_model_parallel_size}) must be a "
++                    f"multiple of context_parallel_size ({self.context_parallel_size})."
++                )
++                assert (
++                    self.linear_num_value_heads // self.tensor_model_parallel_size
++                ) % self.context_parallel_size == 0, (
++                    "linear_num_value_heads // tensor_model_parallel_size "
++                    f"({self.linear_num_value_heads // self.tensor_model_parallel_size}) must be "
++                    f"a multiple of context_parallel_size ({self.context_parallel_size})."
++                )
+ 
+         if self.fp8:
+             # cannot support first last layer bf16 with delayed scaling
+diff --git a/megatron/core/utils.py b/megatron/core/utils.py
+index e714e6c70..6e2ccacad 100644
+--- a/megatron/core/utils.py
++++ b/megatron/core/utils.py
+@@ -10,6 +10,7 @@ import inspect
+ import logging
+ import math
+ import operator
++import os
+ import queue
+ import socket
+ import sys
+@@ -2120,6 +2121,86 @@ def get_batch_on_this_cp_rank(
+     return batch
+ 
+ 
++def merge_short_documents(cu_seqlens: torch.Tensor, min_len: int) -> torch.Tensor:
++    """Merge every document of at most ``min_len`` tokens into its neighbour.
++
++    Each short document is merged into the next one; the last document, which has no
++    successor, is merged into the previous one if it is still short. Afterwards every
++    segment is longer than ``min_len`` unless the whole sequence is not.
++
++    Args:
++        cu_seqlens: 1-D cumulative sequence lengths, starting at 0.
++        min_len: documents with ``length <= min_len`` are merged; ``<= 0`` disables.
++
++    Returns:
++        cu_seqlens with the merged boundaries removed.
++    """
++    if min_len <= 0 or cu_seqlens.numel() <= 2:
++        return cu_seqlens
++    lengths = cu_seqlens[1:] - cu_seqlens[:-1]
++    keep = torch.ones_like(cu_seqlens, dtype=torch.bool)
++    keep[1:-1] = lengths[:-1] > min_len
++    merged = cu_seqlens[keep]
++    # Every segment now ends in a document longer than min_len, except possibly the last.
++    if merged.numel() > 2 and merged[-1] - merged[-2] <= min_len:
++        merged = torch.cat((merged[:-2], merged[-1:]))
++    return merged
++
++
++def pad_thd_batch_for_cp(
++    batch: Dict[str, Any],
++    cu_seqlens: torch.Tensor,
++    cp_size: int,
++    sp_size: int = 1,
++    local_multiple: int = 1,
++):
++    """Pad every document of a packed batch to a multiple of ``2 * cp_size * sp_size``.
++
++    The per-document zigzag partition needs that divisibility and the dataloader's
++    document boundaries do not provide it. Padding goes at each document's causal
++    tail, so no real token can attend to it; it gets zero loss and is flagged in
++    ``padding_mask`` so MoE routing ignores it. The padded total is also rounded up
++    so that every rank holds a multiple of ``local_multiple`` tokens.
++
++    Returns the batch, the padded ``cu_seqlens`` and the padded ``max_seqlen``.
++    """
++    alignment = 2 * cp_size * sp_size
++    cu_seqlens_cpu = cu_seqlens.cpu()
++    # A document of at most `alignment` tokens gets a single token per zigzag chunk, which
++    # CP kernels do not handle. Merging such documents into a neighbour avoids that layout,
++    # but it also removes the inter-document boundary, so it is OPT-IN: it changes the
++    # attention mask and must not alter packing for callers that did not ask for it.
++    # Set MEGATRON_CP_MIN_DOC_TOKENS (e.g. to 2*cp_size*sp_size) to enable it.
++    min_len = int(os.environ.get("MEGATRON_CP_MIN_DOC_TOKENS", 0))
++    merged = merge_short_documents(cu_seqlens_cpu, min_len)
++    if merged.numel() != cu_seqlens_cpu.numel():
++        cu_seqlens_cpu = merged
++        cu_seqlens = merged.to(cu_seqlens.device, dtype=cu_seqlens.dtype)
++    lengths = cu_seqlens_cpu[1:] - cu_seqlens_cpu[:-1]
++    padded_lengths = (lengths + alignment - 1) // alignment * alignment
++    padded_lengths[-1] += -padded_lengths.sum() % (local_multiple * cp_size * sp_size)
++    padded_cu_seqlens_cpu = torch.cat(
++        (cu_seqlens_cpu[:1], padded_lengths.cumsum(0).to(cu_seqlens_cpu.dtype))
++    )
++    padded_cu_seqlens = padded_cu_seqlens_cpu.to(cu_seqlens.device)
++    padded_total = int(padded_cu_seqlens_cpu[-1])
++
++    positions = torch.arange(int(cu_seqlens_cpu[-1]), dtype=cu_seqlens.dtype, device=cu_seqlens.device)
++    document = torch.searchsorted(cu_seqlens[1:], positions, right=True)
++    destinations = (positions + (padded_cu_seqlens[:-1] - cu_seqlens[:-1])[document]).long()
++
++    padding_mask = torch.ones((1, padded_total), dtype=torch.bool, device=cu_seqlens.device)
++    if batch.get('padding_mask') is not None:
++        padding_mask.index_copy_(1, destinations, batch['padding_mask'])
++    else:
++        padding_mask.index_fill_(1, destinations, False)
++    batch['padding_mask'] = padding_mask
++    for key in ('tokens', 'labels', 'loss_mask', 'position_ids'):
++        if batch.get(key) is not None:
++            batch[key] = batch[key].new_zeros((1, padded_total)).index_copy_(1, destinations, batch[key])
++    return batch, padded_cu_seqlens, padded_lengths.max().reshape(1)
++
++
+ def get_thd_batch_on_this_cp_rank(
+     batch: Dict[str, Any],
+     cu_seqlens: torch.Tensor,
+@@ -2131,6 +2212,9 @@ def get_thd_batch_on_this_cp_rank(
+     """Slice each sub-sample in a packed sample batch input along
+     sequence dimension into multiple chunks, which are parallelized
+     across GPUs in a context parallel group.
++
++    Middle pipeline stages carry no tokens, only the packed-sequence metadata and,
++    with BFD packing, the routing ``padding_mask``.
+     """
+     packed_seq_params = PackedSeqParams(
+         qkv_format="thd",
+@@ -2149,13 +2233,15 @@ def get_thd_batch_on_this_cp_rank(
+             "Please update Transformer Engine to >= 1.10 to use "
+             "Context Parallel with THD format data"
+         )
+-        index = tex.thd_get_partitioned_indices(
+-            cu_seqlens_padded, batch['tokens'].size(1), cp_size, cp_rank
+-        )
++        total_tokens = next((data.size(1) for data in batch.values() if data is not None), None)
++        if total_tokens is None:
++            total_tokens = int(cu_seqlens_padded[-1].item())
++        index = tex.thd_get_partitioned_indices(cu_seqlens_padded, total_tokens, cp_size, cp_rank)
+         for key, data in batch.items():
+             if key in {'attention_mask', 'cu_seqlens', 'cu_seqlens_padded', 'max_seqlen'}:
+                 continue
+-            batch[key] = data.index_select(1, index)
++            if data is not None:
++                batch[key] = data.index_select(1, index)
+ 
+     return batch, packed_seq_params
+ 
+-- 
+2.51.0
+

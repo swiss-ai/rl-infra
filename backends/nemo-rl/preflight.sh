@@ -115,10 +115,12 @@ isnum() { [[ "$1" =~ ^[0-9]+$ ]]; }
 (( train_nodes > 0 && train_gpus > 0 )) || err "no trainer GPUs left (${NODES} nodes, ${gen_nodes} node(s) / ${gen_gpus} GPUs for generation)"
 if [[ "${megatron}" == true ]]; then
   tp=$(r policy.megatron_cfg.tensor_model_parallel_size); pp=$(r policy.megatron_cfg.pipeline_model_parallel_size)
-  ep=$(r policy.megatron_cfg.expert_model_parallel_size)
-  if isnum "${tp}" && isnum "${pp}" && isnum "${ep}"; then
-    (( train_gpus % (tp * pp) == 0 && (train_gpus / (tp * pp)) % ep == 0 )) \
-      || err "trainer EP${ep} does not divide the data-parallel size of ${train_gpus} GPUs at TP${tp} PP${pp}"
+  ep=$(r policy.megatron_cfg.expert_model_parallel_size); etp=$(r policy.megatron_cfg.expert_tensor_parallel_size)
+  if isnum "${tp}" && isnum "${pp}" && isnum "${ep}" && isnum "${etp}"; then
+    # train_gpus as computed above (gpus_per_node, shared generation node, judge nodes); Megatron's rule from main 2b2f296
+    (( train_gpus % (tp * pp) == 0 )) || err "trainer TP${tp} PP${pp} does not divide ${train_gpus} GPUs"
+    (( train_gpus % (etp * ep * pp) == 0 )) \
+      || err "trainer EP${ep} (expert TP${etp}) PP${pp} does not divide ${train_gpus} GPUs"
   fi
   if [[ "${opt}" == md_decoupling ]]; then
     [[ "$(o use_distributed_optimizer)" == false ]] || err "md_decoupling needs use_distributed_optimizer: false (it shards state with use_layer_wise_distributed_optimizer)"
