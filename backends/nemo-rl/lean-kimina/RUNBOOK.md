@@ -41,8 +41,12 @@ Results so far (details in the sections below):
   miniF2F-test, most within noise; the best,
   learning rate 1e-5 at step 40, gained +4.4 ± 1.7 points on test and +3.7 ± 1.7 on valid (in-run validation),
   and +5.5 ± 2.0 on test when evaluated again after HF export. It is the Lean expert of experts round 1.
-- Learning is slow: 40–50 steps (about 6 h on 12 nodes) give a few points. Why, and how to get more per step, is
-  the open question before a run of 200+ steps.
+- Learning is slow: 40–50 steps (about 6 h on 12 nodes) give a few points. "Learning speed (2026-11-19)": at 2e-6
+  the policy does not move; at 1e-5 gains on new prompts start after about 20 steps; seen prompts gain far more
+  than new ones; entropy falls fast once the policy moves (no KL, no entropy bonus); routing is fine, but the
+  routed-expert weights (95 % of the model) moved much less than the rest, probably because Adam's ε (1e-8) is
+  above their tiny gradients.
+- Running: the ε ablation (H1 with ε 1e-14, job 3980716, 40 steps), to be compared with H1 prompt by prompt.
 
 Open:
 - `eval/run.sh` of the expert entry has run on the expert, not yet on `start` (its `start` row comes from the
@@ -268,6 +272,7 @@ over the pooled baseline to stand out (2 standard errors).
 | H8 twin | 3972629, resumed 3973966 | learning rate 5e-6 + the 736 mixed prompts (global batch 512) | 23, then 24– | step 23: +2.05 / +2.79; step 30: valid +2.46 ± 1.56, test +4.24 ± 1.61 |
 | No-std | 3972454, rerun 3972630 | advantages not divided by the group's standard deviation (`grpo.normalize_rewards=false`) | 51 | step 40: +1.23 / +2.79; step 50: +1.02 / +2.38 |
 | (H4) | not run | `loss_fn.positive_example_nll_weight` (NLL on correct samples) | | no effect at this NeMo-RL pin: GRPO's training batch carries no `rewards`, so the term is never computed |
+| ε (2026-11-19) | 3980716 | H1 + Adam ε 1e-14 (from 1e-8); 40 steps, checkpoint every 10 | running | see "Learning speed (2026-11-19)" |
 
 What they say, with the caveat that each arm ran once:
 - More movement per step helps: learning rate 1e-5 (H1) is the only arm up on both splits beyond 2 standard
@@ -279,6 +284,121 @@ What they say, with the caveat that each arm ran once:
   at step 20, still in the first epoch).
 
 The launcher of these runs is `ablations.sh <h1|h2|h3|h8|h8s|nostd> [partition]`; see "Tools of 2026-11-18".
+
+## Learning speed (2026-11-19)
+
+Why do 40–50 steps give only a few points? Read-only analyses of the runs above (rollout files, TensorBoard
+metrics, resolved configs and the H1 step-40 weights), with `learning_speed.py`, `tfevents.py` and
+`weight_movement.py` (see "Tools"). Weight version v is trained in step v+2 (versions 0 and 1 in steps 1–2).
+
+**Settings that shape the update** (H1's resolved config; the other arms differ only as listed in "Ablations"):
+
+| Setting | Value | Consequence |
+|---|---|---|
+| Rollouts per step | 32 prompts × 16 | 512 |
+| `train_global_batch_size` | 512 (H2, H8: 128) | one optimizer update per step (H8: 4) |
+| Micro-batches | `train_micro_batch_size` 1, sequence packing up to 16,384 tokens | |
+| Loss | token-level mean over the whole global batch (`token_level_loss: true`) | per-weight gradients are tiny: gradient norm 0.005–0.04 over about 108 B weights |
+| PPO clip | `ratio_clip` 0.2 / 0.2, `ratio_clip_c` 3.0 | inactive with one update per step: `probs_ratio` min = max = 1 in every arm but H8 (H8: 0.16–12.5) |
+| Train/inference correction | truncated importance sampling, cap 2.0 | capped about 3 tokens in a million at 2e-6 |
+| KL to the reference | `reference_policy_kl_penalty: 0.0`, `use_kl_in_reward: false` | none: `train/kl_penalty` is 0 in every step of every arm |
+| Entropy bonus | none | nothing holds entropy up |
+| Optimizer | AdamW, β 0.9 / 0.999, **ε 1e-8**, weight decay 0.01, `clip_grad` 1.0 (never reached), constant learning rate, no warm-up | runs on the CPU as PyTorch's `torch.optim.AdamW` (Megatron's CPU offload); Megatron passes `adam_eps` to it directly; moments in fp32 (Megatron's default, not overridden; checked in the `megatron-lm-moe-apertus2` checkout the jobs import) |
+| MoE | 256 routed experts (top 8) + 1 shared, in layers 3–41 behind a latent projection (3584 → 1792); **routers frozen** (`freeze_moe_router: true`, bias update 0) | experts can only change what they compute, not which tokens they get |
+| Precision | Megatron bf16 with fp32 master weights; vLLM fp8 | |
+
+**1. At learning rate 2e-6 the policy does not move; at 1e-5 gains on new prompts start after about 20 steps.**
+The Goedel run (2e-6), H1 (1e-5) and no-std (2e-6) trained on the same prompts in 44 of 45 common weight versions
+(same seed and rows), so their rewards compare prompt by prompt (`learning_speed.py`, part B):
+
+| Weight versions | H1 − Goedel run (points of reward, ± SE) | No-std − Goedel run |
+|---|---|---|
+| 0–9 | −0.8 ± 0.7 | −0.1 ± 0.6 |
+| 10–19 | −1.4 ± 0.8 | −0.4 ± 0.6 |
+| 20–29 | **+3.2 ± 0.9** | +0.2 ± 0.6 |
+| 30–39 | **+3.8 ± 0.9** | 0.0 ± 0.6 |
+
+**2. Prompts seen again improve much more than new ones.** In H8 (736 mixed prompts, second epoch after the resume)
+608 prompts were seen twice, about 21 versions apart: correct of 16 went from 6.79 to 8.63 (+1.85 ± 0.12; pass
+rate 42 → 54 %), 395 prompts up. The H8 twin: +1.45 ± 0.11 (about +9 points). New prompts gain about 3.5 points
+(table above), miniF2F 4–5 (Ablations). The updates work, but carry over little per step.
+
+**3. Policy movement and entropy** (`tfevents.py <events> trend <tags>`; mean of the first and the last quarter of
+each run's steps):
+
+| Arm | `gen_kl_error` | `approx_entropy` | `grad_norm` |
+|---|---|---|---|
+| Goedel run (2e-6) | 4.8e-4 → 4.8e-4 | 0.278 → 0.271 | 0.012 → 0.014 |
+| No-std (2e-6) | 4.7e-4 → 5.1e-4 | 0.278 → 0.309 | 0.005 → 0.005 |
+| H1 (1e-5) | 6.8e-4 → 9.0e-4 | 0.280 → 0.190 | 0.012 → 0.020 |
+| H8 (5e-6, 4 updates per step), steps 1–23 | 7.2e-4 → 6.6e-4 | 0.277 → 0.192 | 0.031 → 0.038 |
+| H8 twin (5e-6), steps 1–23 | 4.9e-4 → 5.1e-4 | 0.292 → 0.283 | 0.018 → 0.021 |
+
+`gen_kl_error` (vLLM fp8 against the trainer, including the one-step lag) sits at about 4.8e-4 when the policy does
+not move: that is the fp8 floor. At 2e-6 the runs never leave it; H1 rises above it. Entropy falls quickly once the
+policy moves (H1: 0.28 → 0.19 in 47 steps; H8 after the resume down to 0.14), with nothing in the loss against it.
+
+**4. MoE routing is not the problem.** Train/inference mismatch is small (above; mean token probability error about
+1 %; `seq_logprob_error_threshold` is not set, so nothing is masked for it), and the logged expert load (`train/moe/*`) is flat in
+every arm; at 1e-5 the worst per-layer imbalance fell slightly (10.4 → 8.7).
+
+**5. Routed-expert weights moved much less than the rest** (`weight_movement.py`, `start` against the H1 step-40
+export, layers 1, 3, 12, 21, 30, 41, every 4th expert). Both are bf16 and training's fp32 master weights start
+exactly at `start`'s values, so a weight changes in the export only if it moved more than half a bf16 step; the
+step grows with |w|, so groups are compared at the same |w|. Frozen routers: exactly 0 changed (the check).
+Groups by tensor name: "attention" is every `self_attn.*` tensor, i.e. the token-mixing block of a layer, of two
+kinds: Kimi Delta Attention, a linear attention (31 layers, among the sampled ones 1, 12, 21, 30: q/k/v/o
+projections plus short convolutions, decay and gate projections, `A_log`, `dt_bias`, output norm), and gated full
+softmax attention (11 layers: 3, 7, …, 39 and 41; sampled 3 and 41: q/k/v/o with 28 query and 7 key-value heads,
+`q_norm`/`k_norm`, output gate). Its layer norms are counted under "norms". "Router" is the MoE gate
+(`mlp.gate.*`), "latent projection" the MoE block's down/up projection (3584 ↔ 1792) around the routed experts.
+
+| Group | Changed, \|w\| in [0.0078, 0.0156) (moved > 3.1e-5) | [0.0156, 0.0312) (> 6.1e-5) | [0.0312, 0.0625) (> 1.2e-4) |
+|---|---|---|---|
+| Latent projection | 57.1 % | 29.8 % | 3.9 % |
+| Shared expert | 55.0 % | 25.0 % | 2.3 % |
+| Attention | 46.1 % | 20.8 % | 1.8 % |
+| **Routed experts** | **4.3 %** | **0.5 %** | **0.0 %** |
+| Dense MLP (layer 1) | 1.8 % | 0.1 % | 0.0 % |
+
+Over all thresholds, the typical routed-expert weight moved about 3e-6 in 40 updates, the typical attention weight
+about 3e-5 (the upper bound is 40 × 1e-5 = 4e-4). By layer (|w| in [0.0156, 0.0312)): routed experts 0.0 % in
+layers 3 and 12 and 0.5–1.4 % in 21–41, against attention 10–11 % and 24–31 %; across experts of one layer the share
+ranges from 0 to 19 % (layer 21), most experts near 0. Early layers move little in every group (layer 1: attention
+0.5 %, dense MLP 0.1 %).
+
+Adam moves a weight whose gradient is well above ε by up to the learning rate per update, whatever the gradient's
+size; a weight moves much less only if its gradient is near or below ε (1e-8) or zero. With a gradient norm of about
+0.012 over about 108 B weights (216.5 GB in bf16; 3.6e-8 per weight on average), each expert seeing about 3 % of
+the tokens, and the loss averaged over all tokens of the batch, the experts' gradients are likely at or below ε. So
+**ε probably damps most of the model's weights** (routed experts are about 103 B of the 108 B). Not ruled out: experts that get almost no Lean
+tokens (per-expert token counts were not measured). The direct check would be the optimizer's second moments in a
+Megatron checkpoint (needs a job with torch).
+
+A first version of `weight_movement.py` averaged the bf16 differences as if they were unbiased moves; that gave
+"experts move 10–1000× less" and was wrong (moves under half a step vanish). The numbers above are from the
+corrected version.
+
+**What follows for a long run:** at 2e-6 nothing happens; a run needs at least 1e-5 or more movement per update,
+which drives entropy down with nothing holding it; gains carry over little between prompts, so a larger and more
+varied prompt pool helps more than more epochs; and ε may be the brake on the experts, tested next.
+
+**The ε ablation** (job 3980716, run `lean-kimina-v02-abl-eps14-preemptable-20261119`, submitted 2026-11-19 16:45,
+running): H1 with `policy.megatron_cfg.optimizer.adam_eps=1.0e-14`, 40 steps (`grpo.max_num_steps=40`), a
+checkpoint every 10 steps (1.4 TB each), `JOB_TIME` 8 h, `preemptable`. Launched with
+
+    RUN=lean-kimina-v02-abl-eps14-preemptable-20261119 JOB_TIME=08:00:00 \
+    EXTRA_OVERRIDES="policy.megatron_cfg.optimizer.adam_eps=1.0e-14 grpo.max_num_steps=40 checkpointing.save_period=10" \
+    bash backends/nemo-rl/lean-kimina/ablations.sh h1 preemptable
+
+(the later `checkpointing.save_period=10` wins over `ablations.sh`'s 5: Hydra 1.3.2, NeMo-RL's pin, applies
+overrides in order). Its base config and overrides match H1's but for these; H1 ran from an older clone whose
+`in_job.sbatch` still passed an 8 GB REPL limit, but its `kimina.sh` hard-codes 32 GB, as now. 1e-14 is far below the
+expert gradients that the weight movement suggests. Judge it by: the paired per-prompt reward against H1 in blocks
+of 10 versions (`learning_speed.py`, part B, with the run added); validation at steps 10/20/30/40 against H1's
+42.7 / 45.3 / 46.3 / 47.2 % (972 rows); `gen_kl_error` above H1's; entropy; and, for the mechanism, the weight
+movement of its step 40 after an HF export. Faster gains than H1 would make a low ε part of the long run; entropy
+collapse would call for a lower learning rate with it.
 
 ## Expert handover (Apertus 2 experts, round 1)
 
@@ -320,11 +440,16 @@ H1 step 40 is staged as `lean__lean-kimina-v02-abl-h1-20261118` in
 | `compare_safetensors.py <ckpt> <start>` | tensor names, shapes and dtypes of two HF checkpoints, from their safetensors headers |
 | `handover_lean.py` | prompts and rollouts of a run in the experts-handover schema |
 | `expert-eval/run.sh`, `expert-eval/score.py` | copies of the expert entry's `eval/`, for reference: validate-only evaluation of an HF checkpoint, pinned to rl-infra 302695a. Run it from the entry, which also holds the validation file and the apertus-common bundle it needs |
+| `learning_speed.py` (2026-11-19) | from the runs' rollout files: A, prompts seen twice (first against second visit); B, runs on the same prompts compared prompt by prompt per block of weight versions. The runs are listed in `RUNS` |
+| `tfevents.py <events> tags\|dump\|trend <tags>` (2026-11-19) | TensorBoard scalars without TensorFlow: list, dump as JSON lines, or first/last-quarter means |
+| `weight_movement.py <start> <trained>` (2026-11-19) | which kinds of weights moved between two HF checkpoints, at matched \|w\| (a bf16 export only shows moves over half a bf16 step); reads sampled layers in chunks, about 5 min and 1 GB on a login node |
 
 These were run on Clariden from copies with fixed paths; the versions here take the checkout, run and files as
 arguments. `ablations.sh` was dry-run from a fresh clone on 2026-11-19 (variants h1 and h8s, empty `LEAN_DATA`:
 it unpacked all three data files with the expected checksums and passed preflight), and `val_report.py`
 reproduced the numbers of "Ablations" from the runs' logs; the other scripts are syntax-checked.
+`weight_movement.py` was tested on synthetic checkpoints (chunked and unchunked results identical, frozen tensors
+0) and produced "Learning speed", item 5, on Clariden; `learning_speed.py` and `tfevents.py` produced items 1–3.
 
 ## Known problems and lessons
 
