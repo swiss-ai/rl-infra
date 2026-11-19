@@ -699,3 +699,102 @@ bash experiments/long-context/launch-code-ctx.sh 131072 checkpointing.keep_top_k
 ```
 
 - Running at the time of writing (step 36 of 46).
+## SFT v0.2 (iter_0018315), Reasoning Gym in the math environment
+
+Job 1276175, 10 nodes (HANGANG, account hanint09). It ran an earlier version of this branch, which differs from the
+current one in two ways. Its rows had 84 tasks, coin_flip included (24 train rows, 1 or 2 validation rows); the current
+script drops coin_flip and gives 83. Its reward kept Reasoning Gym's partial credit above 0.05; the current verifier
+is binary, and refuses NaN answers on complex_arithmetic and number_sorting. Of its 392 rewarded training answers
+none used those holes (no coin_flip or number_sorting answer was rewarded, the 12 complex_arithmetic ones were
+numbers, and no reward was below 0.2), so the numbers below should carry over, but they are not a rerun.
+
+```bash
+python3.12 envs/prepare_reasoning_gym.py $SCRATCH/reasoning-gym/native
+RUN=rg-native-v02-high-20st JOB_TIME=04:00:00 bash run.sh envs/reasoning-gym-sft.yaml
+```
+
+Validation on the same 128 prompts, reward on the claim frame (counts from the environment's frame metrics; "reply
+correct" = the reply frame verified the same way, logged but not rewarded):
+
+| Validation step | 0 | 10 | 20 |
+|---|---|---|---|
+| accuracy | 0.070 | 0.109 | 0.178 |
+| answers with a claim frame | 20/128 | 26/128 | 44/128 |
+| correct claims | 9 | 14 | 24 |
+| reply correct | 59 | 57 | 53 |
+
+Training reward rose from 0.016 (step 1) to 0.20 and 0.19 (steps 19 and 20), and the share of training answers with
+a claim frame from 2.7% to 26.6%; rows trained per step (non-zero advantage) went from 16-96 to 104-112 of 256. The
+think frame was never empty (thinking level high). So far the gain is the claim format, not the reasoning: the reply
+is right about as often as at step 0, and most correct replies still carry no claim. 1 h 35 min, about 63 GPU-h.
+
+Two settings that did not work, from the same session:
+- Thinking level medium (the default system frame): v0.2 left the think frame empty on every one of these
+  prompts (128/128 on the validation set, through Gym's reasoning_gym server with an "<answer> tags" line on each
+  prompt, job 1276079).
+- DAPO-Math's "Answer:" instruction around each prompt: the claim rate did not rise (20/128 at step 0), the model
+  wrote "Answer: X" in the reply instead, and only 2 of the 20 claims were right (job 1276229, stopped at step 5).
+
+## RDKit chemistry in the math environment (claim graded)
+
+Rows from `envs/prepare_chem_rdkit.py`: 12,499 train candidates (not pass-rate filtered) and validation rows from
+held-out molecules (no shared Bemis-Murcko scaffold with train) covering all 123 properties. HANGANG, account hanint09,
+thinking level high, lr 2e-6.
+
+### From SFT v0.2: the model does not claim
+
+Job 1276738, 10 nodes, bare prompts, async trainer: at step 0, 110 of 128 validation answers had no claim frame, 1 had a
+claim (wrong), and the reply was right in 37. Steps 1 and 2 had reward 0, then the async trainer waited for 32 groups
+with a rewarded answer that never came ("not enough groups to form a full step", 503 times). Cancelled after 28 min.
+
+As a diagnostic, job 1276869 graded the reply (`env.math.reward_frame=reply`): 0.273, 0.258, 0.398 at steps 0, 10, 20
+on 128 prompts. 8 of its 24 newly correct answers had been cut at 16K at step 0, so part of that gain is truncation
+repair.
+
+### From the STEM-mix climb: it claims, with the answer-line instruction
+
+`recipes/apertus2-chonk-sftv02-stemmix-run4-100-vllm-adamw.yaml` starts from step 100 of hanint06's
+`sftv02-stem-mix-run4-33n`, converted to HF (`/scratch/hanint09/exports/sftv02-stem-mix-run4-step100`). That run
+claims on 959 of its 960 DAPO-Math validation prompts. On chemistry, step 0 of
+validation (128 prompts):
+
+| Prompt | System frame | No claim | Correct (claim) | Correct (reply) | Mean length |
+|---|---|---|---|---|---|
+| bare | high | 125 | 0 | 42 | 5,801 |
+| bare | medium | 127 | 0 | 31 | 522 (think frame empty in 125) |
+| with the answer-line instruction | high | **0** | **60** | 61 | 4,909 |
+
+The answer-line instruction is the text the math rows carry (as in DAPO-Math-17k), word for word: "Solve the following
+math problem step by step. The last line of your response should be of the form Answer: $Answer …" before the
+prompt and "Remember to put your answer on its own line after "Answer:"." after it. `prepare_chem_rdkit.py` always adds it.
+
+### Training: async with 32 prompts is flat, dynamic sampling with 64 learns
+
+| Job | Trainer | Prompts per step | Steps | Validation accuracy (claim) |
+|---|---|---|---|---|
+| 1280114 | async, `skip_zero_advantage_groups` | 32 | 20 | 0.469, 0.414, 0.461 (128 prompts, steps 0/10/20) |
+| 1280378 | async, `skip_zero_advantage_groups` | 32 | 50 | 0.469, 0.438, 0.461 (128 prompts, steps 0/20/40); length 4,909 to 7,041 |
+| **1280697** | **sync, `use_dynamic_sampling`** | **64 (of 128 generated)** | 45 | **0.420, 0.438, 0.484, 0.463, 0.492** (512 prompts, steps 0/10/20/30/40) |
+
+The async runs trained on all 32 groups per step although 11 to 15 had equal rewards. `skip_zero_advantage_groups`
+leaves them out of the passes but scales the rest so the update equals the full-batch one ("Training 160 of 256
+rows"). In the async loop `use_dynamic_sampling` is only logged; the filtering is in the synchronous trainer.
+
+Job 1280697 (`chem-rdkit-sft.yaml` as committed): 14 nodes, 8 trainer + 6 vLLM.
+- **Dynamic sampling**: 77 to 83 of 128 generated groups had differing rewards, and all 512 trained rows had
+  nonzero advantage. Steps took about 360 s, and about 680 s when a second generation batch was needed.
+- **Validation (512 prompts)**:
+  - steps 0 to 20: 79 newly correct (1 previously cut), 46 newly wrong;
+  - fragments 147/322 to 174/322, counts 54/170 to 61/170;
+  - mean length 4,979 to 5,372;
+  - at most 14 of 1,024 rollouts cut at 16K per step.
+- **Training reward per step**: about 0.43 over steps 1 to 25, about 0.48 over steps 26 to 45.
+- **OOM**: trainer rank 19 ran out of memory in `train_prep` at steps 27 and 46. It requested 6.1 GiB with 68.7 GiB
+  reserved and 53.2 GiB allocated, under the 0.78 cap (74.1 GiB). `driver_retry` resumed from the step-25 checkpoint
+  (weights only, so Adam restarted). The job was stopped at step 46, before the step-50 save.
+- Raising `NRL_CUDA_MEMORY_FRACTION` is the next thing to try; the task file now saves every 10 steps.
+
+```bash
+python3.12 envs/prepare_chem_rdkit.py /scratch/hanint09/chem/data/faithful-qwen-v1/rows $SCRATCH/chem-rdkit/native --val-rows 512
+RUN=chem-rdkit-run4s100-dapo-dynsamp JOB_TIME=10:00:00 bash run.sh envs/chem-rdkit-sft.yaml
+```

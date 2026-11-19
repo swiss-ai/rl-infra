@@ -1,0 +1,8 @@
+# The 32-node SFT v0.2 recipe plus 2 judge node(s) for env.judge_pool: 16 trainer + 16 vLLM + 2 judge.
+defaults: apertus2-chonk-sftv02-18315-vllm-adamw-dapo-32n.yaml
+
+# run.sh reads sft_export and cluster.num_nodes from this file only, not from its defaults.
+sft_export: chonk-sft/models/chonk-lc-16k-v0.2-iter_0018315
+
+cluster:
+  num_nodes: 34

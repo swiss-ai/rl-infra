@@ -1,0 +1,13 @@
+# Generation-only scoring on one node: the SFT v0.2 (iteration 18,315) DAPO recipe, as the thinking-level
+# comparison used (rl-analysis/thinking-levels/recipe-sftv02-score1.yaml). run.sh reads sft_export and
+# cluster.num_nodes from this file only.
+defaults: /home01/hanint06/projects/rl-infra-enigmata/recipes/apertus2-chonk-sft-vllm-adamw-dapo.yaml
+sft_export: chonk-sft/models/chonk-lc-16k-v0.2-iter_0018315
+cluster:
+  num_nodes: 1
+policy:
+  model_name: ${oc.env:SCRATCH}/models/chonk-lc-16k-v0.2-iter_0018315
+  generation:
+    vllm_kwargs:
+      # As in the 512-prompt runs (vLLM's default is 128 sequences per GPU at once).
+      max_num_seqs: 256

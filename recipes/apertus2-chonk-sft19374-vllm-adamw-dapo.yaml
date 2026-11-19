@@ -1,6 +1,8 @@
 defaults: apertus2-chonk-sft-vllm-adamw-dapo.yaml
 
-sft_export: ../hanint05/hf-exports/bridge/chonk-lc-16k-v0.1-ep1-iter_0019374
+# The 19374 export moved from hanint05's scratch to /appsdata/hanint06 on 2026-11-11; this view
+# links to it.
+sft_export: nemo-rl/passrate/sft-export-view/chonk-lc-16k-v0.1-ep1-iter_0019374
 
 cluster:
   num_nodes: 16
