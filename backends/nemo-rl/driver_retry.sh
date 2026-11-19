@@ -24,9 +24,13 @@ deadline_s=""
 log_dir=""
 ckpt_dir=""
 for a in "$@"; do
-  if [[ "${a}" =~ ^${KEY}=[0-9]+:[0-9]+:[0-9]+:[0-9]+$ ]]; then
-    IFS=: read -r d h m s <<<"${a#*=}"
-    deadline_s=$(( 10#${d}*86400 + 10#${h}*3600 + 10#${m}*60 + 10#${s} ))
+  # The value arrives quoted ('01:23:30:00'): Hydra reads an unquoted colon as a separator, so the launchers quote it.
+  if [[ "${a}" == "${KEY}="* ]]; then
+    v="${a#*=}"; v="${v//\'/}"; v="${v//\"/}"
+    if [[ "${v}" =~ ^[0-9]+:[0-9]+:[0-9]+:[0-9]+$ ]]; then
+      IFS=: read -r d h m s <<<"${v}"
+      deadline_s=$(( 10#${d}*86400 + 10#${h}*3600 + 10#${m}*60 + 10#${s} ))
+    fi
   fi
   [[ "${a}" == logger.log_dir=* ]] && log_dir="${a#*=}"
   [[ "${a}" == checkpointing.checkpoint_dir=* ]] && ckpt_dir="${a#*=}"
@@ -71,7 +75,7 @@ while true; do
     new="$(printf '%02d:%02d:%02d:%02d' $(( left / 86400 )) $(( left % 86400 / 3600 )) $(( left % 3600 / 60 )) $(( left % 60 )))"
     args=()
     for a in "$@"; do
-      [[ "${a}" == "${KEY}="* ]] && a="${KEY}=${new}"
+      [[ "${a}" == "${KEY}="* ]] && a="${KEY}='${new}'"
       args+=("${a}")
     done
     set -- "${args[@]}"
