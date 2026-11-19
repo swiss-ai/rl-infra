@@ -17,7 +17,9 @@ host_path() { [[ "$1" == /opt/nemo-rl/* ]] && echo "${NEMO_RL_DIR}/${1#/opt/nemo
 
 # Resolve `defaults` as NeMo-RL does: each parent is resolved on its own, the parents are
 # merged in list order (later wins), then the file itself goes on top. Entries are relative
-# to their file's directory.
+# to their file's directory. _config_merge (config.sh) applies NeMo-RL's _override_ rule.
+# shellcheck source=config.sh
+source "$(dirname "${BASH_SOURCE[0]}")/config.sh"
 chain=()
 resolve() {
   local f=$1 out=$2 d p base part
@@ -31,9 +33,11 @@ resolve() {
     [[ "$d" == /* ]] && p="$(host_path "$d")" || p="$(dirname "$f")/$d"
     part="$(mktemp -p "${TMP}")"
     resolve "$p" "${part}"
-    yq m -x -a overwrite "${base}" "${part}" > "${base}.m" && mv "${base}.m" "${base}"
+    _config_merge "${base}" "${part}"
   done
-  yq m -x -a overwrite "${base}" "$f" > "${out}"
+  _config_merge "${base}" "$f"
+  yq d -i "${base}" defaults
+  mv "${base}" "${out}"
 }
 merged="${TMP}/merged.yaml"
 resolve "$(host_path "${CONFIG}")" "${merged}"
@@ -210,6 +214,8 @@ for v in NRL_REFIT_BUFFER_MEMORY_RATIO NRL_REFIT_NUM_BUFFERS; do
   [[ "$t" == "$gv" ]] || err "$v differs between trainer ('$t') and generation ('$gv'); the refit broadcast hangs"
 done
 must=$(r checkpointing.checkpoint_must_save_by)
+# A command-line value arrives quoted ('01:23:30:00'), as Hydra needs it.
+must=${must//\'/}; must=${must//\"/}
 if [[ "$(r checkpointing.enabled)" != false && -n "${must}" && "${must}" != null && -n "${JOB_TIME:-}" ]]; then
   secs() { local s=$1 d=0; [[ "$s" == *-* ]] && { d=${s%%-*}; s=${s#*-}; }; IFS=: read -r a b c <<<"$s"; echo $(( d*86400 + 10#$a*3600 + 10#$b*60 + 10#${c:-0} )); }
   IFS=: read -r md mh mm ms <<<"${must}"

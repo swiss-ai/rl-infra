@@ -14,7 +14,7 @@ source "${PIN_FILE}"
 source "${ROOT}/backends/nemo-rl/container.sh"
 
 # 1. NeMo-RL source
-if [[ ! -d "${NEMO_RL_DIR}/.git" ]]; then
+if [[ ! -e "${NEMO_RL_DIR}/.git" ]]; then
     echo "== cloning NeMo-RL into ${NEMO_RL_DIR}"
     git clone "${NEMO_RL_URL}" "${NEMO_RL_DIR}"
     git -C "${NEMO_RL_DIR}" switch -c "${NEMO_RL_BRANCH}" "${NEMO_RL_COMMIT}"

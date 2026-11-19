@@ -21,7 +21,8 @@ source "${ROOT}/backends/nemo-rl/container.sh"
 GIT=(git -c user.name="$(git -C "${ROOT}" config user.name || echo rl-infra)" -c user.email="$(git -C "${ROOT}" config user.email || echo rl-infra@localhost)" -c commit.gpgsign=false)
 
 # 1. NeMo-RL source
-if [[ ! -d "${NEMO_RL_DIR}/.git" ]]; then
+# A worktree has a .git file, a clone a .git directory: either is an existing checkout.
+if [[ ! -e "${NEMO_RL_DIR}/.git" ]]; then
     echo "== cloning NeMo-RL into ${NEMO_RL_DIR}"
     git clone --filter=blob:none "${NEMO_RL_URL}" "${NEMO_RL_DIR}"
     git -C "${NEMO_RL_DIR}" switch -c "${NEMO_RL_BRANCH}" "${NEMO_RL_COMMIT}"

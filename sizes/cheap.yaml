@@ -1,0 +1,7 @@
+# Cheap tier: the smallest trainer the 108B Chonk fits on (PP2 x EP16 = 32 GPUs) and half the vLLM nodes of the
+# expensive tier. Judge nodes come from the task (env.judge_pool). run.sh turns this into cluster.num_nodes and
+# policy.generation.colocated.resources.num_nodes; batch_scale multiplies the task's prompts per step, global batch
+# and per-dataset shares.
+trainer_nodes: 8
+generation_nodes: 16
+batch_scale: 1

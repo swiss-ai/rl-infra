@@ -1,0 +1,6 @@
+# Ultra tier: twice the expensive tier and twice the batch. Whether this doubles the throughput is measured by the
+# benchmark of 2026-11-19 (jobs 1315243: 16 trainer + 64 vLLM at 512 prompts; 1315245: 32 + 64 at 1,024 prompts;
+# 1315247: 16 + 32 at 512, the baseline); revise these numbers from its result.
+trainer_nodes: 32
+generation_nodes: 64
+batch_scale: 2
