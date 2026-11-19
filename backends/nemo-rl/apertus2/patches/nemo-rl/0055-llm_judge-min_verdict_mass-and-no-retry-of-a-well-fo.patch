@@ -1,0 +1,82 @@
+From 8be40ab9c4522dbe8511415e76e09faccf996cea Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Sat, 14 Nov 2026 01:49:19 +0900
+Subject: [PATCH 55/61] llm_judge: min_verdict_mass, and no retry of a
+ well-formed call without a verdict
+
+Gemma starts to explain on 5% of verdict calls (first token To/The) but keeps Yes/No among its top
+tokens; min_verdict_mass 0 reads the verdict from them. Retrying a call without a verdict gives the
+same distribution or greedy text, so it now fails at once; retries remain for HTTP errors.
+
+---
+ nemo_rl/environments/llm_judge_environment.py | 26 ++++++++++++++-----
+ 1 file changed, 20 insertions(+), 6 deletions(-)
+
+diff --git a/nemo_rl/environments/llm_judge_environment.py b/nemo_rl/environments/llm_judge_environment.py
+index da86bd784..afdde29a7 100644
+--- a/nemo_rl/environments/llm_judge_environment.py
++++ b/nemo_rl/environments/llm_judge_environment.py
+@@ -73,6 +73,9 @@ class LLMJudgeEnvConfig(TypedDict):
+     top_logprobs: int
+     # verdict: "soft" (P(Yes)) or "hard" (1 if P(Yes) >= 0.5).
+     score: str
++    # verdict: least first-token probability on Yes + No for a verdict (0: any Yes/No among
++    # the top_logprobs tokens). Below it the call counts as failed.
++    min_verdict_mass: NotRequired[float]
+     # Judge calls this environment keeps in flight at once.
+     max_concurrent_calls: int
+     timeout_s: float
+@@ -198,8 +201,15 @@ def graded_answer(text: str, max_chars: int) -> str:
+     return answer[:max_chars]
+ 
+ 
+-def verdict_probability(top_logprobs: list[dict[str, Any]]) -> float | None:
+-    """P(Yes) among the Yes/No tokens of a first-token distribution, None without enough mass."""
++def verdict_probability(
++    top_logprobs: list[dict[str, Any]], min_mass: float = 0.5
++) -> float | None:
++    """P(Yes) among the Yes/No tokens of a first-token distribution.
++
++    None when Yes and No together have less than ``min_mass`` of the first token's
++    probability (with ``min_mass`` 0: when neither is among the top tokens). A judge that
++    starts to explain ("To", "The") still puts some mass on its verdict word.
++    """
+     p_yes = p_no = 0.0
+     for entry in top_logprobs:
+         token = str(entry.get("token", "")).strip().lower()
+@@ -208,7 +218,7 @@ def verdict_probability(top_logprobs: list[dict[str, Any]]) -> float | None:
+             p_yes += p
+         elif token == "no":
+             p_no += p
+-    if p_yes + p_no < 0.5:
++    if p_yes + p_no <= 0.0 or p_yes + p_no < min_mass:
+         return None
+     return p_yes / (p_yes + p_no)
+ 
+@@ -315,7 +325,10 @@ class LLMJudgeEnvironment(EnvironmentInterface[LLMJudgeMetadata]):
+             content = (choice.get("logprobs") or {}).get("content") or []
+             if not content:
+                 return None
+-            p = verdict_probability(content[0].get("top_logprobs") or [])
++            p = verdict_probability(
++                content[0].get("top_logprobs") or [],
++                self.cfg.get("min_verdict_mass", 0.5),
++            )
+             if p is None:
+                 return None
+             return p if self.cfg["score"] == "soft" else float(p >= 0.5)
+@@ -339,8 +352,9 @@ class LLMJudgeEnvironment(EnvironmentInterface[LLMJudgeMetadata]):
+                             completion = await response.json()
+                         score = self._score(completion)
+                         self._latencies.append(time.perf_counter() - t0)
+-                        if score is not None:
+-                            return score, False
++                        # No verdict in a well-formed answer: asking again gives the same
++                        # distribution (verdict) or text (greedy justify), so it fails now.
++                        return (0.0, True) if score is None else (score, False)
+                     except (aiohttp.ClientError, asyncio.TimeoutError, KeyError, ValueError) as e:
+                         if attempt == self.cfg["retries"]:
+                             print(f"[llm_judge] call failed: {type(e).__name__}: {e}", flush=True)
+-- 
+2.51.0
+

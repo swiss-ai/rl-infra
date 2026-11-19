@@ -1,0 +1,71 @@
+From 7296f90ac05a3565596ffb92e84cf9ca538cf01b Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Sat, 14 Nov 2026 08:42:42 +0900
+Subject: [PATCH 60/61] ScienceWorld workers: JVM without perf data, log on
+ stderr, start retried
+
+launch_gateway takes the first line of the JVM's stdout as its port. In job 1276579 a JVM printed a
+/tmp/hsperfdata lock warning there first, the worker failed to start and the rollout died. The JVM now
+runs with -XX:-UsePerfData and -Xlog:all=warning:stderr, and a failed start is retried twice.
+
+---
+ .../environments/scienceworld_environment.py  | 43 ++++++++++++-------
+ 1 file changed, 28 insertions(+), 15 deletions(-)
+
+diff --git a/nemo_rl/environments/scienceworld_environment.py b/nemo_rl/environments/scienceworld_environment.py
+index f64e3e906..afada05ef 100644
+--- a/nemo_rl/environments/scienceworld_environment.py
++++ b/nemo_rl/environments/scienceworld_environment.py
+@@ -232,21 +232,34 @@ class ScienceWorldSimWorker:
+                 )
+             )
+         )
+-        port, self._process = launch_gateway(
+-            jarpath=py4j_jars[-1] if py4j_jars else JAR_PATH,
+-            classpath=JAR_PATH,
+-            die_on_exit=True,
+-            cwd=BASEPATH,
+-            java_path=self.cfg["java_path"],
+-            # Few GC and compiler threads: a node has 288 CPUs, and a JVM sizes its
+-            # thread pools by them.
+-            javaopts=[
+-                f"-Xmx{self.cfg['jvm_heap']}",
+-                "-XX:+UseSerialGC",
+-                "-XX:ActiveProcessorCount=2",
+-            ],
+-            return_proc=True,
+-        )
++        # launch_gateway reads the port from the JVM's first line of stdout, so the JVM
++        # must print nothing else there: no perf-data file (a /tmp/hsperfdata clash
++        # printed a warning first in job 1276579) and its log on stderr. Few GC and
++        # compiler threads: a node has 288 CPUs, and a JVM sizes its pools by them.
++        javaopts = [
++            f"-Xmx{self.cfg['jvm_heap']}",
++            "-XX:+UseSerialGC",
++            "-XX:ActiveProcessorCount=2",
++            "-XX:-UsePerfData",
++            "-Xlog:all=warning:stderr",
++        ]
++        for attempt in range(3):
++            try:
++                port, self._process = launch_gateway(
++                    jarpath=py4j_jars[-1] if py4j_jars else JAR_PATH,
++                    classpath=JAR_PATH,
++                    die_on_exit=True,
++                    cwd=BASEPATH,
++                    java_path=self.cfg["java_path"],
++                    javaopts=javaopts,
++                    return_proc=True,
++                )
++                break
++            except ValueError as error:
++                if attempt == 2:
++                    raise
++                print(f"ScienceWorld: JVM start failed ({error}), retrying", flush=True)
++                time.sleep(1.0)
+         self._gateway = JavaGateway(
+             gateway_parameters=GatewayParameters(auto_field=True, port=port)
+         )
+-- 
+2.51.0
+

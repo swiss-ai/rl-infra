@@ -1,0 +1,177 @@
+From 462ef7871748db38a8cc3d07f616aabc820a3200 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Wed, 11 Nov 2026 11:31:24 +0900
+Subject: [PATCH 52/61] Math environment: claim_multichoice verifier for option
+ letters in the claim
+
+The Apertus 2 claim frame holds a bare answer, so a multiple-choice claim is
+"B" rather than an "Answer: B" line, and neither english_multichoice (which
+needs that line) nor math-verify (which reads no bare letter) can score it.
+claim_multichoice takes the option letter from an "Answer: X" line, a
+\boxed{X}, the letter alone ("B", "(B)", "B.", "Option B") or a letter
+leading its option's text ("B) 4.5 m/s"). Lowercase letters do not count: in
+questions like GPQA's they name sub-items, not options.
+
+---
+ nemo_rl/environments/math_environment.py      | 78 +++++++++++++++++++
+ .../environments/test_math_environment.py     | 51 ++++++++++++
+ 2 files changed, 129 insertions(+)
+
+diff --git a/nemo_rl/environments/math_environment.py b/nemo_rl/environments/math_environment.py
+index c18cb8602..cc6108523 100644
+--- a/nemo_rl/environments/math_environment.py
++++ b/nemo_rl/environments/math_environment.py
+@@ -218,6 +218,83 @@ class MultilingualMultichoiceVerifyWorker:
+             return results
+ 
+ 
++# An option label as the whole answer: "B", "(B)", "B)", "B.", "Option B", "\boxed{B}".
++_BARE_CHOICE = re.compile(
++    r"^\s*(?:\\boxed\{\s*)?(?:(?:option|choice)\s+)?\(?([A-Za-z])\)?[.):]?(?:\s*\})?\s*$",
++    re.IGNORECASE,
++)
++# An option label leading its option's text: "B) 4.5 m/s", "(B) 4.5 m/s", "B. 4.5 m/s".
++_LEADING_CHOICE = re.compile(r"^\s*\(?([A-Z])[.)]\s+\S")
++_ANSWER_LINE_CHOICE = re.compile(r"Answer\s*:[ \t]*\(?([A-Z])\b")
++_BOXED_CHOICE = re.compile(r"\\boxed\{\s*(?:\\text\{\s*)?\(?([A-Z])\)?\s*\}")
++
++
++def extract_claim_choice(text: str) -> str | None:
++    """Return the option letter an answer picks, or None.
++
++    For multiple-choice answers in the Apertus 2 claim frame, which holds a bare
++    answer ("B") rather than an "Answer: B" line. Accepted, in order: an
++    "Answer: X" line (the last one), a \\boxed{X}, the letter alone (in brackets,
++    with a trailing period or colon, or after "Option"/"Choice"), and a letter
++    leading its option's text ("B) 4.5 m/s"). Only capital letters count: a
++    lowercase letter may name a sub-item of the question rather than an option.
++    """
++    if not text:
++        return None
++    text = text.replace("**", "").strip()
++    answer_lines = _ANSWER_LINE_CHOICE.findall(text)
++    if answer_lines:
++        return answer_lines[-1]
++    boxed = _BOXED_CHOICE.findall(text)
++    if boxed:
++        return boxed[-1]
++    bare = _BARE_CHOICE.match(text)
++    if bare:
++        return bare.group(1) if bare.group(1).isupper() else None
++    leading = _LEADING_CHOICE.match(text)
++    if leading:
++        return leading.group(1)
++    return None
++
++
++@ray.remote  # pragma: no cover
++class ClaimMultichoiceVerifyWorker:
++    def verify(
++        self,
++        pred_responses: list[str],
++        ground_truths: list[str],
++        return_extracted_answer: bool = False,
++        **kwargs,
++    ) -> Union[list[float], tuple[list[float], list[str | None]]]:
++        """Score multiple-choice answers by the option letter they pick.
++
++        Args:
++            pred_responses: list[str]. The graded text of each response (the
++                claim frame with env.math.reward_frame=claim).
++            ground_truths: list[str]. The correct option letter of each question.
++
++        Returns:
++            Union[list[float], tuple[list[float], list[str | None]]].
++            If return_extracted_answer is False, returns only the scores.
++            If return_extracted_answer is True, returns (scores, extracted_answers).
++        """
++        results = []
++        extracted_answers: list[str | None] = []
++        for response, ground_truth in zip(pred_responses, ground_truths):
++            extracted_answer = extract_claim_choice(response)
++            score = (
++                1.0
++                if extracted_answer is not None
++                and extracted_answer == ground_truth.strip().upper()
++                else 0.0
++            )
++            results.append(score)
++            extracted_answers.append(extracted_answer)
++        if return_extracted_answer:
++            return results, extracted_answers
++        return results
++
++
+ @ray.remote  # pragma: no cover
+ class EnglishMultichoiceVerifyWorker:
+     def verify(
+@@ -473,6 +550,7 @@ class MathEnvironment(BaseMathEnvironment):
+         "math": HFVerifyWorker,
+         "english_multichoice": EnglishMultichoiceVerifyWorker,
+         "multilingual_multichoice": MultilingualMultichoiceVerifyWorker,
++        "claim_multichoice": ClaimMultichoiceVerifyWorker,
+         "reasoning_gym": ReasoningGymVerifyWorker,
+     }
+ 
+diff --git a/tests/unit/environments/test_math_environment.py b/tests/unit/environments/test_math_environment.py
+index abe791255..e8dda59cc 100644
+--- a/tests/unit/environments/test_math_environment.py
++++ b/tests/unit/environments/test_math_environment.py
+@@ -640,3 +640,54 @@ def test_a_reward_frame_without_frames_fails_loudly(claim_env):
+                 [{"ground_truth": "42"}],
+             )
+         )
++
++
++@pytest.mark.parametrize(
++    "text, expected",
++    [
++        ("B", "B"),
++        ("(B)", "B"),
++        ("B)", "B"),
++        ("B.", "B"),
++        ("Option D", "D"),
++        ("\\boxed{B}", "B"),
++        ("\\boxed{\\text{C}}", "C"),
++        ("Answer: C", "C"),
++        ("The answer is B\nAnswer: D", "D"),
++        ("**B**", "B"),
++        ("B) 4.5 m/s", "B"),
++        ("(A) the hepatic artery", "A"),
++        # A lowercase letter may be a sub-item of the question, not an option.
++        ("b", None),
++        ("540", None),
++        ("A and B", None),
++        ("I think B", None),
++        ("", None),
++    ],
++)
++def test_extract_claim_choice(text, expected):
++    from nemo_rl.environments.math_environment import extract_claim_choice
++
++    assert extract_claim_choice(text) == expected
++
++
++def test_claim_multichoice_env_scores_bare_letter_claims():
++    env = create_env(
++        "math_default", {"num_workers": 1, "verifier_type": "claim_multichoice"}
++    )
++    try:
++        result = ray.get(
++            env.step.remote(
++                [
++                    [{"role": "assistant", "content": "B"}],
++                    [{"role": "assistant", "content": "Option C"}],
++                    [{"role": "assistant", "content": "b"}],
++                ],
++                [{"ground_truth": "B"}, {"ground_truth": "B"}, {"ground_truth": "B"}],
++            )
++        )
++        assert result.rewards.tolist() == [1.0, 0.0, 0.0]
++    finally:
++        env.shutdown.remote()
++        ray.kill(env)
++        time.sleep(0.2)
+-- 
+2.51.0
+

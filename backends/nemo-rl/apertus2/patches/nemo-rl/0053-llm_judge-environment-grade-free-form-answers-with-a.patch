@@ -1,0 +1,561 @@
+From a9e4420a1cb0c9b9c67b63b1a1c6b70fa6eec6a7 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Sat, 14 Nov 2026 00:22:02 +0900
+Subject: [PATCH 53/61] llm_judge environment: grade free-form answers with a
+ judge pool in a native run
+
+A native environment (env name llm_judge) that grades the claim frame, or its last \boxed{} content,
+against the reference with the judge model env.judge_pool serves. Modes: verdict (one token, reward
+P(Yes) or P(Yes) >= 0.5) and justify (NVIDIA Gym equivalence prompt, [[A=B]]/[[A!=B]]). The judge pool
+now also starts in native runs, after the trainer and inference clusters, and publishes its URLs in
+Ray internal KV so native environments find it by name (judge_pool_address).
+
+---
+ nemo_rl/algorithms/grpo.py                    |  11 +
+ nemo_rl/distributed/actor_environments.py     |   1 +
+ nemo_rl/environments/judge_pool.py            |  57 ++-
+ nemo_rl/environments/llm_judge_environment.py | 406 ++++++++++++++++++
+ nemo_rl/environments/utils.py                 |   3 +
+ 5 files changed, 469 insertions(+), 9 deletions(-)
+ create mode 100644 nemo_rl/environments/llm_judge_environment.py
+
+diff --git a/nemo_rl/algorithms/grpo.py b/nemo_rl/algorithms/grpo.py
+index 2a4eb75c5..376ce5c1f 100644
+--- a/nemo_rl/algorithms/grpo.py
++++ b/nemo_rl/algorithms/grpo.py
+@@ -1796,6 +1796,17 @@ def setup(
+     # Record when worker initialization completes (for calculating other setup time)
+     worker_init_complete_time = time.perf_counter() - setup_start_time
+ 
++    # With Gym, the judge pools start in _spinup_nemo_gym. Without it, native environments
++    # (llm_judge) reach them by name, so they start here, on the nodes left after the
++    # trainer and inference clusters.
++    if not enable_nemo_gym and judge_pool_num_nodes(env_configs) > 0:
++        judge_t0 = time.perf_counter()
++        start_judge_pool(env_configs, cluster_config)
++        print(
++            f"  ✓ Judge pools started in {time.perf_counter() - judge_t0:.1f}s",
++            flush=True,
++        )
++
+     # print the node IP and GPU ID of the policy workers for debugging
+     policy.print_node_ip_and_gpu_id()
+ 
+diff --git a/nemo_rl/distributed/actor_environments.py b/nemo_rl/distributed/actor_environments.py
+index 4ad8750ab..ff758b6e2 100644
+--- a/nemo_rl/distributed/actor_environments.py
++++ b/nemo_rl/distributed/actor_environments.py
+@@ -71,6 +71,7 @@ ACTOR_ENVIRONMENTS: dict[str, list[str] | None] = {
+     ],
+     "nemo_rl.environments.math_environment.MathEnvironment": None,
+     "nemo_rl.environments.math_environment.MathMultiRewardEnvironment": None,
++    "nemo_rl.environments.llm_judge_environment.LLMJudgeEnvironment": None,
+     "nemo_rl.environments.vlm_environment.VLMEnvironment": None,
+     "nemo_rl.environments.code_environment.CodeEnvironment": None,
+     "nemo_rl.environments.reward_model_environment.RewardModelEnvironment": None,
+diff --git a/nemo_rl/environments/judge_pool.py b/nemo_rl/environments/judge_pool.py
+index 55da4dc71..d4a86b42a 100644
+--- a/nemo_rl/environments/judge_pool.py
++++ b/nemo_rl/environments/judge_pool.py
+@@ -113,6 +113,40 @@ def _gym_model_server(judge_config: dict[str, Any]) -> str:
+     return judge_config.get("gym_model_server", "judge_model")
+ 
+ 
++_KV_PREFIX = "nrl_judge_pool/"
++
++
++def _publish(name: str, base_urls: list[str], model_name: str) -> None:
++    """Store a pool's server URLs and model name in Ray's key-value store."""
++    from ray.experimental import internal_kv
++
++    internal_kv._internal_kv_put(
++        _KV_PREFIX + name,
++        json.dumps({"base_urls": base_urls, "model": model_name}),
++        overwrite=True,
++    )
++
++
++def judge_pool_address(name: str, timeout_s: float) -> tuple[list[str], str]:
++    """Return a pool's server URLs and model name, waiting up to ``timeout_s`` for it to start.
++
++    Environments are created before the pools start, so they look the pool up when they
++    first need it. ``name`` is ``judge`` for ``env.judge_pool`` and ``judge_<name>`` for an
++    entry of ``env.extra_judge_pools``.
++    """
++    from ray.experimental import internal_kv
++
++    deadline = time.monotonic() + timeout_s
++    while True:
++        value = internal_kv._internal_kv_get(_KV_PREFIX + name)
++        if value:
++            entry = json.loads(value)
++            return entry["base_urls"], entry["model"]
++        if time.monotonic() > deadline:
++            raise TimeoutError(f"Judge pool {name} did not start within {timeout_s} s")
++        time.sleep(5.0)
++
++
+ def _start_pool(
+     name: str,
+     judge_config: dict[str, Any],
+@@ -153,17 +187,22 @@ def _start_pool(
+     pool.finish_generation()
+     _judge_pools.append(pool)
+ 
+-    model_server = (
+-        env_configs["nemo_gym"]
+-        .setdefault(_gym_model_server(judge_config), {})
+-        .setdefault("responses_api_models", {})
+-        .setdefault("vllm_model", {})
+-    )
+-    model_server["base_url"] = list(pool.dp_openai_server_base_urls)
+-    model_server["model"] = generation_config["model_name"]
++    base_urls = list(pool.dp_openai_server_base_urls)
++    # Native environments (env.<name>.judge_pool, e.g. llm_judge) look the pool up by name.
++    _publish(name, base_urls, generation_config["model_name"])
++    # Without Gym (a native run), only the published URLs are needed.
++    if "nemo_gym" in env_configs:
++        model_server = (
++            env_configs["nemo_gym"]
++            .setdefault(_gym_model_server(judge_config), {})
++            .setdefault("responses_api_models", {})
++            .setdefault("vllm_model", {})
++        )
++        model_server["base_url"] = base_urls
++        model_server["model"] = generation_config["model_name"]
+     print(
+         f"  ✓ Judge pool {name} ready on {judge_config['num_nodes']} node(s): "
+-        f"{model_server['base_url']}",
++        f"{base_urls}",
+         flush=True,
+     )
+     if stats_path:
+diff --git a/nemo_rl/environments/llm_judge_environment.py b/nemo_rl/environments/llm_judge_environment.py
+new file mode 100644
+index 000000000..5723314bc
+--- /dev/null
++++ b/nemo_rl/environments/llm_judge_environment.py
+@@ -0,0 +1,406 @@
++# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""A native environment that grades a free-form answer against a reference with an LLM judge.
++
++The judge is a fixed model served by ``env.judge_pool`` (judge_pool.py) on nodes of the same
++job. Unlike the NeMo Gym judges, this environment runs in NeMo-RL's own rollout, so a run can
++mix it with the native math and multiple-choice environments.
++
++The graded answer is the frame ``reward_frame`` names (``claim`` for Apertus 2), or the content
++of its last ``\\boxed{}`` when it has one. Two scoring modes:
++
++- ``verdict``: the judge answers with one token. The reward is the probability of "Yes" among
++  the yes/no tokens of its first-token distribution (``score: soft``), or 1 when that is at
++  least 0.5 (``score: hard``).
++- ``justify``: NVIDIA's NeMo Gym equivalence prompt (equivalence_llm_judge): the judge writes a
++  short justification and then ``[[A=B]]`` or ``[[A!=B]]``; the first label in its output
++  decides, as in Gym. The reward is 1 for ``[[A=B]]``.
++
++An empty answer scores 0 without a judge call. A call that still fails after ``retries`` scores
++0 and is counted. Every ``log_every`` calls the actor prints a ``[llm_judge]`` line with calls,
++failures, latency and calls in flight.
++"""
++
++import asyncio
++import itertools
++import math
++import random
++import time
++from typing import Any, NotRequired, TypedDict
++
++import aiohttp
++import ray
++import torch
++
++from nemo_rl.data.apertus2_format import frame_text
++from nemo_rl.data.interfaces import LLMMessageLogType
++from nemo_rl.distributed.batched_data_dict import BatchedDataDict
++from nemo_rl.environments.interfaces import EnvironmentInterface, EnvironmentReturn
++from nemo_rl.environments.judge_pool import judge_pool_address
++from nemo_rl.environments.metrics import calculate_pass_rate_per_prompt
++
++
++class LLMJudgeEnvConfig(TypedDict):
++    # "judge" for env.judge_pool, "judge_<name>" for an entry of env.extra_judge_pools.
++    judge_pool: str
++    # "verdict" (one token, reward from its probability) or "justify" (text, then a label).
++    mode: str
++    # Apertus 2 frame to grade ("claim"); None grades the plain response text.
++    reward_frame: str | None
++    # Must equal the pool's generation temperature/top_p or its val_temperature/val_top_p:
++    # NeMo-RL's server rejects other sampling settings.
++    temperature: float
++    top_p: float
++    # justify: the judge's output limit. verdict always asks for one token.
++    max_tokens: int
++    # verdict: how many first-token alternatives to read.
++    top_logprobs: int
++    # verdict: "soft" (P(Yes)) or "hard" (1 if P(Yes) >= 0.5).
++    score: str
++    # Judge calls this environment keeps in flight at once.
++    max_concurrent_calls: int
++    timeout_s: float
++    retries: int
++    # How long the first step waits for the judge pool to start.
++    pool_wait_s: float
++    # The answer is cut to this many characters.
++    max_answer_chars: int
++    log_every: int
++    # e.g. {"enable_thinking": false}: judges must not reason before a verdict token.
++    chat_template_kwargs: NotRequired[dict[str, Any] | None]
++
++
++class LLMJudgeMetadata(TypedDict):
++    ground_truth: str
++    extracted_answer: NotRequired[str | None]
++
++
++_GRADING_RULES = """You are a meticulous STEM grader. Compare a candidate answer to a GOLD reference for a scientific question and decide strict equivalence.
++
++Grading priorities (in order):
++1) Factual equivalence to GOLD (accept algebraically/formally equivalent formulations).
++2) Completeness on required parts — the candidate must include the same core parts/subclaims as the GOLD.
++
++Rules:
++- Treat GOLD as authoritative for what counts as correct.
++- If GOLD is a range or set, the candidate is equivalent only if it lies within that range or is a member of that set.
++- For formulas/derivations, accept mathematically identical transformations (e.g., symbol reordering, factoring, equivalent identities).
++- Multi-part: all essential parts must match for “equivalent”; otherwise they are not equivalent."""
++
++# NVIDIA's NeMo Gym prompt (resources_servers/equivalence_llm_judge/prompt_templates/
++# equivalence_llm_judge.txt), sent as one user message as Gym does.
++JUSTIFY_PROMPT = (
++    "===== System role =====\n"
++    + _GRADING_RULES
++    + """
++- Be concise. Do NOT reveal or rewrite the GOLD.
++
++Show your reason why they are equivalent or not equivalent first and then provide the output.
++
++Output (at the end after double newlines):
++- If equivalent: [[A=B]] they are equivalent
++- If not equivalent: [[A!=B]] they are not equivalent
++
++===== Example 1 (equivalent) =====
++QUESTION:
++State Avogadro’s constant (include units).
++
++GOLD:
++6.022 × 10^23 mol^-1
++
++CANDIDATE:
++6.022e23 per mole.
++
++The candidate gives the same magnitude in scientific notation and the same “per mole” unit; no extra or missing qualifiers.
++
++[[A=B]] they are equivalent
++
++===== Example 2 (not equivalent) =====
++QUESTION:
++State the first law of thermodynamics for a closed system and identify what each symbol represents.
++
++GOLD:
++ΔU = Q − W ; ΔU is change in internal energy, Q is heat added to the system, W is work done by the system.
++
++CANDIDATE:
++ΔU = Q + W ; ΔU is change in internal energy, Q is heat added to the system, W is work done by the system.
++
++The candidate uses the opposite sign convention for work relative to the required relationship; one core part is incorrect, so the overall statement does not match.
++
++[[A!=B]] they are not equivalent
++
++===== Inputs =====
++QUESTION:
++{question}
++
++GOLD:
++{expected_answer}
++
++CANDIDATE:
++{generated_answer}"""
++)
++
++# The same rules with a one-word answer, so the first token carries the verdict.
++VERDICT_SYSTEM = _GRADING_RULES + (
++    "\n\nAnswer with exactly one word: Yes if the CANDIDATE is equivalent to GOLD, No otherwise."
++)
++VERDICT_USER = """QUESTION:
++{question}
++
++GOLD:
++{expected_answer}
++
++CANDIDATE:
++{generated_answer}
++
++Is the CANDIDATE equivalent to GOLD? Answer Yes or No."""
++
++EQUAL, NOT_EQUAL = "[[A=B]]", "[[A!=B]]"
++
++
++def last_boxed(text: str) -> str | None:
++    """Return the content of the last ``\\boxed{...}`` (balanced braces), or None."""
++    start = text.rfind("\\boxed{")
++    if start < 0:
++        return None
++    i = start + len("\\boxed{")
++    depth = 1
++    for j in range(i, len(text)):
++        if text[j] == "{":
++            depth += 1
++        elif text[j] == "}":
++            depth -= 1
++            if depth == 0:
++                return text[i:j]
++    return None
++
++
++def graded_answer(text: str, max_chars: int) -> str:
++    """The answer the judge reads: the last boxed content if any, else the stripped text."""
++    boxed = last_boxed(text)
++    answer = (boxed if boxed is not None else text).strip()
++    return answer[:max_chars]
++
++
++def verdict_probability(top_logprobs: list[dict[str, Any]]) -> float | None:
++    """P(Yes) among the Yes/No tokens of a first-token distribution, None without enough mass."""
++    p_yes = p_no = 0.0
++    for entry in top_logprobs:
++        token = str(entry.get("token", "")).strip().lower()
++        p = math.exp(float(entry["logprob"]))
++        if token == "yes":
++            p_yes += p
++        elif token == "no":
++            p_no += p
++    if p_yes + p_no < 0.5:
++        return None
++    return p_yes / (p_yes + p_no)
++
++
++def justify_label(text: str) -> bool | None:
++    """True for [[A=B]], False for [[A!=B]], whichever comes first; None without a label."""
++    eq, neq = text.find(EQUAL), text.find(NOT_EQUAL)
++    if eq < 0 and neq < 0:
++        return None
++    return eq >= 0 and (neq < 0 or eq < neq)
++
++
++def _question(conversation: LLMMessageLogType) -> str:
++    users = [str(m["content"]) for m in conversation if m["role"] == "user"]
++    return users[-1] if users else ""
++
++
++def _response_text(conversation: LLMMessageLogType, reward_frame: str | None) -> str:
++    if reward_frame is not None:
++        outputs = [m["apertus2_output"] for m in conversation if "apertus2_output" in m]
++        if outputs:
++            return frame_text(outputs[-1], reward_frame)
++        return ""
++    return "".join(str(m["content"]) for m in conversation if m["role"] == "assistant")
++
++
++@ray.remote(max_restarts=-1, max_task_retries=-1, max_concurrency=1000)  # pragma: no cover
++class LLMJudgeEnvironment(EnvironmentInterface[LLMJudgeMetadata]):
++    """Grades answers against references with a judge pool; see the module docstring."""
++
++    def __init__(self, cfg: LLMJudgeEnvConfig):
++        self.cfg = cfg
++        assert cfg["mode"] in ("verdict", "justify"), f"unknown mode {cfg['mode']}"
++        assert cfg["score"] in ("soft", "hard"), f"unknown score {cfg['score']}"
++        self._urls: list[str] | None = None
++        self._model: str | None = None
++        self._url_cycle = None
++        self._session: aiohttp.ClientSession | None = None
++        self._semaphore: asyncio.Semaphore | None = None
++        self._ready = None
++        self._calls = 0
++        self._failures = 0
++        self._latencies: list[float] = []
++        self._in_flight = 0
++
++    async def _ensure_ready(self) -> None:
++        if self._ready is None:
++            self._ready = asyncio.get_running_loop().create_task(self._connect())
++        await self._ready
++
++    async def _connect(self) -> None:
++        urls, model = await asyncio.to_thread(
++            judge_pool_address, self.cfg["judge_pool"], self.cfg["pool_wait_s"]
++        )
++        self._urls, self._model = urls, model
++        self._url_cycle = itertools.cycle(random.sample(urls, len(urls)))
++        self._semaphore = asyncio.Semaphore(self.cfg["max_concurrent_calls"])
++        connector = aiohttp.TCPConnector(limit=0)
++        self._session = aiohttp.ClientSession(
++            connector=connector, timeout=aiohttp.ClientTimeout(total=self.cfg["timeout_s"])
++        )
++        print(f"[llm_judge] connected to {len(urls)} judge server(s) of {model}", flush=True)
++
++    def _request(self, question: str, reference: str, answer: str) -> dict[str, Any]:
++        cfg = self.cfg
++        fields = dict(question=question, expected_answer=reference, generated_answer=answer)
++        body: dict[str, Any] = {
++            "model": self._model,
++            "temperature": cfg["temperature"],
++            "top_p": cfg["top_p"],
++            # NeMo-RL's server answers with token IDs by default; the judge is read as text.
++            "return_tokens_as_token_ids": False,
++        }
++        if cfg["mode"] == "verdict":
++            body["messages"] = [
++                {"role": "system", "content": VERDICT_SYSTEM},
++                {"role": "user", "content": VERDICT_USER.format(**fields)},
++            ]
++            body.update(max_tokens=1, logprobs=True, top_logprobs=cfg["top_logprobs"])
++        else:
++            body["messages"] = [{"role": "user", "content": JUSTIFY_PROMPT.format(**fields)}]
++            body["max_tokens"] = cfg["max_tokens"]
++        if cfg.get("chat_template_kwargs"):
++            body["chat_template_kwargs"] = dict(cfg["chat_template_kwargs"])
++        return body
++
++    def _score(self, completion: dict[str, Any]) -> float | None:
++        choice = completion["choices"][0]
++        if self.cfg["mode"] == "verdict":
++            content = (choice.get("logprobs") or {}).get("content") or []
++            if not content:
++                return None
++            p = verdict_probability(content[0].get("top_logprobs") or [])
++            if p is None:
++                return None
++            return p if self.cfg["score"] == "soft" else float(p >= 0.5)
++        label = justify_label(choice["message"].get("content") or "")
++        return None if label is None else float(label)
++
++    async def _judge(self, question: str, reference: str, answer: str) -> tuple[float, bool]:
++        """Return (reward, failed)."""
++        if not answer:
++            return 0.0, False
++        body = self._request(question, reference, answer)
++        async with self._semaphore:
++            self._in_flight += 1
++            try:
++                for attempt in range(self.cfg["retries"] + 1):
++                    url = next(self._url_cycle) + "/chat/completions"
++                    t0 = time.perf_counter()
++                    try:
++                        async with self._session.post(url, json=body) as response:
++                            response.raise_for_status()
++                            completion = await response.json()
++                        score = self._score(completion)
++                        self._latencies.append(time.perf_counter() - t0)
++                        if score is not None:
++                            return score, False
++                    except (aiohttp.ClientError, asyncio.TimeoutError, KeyError, ValueError) as e:
++                        if attempt == self.cfg["retries"]:
++                            print(f"[llm_judge] call failed: {type(e).__name__}: {e}", flush=True)
++                    await asyncio.sleep(min(30.0, 2.0**attempt))
++                return 0.0, True
++            finally:
++                self._in_flight -= 1
++                self._calls += 1
++                self._maybe_log()
++
++    def _maybe_log(self) -> None:
++        if self._calls % self.cfg["log_every"]:
++            return
++        lat = sorted(self._latencies[-self.cfg["log_every"] :]) or [0.0]
++        print(
++            f"[llm_judge] calls={self._calls} failures={self._failures} in_flight={self._in_flight} "
++            f"latency_s mean={sum(lat) / len(lat):.2f} p50={lat[len(lat) // 2]:.2f} "
++            f"p95={lat[int(0.95 * (len(lat) - 1))]:.2f} t={time.time():.0f}",
++            flush=True,
++        )
++
++    async def step(
++        self,
++        message_log_batch: list[LLMMessageLogType],
++        metadata: list[LLMJudgeMetadata],
++        return_extracted_answer: bool = False,
++    ) -> EnvironmentReturn[LLMJudgeMetadata]:
++        await self._ensure_ready()
++        reward_frame = self.cfg.get("reward_frame")
++        answers = [
++            graded_answer(_response_text(c, reward_frame), self.cfg["max_answer_chars"])
++            for c in message_log_batch
++        ]
++        results = await asyncio.gather(
++            *[
++                self._judge(_question(c), str(m["ground_truth"]), a)
++                for c, m, a in zip(message_log_batch, metadata, answers)
++            ]
++        )
++        self._failures += sum(failed for _, failed in results)
++        rewards = torch.tensor([reward for reward, _ in results], dtype=torch.float32)
++        observations = [
++            {
++                "role": "environment",
++                "content": "Environment: correct" if r >= 0.5 else "Environment: incorrect",
++            }
++            for r in rewards.tolist()
++        ]
++        metadata = [{**m, "extracted_answer": a} for m, a in zip(metadata, answers)]
++        return EnvironmentReturn(
++            observations=observations,
++            metadata=metadata,
++            next_stop_strings=[None] * len(message_log_batch),
++            rewards=rewards,
++            terminateds=torch.ones_like(rewards),
++            answers=answers if return_extracted_answer else None,
++        )
++
++    def global_post_process_and_metrics(
++        self, batch: BatchedDataDict[Any]
++    ) -> tuple[BatchedDataDict[Any], dict[str, float | int]]:
++        rewards = batch["rewards"] * batch["is_end"]
++        lengths = batch["generation_lengths"] - batch["prompt_lengths"]
++        correct = rewards >= 0.5
++        metrics = {
++            "accuracy": rewards.mean().item(),
++            "pass@samples_per_prompt": calculate_pass_rate_per_prompt(batch["text"], rewards),
++            "fraction_of_samples_properly_ended": batch["is_end"].float().mean().item(),
++            "num_problems_in_batch": batch["is_end"].shape[0],
++            "generation_lengths": batch["generation_lengths"].float().mean().item(),
++            "prompt_lengths": batch["prompt_lengths"].float().mean().item(),
++            "correct_solution_generation_lengths": (
++                lengths[correct].float().mean().item() if correct.any() else 0
++            ),
++            "judge_calls": self._calls,
++            "judge_failures": self._failures,
++        }
++        return batch, metrics
++
++    async def shutdown(self) -> None:
++        if self._session is not None:
++            await self._session.close()
+diff --git a/nemo_rl/environments/utils.py b/nemo_rl/environments/utils.py
+index 83830bb2b..53f6c74d1 100644
+--- a/nemo_rl/environments/utils.py
++++ b/nemo_rl/environments/utils.py
+@@ -61,6 +61,9 @@ ENV_REGISTRY: Dict[str, EnvRegistryEntry] = {
+     "nemo_gym": {
+         "actor_class_fqn": "nemo_rl.environments.nemo_gym.NemoGym",
+     },
++    "llm_judge": {
++        "actor_class_fqn": "nemo_rl.environments.llm_judge_environment.LLMJudgeEnvironment",
++    },
+ }
+ 
+ 
+-- 
+2.51.0
+

@@ -1,0 +1,26 @@
+From e57b6332fb5bc57c1c028c801f4da9ad3d9953b9 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Sat, 14 Nov 2026 07:59:58 +0900
+Subject: [PATCH 58/61] enigmata environment: integer counts in the summary
+ line
+
+---
+ nemo_rl/environments/enigmata_environment.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/nemo_rl/environments/enigmata_environment.py b/nemo_rl/environments/enigmata_environment.py
+index 1a98c2e73..602fb4456 100644
+--- a/nemo_rl/environments/enigmata_environment.py
++++ b/nemo_rl/environments/enigmata_environment.py
+@@ -396,7 +396,7 @@ class EnigmataEnvironment(EnvironmentInterface[EnigmataMetadata]):
+         )
+         statuses = " ".join(f"{k}={v}" for k, v in sorted(self._statuses.items())) or "none"
+         print(
+-            f"[enigmata] graded={total} reward={reward / max(total, 1):.3f} "
++            f"[enigmata] graded={int(total)} reward={reward / max(total, 1):.3f} "
+             f"failures: {statuses} replaced_workers={self._worker_replacements} | {per_task}",
+             flush=True,
+         )
+-- 
+2.51.0
+

@@ -1,0 +1,919 @@
+From e4eb302b6fa30f3211e4c0dbe50fcb81d6b581e0 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Sat, 14 Nov 2026 07:59:52 +0900
+Subject: [PATCH 59/61] ScienceWorld environment: native multi-turn episodes in
+ the Apertus 2 format
+
+ScienceWorld (AllenAI, Apache-2.0) simulates 30 elementary-school science tasks as a text game on the
+JVM. The scienceworld environment plays one episode per rollout sample: the row prompt holds the task
+and the first observation, every burst gives one command (reply frame or act tool call, per row), and
+the simulator answer comes back as a user message or a call result. Invalid commands return the
+simulator text and the episode goes on. Reward per turn is the change of max(score, 0)/100, so an
+episode totals its last score in [0, 1].
+
+Simulators run in worker actors with one JVM each, placed on the nodes of the placement groups that
+env.scienceworld.placement_group_prefix names (the vLLM nodes). A worker runs one simulator call at a
+time: two loads at once in one JVM fail on the global simplification state. Episode metadata carries
+the commands so far, so a lost episode is replayed.
+
+Rollouts take an observation token_ids from the environment when it gives them (input frames encoded
+by apertus-common); otherwise they tokenize the text as before. Frame metrics are averaged per name
+over the samples that report them, in rollouts and in validation, since ScienceWorld reports other
+counts than the math environment. New processor apertus2_sciworld_data_processor.
+
+---
+ nemo_rl/algorithms/grpo.py                    |  12 +-
+ nemo_rl/data/processors.py                    |  52 ++
+ nemo_rl/distributed/actor_environments.py     |   1 +
+ .../environments/scienceworld_environment.py  | 679 ++++++++++++++++++
+ nemo_rl/environments/utils.py                 |   3 +
+ nemo_rl/experience/rollouts.py                |  47 +-
+ 6 files changed, 772 insertions(+), 22 deletions(-)
+ create mode 100644 nemo_rl/environments/scienceworld_environment.py
+
+diff --git a/nemo_rl/algorithms/grpo.py b/nemo_rl/algorithms/grpo.py
+index af49bc02e..fadc119e1 100644
+--- a/nemo_rl/algorithms/grpo.py
++++ b/nemo_rl/algorithms/grpo.py
+@@ -4615,10 +4615,14 @@ def validate(
+             val_metrics["pass_k"] = pass_k
+         accuracy_by_task = _mean_by_task(total_task_names, total_rewards, "accuracy")
+         val_metrics.update(accuracy_by_task)
+-        for name in all_frame_metrics[0] if all_frame_metrics else ():
+-            val_metrics[f"frames/{name}"] = sum(
+-                metrics[name] for metrics in all_frame_metrics
+-            ) / len(all_frame_metrics)
++        # Environments report different counts (math: claim/reply, ScienceWorld:
++        # scores and actions), so each is averaged over the samples that have it.
++        frame_values: dict[str, list[float]] = {}
++        for metrics in all_frame_metrics:
++            for name, value in (metrics or {}).items():
++                frame_values.setdefault(name, []).append(value)
++        for name, values in frame_values.items():
++            val_metrics[f"frames/{name}"] = sum(values) / len(values)
+ 
+         # Print sample conversations only once at the end of validation
+         try:
+diff --git a/nemo_rl/data/processors.py b/nemo_rl/data/processors.py
+index 52d143eb6..d738d87da 100644
+--- a/nemo_rl/data/processors.py
++++ b/nemo_rl/data/processors.py
+@@ -681,6 +681,57 @@ def apertus2_math_data_processor(
+     return output
+ 
+ 
++def apertus2_sciworld_data_processor(
++    datum_dict: dict[str, Any],
++    task_data_spec: TaskDataSpec,
++    tokenizer: TokenizerType,
++    max_seq_length: int,
++    idx: int,
++) -> DatumSpec:
++    """A ScienceWorld episode's opening prompt in the Apertus 2 message format.
++
++    The row's user message holds the instructions, the task and the first
++    observation; ``sciworld`` names the task, variation, simplifications and action
++    format for the environment. The tool format needs the ``act`` tool in the system
++    frame, and the reply format must not declare it.
++    """
++    spec = dict(datum_dict["sciworld"])
++    user_text = datum_dict["messages"][0]["content"]
++    assert task_data_spec.system_prompt, (
++        "Apertus 2 needs system_prompt_file: a JSON file with the system frame."
++    )
++    tools = json.loads(task_data_spec.system_prompt).get("tools") or []
++    declares_act = any(tool.get("name") == "act" for tool in tools)
++    assert declares_act == (spec["action_format"] == "tool"), (
++        f"Row action_format {spec['action_format']!r} needs a system frame "
++        f"{'with' if spec['action_format'] == 'tool' else 'without'} the act tool."
++    )
++    token_ids = torch.tensor(
++        encode_prompt(
++            tokenizer.name_or_path,
++            system_prompt=task_data_spec.system_prompt,
++            user_text=user_text,
++        ),
++        dtype=torch.long,
++    )
++    message_log: LLMMessageLogType = [
++        {"role": "user", "content": user_text, "token_ids": token_ids}
++    ]
++    length = len(token_ids)
++    loss_multiplier = 1.0
++    if length >= max_seq_length:
++        message_log[0]["token_ids"] = token_ids[: min(4, max_seq_length)]
++        loss_multiplier = 0.0
++    return {
++        "message_log": message_log,
++        "length": length,
++        "extra_env_info": {"sciworld": spec},
++        "loss_multiplier": loss_multiplier,
++        "idx": idx,
++        "task_name": datum_dict["task_name"],
++    }
++
++
+ def vlm_hf_data_processor(
+     datum_dict: dict[str, Any],
+     task_data_spec: TaskDataSpec,
+@@ -1079,6 +1130,7 @@ PROCESSOR_REGISTRY: Dict[str, TaskDataProcessFnCallable] = cast(
+     {
+         "default": math_hf_data_processor,
+         "apertus2_math_data_processor": apertus2_math_data_processor,
++        "apertus2_sciworld_data_processor": apertus2_sciworld_data_processor,
+         "helpsteer3_data_processor": helpsteer3_data_processor,
+         "kd_data_processor": kd_data_processor,
+         "math_data_processor": math_data_processor,
+diff --git a/nemo_rl/distributed/actor_environments.py b/nemo_rl/distributed/actor_environments.py
+index 11ee8c945..fe778fbe6 100644
+--- a/nemo_rl/distributed/actor_environments.py
++++ b/nemo_rl/distributed/actor_environments.py
+@@ -78,6 +78,7 @@ ACTOR_ENVIRONMENTS: dict[str, list[str] | None] = {
+     "nemo_rl.environments.reward_model_environment.RewardModelEnvironment": None,
+     "nemo_rl.environments.code_jaccard_environment.CodeJaccardEnvironment": None,
+     "nemo_rl.environments.games.sliding_puzzle.SlidingPuzzleEnv": None,
++    "nemo_rl.environments.scienceworld_environment.ScienceWorldEnvironment": None,
+     # AsyncTrajectoryCollector needs the vLLM environment to handle exceptions
+     # from VllmGenerationWorker.
+     "nemo_rl.algorithms.async_utils.AsyncTrajectoryCollector": ["vllm"],
+diff --git a/nemo_rl/environments/scienceworld_environment.py b/nemo_rl/environments/scienceworld_environment.py
+new file mode 100644
+index 000000000..f64e3e906
+--- /dev/null
++++ b/nemo_rl/environments/scienceworld_environment.py
+@@ -0,0 +1,679 @@
++# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""ScienceWorld as a native multi-turn environment for the Apertus 2 message format.
++
++ScienceWorld (AllenAI, Apache-2.0, pip package ``scienceworld``) simulates 30
++elementary-school science tasks as a text game run by a Scala simulator on the JVM.
++A data row names a task, a variation and the simplifications; its prompt already
++holds the task description and the first observation (``look around``). Every
++model turn is one Apertus 2 burst, which ends at ``<|wait|>``, and the row's
++``action_format`` says how the model acts in it:
++
++* ``reply``: the reply frame is one command. The simulator's answer
++  comes back as the next user message.
++* ``tool``: each ``act`` call holds one command, and the simulator's
++  answer comes back as that call's result. A burst without a call ends the episode.
++
++A command the simulator does not understand returns its own error text, and the
++episode goes on. An episode ends when the task is done or failed, after
++``max_actions`` commands, when the model stops calling ``act`` (tool format), or when
++a burst is cut off by the token limit.
++
++Reward: each turn returns the change of ``max(score, 0) / 100``, so an episode's
++total reward is its last score in [0, 1] however it ends. A failed task (negative
++score) ends at 0.
++
++Simulators run in ``num_workers`` worker actors with one JVM each. The simulator
++keeps the simplifications of the latest ``load`` in a global Scala object, and two
++loads at once in one JVM fail (NullPointerException in SimplifierProcessor), so a
++worker runs one simulator call at a time; a step takes about 8 ms. An episode lives
++in one worker. Its metadata carries its commands so far, so a worker that lost the
++episode (restart, idle timeout) replays them on a fresh simulator.
++"""
++
++import glob
++import hashlib
++import itertools
++import json
++import os
++import re
++import sys
++import threading
++import time
++import uuid
++from typing import Any, NotRequired, TypedDict
++
++import ray
++import torch
++
++from nemo_rl.data.apertus2_format import Apertus2Output
++from nemo_rl.data.interfaces import LLMMessageLogType
++from nemo_rl.distributed.batched_data_dict import BatchedDataDict
++from nemo_rl.distributed.virtual_cluster import PY_EXECUTABLES
++from nemo_rl.environments.interfaces import EnvironmentInterface, EnvironmentReturn
++
++ACT_TOOL = "act"
++# The simulator's answers to input it cannot run, and to input naming several objects.
++_INVALID_PREFIXES = ("No known action matches that input.",)
++_AMBIGUOUS_PREFIX = "Ambiguous request"
++NO_COMMAND = (
++    "No command found. Reply with exactly one command, for example: look around"
++)
++NO_TOOLS = (
++    "No tools are available here. Reply with exactly one command as plain text, "
++    "for example: look around"
++)
++MALFORMED = "Your last message could not be read. Send exactly one command."
++BAD_ACT_ARGUMENTS = (
++    'Error: act takes one argument, "action", the command as a string, '
++    'for example {"action": "look around"}.'
++)
++UNKNOWN_TOOL = "Error: the only tool is act."
++TOO_MANY_CALLS = "Error: not run. Call act once per turn."
++# Commands the environment refuses: "reset task" would restart the episode's clock.
++BLOCKED_COMMANDS = {"reset task": "The command reset task is not available."}
++SIMULATOR_ERROR = "The simulator could not run this command."
++# Reasons an episode ends, one metric each.
++END_REASONS = ("done", "failed", "max_actions", "stopped", "cut_off", "env_error")
++
++
++class ScienceWorldEnvConfig(TypedDict):
++    """``env.<name>`` for the ScienceWorld environment."""
++
++    # Worker actors, one JVM each. A worker runs one simulator call at a time.
++    num_workers: int
++    # Java binary on every node, e.g. a portable aarch64 JRE.
++    java_path: str
++    # Directory holding the ``scienceworld`` and ``py4j`` packages. Only the workers
++    # put it on sys.path.
++    package_path: str
++    # JVM heap per worker, e.g. "4g".
++    jvm_heap: str
++    # The Apertus 2 tokenizer, to encode observations as input frames.
++    tokenizer_path: str
++    # Simplifications every row must use, e.g. "teleportAction,openDoors". The
++    # simulator keeps them in a global object, so one run uses one setting.
++    simplifications: str
++    # Simulator commands per episode; the episode ends after this many.
++    max_actions: int
++    # act calls run per burst (tool format); later calls get an error result.
++    max_calls_per_turn: int
++    # Episodes not stepped for this long are dropped from their worker, and
++    # replayed if they come back.
++    idle_timeout_s: float
++    # Seconds one worker call may take before the episode ends as env_error.
++    call_timeout_s: float
++    # Workers go to the nodes of the Ray placement groups whose name starts with
++    # this (the vLLM nodes in GRPO), else Ray spreads them over the cluster.
++    placement_group_prefix: NotRequired[str | None]
++    # Observations longer than this many characters are cut (None: no cap).
++    max_observation_chars: NotRequired[int | None]
++
++
++class ScienceWorldMetadata(TypedDict):
++    """A row's ``extra_env_info``; ``episode`` and ``frame_metrics`` are added by step()."""
++
++    sciworld: dict[str, Any]
++    episode: NotRequired[dict[str, Any]]
++    frame_metrics: NotRequired[dict[str, float]]
++
++
++_ACTION_LABEL = re.compile(r"^(?:action|command|next action|my action)\s*[:\-]\s*", re.I)
++# Markdown and quoting around a command, and punctuation after it.
++_WRAPPING = "`'\"*_> \t"
++
++
++def _unwrap(text: str) -> str:
++    previous = None
++    while text != previous:
++        previous = text
++        text = text.strip(_WRAPPING).rstrip(".!;:").strip(_WRAPPING)
++        text = _ACTION_LABEL.sub("", text)
++    return text
++
++
++def parse_reply_command(reply: str | None) -> str | None:
++    """Return the one command a reply frame holds, or None if it holds none.
++
++    The reply may wrap the command in markdown, quotes or an "Action:" label. A
++    reply of several lines uses its last labelled line if it has one, else its
++    first non-empty line.
++    """
++    if not reply:
++        return None
++    lines = [line.strip() for line in reply.strip().splitlines() if line.strip()]
++    lines = [line for line in lines if line.strip(_WRAPPING)]
++    if not lines:
++        return None
++    labelled = [line for line in lines if _ACTION_LABEL.match(line.strip(_WRAPPING))]
++    command = _unwrap(labelled[-1] if labelled else lines[0])
++    return command.lower() or None
++
++
++def parse_act_arguments(arguments: str) -> str | None:
++    """Return the command of an act call, or None if its arguments are not usable."""
++    try:
++        parsed = json.loads(arguments)
++    except (json.JSONDecodeError, TypeError):
++        return None
++    if isinstance(parsed, str):
++        command = parsed
++    elif isinstance(parsed, dict):
++        command = parsed.get("action", parsed.get("command"))
++    else:
++        return None
++    if not isinstance(command, str) or not command.strip():
++        return None
++    return command.strip().lower()
++
++
++def spec_hash(meta: ScienceWorldMetadata) -> str | None:
++    """Hash of the first observation the row's prompt shows, if the row has one."""
++    return meta["sciworld"].get("first_obs_hash")
++
++
++def _clipped(score: int) -> float:
++    return max(score, 0) / 100.0
++
++
++def _obs_hash(text: str) -> str:
++    """Hash of an observation's words in sorted order.
++
++    The simulator lists the objects of a room in an order that changes between
++    JVMs and with what the JVM ran before (about 13% of first observations), so
++    only the words are compared, not their order.
++    """
++    words = sorted(re.sub(r"[,.:()]", " ", text).split())
++    return hashlib.sha1(" ".join(words).encode("utf-8")).hexdigest()[:16]
++
++
++@ray.remote(max_concurrency=16)  # pragma: no cover
++class ScienceWorldSimWorker:
++    """One JVM with any number of ScienceWorld simulators, one call at a time."""
++
++    def __init__(self, cfg: ScienceWorldEnvConfig) -> None:
++        self.cfg = cfg
++        if cfg["package_path"] not in sys.path:
++            sys.path.insert(0, cfg["package_path"])
++        self._lock = threading.Lock()
++        self._episodes: dict[str, list[Any]] = {}  # id -> [simulator, last use]
++        self._gateway = None
++        self._process = None
++        self._jvm_starts = 0
++        self._start_jvm()
++        threading.Thread(target=self._drop_idle, daemon=True).start()
++
++    def _start_jvm(self) -> None:
++        from py4j.java_gateway import GatewayParameters, JavaGateway, launch_gateway
++        from scienceworld.constants import BASEPATH, JAR_PATH
++
++        if self._gateway is not None:
++            try:
++                self._gateway.shutdown()
++            except Exception:  # noqa: BLE001
++                pass
++        # The py4j jar that pip installs next to the package; ScienceWorld's own
++        # jar bundles the same server classes and serves as the fallback.
++        py4j_jars = sorted(
++            glob.glob(
++                os.path.join(
++                    self.cfg["package_path"], "py4j-*.data/data/share/py4j/py4j*.jar"
++                )
++            )
++        )
++        port, self._process = launch_gateway(
++            jarpath=py4j_jars[-1] if py4j_jars else JAR_PATH,
++            classpath=JAR_PATH,
++            die_on_exit=True,
++            cwd=BASEPATH,
++            java_path=self.cfg["java_path"],
++            # Few GC and compiler threads: a node has 288 CPUs, and a JVM sizes its
++            # thread pools by them.
++            javaopts=[
++                f"-Xmx{self.cfg['jvm_heap']}",
++                "-XX:+UseSerialGC",
++                "-XX:ActiveProcessorCount=2",
++            ],
++            return_proc=True,
++        )
++        self._gateway = JavaGateway(
++            gateway_parameters=GatewayParameters(auto_field=True, port=port)
++        )
++        self._episodes.clear()
++        self._jvm_starts += 1
++
++    def _new_simulator(self, spec: dict[str, Any]) -> tuple[Any, str]:
++        simulator = self._gateway.jvm.scienceworld.runtime.pythonapi.PythonInterface()
++        simulator.load(
++            spec["task"], int(spec["variation"]), spec["simplifications"], False
++        )
++        simulator.reset()
++        return simulator, simulator.step("look around")
++
++    def _drop_idle(self) -> None:
++        while True:
++            time.sleep(30.0)
++            cutoff = time.monotonic() - self.cfg["idle_timeout_s"]
++            with self._lock:
++                for episode_id in [
++                    k for k, v in self._episodes.items() if v[1] < cutoff
++                ]:
++                    del self._episodes[episode_id]
++
++    def ready(self) -> str:
++        return ray.get_runtime_context().get_node_id()
++
++    def close(self, episode_id: str) -> None:
++        with self._lock:
++            self._episodes.pop(episode_id, None)
++
++    def stats(self) -> dict[str, Any]:
++        rss_kb = 0
++        if self._process is not None:
++            with open(f"/proc/{self._process.pid}/status") as f:
++                for line in f:
++                    if line.startswith("VmRSS:"):
++                        rss_kb = int(line.split()[1])
++        return {
++            "episodes": len(self._episodes),
++            "jvm_rss_mb": rss_kb / 1024,
++            "jvm_starts": self._jvm_starts,
++        }
++
++    def run(
++        self,
++        episode_id: str,
++        spec: dict[str, Any],
++        history: list[str],
++        commands: list[str],
++        last_observation_hash: str | None,
++    ) -> dict[str, Any]:
++        """Run commands in an episode, creating or replaying its simulator first.
++
++        Returns:
++            ``first_observation`` (new episodes), ``results`` as
++            ``[observation, score, done]`` per command run, ``replayed`` and
++            ``replay_mismatch`` (the replayed last observation differs from the one
++            the model saw), and ``error`` when the simulator failed.
++        """
++        from py4j.protocol import Py4JJavaError, Py4JNetworkError
++
++        for attempt in range(2):
++            try:
++                with self._lock:
++                    return self._run_locked(
++                        episode_id, spec, history, commands, last_observation_hash
++                    )
++            except Py4JNetworkError as error:
++                # The JVM died: start a new one; the episode replays from history.
++                with self._lock:
++                    self._start_jvm()
++                if attempt == 1:
++                    return {"error": f"JVM lost: {error}"[:500], "results": []}
++            except Py4JJavaError as error:
++                # The simulator threw on a command: drop its state, which the next
++                # turn replays from the history (without this command).
++                with self._lock:
++                    self._episodes.pop(episode_id, None)
++                return {"error": str(error)[:500], "results": [], "recoverable": True}
++        return {"error": "unreachable", "results": []}
++
++    def _run_locked(
++        self,
++        episode_id: str,
++        spec: dict[str, Any],
++        history: list[str],
++        commands: list[str],
++        last_observation_hash: str | None,
++    ) -> dict[str, Any]:
++        out: dict[str, Any] = {"replayed": False, "replay_mismatch": False}
++        entry = self._episodes.get(episode_id)
++        if entry is None:
++            simulator, first = self._new_simulator(spec)
++            if history:
++                observation = first
++                for command in history:
++                    observation = simulator.step(command)
++                out["replayed"] = True
++                out["replay_mismatch"] = (
++                    last_observation_hash is not None
++                    and _obs_hash(observation) != last_observation_hash
++                )
++            else:
++                out["first_observation"] = first
++            entry = self._episodes[episode_id] = [simulator, time.monotonic()]
++        simulator = entry[0]
++        results = []
++        for command in commands:
++            observation = simulator.step(command)
++            score = int(round(100 * simulator.getScore()))
++            done = bool(simulator.getCompleted()) or score < 0
++            results.append([observation, score, done])
++            if done:
++                break
++        entry[1] = time.monotonic()
++        out["results"] = results
++        return out
++
++
++def _last_output(conversation: LLMMessageLogType) -> Apertus2Output | None:
++    for message in reversed(conversation):
++        if message["role"] == "assistant":
++            return message.get("apertus2_output")
++    return None
++
++
++@ray.remote(max_restarts=-1, max_task_retries=-1, max_concurrency=1000)  # pragma: no cover
++class ScienceWorldEnvironment(EnvironmentInterface[ScienceWorldMetadata]):
++    """Native multi-turn ScienceWorld episodes; see the module docstring."""
++
++    def __init__(self, cfg: ScienceWorldEnvConfig) -> None:
++        self.cfg = cfg
++        self._workers: list[Any] = []
++        self._init_lock = threading.Lock()
++        self._next_worker = itertools.count()
++
++    # ----- workers -----
++
++    def _placement_nodes(self) -> list[str]:
++        prefix = self.cfg.get("placement_group_prefix")
++        if not prefix:
++            return []
++        from ray.util import placement_group_table
++
++        nodes: list[str] = []
++        for table in placement_group_table().values():
++            if table.get("name", "").startswith(prefix) and table.get("state") == "CREATED":
++                for node in table.get("bundles_to_node_id", {}).values():
++                    if node not in nodes:
++                        nodes.append(node)
++        return nodes
++
++    def _ensure_workers(self) -> None:
++        with self._init_lock:
++            if self._workers:
++                return
++            from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
++
++            nodes = self._placement_nodes()
++            workers = []
++            for i in range(self.cfg["num_workers"]):
++                strategy: Any = (
++                    NodeAffinitySchedulingStrategy(node_id=nodes[i % len(nodes)], soft=True)
++                    if nodes
++                    else "SPREAD"
++                )
++                workers.append(
++                    ScienceWorldSimWorker.options(  # type: ignore[attr-defined]
++                        num_cpus=0,
++                        scheduling_strategy=strategy,
++                        runtime_env={"py_executable": PY_EXECUTABLES.SYSTEM},
++                    ).remote(self.cfg)
++                )
++            worker_nodes = ray.get([worker.ready.remote() for worker in workers])
++            print(
++                f"ScienceWorld: {len(workers)} simulator workers on "
++                f"{len(set(worker_nodes))} nodes "
++                f"({'placement groups ' + str(self.cfg.get('placement_group_prefix')) if nodes else 'spread'})",
++                flush=True,
++            )
++            self._workers = workers
++
++    def shutdown(self) -> None:
++        for worker in self._workers:
++            ray.kill(worker)
++
++    def worker_stats(self) -> list[dict[str, Any]]:
++        return ray.get([worker.stats.remote() for worker in self._workers])
++
++    # ----- turns -----
++
++    def _encode(self, items: list[Any]) -> list[int]:
++        from nemo_rl.data.apertus2_format import _get_encoding
++
++        return list(_get_encoding(self.cfg["tokenizer_path"]).encode_items(items))
++
++    def _cap(self, text: str) -> str:
++        cap = self.cfg.get("max_observation_chars")
++        if cap is not None and len(text) > cap:
++            return text[:cap] + " [...]"
++        return text
++
++    def _plan_turn(
++        self, output: Apertus2Output | None, fmt: str
++    ) -> tuple[list[str], list[tuple[Any, str | None]], str | None]:
++        """Read a burst into commands to run and the inputs that answer it.
++
++        Returns:
++            The commands, the answer slots in order as (call or None, fixed text or
++            None for "the next command's observation"), and the end reason if the
++            burst ends the episode before any command runs.
++        """
++        if output is None:
++            raise ValueError(
++                "env.scienceworld needs policy.generation.output_format=apertus2."
++            )
++        if output.truncated:
++            return [], [], "cut_off"
++        if output.error is not None:
++            return [], [(None, MALFORMED)], None
++        if fmt == "reply":
++            if output.calls:
++                return [], [(call, NO_TOOLS) for call in output.calls], None
++            command = parse_reply_command(output.reply)
++            if command is None:
++                return [], [(None, NO_COMMAND)], None
++            if command in BLOCKED_COMMANDS:
++                return [], [(None, BLOCKED_COMMANDS[command])], None
++            return [command], [(None, None)], None
++        # Tool format.
++        if not output.calls:
++            return [], [], "stopped"
++        commands: list[str] = []
++        slots: list[tuple[Any, str | None]] = []
++        for call in output.calls:
++            if call.name != ACT_TOOL:
++                slots.append((call, UNKNOWN_TOOL))
++                continue
++            command = parse_act_arguments(call.arguments)
++            if command is None:
++                slots.append((call, BAD_ACT_ARGUMENTS))
++            elif command in BLOCKED_COMMANDS:
++                slots.append((call, BLOCKED_COMMANDS[command]))
++            elif len(commands) >= self.cfg["max_calls_per_turn"]:
++                slots.append((call, TOO_MANY_CALLS))
++            else:
++                commands.append(command)
++                slots.append((call, None))
++        return commands, slots, None
++
++    def step(
++        self,
++        message_log_batch: list[LLMMessageLogType],
++        metadata: list[ScienceWorldMetadata],
++    ) -> EnvironmentReturn[ScienceWorldMetadata]:
++        """Run one turn of each episode in the batch."""
++        from apertus_common import Result, User
++
++        self._ensure_workers()
++        plans = []
++        futures: list[Any] = []
++        for conversation, meta in zip(message_log_batch, metadata):
++            spec = meta["sciworld"]
++            assert spec["action_format"] in ("reply", "tool"), (
++                f"Row action_format must be reply or tool, got {spec['action_format']!r}"
++            )
++            assert spec["simplifications"] == self.cfg["simplifications"], (
++                f"Row simplifications {spec['simplifications']!r} differ from "
++                f"env.scienceworld.simplifications {self.cfg['simplifications']!r}: "
++                "the simulator keeps one setting per JVM."
++            )
++            episode = dict(
++                meta.get("episode")
++                or {
++                    "id": uuid.uuid4().hex,
++                    "worker": next(self._next_worker) % len(self._workers),
++                    "history": [],
++                    "last_obs_hash": None,
++                    "score": 0,
++                    "turns": 0,
++                    "attempts": 0,
++                    "invalid": 0,
++                    "ambiguous": 0,
++                    "no_command_turns": 0,
++                    "replays": 0,
++                    "replay_mismatches": 0,
++                    "env_errors": 0,
++                    "first_obs_mismatch": 0,
++                }
++            )
++            commands, slots, end = self._plan_turn(
++                _last_output(conversation), spec["action_format"]
++            )
++            commands = commands[: max(0, self.cfg["max_actions"] - len(episode["history"]))]
++            plans.append((episode, commands, slots, end))
++            future = None
++            if commands:
++                future = self._workers[episode["worker"]].run.remote(
++                    episode["id"],
++                    spec,
++                    episode["history"],
++                    commands,
++                    episode["last_obs_hash"],
++                )
++            futures.append(future)
++
++        observations: list[dict[str, Any]] = []
++        new_metadata: list[ScienceWorldMetadata] = []
++        rewards: list[float] = []
++        terminateds: list[bool] = []
++        for meta, (episode, commands, slots, end), future in zip(
++            metadata, plans, futures
++        ):
++            previous = _clipped(episode["score"])
++            episode["turns"] += 1
++            results: list[list[Any]] = []
++            if future is not None:
++                try:
++                    response = ray.get(future, timeout=self.cfg["call_timeout_s"])
++                except ray.exceptions.GetTimeoutError:
++                    response = {"error": "simulator call timed out", "results": []}
++                results = response.get("results", [])
++                first = response.get("first_observation")
++                if first is not None and spec_hash(meta) is not None:
++                    episode["first_obs_mismatch"] = int(_obs_hash(first) != spec_hash(meta))
++                episode["replays"] += int(response.get("replayed", False))
++                episode["replay_mismatches"] += int(response.get("replay_mismatch", False))
++                episode["started"] = True
++                if response.get("error"):
++                    episode["env_errors"] += 1
++                    if not response.get("recoverable"):
++                        end = end or "env_error"
++            texts = []
++            for observation, score, done in results:
++                texts.append(observation)
++                episode["score"] = score
++                if any(observation.startswith(p) for p in _INVALID_PREFIXES):
++                    episode["invalid"] += 1
++                if observation.startswith(_AMBIGUOUS_PREFIX):
++                    episode["ambiguous"] += 1
++                if done:
++                    end = end or ("done" if score >= 0 else "failed")
++            episode["history"] = episode["history"] + commands[: len(results)]
++            if results:
++                episode["last_obs_hash"] = _obs_hash(results[-1][0])
++            # Calls and replies the environment could not run, each answered with an error.
++            rejected = sum(
++                fixed is not None and fixed != TOO_MANY_CALLS for _, fixed in slots
++            )
++            episode["attempts"] += len(results) + rejected
++            episode["invalid"] += rejected
++            if not commands:
++                episode["no_command_turns"] += 1
++            if end is None and len(episode["history"]) >= self.cfg["max_actions"]:
++                end = "max_actions"
++
++            items: list[Any] = []
++            if end is None:
++                command_texts = iter(texts)
++                for call, fixed in slots:
++                    text = fixed if fixed is not None else next(command_texts, SIMULATOR_ERROR)
++                    text = self._cap(text)
++                    if call is None:
++                        items.append(User(payload=text))
++                    else:
++                        items.append(
++                            Result(name=call.name, counter=call.counter, payload=text)
++                        )
++            elif episode.get("started"):
++                self._workers[episode["worker"]].close.remote(episode["id"])
++            token_ids = self._encode(items) if items else []
++            observations.append(
++                {
++                    "role": "user",
++                    "content": "\n".join(
++                        getattr(item, "payload", "") for item in items
++                    ),
++                    "token_ids": token_ids,
++                }
++            )
++            rewards.append(_clipped(episode["score"]) - previous)
++            terminateds.append(end is not None)
++            episode["end"] = end
++            new_metadata.append(
++                {
++                    **meta,
++                    "episode": episode,
++                    "frame_metrics": self._metrics(meta["sciworld"], episode),
++                }
++            )
++
++        return EnvironmentReturn(
++            observations=observations,
++            metadata=new_metadata,
++            next_stop_strings=[None] * len(observations),
++            rewards=torch.tensor(rewards, dtype=torch.float32),
++            terminateds=torch.tensor(terminateds, dtype=torch.bool),
++            answers=None,
++        )
++
++    @staticmethod
++    def _metrics(spec: dict[str, Any], episode: dict[str, Any]) -> dict[str, float]:
++        """Per-episode counts, averaged over a prompt group as frames/<name>."""
++        actions = len(episode["history"])
++        score = episode["score"]
++        metrics = {
++            "sw_score": _clipped(score),
++            "sw_raw_score": score / 100.0,
++            "sw_success": float(score >= 100),
++            "sw_actions": float(actions),
++            "sw_turns": float(episode["turns"]),
++            "sw_invalid": float(episode["invalid"]),
++            "sw_invalid_rate": episode["invalid"] / max(1, episode["attempts"]),
++            "sw_first_obs_mismatch": float(episode["first_obs_mismatch"]),
++            "sw_ambiguous": float(episode["ambiguous"]),
++            "sw_no_command_turns": float(episode["no_command_turns"]),
++            "sw_replays": float(episode["replays"]),
++            "sw_replay_mismatches": float(episode["replay_mismatches"]),
++            "sw_env_errors": float(episode["env_errors"]),
++            f"sw_task_score/{spec['task']}": _clipped(score),
++        }
++        for reason in END_REASONS:
++            metrics[f"sw_end/{reason}"] = float(episode.get("end") == reason)
++        return metrics
++
++    def global_post_process_and_metrics(
++        self, batch: BatchedDataDict[Any]
++    ) -> tuple[BatchedDataDict[Any], dict[str, float | int]]:
++        return batch, {}
+diff --git a/nemo_rl/environments/utils.py b/nemo_rl/environments/utils.py
+index fc7b93d58..ec60dd574 100644
+--- a/nemo_rl/environments/utils.py
++++ b/nemo_rl/environments/utils.py
+@@ -67,6 +67,9 @@ ENV_REGISTRY: Dict[str, EnvRegistryEntry] = {
+     "llm_judge": {
+         "actor_class_fqn": "nemo_rl.environments.llm_judge_environment.LLMJudgeEnvironment",
+     },
++    "scienceworld": {
++        "actor_class_fqn": "nemo_rl.environments.scienceworld_environment.ScienceWorldEnvironment",
++    },
+ }
+ 
+ 
+diff --git a/nemo_rl/experience/rollouts.py b/nemo_rl/experience/rollouts.py
+index 2a4f210bf..0f2ad7fb3 100644
+--- a/nemo_rl/experience/rollouts.py
++++ b/nemo_rl/experience/rollouts.py
+@@ -351,6 +351,25 @@ def _save_nemo_gym_rollouts(path: str, results: list[dict]) -> None:
+             f.write(lines)
+ 
+ 
++def _tokenize_observation(
++    observation: dict[str, Any], tokenizer: TokenizerType
++) -> torch.Tensor:
++    """Return an environment observation's tokens.
++
++    An environment that encodes its own input frames (the Apertus 2 format, where
++    tokenizing text could turn payload into control tokens) passes them as
++    ``token_ids``; other observations are tokenized as plain text.
++    """
++    if observation.get("token_ids") is not None:
++        return torch.tensor(observation["token_ids"], dtype=torch.int64)
++    # TODO @sahilj: handle if we want these subsequent messages to have a chat template
++    tokenized = tokenizer(
++        observation["content"], return_tensors="pt", add_special_tokens=False
++    ).input_ids[0]
++    # tokenizer returns torch.float32 when the content is empty
++    return tokenized.to(dtype=torch.int64)
++
++
+ def _mask_sample_flags(extras: Iterable[dict[str, Any] | None]) -> torch.Tensor:
+     """Return True for samples the environment asks GRPO to mask from loss."""
+     return torch.tensor(
+@@ -1164,13 +1183,7 @@ def run_multi_turn_rollout(
+         truncation_mask = torch.zeros_like(env_output.terminateds, dtype=torch.bool)
+         for i, global_idx in enumerate(active_indices.tolist()):
+             env_obs_content = env_output.observations[i]["content"]
+-            # Tokenize the raw content from the environment
+-            # TODO @sahilj: handle if we want these subsequent messages to have a chat template
+-            tokenized_obs = tokenizer(
+-                env_obs_content, return_tensors="pt", add_special_tokens=False
+-            ).input_ids[0]
+-            # tokenizer returns torch.float32 when env_obs_content is empty
+-            tokenized_obs = tokenized_obs.to(dtype=torch.int64)
++            tokenized_obs = _tokenize_observation(env_output.observations[i], tokenizer)
+ 
+             # check if new message overflows max_seq_len
+             if (
+@@ -1510,10 +1523,7 @@ async def run_sample_multi_turn_rollout(
+         # Check termination
+         terminated = env_output.terminateds[0].item()
+         env_obs_content = env_output.observations[0]["content"]
+-        # Tokenize environment response
+-        tokenized_obs = tokenizer(
+-            env_obs_content, return_tensors="pt", add_special_tokens=False
+-        ).input_ids[0]
++        tokenized_obs = _tokenize_observation(env_output.observations[0], tokenizer)
+ 
+         # Check for sequence length overflow
+         if input_lengths + gen_token_count + len(tokenized_obs) >= max_seq_len:
+@@ -1654,13 +1664,14 @@ def _aggregate_multi_turn_rollout_metrics(
+         "min_total_reward": min(m["total_reward"] for m in all_sample_metrics),
+     }
+ 
+-    frame_metrics = [
+-        m["frame_metrics"] for m in all_sample_metrics if m.get("frame_metrics")
+-    ]
+-    for name in frame_metrics[0] if frame_metrics else ():
+-        rollout_metrics[f"frames/{name}"] = (
+-            sum(m[name] for m in frame_metrics) / batch_size
+-        )
++    # Environments report different counts, and ScienceWorld one per task, so each
++    # is averaged over the samples that have it.
++    frame_values: dict[str, list[float]] = {}
++    for m in all_sample_metrics:
++        for name, value in (m.get("frame_metrics") or {}).items():
++            frame_values.setdefault(name, []).append(value)
++    for name, values in frame_values.items():
++        rollout_metrics[f"frames/{name}"] = sum(values) / len(values)
+ 
+     if "per_worker_token_counts" in all_sample_metrics[0]:
+         per_worker_token_counts = {}
+-- 
+2.51.0
+

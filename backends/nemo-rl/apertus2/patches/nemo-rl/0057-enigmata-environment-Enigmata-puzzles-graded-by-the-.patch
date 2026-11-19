@@ -1,0 +1,481 @@
+From eac46efa8946b254501f12cdd91adf28218572c4 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Sat, 14 Nov 2026 07:49:03 +0900
+Subject: [PATCH 57/61] enigmata environment: Enigmata puzzles graded by the
+ tasks' own verifiers
+
+A native environment, so a run can mix it with the math and multiple-choice environments. Each row's ground truth is a JSON object {task, difficulty, answer, meta} from the Enigmata generator; the verifier of that task (imported from an Enigmata checkout, env.enigmata.repo_dir) grades the claim frame, or the reply when the claim is empty (fallback_frame). Verifiers run in Ray worker actors under a per-call alarm (timeout_s); exceptions and timeouts score 0 and are counted; a hung worker is replaced after hard_timeout_s. Optional per-sample stats file (stats_path).
+
+---
+ nemo_rl/distributed/actor_environments.py    |   1 +
+ nemo_rl/environments/enigmata_environment.py | 431 +++++++++++++++++++
+ nemo_rl/environments/utils.py                |   3 +
+ 3 files changed, 435 insertions(+)
+ create mode 100644 nemo_rl/environments/enigmata_environment.py
+
+diff --git a/nemo_rl/distributed/actor_environments.py b/nemo_rl/distributed/actor_environments.py
+index ff758b6e2..11ee8c945 100644
+--- a/nemo_rl/distributed/actor_environments.py
++++ b/nemo_rl/distributed/actor_environments.py
+@@ -74,6 +74,7 @@ ACTOR_ENVIRONMENTS: dict[str, list[str] | None] = {
+     "nemo_rl.environments.llm_judge_environment.LLMJudgeEnvironment": None,
+     "nemo_rl.environments.vlm_environment.VLMEnvironment": None,
+     "nemo_rl.environments.code_environment.CodeEnvironment": None,
++    "nemo_rl.environments.enigmata_environment.EnigmataEnvironment": None,
+     "nemo_rl.environments.reward_model_environment.RewardModelEnvironment": None,
+     "nemo_rl.environments.code_jaccard_environment.CodeJaccardEnvironment": None,
+     "nemo_rl.environments.games.sliding_puzzle.SlidingPuzzleEnv": None,
+diff --git a/nemo_rl/environments/enigmata_environment.py b/nemo_rl/environments/enigmata_environment.py
+new file mode 100644
+index 000000000..1a98c2e73
+--- /dev/null
++++ b/nemo_rl/environments/enigmata_environment.py
+@@ -0,0 +1,431 @@
++# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""Enigmata logic puzzles as a native environment, graded by the tasks' own verifiers.
++
++Enigmata (github.com/BytedTsinghua-SIA/Enigmata, Apache-2.0) gives each puzzle task a generator
++and a rule-based verifier, ``verifiable_tasks/tasks/<task>/verifier.py:verify(pred, answer,
++meta)``. Many puzzles have several valid solutions, so a verifier checks the answer against the
++puzzle stored in the row's ``answer`` and ``meta``, not against one reference string.
++
++Data: ResponseDataset rows whose ``output`` is a JSON object ``{"task", "difficulty", "answer",
++"meta"}`` holding what the generator returned; it reaches this environment as ``ground_truth``.
++The verifiers are imported from an Enigmata checkout (``repo_dir``), not copied into NeMo-RL.
++
++Graded text: the frame ``reward_frame`` names (``claim`` for Apertus 2). With ``fallback_frame``
++(``reply``), an answer whose claim frame is empty or missing is graded on its reply instead. The
++verifier finds the answer in that text itself (most take the last fenced code block). Both frames
++are verified, for the Apertus 2 frame metrics; an output that does not parse has neither and
++scores 0, as in the math environment. Without ``reward_frame`` the whole response text is graded.
++
++Verifiers run in ``num_workers`` Ray actors. Each call runs on the actor's main thread under a
++``timeout_s`` alarm; a call that raises or times out scores 0 and is counted by cause. A worker
++that has not answered after ``hard_timeout_s`` per call is replaced. Every ``log_every`` graded
++samples the actor prints an ``[enigmata]`` line with reward, frame use and failures per task, and
++with ``stats_path`` set it appends one JSON line per graded sample to that file.
++"""
++
++import contextlib
++import importlib
++import io
++import itertools
++import json
++import math
++import re
++import signal
++import sys
++import threading
++import time
++from collections import defaultdict
++from typing import Any, NotRequired, TypedDict
++
++import ray
++import torch
++
++from nemo_rl.data.apertus2_format import Apertus2Output, frame_metrics, frame_text
++from nemo_rl.data.interfaces import LLMMessageLogType
++from nemo_rl.distributed.batched_data_dict import BatchedDataDict
++from nemo_rl.distributed.virtual_cluster import PY_EXECUTABLES
++from nemo_rl.environments.interfaces import EnvironmentInterface, EnvironmentReturn
++from nemo_rl.environments.metrics import calculate_pass_rate_per_prompt
++from nemo_rl.environments.utils import chunk_list_to_workers
++
++
++class EnigmataEnvConfig(TypedDict):
++    # Enigmata checkout whose verifiable_tasks/tasks/<task>/verifier.py grade the answers.
++    repo_dir: str
++    num_workers: int
++    # Apertus 2 frame the reward grades ("claim"); None grades the whole response text.
++    reward_frame: str | None
++    # Frame graded when the reward frame is empty or missing ("reply"), or None.
++    fallback_frame: NotRequired[str | None]
++    # Alarm on one verifier call, in seconds; a call that runs longer scores 0.
++    timeout_s: float
++    # Seconds per call after which the environment gives up on a worker and replaces it.
++    hard_timeout_s: float
++    # Print an [enigmata] summary every this many graded samples.
++    log_every: int
++    # One JSON line per graded sample (task, difficulty, reward, frame, scores, status), or None.
++    stats_path: NotRequired[str | None]
++    # Characters of the graded text kept in each stats line (0: none).
++    stats_text_chars: NotRequired[int]
++
++
++class EnigmataMetadata(TypedDict):
++    ground_truth: str
++    extracted_answer: NotRequired[str | None]
++    frame_metrics: NotRequired[dict[str, float]]
++
++
++class _VerifyTimeout(BaseException):
++    """Raised by the alarm. A BaseException, so a verifier's ``except Exception`` cannot catch it."""
++
++
++@contextlib.contextmanager
++def _alarm(seconds: float, enabled: bool):
++    if not enabled or seconds <= 0:
++        yield
++        return
++
++    def _raise(signum, frame):
++        raise _VerifyTimeout()
++
++    previous = signal.signal(signal.SIGALRM, _raise)
++    signal.setitimer(signal.ITIMER_REAL, seconds)
++    try:
++        yield
++    finally:
++        signal.setitimer(signal.ITIMER_REAL, 0)
++        signal.signal(signal.SIGALRM, previous)
++
++
++_TASK_NAME = re.compile(r"[A-Za-z0-9_]+")
++
++
++@ray.remote  # pragma: no cover
++class EnigmataVerifyWorker:
++    """Runs Enigmata verifiers. One call at a time, on the actor's main thread (for the alarm)."""
++
++    def __init__(self, repo_dir: str) -> None:
++        if repo_dir not in sys.path:
++            sys.path.insert(0, repo_dir)
++        self._verifiers: dict[str, Any] = {}
++        self._alarm_ok = threading.current_thread() is threading.main_thread()
++
++    def _verifier(self, task: str) -> Any:
++        verify = self._verifiers.get(task)
++        if verify is None:
++            if not _TASK_NAME.fullmatch(task):
++                raise ValueError(f"bad task name {task!r}")
++            module = importlib.import_module(f"verifiable_tasks.tasks.{task}.verifier")
++            verify = self._verifiers[task] = module.verify
++        return verify
++
++    def verify(
++        self, items: list[tuple[str, str]], timeout_s: float
++    ) -> list[tuple[float, str, float]]:
++        """Grade (text, ground-truth JSON) pairs; return (score, status, milliseconds) for each.
++
++        The ground truth is parsed here, once per call, so a verifier that changes its
++        ``answer`` or ``meta`` cannot affect another call.
++        """
++        alarm_ok = self._alarm_ok and threading.current_thread() is threading.main_thread()
++        results = []
++        for text, ground_truth in items:
++            t0 = time.perf_counter()
++            score, status = 0.0, "ok"
++            try:
++                spec = json.loads(ground_truth)
++                verify = self._verifier(spec["task"])
++                with (
++                    contextlib.redirect_stdout(io.StringIO()),
++                    contextlib.redirect_stderr(io.StringIO()),
++                    _alarm(timeout_s, alarm_ok),
++                ):
++                    raw = verify(text, spec["answer"], spec["meta"])
++                score = float(raw)
++                if not math.isfinite(score) or not 0.0 <= score <= 1.0:
++                    score, status = 0.0, "bad_score"
++            except _VerifyTimeout:
++                status = "timeout"
++            except Exception as e:  # a verifier error scores 0 and is counted by type
++                status = f"error:{type(e).__name__}"
++            results.append((score, status, 1000.0 * (time.perf_counter() - t0)))
++        return results
++
++
++def _last_outputs(message_log_batch: list[LLMMessageLogType]) -> list[Apertus2Output] | None:
++    """Each conversation's last parsed Apertus 2 output, or None for plain-text responses."""
++    outputs = [
++        [m["apertus2_output"] for m in conversation if "apertus2_output" in m]
++        for conversation in message_log_batch
++    ]
++    return [parsed[-1] for parsed in outputs] if any(outputs) else None
++
++
++def _spec_fields(ground_truth: str) -> tuple[str, str]:
++    try:
++        spec = json.loads(ground_truth)
++        return str(spec.get("task", "?")), str(spec.get("difficulty", "?"))
++    except (ValueError, AttributeError):
++        return "?", "?"
++
++
++@ray.remote(max_restarts=-1, max_task_retries=-1, max_concurrency=1000)  # pragma: no cover
++class EnigmataEnvironment(EnvironmentInterface[EnigmataMetadata]):
++    """Grades Enigmata puzzle answers with the tasks' verifiers; see the module docstring."""
++
++    def __init__(self, cfg: EnigmataEnvConfig):
++        self.cfg = cfg
++        self.num_workers = cfg["num_workers"]
++        reward_frame = cfg.get("reward_frame")
++        fallback = cfg.get("fallback_frame")
++        assert reward_frame in (None, "claim", "reply"), f"bad reward_frame {reward_frame!r}"
++        self._side_frame = {"claim": "reply", "reply": "claim"}.get(reward_frame)
++        assert fallback in (None, self._side_frame), (
++            f"fallback_frame must be None or {self._side_frame!r}, got {fallback!r}"
++        )
++        self._lock = threading.Lock()
++        self._counter = itertools.count()
++        self.workers = [self._new_worker() for _ in range(self.num_workers)]
++        self._graded = 0
++        self._by_task: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
++        self._statuses: dict[str, int] = defaultdict(int)
++        self._worker_replacements = 0
++
++    def _new_worker(self):
++        return EnigmataVerifyWorker.options(  # type: ignore # (decorated with @ray.remote)
++            runtime_env={"py_executable": PY_EXECUTABLES.SYSTEM}
++        ).remote(self.cfg["repo_dir"])
++
++    def _replace_worker(self, index: int, handle) -> None:
++        with self._lock:
++            if self.workers[index] is not handle:
++                return  # another call already replaced it
++            self.workers[index] = self._new_worker()
++            self._worker_replacements += 1
++        with contextlib.suppress(Exception):
++            ray.kill(handle)
++        print(f"[enigmata] replaced verifier worker {index}", flush=True)
++
++    def _collect(
++        self, index: int, handle, ref, chunk: list[tuple[str, str]]
++    ) -> list[tuple[float, str, float]]:
++        """Wait for one worker's results; replace a hung worker, retry once if it died."""
++        limit = self.cfg["hard_timeout_s"] * len(chunk)
++        for attempt in range(2):
++            try:
++                return ray.get(ref, timeout=limit)
++            except ray.exceptions.GetTimeoutError:
++                self._replace_worker(index, handle)
++                return [(0.0, "hard_timeout", 1000.0 * limit)] * len(chunk)
++            except ray.exceptions.RayActorError:
++                # Killed by a replacement after another call's hard timeout: once more,
++                # on the next worker.
++                if attempt == 1:
++                    break
++                index = (index + 1) % self.num_workers
++                handle = self.workers[index]
++                ref = handle.verify.remote(chunk, self.cfg["timeout_s"])
++        return [(0.0, "worker_error", 0.0)] * len(chunk)
++
++    def _verify(self, items: list[tuple[str, str]]) -> list[tuple[float, str, float]]:
++        """Verify (text, ground truth) pairs across the workers; empty texts score 0 uncalled."""
++        results: list[tuple[float, str, float]] = [(0.0, "empty", 0.0)] * len(items)
++        todo = [i for i, (text, _) in enumerate(items) if text.strip()]
++        if not todo:
++            return results
++        start = next(self._counter) % self.num_workers
++        pending = []
++        # Submit every chunk first, so the chunks run in parallel on their workers.
++        for offset, chunk in enumerate(chunk_list_to_workers(todo, self.num_workers)):
++            if not chunk:
++                continue
++            index = (start + offset) % self.num_workers
++            handle = self.workers[index]
++            pairs = [items[i] for i in chunk]
++            pending.append(
++                (chunk, index, handle, handle.verify.remote(pairs, self.cfg["timeout_s"]), pairs)
++            )
++        for chunk, index, handle, ref, pairs in pending:
++            for i, r in zip(chunk, self._collect(index, handle, ref, pairs)):
++                results[i] = r
++        return results
++
++    def step(
++        self,
++        message_log_batch: list[LLMMessageLogType],
++        metadata: list[EnigmataMetadata],
++        return_extracted_answer: bool = False,
++    ) -> EnvironmentReturn[EnigmataMetadata]:
++        reward_frame = self.cfg.get("reward_frame")
++        outputs = _last_outputs(message_log_batch)
++        if (reward_frame is None) != (outputs is None):
++            raise ValueError(
++                "env.enigmata.reward_frame and policy.generation.output_format must be set "
++                "together: frames are graded only when both are."
++            )
++        ground_truths = [str(m["ground_truth"]) for m in metadata]
++        if outputs is None:
++            primary = [
++                "".join(str(x["content"]) for x in c if x["role"] == "assistant")
++                for c in message_log_batch
++            ]
++            side = [""] * len(primary)
++        else:
++            primary = [frame_text(o, reward_frame) for o in outputs]
++            side = [frame_text(o, self._side_frame) for o in outputs]
++
++        n = len(primary)
++        verified = self._verify(
++            [(t, g) for t, g in zip(primary, ground_truths)]
++            + [(t, g) for t, g in zip(side, ground_truths)]
++        )
++        primary_res, side_res = verified[:n], verified[n:]
++
++        fallback = self.cfg.get("fallback_frame")
++        rewards, sources, graded = [], [], []
++        for i in range(n):
++            if primary[i].strip():
++                rewards.append(primary_res[i][0])
++                sources.append(reward_frame or "text")
++                graded.append(primary[i])
++            elif fallback is not None and side[i].strip():
++                rewards.append(side_res[i][0])
++                sources.append(fallback)
++                graded.append(side[i])
++            else:
++                rewards.append(0.0)
++                sources.append("none")
++                graded.append("")
++
++        new_metadata = []
++        for i, m in enumerate(metadata):
++            entry = {**m, "extracted_answer": graded[i][-300:] if graded[i] else None}
++            if outputs is not None:
++                claim_score, reply_score = (
++                    (primary_res[i][0], side_res[i][0])
++                    if reward_frame == "claim"
++                    else (side_res[i][0], primary_res[i][0])
++                )
++                entry["frame_metrics"] = frame_metrics(
++                    outputs[i], claim_score=claim_score, reply_score=reply_score
++                )
++            new_metadata.append(entry)
++
++        self._record(ground_truths, rewards, sources, primary_res, side_res, graded, outputs)
++
++        rewards_t = torch.tensor(rewards, dtype=torch.float32)
++        return EnvironmentReturn(
++            observations=[
++                {
++                    "role": "environment",
++                    "content": "Environment: correct" if r >= 0.5 else "Environment: incorrect",
++                }
++                for r in rewards
++            ],
++            metadata=new_metadata,
++            next_stop_strings=[None] * n,
++            rewards=rewards_t,
++            terminateds=torch.ones_like(rewards_t),
++            answers=[m["extracted_answer"] for m in new_metadata]
++            if return_extracted_answer
++            else None,
++        )
++
++    def _record(self, ground_truths, rewards, sources, primary_res, side_res, graded, outputs):
++        """Update the per-task counters; print a summary every log_every samples; write stats."""
++        lines = []
++        keep = int(self.cfg.get("stats_text_chars", 0) or 0)
++        with self._lock:
++            for i, gt in enumerate(ground_truths):
++                task, difficulty = _spec_fields(gt)
++                c = self._by_task[task]
++                c["n"] += 1
++                c["reward"] += rewards[i]
++                c[f"src_{sources[i]}"] += 1
++                for status in (primary_res[i][1], side_res[i][1]):
++                    if status not in ("ok", "empty"):
++                        c["failures"] += 1
++                        self._statuses[status] += 1
++                c["ms"] += primary_res[i][2] + side_res[i][2]
++                if self.cfg.get("stats_path"):
++                    row = {
++                        "t": round(time.time(), 1),
++                        "task": task,
++                        "difficulty": difficulty,
++                        "reward": rewards[i],
++                        "source": sources[i],
++                        "primary_score": primary_res[i][0],
++                        "primary_status": primary_res[i][1],
++                        "side_score": side_res[i][0],
++                        "side_status": side_res[i][1],
++                        "verify_ms": round(primary_res[i][2] + side_res[i][2], 2),
++                    }
++                    if outputs is not None:
++                        row["truncated"] = bool(outputs[i].truncated)
++                        row["parse_error"] = outputs[i].error is not None
++                    if keep:
++                        row["graded_tail"] = graded[i][-keep:]
++                    lines.append(json.dumps(row, ensure_ascii=False))
++                self._graded += 1
++                if self._graded % self.cfg["log_every"] == 0:
++                    self._print_summary()
++            if lines:
++                with open(self.cfg["stats_path"], "a") as f:
++                    f.write("\n".join(lines) + "\n")
++
++    def _print_summary(self) -> None:
++        total = sum(c["n"] for c in self._by_task.values())
++        reward = sum(c["reward"] for c in self._by_task.values())
++        per_task = " ".join(
++            f"{task}:{c['reward'] / c['n']:.2f}/{int(c['n'])}"
++            + (f"/fb{int(c['src_reply'])}" if c.get("src_reply") else "")
++            + (f"/fail{int(c['failures'])}" if c.get("failures") else "")
++            for task, c in sorted(self._by_task.items())
++        )
++        statuses = " ".join(f"{k}={v}" for k, v in sorted(self._statuses.items())) or "none"
++        print(
++            f"[enigmata] graded={total} reward={reward / max(total, 1):.3f} "
++            f"failures: {statuses} replaced_workers={self._worker_replacements} | {per_task}",
++            flush=True,
++        )
++
++    def global_post_process_and_metrics(
++        self, batch: BatchedDataDict[Any]
++    ) -> tuple[BatchedDataDict[Any], dict[str, float | int]]:
++        rewards = batch["rewards"] * batch["is_end"]
++        lengths = batch["generation_lengths"] - batch["prompt_lengths"]
++        correct = rewards >= 0.5
++        with self._lock:
++            failures = sum(self._statuses.values())
++        metrics = {
++            "accuracy": rewards.mean().item(),
++            "pass@samples_per_prompt": calculate_pass_rate_per_prompt(batch["text"], rewards),
++            "fraction_of_samples_properly_ended": batch["is_end"].float().mean().item(),
++            "num_problems_in_batch": batch["is_end"].shape[0],
++            "generation_lengths": batch["generation_lengths"].float().mean().item(),
++            "prompt_lengths": batch["prompt_lengths"].float().mean().item(),
++            "correct_solution_generation_lengths": (
++                lengths[correct].float().mean().item() if correct.any() else 0
++            ),
++            "verifier_failures": failures,
++        }
++        return batch, metrics
++
++    def shutdown(self) -> None:
++        with self._lock:
++            self._print_summary()
++        for worker in self.workers:
++            with contextlib.suppress(Exception):
++                ray.kill(worker)
+diff --git a/nemo_rl/environments/utils.py b/nemo_rl/environments/utils.py
+index 53f6c74d1..fc7b93d58 100644
+--- a/nemo_rl/environments/utils.py
++++ b/nemo_rl/environments/utils.py
+@@ -55,6 +55,9 @@ ENV_REGISTRY: Dict[str, EnvRegistryEntry] = {
+     "code_jaccard": {
+         "actor_class_fqn": "nemo_rl.environments.code_jaccard_environment.CodeJaccardEnvironment",
+     },
++    "enigmata": {
++        "actor_class_fqn": "nemo_rl.environments.enigmata_environment.EnigmataEnvironment",
++    },
+     "vlm": {
+         "actor_class_fqn": "nemo_rl.environments.vlm_environment.VLMEnvironment",
+     },
+-- 
+2.51.0
+

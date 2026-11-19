@@ -1,0 +1,93 @@
+From 7ade6e181bdb9aab3d2644691bd116efa2dd8c64 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Sat, 14 Nov 2026 00:57:52 +0900
+Subject: [PATCH 54/61] llm_judge: grade the reply's last \boxed{} when the
+ claim frame is empty (fallback_frame)
+
+SFT v0.2 answers most open questions that ask for \boxed{} in the reply, with no claim frame (77% of
+answers of job 1275487); grading only the claim would score those 0.
+
+---
+ nemo_rl/environments/llm_judge_environment.py | 43 ++++++++++++++-----
+ 1 file changed, 33 insertions(+), 10 deletions(-)
+
+diff --git a/nemo_rl/environments/llm_judge_environment.py b/nemo_rl/environments/llm_judge_environment.py
+index 5723314bc..da86bd784 100644
+--- a/nemo_rl/environments/llm_judge_environment.py
++++ b/nemo_rl/environments/llm_judge_environment.py
+@@ -17,8 +17,11 @@ The judge is a fixed model served by ``env.judge_pool`` (judge_pool.py) on nodes
+ job. Unlike the NeMo Gym judges, this environment runs in NeMo-RL's own rollout, so a run can
+ mix it with the native math and multiple-choice environments.
+ 
+-The graded answer is the frame ``reward_frame`` names (``claim`` for Apertus 2), or the content
+-of its last ``\\boxed{}`` when it has one. Two scoring modes:
++The graded answer is the content of the last ``\\boxed{}`` of the frame ``reward_frame`` names
++(``claim`` for Apertus 2), else that frame's text. With ``fallback_frame`` set (``reply``), an answer
++whose ``reward_frame`` is empty is taken from the last ``\\boxed{}`` of the fallback frame: on
++open questions that ask for ``\\boxed{}``, SFT v0.2 often answers in the reply with no claim frame.
++Two scoring modes:
+ 
+ - ``verdict``: the judge answers with one token. The reward is the probability of "Yes" among
+   the yes/no tokens of its first-token distribution (``score: soft``), or 1 when that is at
+@@ -58,6 +61,8 @@ class LLMJudgeEnvConfig(TypedDict):
+     mode: str
+     # Apertus 2 frame to grade ("claim"); None grades the plain response text.
+     reward_frame: str | None
++    # Frame whose last \boxed{} content is graded when reward_frame is empty ("reply"), or None.
++    fallback_frame: NotRequired[str | None]
+     # Must equal the pool's generation temperature/top_p or its val_temperature/val_top_p:
+     # NeMo-RL's server rejects other sampling settings.
+     temperature: float
+@@ -221,13 +226,27 @@ def _question(conversation: LLMMessageLogType) -> str:
+     return users[-1] if users else ""
+ 
+ 
+-def _response_text(conversation: LLMMessageLogType, reward_frame: str | None) -> str:
+-    if reward_frame is not None:
+-        outputs = [m["apertus2_output"] for m in conversation if "apertus2_output" in m]
+-        if outputs:
+-            return frame_text(outputs[-1], reward_frame)
++def _response_answer(
++    conversation: LLMMessageLogType,
++    reward_frame: str | None,
++    fallback_frame: str | None,
++    max_chars: int,
++) -> str:
++    """The answer the judge reads; see the module docstring."""
++    if reward_frame is None:
++        text = "".join(str(m["content"]) for m in conversation if m["role"] == "assistant")
++        return graded_answer(text, max_chars)
++    outputs = [m["apertus2_output"] for m in conversation if "apertus2_output" in m]
++    if not outputs:
+         return ""
+-    return "".join(str(m["content"]) for m in conversation if m["role"] == "assistant")
++    primary = frame_text(outputs[-1], reward_frame)
++    if primary.strip():
++        return graded_answer(primary, max_chars)
++    if fallback_frame is not None:
++        boxed = last_boxed(frame_text(outputs[-1], fallback_frame))
++        if boxed is not None:
++            return boxed.strip()[:max_chars]
++    return ""
+ 
+ 
+ @ray.remote(max_restarts=-1, max_task_retries=-1, max_concurrency=1000)  # pragma: no cover
+@@ -350,9 +369,13 @@ class LLMJudgeEnvironment(EnvironmentInterface[LLMJudgeMetadata]):
+         return_extracted_answer: bool = False,
+     ) -> EnvironmentReturn[LLMJudgeMetadata]:
+         await self._ensure_ready()
+-        reward_frame = self.cfg.get("reward_frame")
+         answers = [
+-            graded_answer(_response_text(c, reward_frame), self.cfg["max_answer_chars"])
++            _response_answer(
++                c,
++                self.cfg.get("reward_frame"),
++                self.cfg.get("fallback_frame"),
++                self.cfg["max_answer_chars"],
++            )
+             for c in message_log_batch
+         ]
+         results = await asyncio.gather(
+-- 
+2.51.0
+

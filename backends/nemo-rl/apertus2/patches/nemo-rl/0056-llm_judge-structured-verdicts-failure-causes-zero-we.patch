@@ -1,0 +1,334 @@
+From b2743744fd2d3abc43d86cb6dcc28e0941cbef10 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Sat, 14 Nov 2026 07:21:03 +0900
+Subject: [PATCH 56/61] llm_judge: structured verdicts, failure causes, zero
+ weight for failed judge calls
+
+structured: vLLM structured outputs, choice [Yes, No] for verdict (P(Yes) still read from the first
+token's logprobs) and a JSON object {reasoning, verdict} with a length cap for justify. Judge calls are
+counted by outcome (ok, no_verdict, http, timeout, other) apart from answers with nothing to judge,
+with the first answers logged. mask_failures: a failed call marks its sample mask_sample in the
+environment metadata; native rollouts now always carry mask_sample, GRPO's mask_sample filter drops
+those samples from the loss, and the advantage estimator leaves them out of their group's baseline.
+
+---
+ nemo_rl/algorithms/grpo.py                    |  16 +++
+ nemo_rl/environments/llm_judge_environment.py | 128 ++++++++++++++++--
+ nemo_rl/experience/rollouts.py                |  11 ++
+ 3 files changed, 145 insertions(+), 10 deletions(-)
+
+diff --git a/nemo_rl/algorithms/grpo.py b/nemo_rl/algorithms/grpo.py
+index 376ce5c1f..af49bc02e 100644
+--- a/nemo_rl/algorithms/grpo.py
++++ b/nemo_rl/algorithms/grpo.py
+@@ -3822,10 +3822,18 @@ def _grpo_train_impl(
+                     sample_mask = train_data["sample_mask"]
+                     mask = token_mask * sample_mask.unsqueeze(-1)
+ 
++                    # Samples an environment could not grade (mask_sample) stay out of
++                    # their siblings' baseline, as they are out of the loss.
++                    valid_mask = None
++                    if "mask_sample" in repeated_batch:
++                        valid_mask = (
++                            ~torch.as_tensor(repeated_batch["mask_sample"]).bool()
++                        ).float()
+                     train_data["advantages"] = adv_estimator.compute_advantage(
+                         prompt_ids=prompt_ids_for_adv,
+                         rewards=rewards,
+                         mask=mask,
++                        valid_mask=valid_mask,
+                         repeated_batch=repeated_batch,
+                         logprobs_policy=train_data["prev_logprobs"],
+                         logprobs_reference=train_data.get("reference_policy_logprobs"),
+@@ -5722,10 +5730,18 @@ def async_grpo_train(
+                     sample_mask = train_data["sample_mask"]
+                     mask = token_mask * sample_mask.unsqueeze(-1)
+ 
++                    # Samples an environment could not grade (mask_sample) stay out of
++                    # their siblings' baseline, as they are out of the loss.
++                    valid_mask = None
++                    if "mask_sample" in repeated_batch:
++                        valid_mask = (
++                            ~torch.as_tensor(repeated_batch["mask_sample"]).bool()
++                        ).float()
+                     train_data["advantages"] = adv_estimator.compute_advantage(
+                         prompt_ids=prompt_ids_for_adv,
+                         rewards=rewards,
+                         mask=mask,
++                        valid_mask=valid_mask,
+                         repeated_batch=repeated_batch,
+                         logprobs_policy=train_data["prev_logprobs"],
+                         logprobs_reference=train_data.get("reference_policy_logprobs"),
+diff --git a/nemo_rl/environments/llm_judge_environment.py b/nemo_rl/environments/llm_judge_environment.py
+index afdde29a7..0ca9f03fd 100644
+--- a/nemo_rl/environments/llm_judge_environment.py
++++ b/nemo_rl/environments/llm_judge_environment.py
+@@ -37,6 +37,7 @@ failures, latency and calls in flight.
+ 
+ import asyncio
+ import itertools
++import json
+ import math
+ import random
+ import time
+@@ -76,6 +77,14 @@ class LLMJudgeEnvConfig(TypedDict):
+     # verdict: least first-token probability on Yes + No for a verdict (0: any Yes/No among
+     # the top_logprobs tokens). Below it the call counts as failed.
+     min_verdict_mass: NotRequired[float]
++    # Constrain the judge's output with vLLM structured outputs: choice ["Yes", "No"] for
++    # verdict, a JSON object {"reasoning": <= max_reasoning_chars, "verdict": "A=B"|"A!=B"}
++    # for justify.
++    structured: NotRequired[bool]
++    max_reasoning_chars: NotRequired[int]
++    # A failed judge call (no verdict, HTTP error, timeout) marks its sample mask_sample:
++    # zero weight in the loss and out of its group's baseline, not reward 0.
++    mask_failures: NotRequired[bool]
+     # Judge calls this environment keeps in flight at once.
+     max_concurrent_calls: int
+     timeout_s: float
+@@ -159,6 +168,40 @@ CANDIDATE:
+ {generated_answer}"""
+ )
+ 
++# The justify rules with a JSON answer, for structured outputs.
++JUSTIFY_JSON_PROMPT = (
++    "===== System role =====\n"
++    + _GRADING_RULES
++    + """
++- Be concise. Do NOT reveal or rewrite the GOLD.
++
++Answer with a JSON object: "reasoning" (one or two sentences on why they are or are not equivalent), then
++"verdict": "A=B" if they are equivalent, "A!=B" if not.
++
++===== Inputs =====
++QUESTION:
++{question}
++
++GOLD:
++{expected_answer}
++
++CANDIDATE:
++{generated_answer}"""
++)
++
++
++def justify_schema(max_reasoning_chars: int) -> dict[str, Any]:
++    return {
++        "type": "object",
++        "properties": {
++            "reasoning": {"type": "string", "maxLength": max_reasoning_chars},
++            "verdict": {"type": "string", "enum": ["A=B", "A!=B"]},
++        },
++        "required": ["reasoning", "verdict"],
++        "additionalProperties": False,
++    }
++
++
+ # The same rules with a one-word answer, so the first token carries the verdict.
+ VERDICT_SYSTEM = _GRADING_RULES + (
+     "\n\nAnswer with exactly one word: Yes if the CANDIDATE is equivalent to GOLD, No otherwise."
+@@ -223,6 +266,15 @@ def verdict_probability(
+     return p_yes / (p_yes + p_no)
+ 
+ 
++def justify_json_label(text: str) -> bool | None:
++    """True/False from a structured justify answer's "verdict"; None if it does not parse."""
++    try:
++        verdict = json.loads(text).get("verdict")
++    except (ValueError, AttributeError):
++        return None
++    return {"A=B": True, "A!=B": False}.get(verdict)
++
++
+ def justify_label(text: str) -> bool | None:
+     """True for [[A=B]], False for [[A!=B]], whichever comes first; None without a label."""
+     eq, neq = text.find(EQUAL), text.find(NOT_EQUAL)
+@@ -275,6 +327,11 @@ class LLMJudgeEnvironment(EnvironmentInterface[LLMJudgeMetadata]):
+         self._ready = None
+         self._calls = 0
+         self._failures = 0
++        # Judge calls by outcome, plus answers with nothing to judge (never sent).
++        self._causes = {"ok": 0, "no_verdict": 0, "http": 0, "timeout": 0, "other": 0}
++        self._no_answer = 0
++        self._examples: list[str] = []
++        self._shown_ok = 0
+         self._latencies: list[float] = []
+         self._in_flight = 0
+ 
+@@ -306,12 +363,27 @@ class LLMJudgeEnvironment(EnvironmentInterface[LLMJudgeMetadata]):
+             # NeMo-RL's server answers with token IDs by default; the judge is read as text.
+             "return_tokens_as_token_ids": False,
+         }
++        structured = cfg.get("structured", False)
+         if cfg["mode"] == "verdict":
+             body["messages"] = [
+                 {"role": "system", "content": VERDICT_SYSTEM},
+                 {"role": "user", "content": VERDICT_USER.format(**fields)},
+             ]
+-            body.update(max_tokens=1, logprobs=True, top_logprobs=cfg["top_logprobs"])
++            body.update(logprobs=True, top_logprobs=cfg["top_logprobs"])
++            if structured:
++                # Room for the choice to end; the verdict is the first token.
++                body["max_tokens"] = 4
++                body["structured_outputs"] = {"choice": ["Yes", "No"]}
++            else:
++                body["max_tokens"] = 1
++        elif structured:
++            body["messages"] = [
++                {"role": "user", "content": JUSTIFY_JSON_PROMPT.format(**fields)}
++            ]
++            body["max_tokens"] = cfg["max_tokens"]
++            body["structured_outputs"] = {
++                "json": justify_schema(cfg.get("max_reasoning_chars", 400))
++            }
+         else:
+             body["messages"] = [{"role": "user", "content": JUSTIFY_PROMPT.format(**fields)}]
+             body["max_tokens"] = cfg["max_tokens"]
+@@ -332,14 +404,21 @@ class LLMJudgeEnvironment(EnvironmentInterface[LLMJudgeMetadata]):
+             if p is None:
+                 return None
+             return p if self.cfg["score"] == "soft" else float(p >= 0.5)
+-        label = justify_label(choice["message"].get("content") or "")
++        text = choice["message"].get("content") or ""
++        label = (
++            justify_json_label(text)
++            if self.cfg.get("structured", False)
++            else justify_label(text)
++        )
+         return None if label is None else float(label)
+ 
+     async def _judge(self, question: str, reference: str, answer: str) -> tuple[float, bool]:
+-        """Return (reward, failed)."""
++        """Return (reward, failed). An empty answer scores 0 and is not a judge failure."""
+         if not answer:
++            self._no_answer += 1
+             return 0.0, False
+         body = self._request(question, reference, answer)
++        cause = "other"
+         async with self._semaphore:
+             self._in_flight += 1
+             try:
+@@ -350,17 +429,38 @@ class LLMJudgeEnvironment(EnvironmentInterface[LLMJudgeMetadata]):
+                         async with self._session.post(url, json=body) as response:
+                             response.raise_for_status()
+                             completion = await response.json()
+-                        score = self._score(completion)
++                    except asyncio.TimeoutError:
++                        cause = "timeout"
++                    except aiohttp.ClientError as e:
++                        cause = "http"
++                        if attempt == self.cfg["retries"]:
++                            print(f"[llm_judge] call failed: {type(e).__name__}: {e}", flush=True)
++                    else:
+                         self._latencies.append(time.perf_counter() - t0)
+-                        # No verdict in a well-formed answer: asking again gives the same
++                        try:
++                            score = self._score(completion)
++                        except (KeyError, IndexError, TypeError, ValueError):
++                            score, cause = None, "other"
++                        else:
++                            cause = "ok" if score is not None else "no_verdict"
++                        if score is not None and self._shown_ok < 3:
++                            # Shows whether top_logprobs are the raw or the choice-masked
++                            # distribution (only Yes/No finite under structured outputs).
++                            self._shown_ok += 1
++                            print(
++                                f"[llm_judge] sample: {json.dumps(completion['choices'][0])[:700]}",
++                                flush=True,
++                            )
++                        if score is None and len(self._examples) < 5:
++                            self._examples.append(json.dumps(completion["choices"][0])[:600])
++                            print(f"[llm_judge] no verdict: {self._examples[-1]}", flush=True)
++                        # A well-formed answer without a verdict: asking again gives the same
+                         # distribution (verdict) or text (greedy justify), so it fails now.
+                         return (0.0, True) if score is None else (score, False)
+-                    except (aiohttp.ClientError, asyncio.TimeoutError, KeyError, ValueError) as e:
+-                        if attempt == self.cfg["retries"]:
+-                            print(f"[llm_judge] call failed: {type(e).__name__}: {e}", flush=True)
+                     await asyncio.sleep(min(30.0, 2.0**attempt))
+                 return 0.0, True
+             finally:
++                self._causes[cause] += 1
+                 self._in_flight -= 1
+                 self._calls += 1
+                 self._maybe_log()
+@@ -369,8 +469,10 @@ class LLMJudgeEnvironment(EnvironmentInterface[LLMJudgeMetadata]):
+         if self._calls % self.cfg["log_every"]:
+             return
+         lat = sorted(self._latencies[-self.cfg["log_every"] :]) or [0.0]
++        causes = " ".join(f"{k}={v}" for k, v in self._causes.items())
+         print(
+-            f"[llm_judge] calls={self._calls} failures={self._failures} in_flight={self._in_flight} "
++            f"[llm_judge] calls={self._calls} failures={self._failures} {causes} "
++            f"no_answer={self._no_answer} in_flight={self._in_flight} "
+             f"latency_s mean={sum(lat) / len(lat):.2f} p50={lat[len(lat) // 2]:.2f} "
+             f"p95={lat[int(0.95 * (len(lat) - 1))]:.2f} t={time.time():.0f}",
+             flush=True,
+@@ -407,7 +509,11 @@ class LLMJudgeEnvironment(EnvironmentInterface[LLMJudgeMetadata]):
+             }
+             for r in rewards.tolist()
+         ]
+-        metadata = [{**m, "extracted_answer": a} for m, a in zip(metadata, answers)]
++        mask = bool(self.cfg.get("mask_failures", False))
++        metadata = [
++            {**m, "extracted_answer": a, "mask_sample": mask and failed}
++            for m, a, (_, failed) in zip(metadata, answers, results)
++        ]
+         return EnvironmentReturn(
+             observations=observations,
+             metadata=metadata,
+@@ -435,6 +541,8 @@ class LLMJudgeEnvironment(EnvironmentInterface[LLMJudgeMetadata]):
+             ),
+             "judge_calls": self._calls,
+             "judge_failures": self._failures,
++            "judge_no_answer": self._no_answer,
++            **{f"judge_{k}": v for k, v in self._causes.items()},
+         }
+         return batch, metrics
+ 
+diff --git a/nemo_rl/experience/rollouts.py b/nemo_rl/experience/rollouts.py
+index 96b18db49..2a4f210bf 100644
+--- a/nemo_rl/experience/rollouts.py
++++ b/nemo_rl/experience/rollouts.py
+@@ -1406,6 +1406,7 @@ async def run_sample_multi_turn_rollout(
+     env_token_count = 0
+     terminated = False
+     truncated = False
++    mask_sample = False  # set by an environment that could not grade the sample
+     max_turns_reached = False
+     frame_metrics: dict[str, float] | None = None  # set by format-aware environments
+ 
+@@ -1503,6 +1504,9 @@ async def run_sample_multi_turn_rollout(
+             total_reward += float(env_output.rewards[0].item())
+         if env_output.metadata[0] is not None:
+             frame_metrics = env_output.metadata[0].get("frame_metrics")
++            # An environment marks a sample it could not grade (llm_judge: a failed judge
++            # call) for zero weight; GRPO's mask_sample filter drops it from the loss.
++            mask_sample = mask_sample or bool(env_output.metadata[0].get("mask_sample"))
+         # Check termination
+         terminated = env_output.terminateds[0].item()
+         env_obs_content = env_output.observations[0]["content"]
+@@ -1556,6 +1560,7 @@ async def run_sample_multi_turn_rollout(
+         "total_reward": torch.tensor(total_reward),
+         "stop_strings": current_stop_strings,
+         "idx": sample_idx,
++        "mask_sample": mask_sample,
+     }
+     if multi_reward_seen:
+         for name, acc in reward_acc_dict.items():
+@@ -1758,6 +1763,12 @@ async def _run_multi_turn_rollout_async(
+             ),
+         }
+     )
++    # Samples an environment could not grade; GRPO gives them zero weight. Always set,
++    # because batches of different prompt groups are merged key by key.
++    final_batch["mask_sample"] = torch.tensor(
++        [bool(state.get("mask_sample")) for state in final_sample_states],
++        dtype=torch.bool,
++    )
+ 
+     if any(metrics.get("frame_metrics") for metrics in all_sample_metrics):
+         final_batch["frame_metrics"] = [
+-- 
+2.51.0
+
