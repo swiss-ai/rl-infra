@@ -1,7 +1,7 @@
 #!/bin/bash
 # bash launch-code-ctx.sh <context tokens> [extra hydra overrides...]
 # Competitive coding on Gym's code_gen with the unit tests in OpenSandbox pods (rl-infra
-# envs/code-gen-osb-sft.yaml: PROMPTS x 16 answers, one optimizer step, lr 2e-6, no thinking budget, reward 1 only
+# envs/code/code-gen-osb-sft.yaml: PROMPTS x 16 answers, one optimizer step, lr 2e-6, no thinking budget, reward 1 only
 # if every test passes, LiveCodeBench validation 10 times over) on the SFT v0.2 checkpoint, with a longer context:
 # prompt plus answer, vLLM's limit and the trainer's packed micro-batch are <context tokens>.
 #
@@ -82,8 +82,8 @@ elif (( CP != 1 && CP != 2 && CP != 4 )); then
     echo "ERROR: without KCP=1 the KDA layers split their 28 heads over the CP ranks: CP must be 1, 2 or 4" >&2; exit 1
 fi
 case "${THINKING:-high}" in
-    high)   EXTRA+=(policy.generation.system_prompt_file=${INFRA}/envs/apertus2-system-high.json) ;;
-    medium) EXTRA+=(policy.generation.system_prompt_file=${INFRA}/envs/apertus2-system.json) ;;
+    high)   EXTRA+=(policy.generation.system_prompt_file=${INFRA}/envs/frames/apertus2-system-high.json) ;;
+    medium) EXTRA+=(policy.generation.system_prompt_file=${INFRA}/envs/frames/apertus2-system.json) ;;
     *)      echo "ERROR: THINKING must be high or medium" >&2; exit 1 ;;
 esac
 echo "Thinking ${THINKING:-high} in training and validation"
@@ -115,7 +115,7 @@ CODE_GEN=env.nemo_gym.code_gen.resources_servers.code_gen
 # pods at CSCS (no Kubernetes). Start the service first, as a job of its own that outlives the run:
 #   SANDBOX_ENDPOINT_FILE=<endpoint file> SANDBOX_WORKERS=192 JOB_TIME=2-00:00:00 \
 #       bash <rl-infra>/backends/nemo-rl/sandbox/start.sh
-# The task file is then envs/code-gen-osb-sft.yaml without its pod pool (written to launch/), every other setting
+# The task file is then envs/code/code-gen-osb-sft.yaml without its pod pool (written to launch/), every other setting
 # unchanged; the code_gen server takes the sandbox service when there is no pod pool. SANDBOX_WORKERS (default 192)
 # must be the service's --workers: that many submissions are in flight.
 if [[ -n "${SANDBOX:-}" ]]; then
@@ -129,13 +129,13 @@ if [[ -n "${SANDBOX:-}" ]]; then
     fi
     mkdir -p ${SCRATCH}/long-context/launch
     TASK=${SCRATCH}/long-context/launch/code-gen-sandbox-sft.yaml
-    sed '/^          opensandbox:/,/^            num_pods:/d' "${INFRA}/envs/code-gen-osb-sft.yaml" > "${TASK}"
+    sed '/^          opensandbox:/,/^            num_pods:/d' "${INFRA}/envs/code/code-gen-osb-sft.yaml" > "${TASK}"
     if grep -q "^ *opensandbox:" "${TASK}" || ! grep -q "^          reward_mode: all_tests" "${TASK}"; then
         echo "ERROR: could not take the pod pool out of the task file (${TASK})" >&2; exit 1
     fi
     EXTRA+=(${CODE_GEN}.sandbox_endpoint_file=${SANDBOX} ${CODE_GEN}.num_processes=${SANDBOX_WORKERS:-192})
 else
-    TASK=${INFRA}/envs/code-gen-osb-sft.yaml
+    TASK=${INFRA}/envs/code/code-gen-osb-sft.yaml
     EXTRA+=(${CODE_GEN}.opensandbox.api_key_file=${OPENSANDBOX_TOKEN_FILE:-${HOME}/.opensandbox_token})
     if [[ -n "${PODS:-}" ]]; then
         EXTRA+=(${CODE_GEN}.opensandbox.num_pods=${PODS} ${CODE_GEN}.num_processes=$(( 2 * PODS )))

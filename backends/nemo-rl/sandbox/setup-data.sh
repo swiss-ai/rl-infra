@@ -1,5 +1,5 @@
 #!/bin/bash
-# Download the coding dataset, then write the two files envs/code-gen-sft.yaml reads. A row holds its
+# Download the coding dataset, then write the two files envs/code/code-gen-sft.yaml reads. A row holds its
 # unit tests and can reach hundreds of MB, so you choose how large a row may be, file by file. Keep the
 # validation cap below the sandbox's SANDBOX_MAX_REQUEST_BYTES: a larger row stops the run. Filtering
 # needs some CPU time, so run this on a compute node.

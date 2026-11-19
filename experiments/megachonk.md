@@ -70,7 +70,7 @@ Job 1285740, run `megachonk-gsm8k-58steps-1`, 2026-11-16, 09:21 to 13:15 KST.
 
 | Setting | Value |
 |---|---|
-| Task | GSM8K train, five-shot prompt (`envs/gsm8k.yaml`) |
+| Task | GSM8K train, five-shot prompt (`envs/math/gsm8k.yaml`) |
 | Context | 2,048 tokens in total, up to 2,048 generated |
 | Batch | 128 prompts × 16 answers per step, 4 optimizer steps (global batch 512) |
 | Optimizer | AdamW, lr 1e-6 |
@@ -78,7 +78,7 @@ Job 1285740, run `megachonk-gsm8k-58steps-1`, 2026-11-16, 09:21 to 13:15 KST.
 | Steps | 58 (one epoch) |
 | Validation | GSM8K test, 1,319 questions, at steps 0, 20, 40 and 58 |
 | Layout | 40 nodes: 32 trainer + 8 inference |
-| Recipe | `recipes/apertus2-megachonk-vllm-adamw.yaml` with `envs/gsm8k.yaml` |
+| Recipe | `recipes/apertus2-megachonk-vllm-adamw.yaml` with `envs/math/gsm8k.yaml` |
 
 **Result: completed 58 of 58 steps in 3 h 53 min 37 s.**
 
@@ -177,10 +177,10 @@ Recipes and experiment files:
 | `experiments/grpo-chonk/megachonk-stem-16k-megatron-512x16-async-fp8.yaml` | 16K, 512 × 16, one optimizer step, CP4 |
 | `recipes/apertus2-megachonk-vllm-adamw-stem16k.yaml` | 16K, 48 nodes (two 8-node vLLM replicas) |
 | `recipes/apertus2-megachonk-vllm-adamw-stem16k-36n.yaml`, `-64n.yaml` | 16K on 36 nodes (debug runs), on 64 nodes (four replicas, not run) |
-| `envs/stem-mix-run3-base.yaml` | STEM mix task: DAPO-Math, NuminaMath, science multiple choice; AIME and GPQA validation |
+| `envs/stem/archive/stem-mix-run3-base.yaml` | STEM mix task: DAPO-Math, NuminaMath, science multiple choice; AIME and GPQA validation |
 | `experiments/grpo-chonk/megachonk-dapo-16k-megatron-128x16-async-fp8-skip-trunc0.yaml`, `recipes/apertus2-megachonk-vllm-adamw-dapo.yaml` | DAPO-Math only with AIME validation, the setup of the pretrained-Chonk AIME runs (not run) |
-| `envs/score-text.yaml` | debug tool: the trainer's log-probabilities of plain text |
-| `envs/stem-mix-four-shot.txt` | four worked examples as a prompt prefix for the STEM mix (not run) |
+| `envs/tools/score-text.yaml` | debug tool: the trainer's log-probabilities of plain text |
+| `envs/stem/stem-mix-four-shot.txt` | four worked examples as a prompt prefix for the STEM mix (not run) |
 
 NeMo-RL changes, as patches applied by `setup.sh` (`backends/nemo-rl/apertus2/patches/nemo-rl/`):
 - `0050`: the `policy.megatron_cfg.distributed_timeout_minutes` key.
@@ -222,21 +222,21 @@ of the timeout and warm-up patches, which later 16K runs needed):
 
 ```bash
 env $COMMON RUN=<run name> SBATCH_EXTRA="$SBATCH_EXTRA" \
-RECIPE=recipes/apertus2-megachonk-vllm-adamw.yaml bash run.sh envs/gsm8k.yaml
+RECIPE=recipes/apertus2-megachonk-vllm-adamw.yaml bash run.sh envs/math/gsm8k.yaml
 ```
 
 STEM mix, 16K context, 48 nodes (the current full run):
 
 ```bash
 env $COMMON RUN=<run name> SBATCH_EXTRA="$SBATCH_EXTRA" \
-bash run.sh envs/stem-mix-run3-base.yaml ++env.should_log_nemo_gym_responses=true
+bash run.sh envs/stem/archive/stem-mix-run3-base.yaml ++env.should_log_nemo_gym_responses=true
 ```
 
 DAPO-Math with AIME validation, 16K context, 48 nodes (not run yet):
 
 ```bash
 env $COMMON RUN=<run name> SBATCH_EXTRA="$SBATCH_EXTRA" \
-RECIPE=recipes/apertus2-megachonk-vllm-adamw-dapo.yaml bash run.sh envs/dapo-math.yaml \
+RECIPE=recipes/apertus2-megachonk-vllm-adamw-dapo.yaml bash run.sh envs/math/dapo-math.yaml \
   grpo.max_num_steps=140 ++env.should_log_nemo_gym_responses=true
 ```
 

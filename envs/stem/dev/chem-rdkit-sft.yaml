@@ -1,0 +1,80 @@
+# Task file: RDKit chemistry questions scored in NeMo-RL's own math environment on the claim (no Gym, no new verifier).
+# A clone of Litmus-Bench v0.1 (nvidia/Nemotron-RL-litmus-bench-v0.1) without its ChEMBL molecules or its question
+# text: the same 123 RDKit properties (fragment counts, ring and atom counts, Ro5, Veber and QED checks), molecules from
+# COCONUT (CC0, minus its ChEMBL collection) and the NCI DTP Open set (US public domain), answers computed with
+# RDKit 2025.09.5 (which reproduces all 5,714 Litmus v0.1 answers). Every answer is an integer or 0/1, so the math
+# environment grades the claim unchanged. Rows from envs/stem/prepare_chem_rdkit.py, which puts the answer-line instruction
+# of the math rows ("…the last line of your response should be of the form Answer: $Answer…") around each prompt:
+#   python3.12 envs/stem/prepare_chem_rdkit.py <generator output dir> $SCRATCH/chem-rdkit/native --val-rows 512
+#   bash run.sh envs/stem/dev/chem-rdkit-sft.yaml
+# What this setup needs, from the runs in experiments/runs.md:
+#  - A model that claims on these prompts. SFT v0.2 answers them in the reply and claimed in 1 of 128 (claim-graded
+#    reward 0, the async trainer stalls); step 100 of the native STEM-mix climb sftv02-stem-mix-run4-33n claims on all
+#    of them, but only with the answer-line instruction (0 of 128 without it). Hence the recipe and the instruction.
+#  - DAPO dynamic sampling, synchronous: the async trainer's skip_zero_advantage_groups keeps the full-batch gradient,
+#    so groups with equal rewards dilute each update; with dynamic sampling and 64 trained prompts per step, held-out
+#    accuracy rose from 0.420 to 0.492 in 40 steps (async, 32 prompts: flat).
+# Validation rows are held-out molecules whose Bemis-Murcko scaffolds are not in train.
+# As a set in a native mix: data.train entry {dataset_name: ResponseDataset, data_path: <train.jsonl>, env_name: math},
+# the dataloader key is "<parent dir>-<file stem>".
+defaults: ../../../recipes/apertus2-chonk-sftv02-stemmix-run4-100-vllm-adamw-14n.yaml
+
+grpo:
+  num_prompts_per_step: 64
+  num_generations_per_prompt: 8
+  max_num_steps: 50
+  max_num_epochs: 1
+  val_period: 10
+  val_at_start: true
+  val_at_end: true
+  val_batch_size: 512
+  max_val_samples: 512
+  # DAPO dynamic sampling (synchronous trainer): generate 2 x 64 prompts, train the first 64 whose 8 rewards differ,
+  # generate up to 4 batches when fewer qualify (steps with a second batch took about 680 s instead of 360 s).
+  async_grpo:
+    enabled: false
+  use_dynamic_sampling: true
+  batch_multiplier: 2
+  dynamic_sampling_max_gen_batches: 4
+  skip_zero_advantage_groups: false
+
+checkpointing:
+  enabled: true
+  save_period: 10
+  save_optimizer: false
+  keep_top_k: 1
+  checkpoint_must_save_by: "00:09:30:00"
+
+policy:
+  # 64 x 8 = 512 rollouts, one optimizer step per GRPO step.
+  train_global_batch_size: 512
+  megatron_cfg:
+    optimizer:
+      lr: 2.0e-6
+    env_vars:
+      # NeMo-RL patch 0033 caps PyTorch's allocator. At 0.78 (74 GB) trainer rank 19 ran out of memory twice in
+      # train_prep (6.1 GiB request, 68.7 GiB reserved, 53.2 GiB allocated; job 1280697). 0.82 is untested.
+      NRL_CUDA_MEMORY_FRACTION: "0.78"
+
+data:
+  _override_: true
+  # Longest prompt 1,897 characters with the answer-line instruction.
+  max_input_seq_length: 2048
+  shuffle: true
+  num_workers: 1
+  use_multiple_dataloader: false
+  train:
+    dataset_name: ResponseDataset
+    data_path: ${oc.env:SCRATCH}/chem-rdkit/native/train.jsonl
+    env_name: math
+  validation:
+    dataset_name: ResponseDataset
+    data_path: ${oc.env:SCRATCH}/chem-rdkit/native/validation.jsonl
+    env_name: math
+  default:
+    prompt_file: null
+    # Thinking level high (envs/frames/apertus2-system-high.json): at medium the think frame came out empty (125 of 128
+    # chemistry answers from the run-4 checkpoint).
+    system_prompt_file: ${oc.env:RL_INFRA_DIR}/envs/frames/apertus2-system-high.json
+    processor: apertus2_math_data_processor
+    env_name: math

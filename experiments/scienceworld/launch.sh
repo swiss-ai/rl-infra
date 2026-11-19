@@ -1,6 +1,6 @@
 #!/bin/bash
 # bash launch.sh [extra hydra overrides...]
-# GRPO of SFT v0.2 on the run-3 STEM mix plus ScienceWorld (TASK, default envs/stem-mix-run3-sciworld.yaml) on
+# GRPO of SFT v0.2 on the run-3 STEM mix plus ScienceWorld (TASK, default envs/stem/archive/stem-mix-run3-sciworld.yaml) on
 # 16 trainer + 16 vLLM nodes with the 512-prompt variant B of handover/rl-throughput-and-512p-config.md (one optimizer
 # step, no log-prob pass, staleness 2, lr 2e-6, PyTorch cap 0.84, compile threads 1, max_num_seqs 256, no rollout
 # dump, no checkpoints), from the NeMo-RL copy with the scienceworld environment (branch apertus2-sciworld).
@@ -13,7 +13,7 @@ export RUN=${RUN:-sftv02-stem-mix-sciworld-32n}
 export NEMO_RL_DIR=/home01/hanint06/projects/nemo-rl-apertus2-sciworld
 export JOB_TIME=${JOB_TIME:-12:00:00}
 export SBATCH_EXTRA="--gres=gpu:4 --exclusive --comment=field=nlp;appl=pytorch --propagate=NONE --job-name=nrl-${RUN} ${SBATCH_MORE:-}"
-bash run.sh "${TASK:-envs/stem-mix-run3-sciworld.yaml}" \
+bash run.sh "${TASK:-envs/stem/archive/stem-mix-run3-sciworld.yaml}" \
     grpo.num_prompts_per_step=512 policy.train_global_batch_size=8192 \
     loss_fn.force_on_policy_ratio=true grpo.async_grpo.max_trajectory_age_steps=2 \
     checkpointing.enabled=false policy.megatron_cfg.optimizer.lr=2.0e-6 \

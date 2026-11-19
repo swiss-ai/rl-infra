@@ -1,5 +1,5 @@
 #!/bin/bash
-# Trainer GPU memory tests on the 16k coding task (envs/code-gen-osb-sft.yaml): 3 steps each, 16 nodes,
+# Trainer GPU memory tests on the 16k coding task (envs/code/code-gen-osb-sft.yaml): 3 steps each, 16 nodes,
 # 16 sandbox pods, no validation or checkpoints. Each variant changes one thing; all but "base" train
 # with one optimizer step per GRPO step. The runs keep the base config's memory forensics (per-phase
 # [gpumem] lines, forensics/mem-rank*.tsv, NCCL INFO/ALLOC logs).
@@ -54,5 +54,5 @@ for v in "$@"; do
     [[ -v "V[${v}]" ]] || { echo "unknown variant ${v}" >&2; exit 1; }
     if [[ "${v}" == *-ckpt ]]; then args=("${COMMON_CKPT[@]}"); else args=("${COMMON[@]}"); fi
     # shellcheck disable=SC2086
-    RUN="mem-${v}" JOB_TIME="${JOB_TIME:-02:30:00}" bash run.sh envs/code-gen-osb-sft.yaml "${args[@]}" ${V[${v}]}
+    RUN="mem-${v}" JOB_TIME="${JOB_TIME:-02:30:00}" bash run.sh envs/code/code-gen-osb-sft.yaml "${args[@]}" ${V[${v}]}
 done

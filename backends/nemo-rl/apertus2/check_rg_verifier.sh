@@ -6,7 +6,7 @@
 # number_sorting, "0" on coin_flip, an unsafe task) and answers that some scorers pay a little for (any
 # sentence, any palindrome, any fraction). Fails if a gold answer scores below 1 on more than MAX_GOLD_FAIL
 # rows (default 0), or if any other case scores above 0, except another row's answer when it is also right.
-# Rows from envs/prepare_reasoning_gym.py. Runs as a one-node job, after setup.sh has applied patch 0034 to
+# Rows from envs/stem/prepare_reasoning_gym.py. Runs as a one-node job, after setup.sh has applied patch 0034 to
 # the clone (run.sh, or a DRY_RUN=1 of it, does):
 #   PYDEPS_RG=1 PYDEPS=$SCRATCH/nemo-rl-apertus2/pydeps-rg CHECK_SCRIPT=check_rg_verifier.sh \
 #       RG_FILE=$SCRATCH/reasoning-gym/native/train.jsonl bash backends/nemo-rl/apertus2/check_env_job.sh

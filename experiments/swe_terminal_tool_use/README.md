@@ -3,7 +3,7 @@
 GRPO on the Harbor verified tasks: SWE and terminal tasks from 15 validation campaigns, each checked
 against its own solution. The agent is Terminus-2 through Gym's `harbor_agent`. Every trial runs in a
 fresh OpenSandbox pod, and the task's tests, run in a second pod, give the reward. The task file is
-`envs/harbor-verified-sft.yaml`, and the starting point is the SFT checkpoint in
+`envs/agents/harbor-verified-sft.yaml`, and the starting point is the SFT checkpoint in
 `recipes/apertus2-chonk-sft19374-vllm-adamw-tools.yaml`, the task file's recipe.
 
 The commands below are for HANGANG and run from the repository root on a login node.
@@ -37,7 +37,7 @@ Once per user:
 ## 2. Prepare the data
 
 ```bash
-bash envs/prepare_harbor_verified_tasks.sh \
+bash envs/agents/prepare_harbor_verified_tasks.sh \
     ~/projects/harbor_verified_tasks/capstor/store/cscs/swissai/infra01/datasets/swe_and_agentic_gym_datasets/harbor_verified_tasks \
     ~/projects/task_datasets/harbor_verified
 ```
@@ -57,7 +57,7 @@ library; nothing is pulled, because every `task.toml` names digest-pinned images
 ```bash
 RUN=sft19374-harbor-verified-<name>
 RUN=$RUN EXCLUDE_NODES=node1903 JOB_TIME=24:00:00 WANDB_PROJECT=grpo-dev WANDB_ENTITY=apertus \
-bash run.sh envs/harbor-verified-sft.yaml \
+bash run.sh envs/agents/harbor-verified-sft.yaml \
     harbor_data_dir=$HOME/projects/task_datasets/harbor_verified \
     env.nemo_gym.harbor_agent.responses_api_agents.harbor_agent.harbor_jobs_dir=/appsdata/$USER/harbor-jobs/$RUN
 ```
@@ -116,7 +116,7 @@ Environment variables, read by `run.sh` and `backends/nemo-rl/launch.sh` rather 
 
 ### Defaults in the task file
 
-These used to be passed at launch and are now set in `envs/harbor-verified-sft.yaml`. Override them
+These used to be passed at launch and are now set in `envs/agents/harbor-verified-sft.yaml`. Override them
 for a full training run.
 
 | Setting | Default | For a training run |
