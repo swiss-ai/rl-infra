@@ -11,12 +11,17 @@ Gym patch `0011` (`../apertus2/patches/gym`) adds `verifier: kimina` to `math_fo
 sandbox's result format, so scoring and correction prompts are unchanged. The task file is
 `envs/lean-kimina-sft.yaml`.
 
-**Status (2026-11-17):** `setup.sh`, the data job and the server job have run on Clariden, with the REPLs in
-bubblewrap; see [Tested](#tested). Short GRPO runs of Chonk on the task have run with the server (see
-[Training runs](#training-runs-clariden-2026-11-15)). **To train, follow [`RUNBOOK.md`](RUNBOOK.md)**: it
-starts from an account that never ran the stack, and uses `train.sh`, which submits the training with its
-server inside the job (or, with `SERVER=debug`, as a debug job of its own).
-The run of 2026-11-17 (Goedel-Prover problems, 9 nodes) is `run-goedel-9n.sh`; RUNBOOK.md says why each setting.
+**Status (2026-11-19):** the whole pipeline has run on Clariden: `train.sh` with the server inside the job,
+16,000-token rollouts, validation, checkpoints every 5–10 steps (1.4 TB each), resuming from a checkpoint, and
+HF export of a checkpoint. GRPO runs of Chonk SFT v0.2 on Goedel-Prover problems ran on 2026-11-17/18 (one 9-node
+run, then six 12-node ablations, one of which failed, plus a rerun and two resumes); their results and lessons are in [`RUNBOOK.md`](RUNBOOK.md)
+("The Goedel run" and "Ablations"). The best one, learning rate 1e-5, step 40, is the Lean expert of
+Apertus 2 experts round 1: miniF2F-test (corrected, 242) pass@1 39.4 → 44.8 (+5.5 ± 2.0). Gains are real but
+small after 40–50 steps; why learning is slow is the open question before a 200-step run.
+**To train, follow [`RUNBOOK.md`](RUNBOOK.md)**: it starts from an account that never ran the stack, and uses
+`train.sh`, which submits the training with its server inside the job (or, with `SERVER=debug`, as a debug job
+of its own). The run of 2026-11-17 (9 nodes) is `run-goedel-9n.sh`. The ablations of 2026-11-18 are `ablations.sh` on the
+12-node recipe; their tools are listed in RUNBOOK.md ("Tools of 2026-11-18").
 
 ## Before the first run: Lean and Mathlib
 
@@ -189,10 +194,6 @@ that `train.sh` and `endpoint.sh` now hold, with the training first and the serv
   `admit`, `axiom` or `native_decide`.
 - **v0.1 scored 0 everywhere.** Its SFT data had no Lean.
 - **The 4,096-token cap is too small:** 84 % of v0.2's rollouts (45 % of v0.1's) stopped before replying.
-- **Not yet run:**
-  - a run with rewards that finishes;
-  - the task's 16,384 tokens through a whole run;
-  - validation;
-  - checkpoint saving on this task (other Chonk GRPO runs in rl-infra save and resume);
-  - `train.sh` itself on Clariden, and the server inside the job (`in_job.sbatch`); both are tested only
-    locally, with stand-ins for Slurm, ray.sub and the server.
+- **Not yet run on 2026-11-15, all done since** (RUNBOOK.md, "The Goedel run" and "Ablations"): a run with rewards
+  that finishes, 16,000 tokens through a whole run, validation, checkpoint saving and resuming, `train.sh` on
+  Clariden with the server inside the job (`in_job.sbatch`; no server restart was seen in these runs).

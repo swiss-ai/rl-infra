@@ -24,24 +24,30 @@ is requeued and resumes from its last checkpoint. It saves by `JOB_TIME` - 30 mi
 `SERVER=debug` runs the server as a 1-node debug job of its own instead (how the runs of 2026-11-15 worked). It
 limits the training to about 1:20 h and takes your one running debug job; see the comments in `train.sh`.
 
-## Status (2026-11-17)
+## Status (2026-11-19)
 
-Seen working on Clariden (2026-11-15, see "Training runs" in `README.md`):
-- start-up;
-- generation in the Apertus 2 format;
-- Gym → Kimina with 0 unchecked proofs;
-- correct rewards: 6 verified proofs from Chonk SFT v0.2, all genuine;
-- non-zero losses, weight refits and a run finishing its 3 steps with exit 0.
+Working on Clariden, shown by the runs below:
+- `train.sh` with the server inside the job, on 9 and 12 nodes; no server restart was seen in these runs
+  (16 REPLs, 32 GB address space each);
+- 16,000-token rollouts, validation (in-run, every 10–20 steps), checkpoints (1.4 TB each, about 1 min to save),
+  resuming from a checkpoint (requeue or a new job with the same `RUN`), keeping all checkpoints;
+- export of a checkpoint to HF, and a validate-only evaluation of an HF checkpoint with this pipeline (see
+  "Expert handover");
+- correct rewards and rollout logs: every step's logged `Avg Reward` equals the mean reward of its rollouts.
 
-Not yet shown in one run:
-- a run with rewards that finishes;
-- the task's 16,384 tokens through a whole run;
-- validation;
-- checkpoint saving;
-- `train.sh` itself, which puts together the hand-made scripts of those runs, and the server inside the job
-  (`in_job.sbatch`). Both are tested only locally, with stand-ins for Slurm, ray.sub and the server.
-- checkpoint saving on this task. Other Chonk GRPO runs in rl-infra save (about 1.5 TB per checkpoint with
-  AdamW) and resume.
+Results so far (details in the sections below):
+- 9 nodes, learning rate 2e-6 (job 3965303): 44 steps, no measurable change on miniF2F; the policy barely moved.
+- 12 nodes, six ablations (2026-11-18; one failed): every arm that ran ended above the baseline on
+  miniF2F-test, most within noise; the best,
+  learning rate 1e-5 at step 40, gained +4.4 ± 1.7 points on test and +3.7 ± 1.7 on valid (in-run validation),
+  and +5.5 ± 2.0 on test when evaluated again after HF export. It is the Lean expert of experts round 1.
+- Learning is slow: 40–50 steps (about 6 h on 12 nodes) give a few points. Why, and how to get more per step, is
+  the open question before a run of 200+ steps.
+
+Open:
+- the 736 mixed-reward rows are not in this repository yet (see "Tools of 2026-11-18");
+- `eval/run.sh` of the expert entry has run on the expert, not yet on `start` (its `start` row comes from the
+  same pipeline's step-0 validations).
 
 ## Once per account
 
@@ -187,8 +193,24 @@ The outputs:
 
 ## The Goedel run (2026-11-17)
 
-Clariden job 3965303, submitted on 2026-11-17; not yet started when this was written. `run-goedel-9n.sh` repeats
-it as one command (`DRY_RUN=1` first). It needs everything above, including `validation.v434.jsonl`.
+Clariden job 3965303. `run-goedel-9n.sh` repeats it as one command (`DRY_RUN=1` first). It needs everything above,
+including `validation.v434.jsonl`.
+
+**Outcome.** It ran 2026-11-18 00:58–07:28 with its time limit shortened to 6:30 (Clariden maintenance at 08:00):
+44 training steps, checkpoints at steps 10, 20, 30, 40 (the time limit stopped it before step 50).
+- miniF2F (212 statements, 1 sample each): 44.34 % at the start, 42.92 % at step 20, 40.09 % at step 40. With one
+  sample per statement a difference has a standard error of about 3.8 points: no measurable change.
+- Training reward flat at about 0.20 (mean 0.2005, step to step 0.086–0.283).
+- The policy barely moved: entropy (about 0.27), mean reply length (about 8,990 tokens) and termination rate show
+  no trend. The PPO ratio was exactly 1 (one optimizer update per batch), the gradient norm 0.009–0.017 (clip 1.0),
+  the importance-weight cap (2.0) hit on about 3e-6 of tokens: no clipping acted.
+- Not starved of signal: 51 % of the 1,408 trained prompt groups had mixed rewards (48 % all 0, 0.6 % all 1),
+  about 16 informative groups per step. By source: OMR_problem 72 % all 0, lean_workbook_plus 36 %.
+- 12.3 % of rollouts were cut at 16,000 tokens (Gym `incomplete`, reason `max_output_tokens`; these are the
+  `empty_generation` rows, reward 0); 2.0 % timed out in Kimina (120 s).
+- Kimina never restarted; the head node kept at least about 82 GB free.
+- The rollouts are in `results/<RUN>/rollouts/train_weights<v>.jsonl`, one file per generating weight version:
+  steps 1 and 2 trained on version 0, step s >= 3 on version s-2 (asynchronous GRPO, trajectory age 1).
 
 | Setting | Value | Why |
 |---|---|---|
@@ -219,6 +241,95 @@ Versions: this branch of rl-infra; NeMo-RL, Megatron, Bridge and Gym at `../aper
 Mathlib from `site.env`. The run's Kimina install is at 97d7683; `pin` names b3c6c3e, which only adds exiting when
 the server's start-up fails.
 
+## Ablations (2026-11-18)
+
+Why: the Goedel run's policy barely moved (one update of about 2e-6 per step), so every arm changes how far or how
+usefully the policy moves per step. All start from Chonk SFT v0.2 iteration 18315 and keep the Goedel run's
+settings (Goedel rows, 32 prompts × 16 rollouts, temperature 1.0, 16,000 tokens, 120 s, constant learning rate,
+no KL), except:
+- **12 nodes: 8 Megatron trainers, 4 vLLM** (recipe `apertus2-chonk-sftv02-18315-vllm-adamw-code-12n.yaml`). One
+  vLLM node made generation the bottleneck; with four, a step takes about 7 min (alternating about 10–13 min and
+  2 min) and a 972-row validation about 7 min.
+- **Validation: corrected miniF2F** (the user's `corrected_miniF2F/minif2f.jsonl`, valid 244 + test 244; 486 of
+  488 elaborate on v4.34: test `amc12a_2020_p7` uses `∑ … in`, `amc12a_2020_p15` uses `Complex.abs`), every
+  statement twice (972 rows), every 10 steps. Checkpoints are picked on **valid** and reported on **test**.
+- Checkpoints every 5 steps, all kept; `JOB_TIME` 6:20; `preemptable` with requeue.
+
+**Baseline** (the same starting model validated twice, jobs 3972333 and 3972629, step 0): valid 45.70 / 48.16 %,
+test 39.26 / 39.46 %; pooled (4 samples per statement) **valid 46.93 %, test 39.36 %**. The two identical
+measurements differed by +2.5 ± 2.0 (valid) and +0.2 ± 2.0 (test) points: a checkpoint needs roughly 3.5 points
+over the pooled baseline to stand out (2 standard errors).
+
+| Arm | Job | Change | Steps | Best validation (change vs baseline, ± paired SE) |
+|---|---|---|---|---|
+| **H1** | 3972337 | learning rate 1e-5 | 47 (time limit) | step 40: valid +3.69 ± 1.66, test +4.44 ± 1.74; step 30: test +5.06 ± 1.89; step 20: valid +4.51 ± 2.00, test −0.31 |
+| H2 | 3972342 | global batch 128 (4 optimizer updates per step) | 1 | failed in step 2: host memory (Slurm `OUT_OF_MEMORY`), see Known problems |
+| H3 | 3972343 | only the 736 prompts with mixed rewards in run 3965303 | 23 (one epoch) | step 20: valid +2.66 ± 1.51, test +2.58 ± 1.66; step 23: +1.43 / +0.93 |
+| H8 | 3972333, resumed 3973965 | learning rate 5e-6 + global batch 128 + the 736 mixed prompts | 23, then 24–41 | step 23: valid +2.87 ± 1.61, test +3.00 ± 1.88; second epoch: step 30 +2.46 / +0.52, step 40 +3.07 / +1.55 |
+| H8 twin | 3972629, resumed 3973966 | learning rate 5e-6 + the 736 mixed prompts (global batch 512) | 23, then 24– | step 23: +2.05 / +2.79; step 30: valid +2.46 ± 1.56, test +4.24 ± 1.61 |
+| No-std | 3972454, rerun 3972630 | advantages not divided by the group's standard deviation (`grpo.normalize_rewards=false`) | 51 | step 40: +1.23 / +2.79; step 50: +1.02 / +2.38 |
+| (H4) | not run | `loss_fn.positive_example_nll_weight` (NLL on correct samples) | | no effect at this NeMo-RL pin: GRPO's training batch carries no `rewards`, so the term is never computed |
+
+What they say, with the caveat that each arm ran once:
+- More movement per step helps: learning rate 1e-5 (H1) is the only arm up on both splits beyond 2 standard
+  errors; 5e-6 (H8, H8 twin) is up on both by about 2–4 points.
+- Training only on prompts with mixed rewards (H3, H8, H8 twin) gives earlier gains, but the 736 prompts run out
+  after 23 steps, and a second epoch on the same prompts (H8) did not add to miniF2F.
+- Removing the standard-deviation scaling (no-std) changed little.
+- The training reward rose clearly only on the mixed prompts (H8: about 0.33 at the start, 0.42 at step 10, 0.55
+  at step 20, still in the first epoch).
+
+The launcher of these runs is `ablations.sh <h1|h2|h3|h8|h8s|nostd> [partition]`; see "Tools of 2026-11-18".
+
+## Expert handover (Apertus 2 experts, round 1)
+
+H1 step 40 is staged as `lean__lean-kimina-v02-abl-h1-20261118` in
+`/capstor/store/cscs/swissai/infra01/apertus-2-expert-staging/experts-r1-2026-11-18/`, following
+`apertus-program/docs/engineering/models/apertus-2/apertus2-experts.md` (posted to issue #1348):
+- `ckpt`: HF export of `results/<RUN>/step_40/policy/weights/iter_0000000` with NeMo-RL
+  `examples/converters/convert_megatron_to_hf.py` (8 min on one debug node). The single-process export fails
+  with DeepEP, so it reads a shadow copy of the checkpoint folder: symlinks to the shards and a `run_config.yaml`
+  with `moe_enable_deepep: false` and `moe_flex_dispatcher_backend: null` (weights unchanged). The converter
+  writes its own config, tokenizer and modeling files; they are replaced by those of `start` (originals kept in
+  `ckpt_export_originals/`). Checked: 30,978 tensors with the names, shapes and dtypes of `start`, every shard
+  complete against its header; the sampled tensors differ from `start`.
+- `prompts/`: the 2,357 training rows and the 446-statement Goedel held-out sample in the handover schema
+  (Apertus 2 native conversation, frame `{"thinking":"medium","tools":[]}`).
+- `rollouts/`: every trained rollout, `step001`–`step047.jsonl`, with `prompt_id`, `step`, `sample`, `messages`
+  (prompt, raw reply with the think block, Kimina's verdict) and `reward`. Version 0 holds the batches of steps
+  1 and 2 interleaved; they are split by the collector's log ("Buffered prompt group (_ng_task_index=..,
+  target_weight=..)"). Every step's mean reward equals the run's logged `Avg Reward`.
+- `eval/run.sh`: `MODEL=<HF dir> bash eval/run.sh` validates MODEL once with this pipeline (rl-infra at 302695a,
+  12 nodes) and stops: `grpo.val_at_start=true grpo.stop_at_validation_metric=accuracy
+  grpo.stop_at_validation_threshold=0.0 checkpointing.enabled=false`. (`grpo.max_num_steps=0` returns before
+  the validation at start.) Lean comes from the shared install
+  `/capstor/store/cscs/swissai/infra01/lean_apertus_v2/lean-v4.34.0` (Lean v4.34.0, Mathlib `5ed29652`, the same
+  as the training's project). On the expert (job 3974712, 18 min) it gave test 44.83 %, valid 49.80 %, within
+  noise of the run's own step-40 validation (43.80 / 50.61 %).
+
+## Tools of 2026-11-18 (this directory)
+
+| File | What |
+|---|---|
+| `../../../recipes/apertus2-chonk-sftv02-18315-vllm-adamw-code-12n.yaml` | the 12-node layout: 8 Megatron trainers + 4 vLLM |
+| `ablations.sh <variant> [partition]` | the ablation launcher (h1, h2, h3, h8, h8s, nostd); `RUN`, `VAL_AT_START`, `EXTRA_OVERRIDES` for resumes |
+| `data/minif2f-corrected-x2.v434.jsonl.gz` | the validation file: corrected miniF2F, valid 244 + test 242, each twice (972 rows, sha256 `f8e04393...`); `ablations.sh` unpacks it |
+| `status.sh <job>:<tag> ...` | status of running jobs: state, server start, steps, validations, checkpoints, fatal errors |
+| `val_report.py --val ... --baseline <RUN> <TAG>=<RUN> ...` | pass@1 per split for every validation of each run, paired against a pooled step-0 baseline |
+| `export_hf.sbatch` | HF export of a checkpoint (DeepEP off in a shadow `run_config.yaml`); then `compare_safetensors.py` |
+| `compare_safetensors.py <ckpt> <start>` | tensor names, shapes and dtypes of two HF checkpoints, from their safetensors headers |
+| `handover_lean.py` | prompts and rollouts of a run in the experts-handover schema |
+| `expert-eval/run.sh`, `expert-eval/score.py` | copies of the expert entry's `eval/`, for reference: validate-only evaluation of an HF checkpoint, pinned to rl-infra 302695a. Run it from the entry, which also holds the validation file and the apertus-common bundle it needs |
+
+These were run on Clariden from copies with fixed paths; the versions here take the checkout, run and files as
+arguments and are only syntax-checked so far.
+
+### Not in this repository yet
+
+- `goedel-train-s1-mixed.v434.jsonl`, the 736 rows with mixed rewards in run 3965303 (variants h3, h8, h8s): on
+  Clariden at `$SCRATCH/lean/data/` of the account that ran them. It was made from the run's rollouts: the training
+  rows whose 16 rollouts had 1-15 rewards, from all 1,444 generated groups.
+
 ## Known problems and lessons
 
 - **Head node container never started** (job 3949635): 16 nodes idled for 1:30 h, because ray.sub waits for the
@@ -241,3 +352,26 @@ the server's start-up fails.
 - **Ports inside the job:** `ray.sub` keeps 1150–8999 (Ray, Gym 5000–5999, vLLM 7000–8999) and reads `PORT`
   as Ray's own port. The in-job server uses 1120 (`KIMINA_PORT`), and `train.sh` passes its settings under
   `KIMINA_` names only.
+- **Global batch 128 (4 optimizer updates per step) runs out of host memory on 8 trainer nodes** (H2, 3972342:
+  Slurm `OUT_OF_MEMORY` on the head node in step 2's training). The optimizer state is offloaded to CPU memory;
+  with 4 updates per step the trainer nodes had about 75–180 GB free against about 310 GB at global batch 512, and
+  single NUMA nodes went down to 6–8 GB. The job gets Slurm's default 450 GB per node (no `--mem`). H8 survived the
+  same setting with a thin margin. Use more trainer nodes before trying more updates per step.
+- **GPU out of memory in the first training step, once** (no-std 3972454, one rank at 0.02 GB free). An identical
+  rerun passed. `driver_retry.sh` does not retry a run that has not completed a step.
+- **`grpo.max_num_epochs: 1` (the recipe) ends a run after one pass over its rows**: the 736 mixed prompts gave 23
+  steps. Set the epochs a run needs before its first step: changing them on resume changes the total iterations
+  that Megatron's learning-rate scheduler stored in the checkpoint, and every trainer fails with
+  `AssertionError: OptimizerParamScheduler: class input value ... and checkpoint value ... do not match`
+  (3973489, 3973492, 3973508). With a constant learning rate it is safe to resume anyway with
+  `++policy.megatron_cfg.scheduler.override_opt_param_scheduler=true` (3973965, 3973966).
+- **`normal` has a 350-node QoS cap** (`normalp`) shared by all its users; a job waits with `QOSGrpNodeLimit`
+  while it is full, and `preemptable` (no cap, same 1,308 nodes) filled up in the evening of 2026-11-18 (estimated
+  starts after midnight). A 12-node job started at once in the afternoon.
+- **`loss_fn.positive_example_nll_weight` does nothing in GRPO** at this pin: the term needs `rewards` in the
+  training batch, and `grpo.py` never puts them there.
+- **Validation logs** (`logs/<RUN>/exp_*/val_data_step<N>.jsonl`) have empty `content` (prompts go to vLLM as
+  token IDs) but an `idx` per row, 0 to N-1 once each, taken as the row of the validation file (consistent with
+  every check so far; not confirmed in NeMo-RL's code). Split scores and paired comparisons rely on it.
+- **Validation with one sample per statement is too noisy** to compare checkpoints: two identical baselines
+  differed by 2.5 points with two samples. Use at least two samples per statement and a baseline measured twice.

@@ -1,0 +1,17 @@
+# apertus2-chonk-sftv02-18315-vllm-adamw-code.yaml on 12 nodes: the same 8 trainer nodes, vLLM on 4 nodes. The 9-node
+# layout (1 vLLM node) made generation and validation the bottleneck; with 4, a Lean GRPO step of 32 x 16 rollouts
+# takes about 7 min and a 972-row validation about 7 min (ablations of 2026-11-18, lean-kimina/RUNBOOK.md).
+defaults: apertus2-chonk-sftv02-18315-vllm-adamw-code.yaml
+
+# run.sh reads sft_export and cluster.num_nodes from this file alone, not from its defaults.
+sft_export: ../../../../capstor/store/cscs/swissai/infra01/apertus_checkpoints/v2/hf/chonk/posttraining/chonk-lc-16k-v0.2-iter_0018315
+
+# 8 trainer nodes and 4 vLLM nodes.
+cluster:
+  num_nodes: 12
+
+policy:
+  generation:
+    colocated:
+      resources:
+        num_nodes: 4
