@@ -34,7 +34,7 @@ registry_cred_file: ${oc.env:RL_USER_HOME}/.rl_registry_cred
 
 grpo:
   # 64 trials, so 64 task pods (and up to 64 verifier pods), in flight.
-  num_prompts_per_step: 64
+  num_prompts_per_step: 128
   num_generations_per_prompt: 8
   max_num_steps: 200
   max_num_epochs: 100
@@ -56,7 +56,7 @@ grpo:
   skip_zero_advantage_groups: false
   async_grpo:
     # Lets a step's rollouts start while the two previous steps' are still in flight.
-    max_trajectory_age_steps: 2
+    max_trajectory_age_steps: 4
 
 checkpointing:
   # The weights every 20 steps, without the optimizer state; only the latest is kept. A run resumed
@@ -67,10 +67,13 @@ checkpointing:
   # Ranks by recency: there is no validation metric to rank by.
   metric_name: null
   keep_top_k: 1
+  # No forced save-and-stop: the recipe stops at 11.5 h (apertus2-chonk-vllm-adamw-dapo.yaml). The run
+  # goes on until max_num_steps or the job time limit.
+  checkpoint_must_save_by: null
 
 policy:
   # One optimizer step per step.
-  train_global_batch_size: 512
+  train_global_batch_size: 1024
   generation:
     # Per agent turn. policy.max_total_sequence_length limits the whole trajectory.
     max_new_tokens: 6144
@@ -157,7 +160,9 @@ env:
           api_key: null
           # RL_USER_HOME is your HOME, from run.sh.
           api_key_file: ${oc.env:RL_USER_HOME}/.opensandbox_token
-          transport_backend: httpx
+          transport_backend: aiohttp
+          # No cap on the client connection pool, which also caps in-flight sandbox operations.
+          max_connections: null
           # Reach sandboxes through the ingress gateway, not through the OpenSandbox server, which
           # answered "no available server" at about 190 sandboxes. opensandbox.yaml sets true.
           use_server_proxy: false
@@ -175,7 +180,7 @@ env:
           # concurrency: ${mul:${grpo.num_prompts_per_step},${grpo.num_generations_per_prompt}}
           # About the ~300 sandboxes the cluster runs at once (it starts about 1.2 pods per second); a
           # higher cap only adds sandboxes waiting to start, which time out after 600 s and are recreated.
-          concurrency: 300
+          concurrency: 1024
           harbor_datasets:
             # The alias is the left half of every row's instance_id.
             verified:
@@ -199,6 +204,14 @@ env:
               # The task images are in a private registry project and the OpenSandbox cluster has no
               # pull secret for it (Gym patch 0013 reads username:password from this file).
               image_auth_file: ${registry_cred_file}
+              # Scheduling requests; each task.toml gives the limits. Without disk_gib the storage request
+              # defaults to the limit (storage_mb, 10-32 GiB), and the sandbox nodes ran out of reservable
+              # ephemeral storage at about 300 pods. The full harbor_agent_opensandbox_training.yaml map,
+              # as this replaces it.
+              resource_requests:
+                cpu: 0.5
+                memory_mib: 512
+                disk_gib: 1
             # A pod lives at most this long, also when a run dies; above the two caps below.
             sandbox_ttl_s: 3600
           # Caps, not overrides: these tasks declare 3000 s for both, and a step lasts as long as its
