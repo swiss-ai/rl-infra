@@ -11,8 +11,8 @@
 # absolute /opt/nemo-rl/... entry is a file of the NeMo-RL clone and stays as it is (it belongs to the code).
 #
 # rl-infra keys: top-level keys read by run.sh, not NeMo-RL config keys. config_freeze leaves them out of the
-# copies: recipe, size, context, job_time, pydeps, script.
-RL_INFRA_KEYS='recipe|size|context|job_time|pydeps|script'
+# copies: recipe, size, context, job_time, pydeps, script, template.
+RL_INFRA_KEYS='recipe|size|context|job_time|pydeps|script|template'
 
 _config_host_path() {
     if [[ "$1" == /opt/nemo-rl/* ]]; then echo "${NEMO_RL_DIR:?NEMO_RL_DIR is not set}/${1#/opt/nemo-rl/}"; else echo "$1"; fi

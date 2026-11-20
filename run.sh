@@ -22,6 +22,7 @@
 #   job_time:  Slurm time limit; a checkpointing run saves and stops 30 minutes before it
 #   pydeps:    reasoning_gym, for Reasoning Gym's scorers in the math environment
 #   script:    entry point instead of examples/run_grpo.py (NeMo Gym tasks)
+#   template:  true in the placeholder files of a new expert; run.sh refuses to submit them
 # A task without `recipe:` names its recipe in `defaults` (the older layout).
 #
 # Environment: RUN names the run (default: the task's path under envs/ and the time, e.g.
@@ -53,6 +54,10 @@ DEBUG="${DEBUG:-0}"; DRY_RUN="${DRY_RUN:-0}"
 if [[ "${DEBUG}" == 1 ]]; then JOB_TIME="${JOB_TIME:-02:00:00}"; else JOB_TIME="${JOB_TIME:-$(task_key job_time)}"; fi
 TASK_SCRIPT="$(task_key script)"
 TASK_PYDEPS="$(task_key pydeps)"
+# The placeholder files of a new expert carry `template: true` until their datasets are filled in.
+if [[ "$(task_key template)" == true && "${DRY_RUN}" != 1 ]]; then
+    echo "ERROR: ${TASK} is a template (template: true): fill in its datasets, then remove that key (DRY_RUN=1 works)" >&2; exit 1
+fi
 
 # --- run name and W&B
 if [[ -z "${RUN:-}" ]]; then

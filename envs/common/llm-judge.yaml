@@ -1,0 +1,71 @@
+# The LLM judge, shared by the experts that grade open answers (STEM openqa; templates of safety, knowledge,
+# translation): the llm_judge environment (NeMo-RL patches 0053-0056; handover/openqa-judge-integration.md) and
+# the judge model on a node of its own (env.judge_pool; run.sh adds its nodes to the tier). A task takes it with
+# `defaults: ../common/llm-judge.yaml` and points a dataset at it with `env_name: llm_judge`; the judge model is
+# downloaded once per user with envs/common/stage_judge_model.sh.
+env:
+  llm_judge:
+    judge_pool: judge
+    mode: verdict
+    score: hard
+    min_verdict_mass: 0.0
+    # vLLM structured outputs: the judge can only answer Yes or No.
+    structured: true
+    max_reasoning_chars: 400
+    # A failed judge call makes its sample zero-weight instead of reward 0; nothing to judge stays reward 0.
+    mask_failures: true
+    reward_frame: claim
+    fallback_frame: reply
+    temperature: 1.0
+    top_p: 1.0
+    max_tokens: 512
+    top_logprobs: 20
+    max_concurrent_calls: 1024
+    timeout_s: 300
+    retries: 2
+    pool_wait_s: 3600
+    max_answer_chars: 2000
+    log_every: 512
+    chat_template_kwargs:
+      enable_thinking: false
+  # The judge's own node (run.sh adds it to the tier's nodes).
+  judge_pool:
+    num_nodes: 1
+    stats_path: ${logger.log_dir}/judge_stats.jsonl
+    stats_interval_s: 5.0
+    generation:
+      backend: vllm
+      model_name: ${oc.env:SCRATCH}/models/gemma-4-26B-A4B-it
+      max_new_tokens: 1024
+      temperature: 1.0
+      top_p: 1.0
+      top_k: null
+      val_temperature: 0.0
+      val_top_p: 1.0
+      val_top_k: null
+      stop_token_ids: null
+      stop_strings: null
+      colocated:
+        enabled: false
+      vllm_cfg:
+        async_engine: true
+        expose_http_server: true
+        precision: bfloat16
+        kv_cache_dtype: auto
+        logprobs_mode: processed_logprobs
+        tensor_parallel_size: 1
+        pipeline_parallel_size: 1
+        expert_parallel_size: 1
+        gpu_memory_utilization: 0.88
+        max_model_len: 8192
+        enforce_eager: false
+        use_deep_gemm: false
+        num_last_layers_in_bf16: 0
+        num_first_layers_in_bf16: 0
+        enable_vllm_metrics_logger: true
+        vllm_metrics_logger_interval: 2.0
+        refit_with_reload_api: false
+        enable_prefix_caching: true
+      vllm_kwargs:
+        max_num_seqs: 256
+        max_num_batched_tokens: 16384

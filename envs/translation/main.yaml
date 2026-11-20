@@ -1,0 +1,17 @@
+# Translation (MT) expert, the official run. TEMPLATE until base.yaml is filled in (template: true there).
+#   bash run.sh envs/translation/main.yaml          full run (W&B); DEBUG=1 for a short debug run, DRY_RUN=1 to see it first
+# Development variants go to envs/translation/dev/ with `defaults: ../main.yaml`; a variant that wins moves its changes here.
+defaults: base.yaml
+size: cheap
+job_time: "12:00:00"
+
+grpo:
+  max_num_steps: 100             # TODO
+
+checkpointing:
+  # Weights only (no optimizer state), every 20 steps, the last 3 kept.
+  enabled: true
+  save_period: 20
+  keep_top_k: 3
+  metric_name: null
+  save_optimizer: false

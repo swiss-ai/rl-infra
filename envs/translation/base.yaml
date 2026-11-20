@@ -1,0 +1,46 @@
+# Translation (MT) expert: every dataset, environment and validation set, defined once. TEMPLATE: the datasets
+# below are placeholders. Fill in the TODOs, then delete `template: true` (run.sh refuses to submit a template;
+# DRY_RUN=1 shows it). Layout as envs/stem/base.yaml; main.yaml is the official run, dev/*.yaml variants.
+# Starting point: source sentences graded by the shared LLM judge (../common/llm-judge.yaml) against a reference
+# translation. TODO: NeMo-RL has no metric environment for translation (chrF, COMET); the judge asks whether the
+# reply matches the reference, which a translation task may need to phrase as adequacy and fluency.
+defaults: ../common/llm-judge.yaml
+template: true
+recipe: recipes/apertus2-chonk-sftv02-grpo.yaml
+context: 16384
+
+# Thinking level per dataset (the system frame its prompts start with); a run file overrides one key.
+frames:
+  default: ${oc.env:RL_INFRA_DIR}/envs/frames/apertus2-system-high.json
+
+grpo:
+  max_num_epochs: 1
+  val_period: 20
+  val_batch_size: 1000           # TODO: number of validation prompts
+  max_val_samples: 1000
+
+data:
+  _override_: true
+  max_input_seq_length: 4096
+  shuffle: true
+  num_workers: 1
+  use_multiple_dataloader: true
+  custom_dataloader: examples.custom_dataloader.custom_dataloader.example_custom_dataloader
+  # Prompts per step from each training set, named <folder>-<file> of its data_path; they add up to
+  # grpo.num_prompts_per_step (512 in the recipe).
+  num_prompts_per_dataloader:
+    translation-train: 512       # TODO: one entry per training set (e.g. one per language pair)
+  train:
+    # TODO: rows {"input": <instruction and source text>, "output": <reference translation>} under ${RL_DATA_DIR}/translation/
+    - dataset_name: ResponseDataset
+      data_path: ${oc.env:RL_DATA_DIR}/translation/train.jsonl
+      env_name: llm_judge
+  validation:
+    - dataset_name: ResponseDataset
+      data_path: ${oc.env:RL_DATA_DIR}/translation/validation.jsonl
+      env_name: llm_judge
+  default:
+    prompt_file: null
+    system_prompt_file: ${frames.default}
+    processor: apertus2_math_data_processor
+    env_name: llm_judge
