@@ -96,7 +96,7 @@ the model has no position table, so the value is only that check. The launchers 
 | File | Purpose |
 |---|---|
 | `launch-code-ctx.sh <tokens>` | Coding on `code_gen` with pods or a sandbox node, CP, KCP, `OFFHEAD`, `HEAD` (a dedicated driver node), node counts 12, 16, 31, 32 |
-| `recipes/` | Node layouts of the coding runs: 8+4, 8+8, 16+15 (with `HEAD=1`), 16+16 (STEM runs take a tier from `sizes/`) |
+| `recipes/` | Node layouts of the coding runs: 8+4, 8+8, 16+15 (with `HEAD=1`), 16+16 (STEM runs take a `size:` tier) |
 | `convert_rl_ckpt.sh <run> <step> <name>` | NeMo-RL checkpoint to an HF export (one node, about 10 minutes; uses the shared converter of the SFT exports) |
 | `eval/` | Evaluation with vLLM only, see below |
 | `tools/rollout_index.py <exp dir>` | Per-step index of the rollout files: step, row, prompt group, dataset, row in the dataset file, reward, length (for files written before patch 0044) |

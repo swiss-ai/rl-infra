@@ -23,7 +23,9 @@
 #              name its own context table with contexts: (default backends/nemo-rl/apertus2/contexts.tsv)
 #   context:   longest prompt + answer in tokens; sets CP, packing and memory from the first row of
 #              backends/nemo-rl/apertus2/contexts.tsv that covers it (up to 131072)
-#   size:      node tier, a file in sizes/ (cheap, expensive, ultra)
+#   size:      nodes: a tier of the recipe's base layout (`nodes:` in the recipe; Chonk 8 trainer x 8 vLLM):
+#              lite (base trainer, half the vLLM), cheap (the base), expensive (twice the base), ultra
+#              (expensive with twice the vLLM); or explicit counts, <trainer>+<vLLM> (e.g. 16+32)
 #   job_time:  Slurm time limit; a checkpointing run saves and stops 30 minutes before it
 #   pydeps:    reasoning_gym, for Reasoning Gym's scorers in the math environment
 #   script:    entry point instead of examples/run_grpo.py (NeMo Gym tasks)
@@ -122,22 +124,28 @@ config_resolve "${CFG}" "${TMP}/merged.yaml"
 cfg() { local v; v="$(yq r "${TMP}/merged.yaml" "$1")"; [[ "${v}" == null ]] && v=""; echo "${v}"; }
 OVR=()   # overrides made here; the command line's come after them and win
 
-# --- nodes: the tier, or the recipe's own counts
+# --- nodes: a tier of the recipe's base layout (nodes: in the recipe), explicit counts, or the task's own
 JUDGE=$(( $(cfg env.judge_pool.num_nodes || true) + 0 ))
 for n in $(yq r "${TMP}/merged.yaml" 'env.extra_judge_pools.*.num_nodes' 2>/dev/null); do JUDGE=$(( JUDGE + n )); done
 if [[ -n "${SIZE}" ]]; then
-    SF="${ROOT}/sizes/${SIZE}.yaml"
-    [[ -f "${SF}" ]] || { echo "ERROR: no node tier sizes/${SIZE}.yaml" >&2; exit 1; }
-    TRAIN=$(yq r "${SF}" trainer_nodes); GEN=$(yq r "${SF}" generation_nodes); SCALE=$(yq r "${SF}" batch_scale)
+    if [[ "${SIZE}" =~ ^([0-9]+)\+([0-9]+)$ ]]; then
+        TRAIN="${BASH_REMATCH[1]}"; GEN="${BASH_REMATCH[2]}"
+    else
+        BT="$(cfg nodes.trainer)"; BI="$(cfg nodes.inference)"
+        [[ -n "${BT}" && -n "${BI}" ]] || { echo "ERROR: size ${SIZE} needs the recipe's base layout (nodes: trainer, inference); give the counts as SIZE=<trainer>+<vLLM> instead" >&2; exit 1; }
+        # The tiers, from the recipe's base layout (trainer x inference nodes; Chonk 8 x 8):
+        #   lite = base trainer, half the inference; cheap = base; expensive = twice the base;
+        #   ultra = expensive with twice the inference.
+        case "${SIZE}" in
+            lite)      TRAIN="${BT}";         GEN=$(( BI / 2 )) ;;
+            cheap)     TRAIN="${BT}";         GEN="${BI}" ;;
+            expensive) TRAIN=$(( 2 * BT ));   GEN=$(( 2 * BI )) ;;
+            ultra)     TRAIN=$(( 2 * BT ));   GEN=$(( 4 * BI )) ;;
+            *) echo "ERROR: size ${SIZE}: a tier (lite, cheap, expensive, ultra) or <trainer>+<vLLM> nodes, e.g. 16+32" >&2; exit 1 ;;
+        esac
+    fi
     NODES=$(( TRAIN + GEN + JUDGE ))
     OVR+=(cluster.num_nodes="${NODES}" policy.generation.colocated.resources.num_nodes="${GEN}")
-    if (( SCALE != 1 )); then
-        OVR+=(grpo.num_prompts_per_step=$(( $(cfg grpo.num_prompts_per_step) * SCALE ))
-              policy.train_global_batch_size=$(( $(cfg policy.train_global_batch_size) * SCALE )))
-        for k in $(yq r "${TMP}/merged.yaml" --printMode p 'data.num_prompts_per_dataloader.*' 2>/dev/null); do
-            OVR+=("${k}=$(( $(cfg "${k}") * SCALE ))")
-        done
-    fi
 else
     NODES="$(cfg cluster.num_nodes)"
     GEN=0; [[ "$(cfg policy.generation.colocated.enabled)" == false ]] && GEN="$(cfg policy.generation.colocated.resources.num_nodes)"

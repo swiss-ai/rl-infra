@@ -3,8 +3,7 @@
 # defaults, written out from recipes/archive/apertus2-megachonk-vllm-adamw-stem16k.yaml. TEMPLATE: no expert uses it
 # yet. Before a run:
 #   - nodes: the trainer needs 32 nodes or more (TP4 x PP8 x EP16; 16 do not fit, job 1291990) and vLLM runs in
-#     replicas of 8 nodes (TP4 x EP32). The tiers in sizes/ are Chonk's; a run on this recipe needs a tier of its
-#     own (the 48-node runs: 32 trainer + 16 vLLM).
+#     replicas of 8 nodes (TP4 x EP32); `nodes:` below is the base of its tiers (the 48-node runs: size lite).
 #   - context: its own table (backends/nemo-rl/apertus2/contexts-megachonk.tsv) holds only the measured 16K (CP 4);
 #     run.sh refuses a longer context until a row for it is measured.
 #   - format: the pretraining format (a few-shot prompt, stop at "Question:"), not the Apertus 2 message format;
@@ -12,6 +11,9 @@
 #   - checkpoint: staged on scratch as $SCRATCH/models/apertus2-megachonk-iter42000 (experiments/megachonk.md).
 defaults: /opt/nemo-rl/examples/configs/grpo_math_1B.yaml
 contexts: backends/nemo-rl/apertus2/contexts-megachonk.tsv
+# Base node layout, the "cheap" tier: the trainer's smallest fit (TP4 x PP8 x EP16 at CP 4 = 128 GPUs) and four vLLM
+# replicas of 8 nodes. lite = 32 + 16, the layout of the 48-node runs.
+nodes: {trainer: 32, inference: 32}
 
 # ======================================================================== model: checkpoint and format
 policy:

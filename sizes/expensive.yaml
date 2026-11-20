@@ -1,6 +1,0 @@
-# Expensive tier: the node split of the STEM run 5 at 32K (job 1299180): 16 trainer + 32 vLLM nodes (+ judge nodes
-# from the task), 512 prompts x 16 per step. Run 5 at 16K with 16 vLLM nodes was limited by generation (459 s per
-# step, of which the trainer needed about 110 s), hence twice the vLLM nodes of the trainer.
-trainer_nodes: 16
-generation_nodes: 32
-batch_scale: 1

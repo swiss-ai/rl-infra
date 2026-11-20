@@ -13,13 +13,14 @@ expert's files. Each active recipe is one file that builds only on NeMo-RL's own
 | `megachonk.yaml` | MegaChonk pretraining checkpoint (iteration 42,000), pretraining format; TP4 x PP8 x EP16 (32 trainer nodes or more), vLLM replicas of 8 nodes, staleness 2 | template: no expert yet; needs a tier with 32+ trainer nodes |
 
 `sft_export` names an SFT checkpoint (relative to $SCRATCH or absolute; a symlink works); run.sh stages it and sets
-`policy.model_name`, so the recipe names it once. A recipe for a model other than Chonk names its context table with
+`policy.model_name`, so the recipe names it once. `nodes: {trainer, inference}` is the recipe's base node layout,
+the `cheap` tier; run.sh derives `lite`, `expensive` and `ultra` from it (`experts/main.yaml`). A recipe for a model other than Chonk names its context table with
 `contexts:` (CP, packing and memory per context length; Chonk's `backends/nemo-rl/apertus2/contexts.tsv` otherwise).
 
 A variant (another optimizer, another checkpoint) is a small file with `defaults: <recipe>.yaml` and what it
 changes; a new model gets a flat file of its own when it is trained. Keep a recipe free of what other files set:
 datasets and environments (`experts/<expert>/base.yaml`), sequence lengths, packing and context parallelism
-(`run.sh`, from `context`), node counts (`sizes/`), checkpoints, validation schedule and logging
+(`run.sh`, from `context`), the node tier, checkpoints, validation schedule and logging
 (`experts/main.yaml`).
 
 `archive/` holds the recipes of earlier runs as they were, and `archive/chain/` the experiment chain they build on

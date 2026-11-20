@@ -13,7 +13,7 @@ to follow, and the steps to move one over. `docs/repository-map.md` describes th
 | Shared pieces | `envs/apertus2-system*.json`, `envs/stage_judge_model.sh`, ... | `shared/frames/`, `shared/judges/llm-judge.yaml`, `shared/prompts/`, `shared/scripts/`, `shared/debug/` |
 | Launch settings | launcher variables (`CP`, `CAP`, `GEN_NODES`, `STEPS`, `SAVE_BY`, ...) in a launcher per experiment | rl-infra keys read by `run.sh`: `size`, `job_time`, `context` in `experts/main.yaml` (a dev file may change them), `recipe` and `template` in the expert's `base.yaml`; Hydra overrides on the command line |
 | Recipes | 34 recipes, each a few keys on a chain of up to 14 files (`recipes/`, `experiments/grpo-chonk/`) | one flat file per active model, on NeMo-RL's defaults only: `recipes/chonk-sftv02.yaml`; the rest in `recipes/archive/` and `recipes/archive/chain/` (`recipes/README.md`) |
-| Node layouts | one recipe per node split | node tiers in `sizes/` (cheap 8+16, expensive 16+32, ultra 32+64 with batch x2); judge nodes come from the task |
+| Node layouts | one recipe per node split | `size:` a tier of the recipe's base layout (`nodes:`; Chonk 8+8): lite 8+4, cheap 8+8, expensive 16+16, ultra 16+32, or explicit counts such as `16+64`; judge nodes come from the task |
 | Context length | `CP`, `KCP`, `CAP`, packing set by hand | `context:` in the task; `backends/nemo-rl/apertus2/contexts.tsv` gives CP, KCP, packing and memory fraction (the next row up: 50K gets the 64K settings) |
 | Run modes | `DRY_RUN=1` ran setup and printed the job; launchers had `DEBUG=1` by default | plain `run.sh` = full run (W&B required); `DEBUG=1` = debug run; `DRY_RUN=1` = everything shown, no setup, no job |
 | Config at job start | the job read the recipe and task chain from their original paths when it started | the job reads copies made at launch (`$OUT/configs/<run>-<time>/`, with the setup log) |
@@ -130,7 +130,7 @@ The NeMo-RL clones of these branches may also hold commits that are not patches 
 | `envs/score-text.yaml` | `shared/debug/` |
 | the judge blocks of `envs/stem-mix-run4.yaml` / `run5.yaml` (`env.llm_judge`, `env.judge_pool`) | `shared/judges/llm-judge.yaml` (taken in with `defaults:`) |
 | `experiments/long-context/setup-kcp.sh`, `experiments/long-context/kcp/` | `backends/nemo-rl/apertus2/kcp/setup.sh`, `kcp/` |
-| `experiments/long-context/recipes/sftv02-stem-*.yaml` | `sizes/` tiers |
+| `experiments/long-context/recipes/sftv02-stem-*.yaml` | `size:` tiers (`experts/main.yaml`) |
 | `recipes/apertus2-*.yaml` (all 34) | `recipes/archive/`; the STEM recipe written out as `recipes/chonk-sftv02.yaml` |
 | `experiments/grpo-chonk/*.yaml` (27) | `recipes/archive/chain/` |
 | `experiments/grpo-chonk/stage_model.sh` | `backends/nemo-rl/apertus2/stage_model.sh` |

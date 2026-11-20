@@ -1,7 +1,7 @@
 # GRPO on the Chonk SFT v0.2 checkpoint (iteration 18,315) with the algorithm of the STEM runs 4 and 5: 16 answers
 # per prompt, one optimizer step per GRPO step (global batch = prompts x 16), no log-prob pass (on-policy ratio),
 # lr 2e-6 constant, rollouts at most 4 weight versions old. These were command-line overrides of
-# experiments/long-context/launch-stem-ctx.sh before. Node counts come from the run's tier (sizes/), CP, packing and
+# experiments/long-context/launch-stem-ctx.sh before. Node counts come from the run's size, CP, packing and
 # memory from its `context:` (backends/nemo-rl/apertus2/contexts.tsv).
 defaults: apertus2-chonk-sftv02-18315-vllm-adamw-dapo-32n.yaml
 

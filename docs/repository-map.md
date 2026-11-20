@@ -11,7 +11,7 @@ Every file of the repository and its role (369 files, branch `restructure`, 2026
 bash run.sh stem      (experts/main.yaml + experts/stem/base.yaml)
  └ run.sh ─ sites/load.sh (sites/hangang.env, site.env, backends/nemo-rl/apertus2/env, backends/nemo-rl/env)
    ├ backends/nemo-rl/config.sh       merges the task's defaults chain, copies every config file for the job
-   ├ sizes/<tier>.yaml                node counts and batch scale
+   ├ the recipe's nodes: + the size tier   node counts (tiers in run.sh)
    ├ backends/nemo-rl/apertus2/contexts.tsv (+ kcp/use.sh above 32K)   CP, packing, memory fraction
    ├ backends/nemo-rl/apertus2/setup.sh         NeMo-RL clone at the pin + patches, Megatron, Bridge, vLLM files, image
    ├ backends/nemo-rl/apertus2/stage_model.sh      model export staged on scratch
@@ -35,16 +35,13 @@ bash run.sh stem      (experts/main.yaml + experts/stem/base.yaml)
 | `docs/repository-map.md` | doc | This file |
 | `docs/MIGRATION.md` | doc | What changed with the restructure and how to move a branch from the old layout |
 
-## `sites/` (cluster profiles) and `sizes/` (node tiers)
+## `sites/` (cluster profiles)
 
 | File | Role | Purpose |
 |---|---|---|
 | `sites/load.sh` | run | Loads the settings in order: environment, `site.env`, site profile, stack env files |
 | `sites/hangang.env` | run | KISTI HANGANG: account, partition, Slurm flags, scratch, pyxis, NCCL/libfabric fixes, mounts, image, Slingshot suffix, `RL_DATA_DIR` |
 | `sites/alps.env` | run | CSCS Alps: the same for Clariden (container engine EDF) |
-| `sizes/cheap.yaml` | run | 8 trainer + 16 vLLM nodes, batch x1 |
-| `sizes/expensive.yaml` | run | 16 + 32 (run 5), batch x1 |
-| `sizes/ultra.yaml` | run | 32 + 64, batch x2 (to be confirmed by the benchmark jobs 1315243/45/47) |
 
 ## `experts/` (what to train on, one folder per RL expert)
 

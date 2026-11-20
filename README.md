@@ -129,7 +129,6 @@ shared/                 pieces task files take in: frames/ (system frames: think
                         judges/llm-judge.yaml, prompts/ (few-shot), scripts/ (judge download, few-shot removal), debug/
 recipes/                how to train: one flat file per model (chonk-sftv02.yaml: checkpoint, trainer, optimizer,
                         vLLM, GRPO); earlier recipes in recipes/archive/ (recipes/README.md)
-sizes/                  node tiers: cheap (8 trainer + 16 vLLM), expensive (16 + 32), ultra (32 + 64, batch x2)
 backends/nemo-rl/apertus2/contexts.tsv   CP, packing and memory per context length
 ```
 
@@ -137,12 +136,22 @@ A run is `bash run.sh <expert> [overrides]` (the expert's `base.yaml`) or `bash 
 [overrides]` (a dev or archive file); `run.sh` puts `experts/main.yaml` between the recipe and the
 expert's files. Besides NeMo-RL settings, a task file holds rl-infra
 keys, inherited through `defaults` like any other key: `recipe` (a file under `recipes/`), `context`
-(longest prompt + answer), `size` (a tier in `sizes/`), `job_time`, `pydeps` and `script`. From them
-`run.sh` derives the node counts (tier nodes plus the task's judge nodes), the batch (scaled by the
-tier's `batch_scale`, per-dataset shares included), CP, packing and the memory fraction (the first row
+(longest prompt + answer), `size` (a node tier), `job_time`, `pydeps` and `script`. From them
+`run.sh` derives the node counts, CP, packing and the memory fraction (the first row
 of `contexts.tsv` at or above the context, so 50K gets the 64K settings; KCP above 32K, set up on first
 use), and the checkpoint deadline 30 minutes before `job_time`. `RECIPE`, `SIZE` and `JOB_TIME` in the
 environment replace the task's values, and overrides on the command line win over everything.
+
+Node tiers come from the recipe's base layout (`nodes:`, Chonk 8 trainer x 8 vLLM, MegaChonk 32 x 32); judge
+nodes come from the task, on top:
+
+| `size` | Trainer | vLLM | Chonk |
+|---|---|---|---|
+| `lite` | base | half the base | 8 + 4 |
+| `cheap` | base | base | 8 + 8 |
+| `expensive` | 2 x base | 2 x base | 16 + 16 |
+| `ultra` | 2 x base | 4 x base | 16 + 32 (run 5; the default in `experts/main.yaml`) |
+| `<t>+<g>` | t | g | explicit counts, e.g. `16+64` |
 
 ```bash
 bash run.sh stem                                  # full run; refuses to start without W&B (site.env)
@@ -150,7 +159,7 @@ DEBUG=1 bash run.sh stem                          # debug run: name ends in -DEB
                                                   # no checkpoints, 2 hours (the command line can change each)
 DRY_RUN=1 bash run.sh stem                        # shows nodes, context, overrides, config copies, preflight
                                                   # and the sbatch command; no setup, no job (also with DEBUG=1)
-SIZE=ultra bash run.sh experts/stem/dev/<name>.yaml
+SIZE=cheap bash run.sh experts/stem/dev/<name>.yaml
 ```
 
 The job reads copies of every config file of the run, made at launch in

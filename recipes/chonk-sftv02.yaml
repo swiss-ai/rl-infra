@@ -2,9 +2,12 @@
 # differs from NeMo-RL's defaults (examples/configs/grpo_math_1B.yaml in the NeMo-RL clone) and replaces the chain of
 # 14 files it was written out from (recipes/archive/apertus2-chonk-sftv02-grpo.yaml and its parents, kept for the
 # archived runs). Set elsewhere, so not here: datasets and environments (experts/<expert>/base.yaml), sequence lengths,
-# packing and context parallelism (run.sh, from `context`), node counts (sizes/), checkpoints, validation schedule
+# packing and context parallelism (run.sh, from `context`), node tier (experts/main.yaml), checkpoints, validation schedule
 # and logging (experts/main.yaml).
 defaults: /opt/nemo-rl/examples/configs/grpo_math_1B.yaml
+# Base node layout, the "cheap" tier (run.sh derives lite, expensive and ultra from it; experts/main.yaml): the
+# trainer's smallest fit (PP2 x EP16 = 32 GPUs) and as many vLLM nodes (one engine per node).
+nodes: {trainer: 8, inference: 8}
 
 # ======================================================================== model: checkpoint and message format
 # The checkpoint: an HF export, relative to $SCRATCH or absolute (a symlink works). run.sh stages it as

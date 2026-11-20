@@ -9,7 +9,7 @@ defaults: ../base.yaml
 recipe: recipes/archive/apertus2-chonk-sftv02-grpo.yaml
 # What that run had from experts/main.yaml, pinned here so that a later change to main.yaml does not change this
 # record: resources, validation period, checkpoints, rollout dump.
-size: expensive
+size: 16+32
 job_time: 2-00:00:00
 context: 32768
 
