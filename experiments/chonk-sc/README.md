@@ -12,9 +12,9 @@ i.e. vLLM DP4 per node through NVIDIA-NeMo/RL#2517) trained through
 | `run-a-gsm8k.yaml`, `run-a.sh` | run A: GSM8K, no Gym, no capture |
 | `run-b-harbor-sc.yaml`, `run-b.sh` | run B: SC rerun of Daint job 5184052 (Harbor micro-tasks, Terminus-2, token capture) |
 | `run-s-sft.yaml`, `run-s.sh` | run S: run B on the SFT checkpoint (16k layout, Apertus 2 message format) |
-| `run-v.sh`, `run-v-24k.sh` | run V: Terminus-2 on Kostas' verified tasks, Gym entrypoint (not SC), 24k on 20 nodes |
-| `run-agent-v.sh`, `run-agent-v.yaml`, `run-ov.yaml` | run OV: OpenCode in the pod on run V's verified tasks, SC + token capture, 24k on 20 nodes |
-| `common.sh` | config composition and the clone / Gym checks, shared by the scripts |
+| `run-v.sh`, `run-v-24k.sh` | run V: Terminus-2 on Kostas' verified tasks, Gym entrypoint (not SC), 24k on 20 nodes; `CTX=65536`: long context |
+| `run-agent-v.sh`, `run-agent-v.yaml`, `run-ov.yaml` | run OV: OpenCode in the pod on run V's verified tasks, SC + token capture, 24k on 20 nodes; `CTX=65536`: long context |
+| `common.sh` | config composition, the long-context profile of runs V and OV, and the clone / Gym checks, shared by the scripts |
 
 Both runs: 3 steps, `async_rl` sampler `in_order` with lookahead 0 (synchronous), one chunk per
 step (`min_groups_for_streaming_train` = `max_inflight_prompts` = `max_buffered_rollouts` =
@@ -288,6 +288,90 @@ What to look at: `train step N/N`; `failure_<class>` per step (OpenCode writes n
 `ok`, `infra`, `agent_timeout`, `verifier_timeout` and `other` can occur; a context overflow ends OpenCode and is
 `ok` with the verifier's reward); masked and rejected rollouts (capture: unresolved parents, poisoned rows);
 HTTP 400 context-length answers in `model-calls/`; OpenCode exit 124 (1740 s); reward per campaign.
+
+## Long context: runs V and OV at 64K (`CTX=65536`)
+
+Plan `research/reports/2026-11-20-long-context-agent-runs-plan.md` (workspace), user decisions 2026-11-20. Both
+launchers take the same `CTX`-driven profile (`common.sh` `long_ctx_defaults` / `long_ctx_args`). Up to 24576 tokens
+nothing changes; above it the defaults are:
+
+| Knob | 24k (unchanged) | > 24576 (64K) | What it sets |
+|---|---|---|---|
+| `SFT_CKPT` | v0.1 iter_0019374 | v0.2 iter_0018315 | recipe (`recipes/apertus2-chonk-sftv02-alps-vllm-adamw-tools-20n.yaml`, 20 nodes), staged dir, `policy.model_name` |
+| `THINKING` | medium (task file's frame) | high | `policy.generation.system_prompt_file=envs/apertus2-system-high.json`; no thinking budget |
+| `CP` / `KCP` | 1 / 0 | CTX/8192 = 8 / 1 (CP > 4) | `context_parallel_size`, `make_sequence_length_divisible_by` 2 x CP, `linear_attention_cp_impl=kcp`; trainer DP 32/CP = 4 |
+| `CAP` | none | 0.74 | `NRL_CUDA_MEMORY_FRACTION` (trainer) |
+| `NCCL_MIN` | none | 60 (from 65536) | `NRL_NCCL_TIMEOUT_MINUTES` (NeMo-RL 0040) |
+| `MAX_NEW` | 6144 | 16384 | `max_new_tokens` per turn (model_info, OpenCode's max_tokens follow) |
+| `MAX_TURNS` | 30 | 100 | `harbor_agent_kwargs.max_turns` (OpenCode: steps) |
+| `AGENT_CAP` | 1800 | 3000 | `harbor_agent_max_timeout`; OV: OpenCode `AGENT_CAP - 60` (2940), rollout/stall timeout `+4800` / `+5100` (7800/8100) |
+| `TTL` | 3600 | 4800 | `harbor_environment_kwargs.sandbox_ttl_s` |
+| `MASK_AGENT_TIMEOUT` | 0 | 1 | `harbor_mask_agent_timeout` (rule ii; on run V's Gym entrypoint masked rows stay in the group baseline until NeMo-RL 0057) |
+| `MASK_OVERFLOW` | 0 | 0 (TODO Gym 0043) | `harbor_mask_context_overflow` (rule i); `check_gym_capture` requires Gym 0043 when 1 |
+| `HANG_DUMP_AFTER_S` / `HANG_KILL_AFTER_S` | 900 / 2700 | 3600 / 14400 (from 65536) | hang watchdog (exported; reaching the job on Alps UNVERIFIED) |
+| `STEPS` / `JOB_TIME` | 20 (V), 10 (OV) / 08:00:00 | 10 / 12:00:00; `SMOKE=1`: 1 step, 4 x 8, 03:00:00 | Daint's time limit for `normal`: UNVERIFIED |
+
+Every knob can be set at any context (e.g. `THINKING=high` at 24k). At long context the job reads a copy of the recipe
+(`$SCRATCH/chonk-sc/recipes/<run>.yaml`), and with `KCP=1` the launchers point setup and job at the KCP stack
+(`kcp_setup`): pin copy with the `rl-kcp` commit and a container spec with fla 0.5.2 on `PYTHONPATH` in
+`$SCRATCH/chonk-sc/kcp/`, and an EDF of their own (`nemo-rl-apertus2-kcp` for V, `nemo-rl-apertus2-sft-kcp` for OV).
+The checkpoint export is linked whole when it carries `MODELING_SOURCE`, else its small files are copied (both
+launchers, the same directory). The first run converts v0.2 to Megatron; whether `linear_attention_cp_impl` changes
+the conversion directory is UNVERIFIED.
+
+```bash
+CTX=65536 RUNS=ov bash experiments/chonk-sc/check.sh          # step 0 for both runs (SMOKE=1 for the smoke values)
+SMOKE=1 CTX=65536 DRY_RUN=1 bash experiments/chonk-sc/run-v-24k.sh        # run V smoke: setup + job script only
+SMOKE=1 CTX=65536 bash experiments/chonk-sc/run-v-24k.sh                  # run V smoke: 1 step, 4 x 8, 03:00:00
+CTX=65536 bash experiments/chonk-sc/run-v-24k.sh                          # run V: 10 steps, 8 x 8, 12:00:00
+SMOKE=1 CTX=65536 AGENT=opencode bash experiments/chonk-sc/run-agent-v.sh # run OV smoke (CP on SC: never run before)
+```
+
+### KCP on Alps (`experiments/long-context/setup-kcp.sh`, once)
+
+`setup-kcp.sh` clones the pinned Megatron into `$PROJECTS_DIR/megatron-lm-moe-apertus2-kcp`, checks out branch
+`rl-kcp` at the pin's commit and applies `experiments/long-context/kcp/*.patch` (plain git, login node), then installs
+flash-linear-attention 0.5.2 (`fla.ops.cp`) with `uv pip install --no-deps --target $PROJECTS_DIR/fla-0.5.2` for
+python3.12 if present, else python3.14 (Alps login nodes have no python3.12). `$PROJECTS_DIR` comes from `sites/alps.env`
+(`/users/$USER/projects`) unless `site.env` changes it; `/users` is mounted in the container.
+
+```bash
+cd ~/rl-infra && export PROJECTS_DIR="$(bash -c 'source sites/load.sh && rl_infra_load && echo "${PROJECTS_DIR}"')"; echo "${PROJECTS_DIR}"
+command -v uv python3.14                                     # uv on the login node: UNVERIFIED
+bash experiments/long-context/setup-kcp.sh
+ls "${PROJECTS_DIR}/fla-0.5.2/fla/ops/cp" && git -C "${PROJECTS_DIR}/megatron-lm-moe-apertus2-kcp" log --oneline -2 rl-kcp
+```
+
+The container question: the job imports fla with the image's Python 3.12 from `PYTHONPATH`, while the wheels were
+chosen for the login node's 3.14. With `--no-deps --target` only the wheel files of fla itself land in the directory,
+so this is fine if flash-linear-attention 0.5.2 and fla-core 0.5.2 are pure-Python wheels (`py3-none-any`;
+UNVERIFIED) and accept 3.14 in `Requires-Python` (UNVERIFIED). Check what was installed:
+
+```bash
+ls "${PROJECTS_DIR}"/fla-0.5.2/*.dist-info/ && grep -h '^Tag:' "${PROJECTS_DIR}"/fla-0.5.2/*.dist-info/WHEEL   # want py3-none-any
+```
+
+If the tag is not `py3-none-any`, or uv refuses 3.14 or is missing, delete `$PROJECTS_DIR/fla-0.5.2` and install for the
+container's interpreter instead, either (a) from the login node, resolving for Python 3.12 on aarch64
+(`uv pip install --python python3.14 --python-version 3.12 --python-platform aarch64-unknown-linux-gnu --no-deps
+--target "${PROJECTS_DIR}/fla-0.5.2" flash-linear-attention==0.5.2 fla-core==0.5.2`; these uv flags with `--target`:
+UNVERIFIED), or (b) inside the image on a compute node (pip in the image and internet from compute nodes: UNVERIFIED;
+the EDF `nemo-rl-apertus2` exists after any earlier `setup.sh`):
+
+```bash
+srun -A "${ACCOUNT}" -p normal -N 1 -t 00:20:00 --environment=nemo-rl-apertus2 bash -c \
+  "python3 -m pip install --no-deps --target ${PROJECTS_DIR}/fla-0.5.2 flash-linear-attention==0.5.2 fla-core==0.5.2"
+```
+
+Either way, an import check in the image costs one short allocation and catches a wrong install before a 20-node job:
+
+```bash
+srun -A "${ACCOUNT}" -p normal -N 1 -t 00:10:00 --environment=nemo-rl-apertus2 \
+  python3 -c "import sys; sys.path.insert(0, '${PROJECTS_DIR}/fla-0.5.2'); import fla, fla.ops.cp; print(fla.__version__, fla.__file__)"
+```
+
+`CTX=65536 RUNS=ov bash experiments/chonk-sc/check.sh` then shows `ok` for the KCP Megatron and fla 0.5.2 (warnings
+section), and the launchers stop before setup when either is missing.
 
 ## Open risks (from the feasibility report, ranked)
 
