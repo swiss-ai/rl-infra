@@ -47,9 +47,9 @@ SFT_EDF_NAME="${SFT_EDF_NAME:-nemo-rl-apertus2-sft}"
 #   AGENT_CAP  3000 s Harbor agent cap (the tasks' own); run OV: OpenCode ends at AGENT_CAP - 60, rollout timeout
 #              AGENT_CAP + 4800 (two pod creates <= 1800 each, verifier 1200), stall watchdog 300 s more
 #   TTL        4800 s sandbox_ttl_s (agent cap + create deadline 1200 + margin)
-#   MASK_AGENT_TIMEOUT  1: harbor_mask_agent_timeout (rule (ii)); on the Gym entrypoint (run V) masked rows still
-#              enter the group baseline until NeMo-RL 0057
-#   MASK_OVERFLOW  0: harbor_mask_context_overflow (rule (i)), a key of Gym 0043 (TODO(Gym 0043) below)
+#   MASK_AGENT_TIMEOUT  1: harbor_mask_agent_timeout (rule (ii)); NeMo-RL 0057 keeps masked rows out of the group
+#              baseline on the Gym entrypoint (run V)
+#   MASK_OVERFLOW  1: harbor_mask_context_overflow (rule (i)), a key of Gym 0043 (check_gym_capture requires 0043)
 #   HANG_DUMP_AFTER_S / HANG_KILL_AFTER_S  3600 / 14400 from 65536 on (backends/nemo-rl/hang_watch.sh: 900 / 2700)
 # Every knob can be set at any CTX; empty = the task file's value. JOB_TIME, STEPS, PROMPTS per launcher.
 LONG_CTX_KNOBS="CTX LONG_CTX SFT_CKPT THINKING CP KCP CAP NCCL_MIN MAX_NEW MAX_TURNS AGENT_CAP TTL MASK_AGENT_TIMEOUT MASK_OVERFLOW"
@@ -376,8 +376,8 @@ check_nemo_rl_clone() {
     grep -q "def _invalid_apertus2_history" "${d}/nemo_rl/models/generation/vllm/vllm_worker_async.py" 2>/dev/null \
         && ok "NeMo-RL patch 0054: an unencodable Apertus 2 chat history gets HTTP 400" \
         || bad "NeMo-RL patch 0054 missing (_invalid_apertus2_history in vllm_worker_async.py); run backends/nemo-rl/apertus2/setup.sh"
-    # NeMo-RL patch 0057: masked rows leave the group baseline on the Gym entrypoint (rule (ii)); checked once
-    # NRL_0057_MARKER is set (top of this file, TODO(NeMo-RL 0057))
+    # NeMo-RL patch 0057: masked rows leave the group baseline on the Gym entrypoint (rule (ii)); checked while
+    # NRL_0057_MARKER (top of this file) is non-empty
     if [[ -n "${NRL_0057_MARKER}" ]]; then
         grep -qF -- "${NRL_0057_MARKER}" "${d}/nemo_rl/algorithms/grpo.py" 2>/dev/null \
             && ok "NeMo-RL patch 0057: masked rows leave the group baseline (${NRL_0057_MARKER})" \
