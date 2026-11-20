@@ -54,7 +54,8 @@ def sandbox_command(env_dir, argv):
     # Nothing is mounted unless it is listed here, so /scratch and home do not exist inside.
     system = []
     for path in ("/usr", "/lib", "/lib64", "/bin", "/etc/ld.so.cache"):
-        system += ["--ro-bind", path, path]
+        if os.path.exists(path):  # an aarch64 Ubuntu image has no /lib64
+            system += ["--ro-bind", path, path]
     return [
         *limits,
         "bwrap",
