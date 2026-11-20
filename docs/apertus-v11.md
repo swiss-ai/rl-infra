@@ -74,7 +74,8 @@ DEBUG=1 bash run.sh experts/stem/dev/gsm8k-cot.yaml                             
 Without `policy.model_name` the run starts from Apertus-v1.1-0.5B-Instruct. One GSM8K epoch is 116 steps of 64
 questions with 8 answers each (512 answers, four optimizer steps of 128 at learning rate 2e-6, no KL penalty);
 validation uses the 1,319 test questions every 10 steps. `run.sh` prints where the training log, the metrics and
-the checkpoints go.
+the checkpoints go. On Alps, `PARTITION=debug` allows at most 1.5 hours: a debug run there needs `JOB_TIME=01:00:00`
+(its default limit is 2 hours).
 
 | Recipe | Layout |
 |---|---|
