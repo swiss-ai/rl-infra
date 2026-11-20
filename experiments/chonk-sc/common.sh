@@ -117,6 +117,22 @@ long_ctx_args() {
     [[ "${MASK_OVERFLOW}" != 1 ]] || LONG_CTX_ARGS+=("++${p}.harbor_mask_context_overflow=true")
 }
 
+# long_ctx_summary: one line with the profile in effect (after agent_v_defaults), so a CTX that did not reach the
+# script (e.g. set without export) shows at the top of check.sh's output instead of only as 24k values further down.
+long_ctx_summary() {
+    local p="24k profile"; [[ "${LONG_CTX}" != 1 ]] || p="long context"
+    echo "== CTX ${CTX} (${p}): SFT ${SFT_CKPT}, thinking ${THINKING}, CP ${CP} KCP ${KCP}, mask overflow ${MASK_OVERFLOW}," \
+        "mask agent timeout ${MASK_AGENT_TIMEOUT}, recipe ${AGENT_V_RECIPE##*/}"
+}
+
+# check_python_usable <python>: the config code's imports work. Not just "import omegaconf": after a scratch purge a
+# venv keeps the package directories without their files, and Python imports an empty directory as a namespace
+# package, so only the names (OmegaConf, compose, VERSION) tell a purged venv from a complete one.
+check_python_usable() {
+    [[ -x "$1" ]] && "$1" -c 'from omegaconf import OmegaConf; from hydra import compose; import pydantic; pydantic.VERSION' \
+        >/dev/null 2>&1
+}
+
 # long_ctx_job_env: exports what the job itself reads (sbatch passes the environment on; that HANG_* reach
 # hang_watch.sh inside the job on Alps is UNVERIFIED, launch.sh passes NUMA_WATCH the same way).
 long_ctx_job_env() {

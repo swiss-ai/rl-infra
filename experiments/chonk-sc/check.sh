@@ -41,6 +41,7 @@ AV_RUNS=0
 if [[ " ${RUNS} " == *" ov "* ]]; then
     AV_RUNS=1
     agent_v_defaults || exit 1    # HARBOR_ROOT ($SCRATCH/osb/harbor_verified), CTX, STEPS, PROMPTS, ... (exported)
+    long_ctx_summary
     # check.py reads the long-context knobs and the staged checkpoint's directory
     export ${LONG_CTX_KNOBS} SFT_MODEL_DIR
     # the launcher's run name and paths (run-agent-v.sh): pod label, Harbor jobs dir, filtered rows
@@ -79,9 +80,11 @@ echo "== (a) composed configs"
 pick_python() {
     if [[ -n "${CHECK_PYTHON:-}" ]]; then echo "${CHECK_PYTHON}"; return 0; fi
     local venv="${WORK}/venv" base="" c
-    if [[ -x "${venv}/bin/python" ]] && "${venv}/bin/python" -c "import omegaconf, hydra, pydantic" 2>/dev/null; then
+    if check_python_usable "${venv}/bin/python"; then
         echo "${venv}/bin/python"; return 0
     fi
+    # missing, or a scratch purge left the package directories without their files (common.sh check_python_usable)
+    [[ ! -e "${venv}" ]] || echo "   ${venv} is incomplete (scratch purge?): rebuilding it" >&2
     # login nodes: python3.14 (the system python3 is older)
     for c in python3.14 python3.13 python3.12 python3; do
         command -v "${c}" >/dev/null || continue
