@@ -489,6 +489,37 @@ Open before a 200-step run: moving `goedel-clean.v434.jsonl` into `$SCRATCH/lean
 problems per step is wanted, and whether to check ε's step-40 outlier and weight movement first. ε's step 40 is a
 better Lean expert than H1's step 40 (round 1); delivering it would need an HF export and `eval/run.sh` on it.
 
+## The 200-step run (prepared 2026-11-21, not started)
+
+`run-200.sh` (commit 245e760, cloned on Clariden as `$SCRATCH/rl-infra-245e760` with the ablations' `site.env`):
+`DRY_RUN=1 bash backends/nemo-rl/lean-kimina/run-200.sh` passed (setup, checksums of both data files, preflight); a
+second job with the same `RUN` resumes. Run name `lean-kimina-v02-grpo200-128x8`.
+
+| Spec | Value | Why |
+|---|---|---|
+| Start | Chonk SFT v0.2, iteration 18315 | all ablations started there, so the run compares with them; ε's step 40 was trained on the old 2,357 rows |
+| Nodes | 12: 8 Megatron trainers (AdamW on the CPU) + 4 vLLM (fp8) | the layout of every ablation and both 128 × 8 tests; 1 vLLM node made generation the bottleneck |
+| Partition, time | `preemptable` with requeue, 24 h per job (checkpoint-and-stop at 23:30 h); then a second job with the same `RUN` | about 36 h in all: 200 × 571 s ≈ 32 h, 10 validations ≈ 3–4 h, saves and two start-ups ≈ 1 h; `normal` allows 12 h, `preemptable` 24 h and has most nodes |
+| Training rows | `goedel-clean.v434.jsonl`, 37,953 rows (sha256 `95c620a7…`, checked by the launcher) | 200 steps use 25,600 of them: no problem repeats (seen problems gain far more than new ones); checked on our Lean; miniF2F near-duplicates and chonk-tests' evaluation sample removed |
+| Rollouts | 128 problems × 8 samples, one optimizer update of 1,024 per step | 8 keeps 44 % of groups mixed (16: 51 %); 128 × 8 gave 1.79 rollouts/s against 1.41 at 32 × 16 (job 3985875) and averages each update over 128 problems |
+| Sampling | temperature 1.0, top_p 1.0, 16,000 new tokens | as all runs: at 0.6 / 0.95, 38 % of rollouts hit the length limit, mostly repetition loops; 16,384 is the checkpoint's context |
+| Proof check | Kimina, 120 s, 16 REPLs of 32 GB address space in the job | keeps 99 % of correct proofs (timing job 3964605); Kimina kept up at 1,024 rollouts |
+| Learning rate | 1e-5 at step 1, cosine to 1e-6 at step 200, no warm-up | 1e-5 is the only rate that learned (2e-6 did not move the policy); the train/inference mismatch grew with the update size in the ε run, so the rate falls in the second half (8.7e-6 at step 50, 5.5e-6 at 100, 2.3e-6 at 150); not tested beyond 47 steps |
+| Adam ε | 1e-14 | the ε ablation: learning on new prompts 10 steps earlier, best checkpoint so far |
+| Other optimizer | β 0.9 / 0.999, weight decay 0.01, gradient clip 1.0, fp32 moments | the recipe's, unchanged in all runs |
+| Loss | GRPO, advantages divided by the group's standard deviation, token-level mean, PPO clip 0.2 / dual clip 3.0, TIS cap 2, no KL, no entropy bonus | the recipe's; no-std changed little; with one update per step the clip does not act; entropy did not collapse with ε 1e-14 |
+| Outlier mask | `grpo.seq_logprob_error_threshold=1.5` | masks sequences like ε's step-40 outlier (error 310); all normal sequences stayed at or below 1.18 |
+| Trainer GPU allocator | `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` | without it 128 × 8 failed (job 3984550) and ε got to 0.28 GB free; with it at least 11 GB free, weight sync unchanged |
+| Validation | corrected miniF2F, 972 rows, every 20 steps, none at the start | 10 points to pick a checkpoint on valid and report on test; each takes 15–26 min at this load; the pooled baseline is known |
+| Checkpoints | every 20 steps, all kept; a recovery checkpoint every 10 steps, only the newest kept | one per validation for picking; at most 10 steps lost after a preemption; about 16 TB at most (1.4 TB each) |
+| Seed | 42 (recipe) | as all runs |
+
+Check after it starts: step 1 trains without memory errors; `train/lr` at step 2 about 9.9995e-6 (the decay counts
+optimizer steps, per NeMo-RL's `scheduler.step(increment=gbs)`; 1e-6 there would mean it counts samples); then
+every validation, `train/token_mult_prob_error` (stop and look if above about 1.05 for several steps),
+`train/gen_kl_error` (above about 3e-3), `train/approx_entropy` (below 0.15 or above 0.45),
+`train/num_masked_seqs_by_logprob_error` rising, and the trainers' least free GPU memory (forensics `mem-rank*.tsv`).
+
 ## Expert handover (Apertus 2 experts, round 1)
 
 H1 step 40 is staged as `lean__lean-kimina-v02-abl-h1-20261118` in
