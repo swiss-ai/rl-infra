@@ -58,7 +58,7 @@ copy_one() {
 }
 export -f copy_one
 echo "== copying ${SRC} -> ${DST} (${JOBS} parallel)"
-find "${SRC}" -maxdepth 1 -type f ! -name configuration_apertus2.py ! -name config.json -print0 \
+find -L "${SRC}" -maxdepth 1 -type f ! -name configuration_apertus2.py ! -name config.json -print0 \
     | xargs -0 -P "${JOBS}" -I{} bash -c 'copy_one "$1" "$2"' _ {} "${DST}"
 
 # 2. Modeling + matching configuration code (the checkpoint's own configuration file predates
@@ -81,7 +81,7 @@ sed 's#^\(    "AutoConfig": "configuration_apertus2.Apertus2Config"\)$#\1,\n    
     || { echo "ERROR: auto_map insert did not apply cleanly" >&2; exit 1; }
 mv "${DST}/config.json.tmp" "${DST}/config.json"
 
-n_src=$(find "${SRC}" -maxdepth 1 -name '*.safetensors' | wc -l)
+n_src=$(find -L "${SRC}" -maxdepth 1 -name '*.safetensors' | wc -l)
 n_dst=$(find "${DST}" -maxdepth 1 -name '*.safetensors' | wc -l)
 echo "== done: ${n_dst}/${n_src} shards, $(du -sh "${DST}" | cut -f1) in ${DST}"
 [[ "${n_dst}" == "${n_src}" ]]
