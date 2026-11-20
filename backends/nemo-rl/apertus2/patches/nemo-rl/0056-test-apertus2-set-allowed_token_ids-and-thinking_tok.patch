@@ -1,0 +1,32 @@
+From b1c5d3085b4921d85cacc09d44aa924fd433b1a5 Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Fri, 20 Nov 2026 14:20:02 +0900
+Subject: [PATCH 56/56] test(apertus2): set allowed_token_ids and
+ thinking_token_budget in the bad_words sampling test
+
+test_sampling_params_preserve_bad_words builds the worker with object.__new__, which skips
+__init__. Since "Apertus 2 format: encode prompts to IDs and grade one output frame" and
+"Apertus 2 format: a thinking token budget", _build_sampling_params reads
+worker.allowed_token_ids and worker.thinking_token_budget, which __init__ sets, and the test
+failed with AttributeError. The test now sets both to None. Same test adaptation as in the
+osb-v0.8.0 series, where it is part of those two commits. Test only.
+---
+ tests/unit/models/generation/test_vllm_generation.py | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/tests/unit/models/generation/test_vllm_generation.py b/tests/unit/models/generation/test_vllm_generation.py
+index eb684f17c..b0c9a68a7 100644
+--- a/tests/unit/models/generation/test_vllm_generation.py
++++ b/tests/unit/models/generation/test_vllm_generation.py
+@@ -654,6 +654,8 @@ def test_sampling_params_preserve_bad_words():
+         "bad_words": ["<image>", "<img>"],
+         "ignore_eos": False,
+     }
++    worker.allowed_token_ids = None
++    worker.thinking_token_budget = None
+     worker.SamplingParams = lambda **kwargs: kwargs
+ 
+     sampling_params = worker._build_sampling_params(
+-- 
+2.43.0
+

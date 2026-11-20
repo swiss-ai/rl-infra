@@ -1,0 +1,34 @@
+From 0207c1309d87cda502e5e320e6f0f4cb3037ddfe Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Sun, 15 Nov 2026 15:33:20 +0000
+Subject: [PATCH 55/56] test(apertus2): build Apertus2Output with think in the
+ math environment tests
+
+"Apertus 2 format: serve it on the chat endpoint for Gym" added the think
+field to Apertus2Output, but the frames helper of test_math_environment.py
+(from "Apertus 2 format: encode prompts to IDs and grade one output frame")
+still built it without, so
+test_claim_frame_sets_the_reward_and_the_reply_is_a_metric and
+test_frames_without_a_reward_frame_fail_loudly failed with a TypeError. The
+helper now passes think=None. Test only.
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ tests/unit/environments/test_math_environment.py | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/tests/unit/environments/test_math_environment.py b/tests/unit/environments/test_math_environment.py
+index abe791255..d01356121 100644
+--- a/tests/unit/environments/test_math_environment.py
++++ b/tests/unit/environments/test_math_environment.py
+@@ -593,6 +593,7 @@ def _frames_conversation(claim, reply, error=None, truncated=False):
+             # The verifier must read the frame, not this text.
+             "content": "<|out|>think<|hdr|>The answer is 41.<|/out|>",
+             "apertus2_output": Apertus2Output(
++                think=None,
+                 claim=claim,
+                 reply=reply,
+                 calls=[],
+-- 
+2.43.0
+
