@@ -62,9 +62,10 @@ long_ctx_defaults() {
         LONG_CTX=1
         : "${SFT_CKPT:=v0.2}" "${THINKING:=high}" "${CP:=$(( CTX / 8192 ))}" "${CAP:=0.74}" "${MAX_NEW:=16384}"
         : "${MAX_TURNS:=100}" "${AGENT_CAP:=3000}" "${TTL:=4800}" "${MASK_AGENT_TIMEOUT:=1}"
-        # TODO(Gym 0043): 1 once Gym patch 0043 (harbor_mask_context_overflow) is applied; before it Gym's config
-        # (extra="allow") would take the key silently and mask nothing. check_gym_capture requires 0043 when 1.
-        : "${MASK_OVERFLOW:=0}"
+        # Rule (i), user 2026-11-17: a rollout that hits the context limit is masked whole (Gym 0043,
+        # harbor_mask_context_overflow). Gym's config is extra="allow", so without 0043 the key would be taken silently
+        # and mask nothing: check_gym_capture requires 0043 when this is 1.
+        : "${MASK_OVERFLOW:=1}"
         if (( CTX >= 65536 )); then
             : "${NCCL_MIN:=60}" "${HANG_DUMP_AFTER_S:=3600}" "${HANG_KILL_AFTER_S:=14400}"
         fi

@@ -1,0 +1,604 @@
+From 4e4d98a7a253f2cf90de7cafc219d0b29bfe79af Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Fri, 20 Nov 2026 06:45:35 +0000
+Subject: [PATCH 43/43] feat(harbor_agent): mask context-limit rollouts, detect
+ OpenCode overflow
+
+A rollout that the context limit ended (failure class context_overflow:
+the prompt no longer fit, or a reply was cut by the context ceiling)
+trains with its verifier reward, usually 0, although the policy neither
+finished nor failed the task. With Terminus-2 at a 24k context this was
+a third to a half of all rollouts in a training step.
+
+New config flag harbor_mask_context_overflow (default false, so the
+default behaviour does not change): when set, every context_overflow
+rollout sets instance_config.mask_sample, with and without training-token
+capture, as harbor_mask_infra does for infra rollouts. The response still
+carries failure_class, failure_detail and the failure_<class> fields.
+
+OpenCode overflows were not classified at all and read as ok. OpenCode
+writes no agent_error_flags.json, and Gym's vLLM model server answers
+vLLM's HTTP 400 "maximum context length" with an empty completion with
+finish_reason "length" and no usage (unless
+propagate_context_overflow_errors is set). OpenCode ends its loop on any
+reply that is not a tool call, also on "length", without an error and
+with exit code 0, so the verifier runs and the rollout looks normal.
+
+When a trial has no flags file, harbor_agent now derives the same fields
+from OpenCode's `run --format=json` log (agent/opencode.txt, downloaded
+with the agent logs): context_overflow when
+- the last step finished with "length" and no tokens at all, after steps
+  that all reported tokens (OpenCode requests stream usage, so every
+  answered call reports prompt tokens): the model server's placeholder,
+  the prompt did not fit;
+- OpenCode reported a ContextOverflowError, or an error whose message is
+  a context-length error (the 400 propagated);
+- the last reply hit "length" within max(256, 1 %) tokens of
+  harbor_agent_kwargs.model_info.max_input_tokens, the rule Terminus-2
+  uses for a reply cut by the context ceiling.
+A "length" reply with room left stays ok. The detail says which case
+applied. The event shapes follow OpenCode 1.17.11 (cli/cmd/run.ts,
+session/processor.ts); Terminus-2's path is unchanged.
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ responses_api_agents/harbor_agent/README.md   |  13 ++
+ responses_api_agents/harbor_agent/app.py      |  40 +++++-
+ .../harbor_agent/failure_classes.py           | 108 +++++++++++++++-
+ .../harbor_agent/tests/test_app.py            | 117 +++++++++++++++++-
+ .../tests/test_failure_classes.py             | 117 ++++++++++++++++++
+ 5 files changed, 389 insertions(+), 6 deletions(-)
+
+diff --git a/responses_api_agents/harbor_agent/README.md b/responses_api_agents/harbor_agent/README.md
+index d873141ee..6fcce232a 100644
+--- a/responses_api_agents/harbor_agent/README.md
++++ b/responses_api_agents/harbor_agent/README.md
+@@ -541,6 +541,19 @@ sandbox never started after a complete episode): its reward is not a measurement
+ response, and the class metrics count masked rollouts too. Without it, a rollout is masked without capture only
+ when it has no output items, and with capture when the trial failed or has no verifier result.
+ 
++`harbor_mask_context_overflow` (default `false`) does the same for every `context_overflow` rollout: the context
++limit, not the policy, ended the episode. Without it such a rollout trains with the verifier's reward.
++
++OpenCode writes no `agent_error_flags.json`, and it ends its loop without an error (exit code 0) on any reply
++that is not a tool call, also on `finish_reason: length`. When the trial has no flags file, harbor_agent derives
++the same fields from OpenCode's `run --format=json` log `agent/opencode.txt` (`opencode_end_flags`):
++`context_overflow` when the last step is the model server's context-overflow placeholder (vllm_model answers
++vLLM's HTTP 400 "maximum context length" with an empty `length` completion without usage unless
++`propagate_context_overflow_errors`; OpenCode requests usage, so every answered call reports prompt tokens), when
++OpenCode reports a `ContextOverflowError` or a context-length error message (the 400 propagated), or when the last
++reply hit `length` within max(256, 1%) tokens of `harbor_agent_kwargs.model_info.max_input_tokens`. A `length`
++reply with room left stays `ok`.
++
+ `Terminus2NemoGym` option `context_limit_truncation` (`overflow` by default, or `resample`): a reply with
+ `finish_reason: length` whose prompt + reply (from the model server's `usage`) come within max(256, 1%) tokens of
+ `model_info.max_input_tokens` was cut by the context ceiling (the NeMo-RL endpoint clamps `max_tokens` to the
+diff --git a/responses_api_agents/harbor_agent/app.py b/responses_api_agents/harbor_agent/app.py
+index 22cbdc9e8..a068abe61 100644
+--- a/responses_api_agents/harbor_agent/app.py
++++ b/responses_api_agents/harbor_agent/app.py
+@@ -46,7 +46,7 @@ from nemo_gym.openai_utils import (
+     NeMoGymResponse,
+     NeMoGymResponseCreateParamsNonStreaming,
+ )
+-from responses_api_agents.harbor_agent.failure_classes import classify_rollout
++from responses_api_agents.harbor_agent.failure_classes import classify_rollout, opencode_end_flags
+ from responses_api_agents.harbor_agent.utils import HarborAgentUtils
+ 
+ 
+@@ -120,6 +120,11 @@ class HarborAgentConfig(BaseResponsesAPIAgentConfig):
+     # reward is not a measurement: in job 5365870 the separate verifier pod never started after 45 complete
+     # episodes, which would otherwise train as reward 0. False = the mask ignores the failure class.
+     harbor_mask_infra: bool = True
++    # Mask rollouts whose failure class is `context_overflow` (the prompt did not fit, or a reply was cut by the
++    # context ceiling), with or without token capture: the episode was ended by the context limit, not by the
++    # policy finishing or failing the task, so its verifier reward says little about the policy. Off by default:
++    # such a rollout then trains with the verifier's reward.
++    harbor_mask_context_overflow: bool = False
+ 
+     # --- Job output ---
+     # Directory where Harbor writes job results and trial artifacts.
+@@ -148,6 +153,10 @@ class HarborVerifyResponse(BaseVerifyResponse):
+     model_config = ConfigDict(extra="allow")
+ 
+ 
++# OpenCode's `run --format=json` log in the trial's agent dir (Harbor's OpenCode agent and OpenCodeNemoGym).
++_OPENCODE_LOG = "opencode.txt"
++
++
+ def _exception_type(trial_result: Optional[dict]) -> Optional[str]:
+     """Harbor's exception_info.exception_type of a trial result dict (e.g. "AgentTimeoutError")."""
+     return ((trial_result or {}).get("exception_info") or {}).get("exception_type")
+@@ -348,10 +357,20 @@ class HarborAgent(SimpleResponsesAPIAgent):
+                 def _read_trial_files():
+                     traj_path = trial_dir / "agent" / "trajectory.json"
+                     flags_path = trial_dir / "agent" / "agent_error_flags.json"
++                    opencode_log = trial_dir / "agent" / _OPENCODE_LOG
++                    if flags_path.exists():
++                        flags = json.loads(flags_path.read_text())
++                    elif opencode_log.exists():
++                        # OpenCode writes no flags file and ends at the context limit without an error
++                        flags = opencode_end_flags(
++                            opencode_log.read_text(errors="replace"), self._agent_context_limit()
++                        )
++                    else:
++                        flags = {}
+                     return (
+                         json.loads((trial_dir / "result.json").read_text()),
+                         json.loads(traj_path.read_text()) if traj_path.exists() else None,
+-                        json.loads(flags_path.read_text()) if flags_path.exists() else {},
++                        flags,
+                     )
+ 
+                 # Trajectories can be many MB; parse off the event loop.
+@@ -418,7 +437,8 @@ class HarborAgent(SimpleResponsesAPIAgent):
+                 # the trainer can drop it from the gradient instead; NeMo-RL
+                 # reads this exact path (instance_config.mask_sample), which is
+                 # also how anyswe_agent reports sandbox failures. An `infra` rollout
+-                # is masked too (harbor_mask_infra): its reward is not a measurement.
++                # is masked too (harbor_mask_infra): its reward is not a measurement;
++                # so is a `context_overflow` one with harbor_mask_context_overflow.
+                 instance_config={
+                     "mask_sample": self._should_mask(trial_result, output_items, failure_class=failure.failure_class)
+                 },
+@@ -505,16 +525,28 @@ class HarborAgent(SimpleResponsesAPIAgent):
+         trial failed or the verifier never produced a result, since its reward then means nothing.
+         With `harbor_mask_agent_timeout`, a trial that ended in AgentTimeoutError is masked as well. With
+         `harbor_mask_infra` (default), a rollout of failure class `infra` is masked in both modes, also when it has
+-        output items or a verifier result.
++        output items or a verifier result; with `harbor_mask_context_overflow` (off by default), so is a rollout of
++        failure class `context_overflow` (the context limit ended the episode).
+         """
+         if self.config.harbor_mask_infra and failure_class == "infra":
+             return True
++        if self.config.harbor_mask_context_overflow and failure_class == "context_overflow":
++            return True
+         if self.config.harbor_mask_agent_timeout and _exception_type(trial_result) == "AgentTimeoutError":
+             return True
+         if not self._token_id_capture_enabled():
+             return not output_items
+         return trial_result is None or not trial_result.get("verifier_result")
+ 
++    def _agent_context_limit(self) -> Optional[int]:
++        """The agent's context limit, `harbor_agent_kwargs.model_info` `max_input_tokens` (else `max_tokens`)."""
++        model_info = (self.config.harbor_agent_kwargs or {}).get("model_info") or {}
++        limit = model_info.get("max_input_tokens") or model_info.get("max_tokens")
++        try:
++            return int(limit) if limit and int(limit) > 0 else None
++        except (TypeError, ValueError):
++            return None
++
+     def _resolve_model_base_url(self, global_config_dict: Any, body: Optional[HarborRunRequest] = None) -> str:
+         """Resolve the model base URL handed to the Harbor agent.
+ 
+diff --git a/responses_api_agents/harbor_agent/failure_classes.py b/responses_api_agents/harbor_agent/failure_classes.py
+index 0697b0f73..98bafa53d 100644
+--- a/responses_api_agents/harbor_agent/failure_classes.py
++++ b/responses_api_agents/harbor_agent/failure_classes.py
+@@ -17,7 +17,8 @@
+ Inputs are the trial's result.json (Harbor's ``exception_info`` with the formatted traceback, the verifier phase
+ timing, ``verifier_result``), the agent's ``agent_error_flags.json`` (Terminus2NemoGym writes the exception that
+ ended its episode there, since it catches it so the verifier still runs) and an error raised by the Harbor job
+-itself. Classes, first matching rule wins:
++itself. OpenCode writes no such file; ``opencode_end_flags`` derives the same fields from its
++``run --format=json`` log (``agent/opencode.txt``). Classes, first matching rule wins:
+ 
+ - ``infra``: the sandbox, the model server or Harbor failed, not the policy (the exception types Harbor's own
+   error_policy.py files under SANDBOX_FAILED, plus the Gym/OpenSandbox ones): sandbox start/setup timeouts, sandbox
+@@ -34,6 +35,8 @@ itself. Classes, first matching rule wins:
+ - ``ok``: the verifier ran and nothing above applies (task complete, max_turns, the agent stopped).
+ """
+ 
++import json
++import math
+ import re
+ from dataclasses import dataclass
+ from datetime import datetime
+@@ -54,6 +57,11 @@ FAILURE_CLASSES = (
+ _EARLY_TIMEOUT_SHARE = 0.9
+ 
+ _CONTEXT_TYPES = {"ContextLengthExceededError", "ContextWindowExceededError"}
++# Phrases of a context-length error body (vLLM / OpenAI), as Terminus-2's NemoGymLLM matches them.
++_CONTEXT_TEXT = re.compile(
++    r"context length exceeded|context_length_exceeded|maximum context length|`inputs` tokens \+ `max_new_tokens`",
++    re.IGNORECASE,
++)
+ _INFRA_TYPES = {
+     # Harbor: sandbox / environment / setup
+     "EnvironmentStartTimeoutError",
+@@ -192,6 +200,104 @@ def _phase_seconds(phase: Any) -> Optional[float]:
+     return (end - start).total_seconds()
+ 
+ 
++def opencode_context_cut_margin(context_limit: int) -> int:
++    """How far below the context limit a "length" reply still counts as cut by it: max(256, 1% of the limit).
++
++    The rule of Terminus-2's ``nemo_gym_llm.context_cut_margin``, kept here so this module needs no Harbor import.
++    """
++    return max(256, math.ceil(context_limit / 100))
++
++
++def _int(value: Any) -> int:
++    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
++
++
++def _opencode_step_tokens(part: dict) -> tuple[int, int]:
++    """(prompt, completion) tokens of an OpenCode step-finish part (Session.getUsage splits both up)."""
++    tokens = part.get("tokens") if isinstance(part.get("tokens"), dict) else {}
++    cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
++    prompt = _int(tokens.get("input")) + _int(cache.get("read")) + _int(cache.get("write"))
++    return prompt, _int(tokens.get("output")) + _int(tokens.get("reasoning"))
++
++
++def opencode_end_flags(log_text: str, context_limit: Optional[int] = None) -> dict[str, Any]:
++    """``agent_error_flags.json`` fields for an OpenCode episode that ended at the context limit, else ``{}``.
++
++    ``log_text`` is OpenCode's ``run --format=json`` output (one JSON event per line, debug log lines in
++    between). OpenCode ends its loop on any reply that is not a tool call, also on ``finish_reason: length``,
++    without an error and with exit code 0; the verifier then runs, so without this the rollout reads as ``ok``.
++    The context limit shows up in three ways:
++
++    - the model server's placeholder: Gym's vLLM model server answers vLLM's HTTP 400 "maximum context length"
++      with an empty completion with ``finish_reason: length`` and no usage (unless
++      ``propagate_context_overflow_errors``). OpenCode requests usage (``stream_options.include_usage``), so
++      every answered call has prompt tokens; a last ``length`` step with no tokens at all, after steps that all
++      had tokens, is that placeholder: the prompt did not fit.
++    - an ``error`` event that OpenCode classified as ``ContextOverflowError`` (the 400 propagated), or whose
++      message is a context-length error.
++    - a last ``length`` step whose prompt + completion come within ``opencode_context_cut_margin`` of
++      ``context_limit`` (the endpoint clamps max_tokens to the room left): the reply was cut by the ceiling.
++
++    A ``length`` reply with room left is an ordinary output-limit cut and gives ``{}``.
++    """
++    steps: list[tuple[str, int, int]] = []
++    overflow_error: Optional[str] = None
++    for line in str(log_text or "").splitlines():
++        line = line.strip()
++        if not line.startswith("{"):
++            continue
++        try:
++            event = json.loads(line)
++        except ValueError:
++            continue
++        if not isinstance(event, dict):
++            continue
++        if event.get("type") == "step_finish" and isinstance(event.get("part"), dict):
++            steps.append((str(event["part"].get("reason") or ""), *_opencode_step_tokens(event["part"])))
++        elif event.get("type") == "error" and isinstance(event.get("error"), dict) and overflow_error is None:
++            error = event["error"]
++            name = str(error.get("name") or "")
++            data = error.get("data") if isinstance(error.get("data"), dict) else {}
++            message = str(data.get("message") or "")
++            if name == "ContextOverflowError" or _CONTEXT_TEXT.search(message):
++                overflow_error = f"{name}: {message}" if name and message else (name or message)
++
++    answered = sum(1 for _, prompt, _ in steps if prompt > 0)
++    if overflow_error is not None:
++        return {
++            "end_reason": "ContextLengthExceededError",
++            "end_message": "OpenCode: " + overflow_error,
++            "context_length_exceeded": True,
++            "answered_model_calls": answered,
++            "prompt_over_context_limit": True,
++        }
++    if not steps or steps[-1][0] != "length":
++        return {}
++    _, prompt, completion = steps[-1]
++    if prompt == 0 and completion == 0:
++        if answered != len(steps) - 1:
++            return {}  # earlier steps without tokens too: no usage reported, zero tokens tell nothing
++        return {
++            "end_reason": "ContextLengthExceededError",
++            "end_message": f"OpenCode: model call {len(steps)} got the model server's context-overflow placeholder "
++            "(finish_reason length, no tokens): the prompt exceeds the context limit",
++            "context_length_exceeded": True,
++            "answered_model_calls": answered,
++            "prompt_over_context_limit": True,
++        }
++    if context_limit and prompt + completion >= context_limit - opencode_context_cut_margin(context_limit):
++        return {
++            "end_reason": "ContextLengthExceededError",
++            "end_message": f"OpenCode: reply cut by the context limit (prompt {prompt} + completion {completion} "
++            f"of {context_limit}); OpenCode ended the episode",
++            "context_length_exceeded": True,
++            "answered_model_calls": answered,
++            "prompt_over_context_limit": False,
++            "last_truncation_at_context_limit": True,
++        }
++    return {}
++
++
+ def classify_rollout(
+     trial_result: Optional[dict],
+     agent_error_flags: Optional[dict] = None,
+diff --git a/responses_api_agents/harbor_agent/tests/test_app.py b/responses_api_agents/harbor_agent/tests/test_app.py
+index c65c79e7d..3f4171186 100644
+--- a/responses_api_agents/harbor_agent/tests/test_app.py
++++ b/responses_api_agents/harbor_agent/tests/test_app.py
+@@ -275,8 +275,9 @@ def _harbor_run_mocks(
+     trajectory: Optional[Dict[str, Any]] = None,
+     side_effect: Optional[Exception] = None,
+     agent_error_flags: Optional[Dict[str, Any]] = None,
++    agent_files: Optional[Dict[str, str]] = None,
+ ):
+-    """Patch external deps and wire up mocks for HarborAgent.run()."""
++    """Patch external deps and wire up mocks for HarborAgent.run(); ``agent_files`` go to the trial's agent/."""
+     with (
+         patch("responses_api_agents.harbor_agent.app.get_global_config_dict") as mock_gc,
+         patch("responses_api_agents.harbor_agent.app.runner_ray_remote") as mock_ray,
+@@ -305,6 +306,10 @@ def _harbor_run_mocks(
+                 agent_dir = Path(trial_dir) / "agent"
+                 agent_dir.mkdir(parents=True, exist_ok=True)
+                 (agent_dir / "agent_error_flags.json").write_text(json.dumps(agent_error_flags))
++            for file_name, text in (agent_files or {}).items():
++                agent_dir = Path(trial_dir) / "agent"
++                agent_dir.mkdir(parents=True, exist_ok=True)
++                (agent_dir / file_name).write_text(text)
+         mock_ray.remote.side_effect = lambda *a, **k: _resolve_future()
+         mock_ray.options.return_value.remote.side_effect = lambda *a, **k: _resolve_future()
+ 
+@@ -556,6 +561,96 @@ class TestApp:
+         assert response.model_dump()["failure_class"] == "infra"
+         assert response.instance_config == {"mask_sample": False}
+ 
++    # OpenCode's `run --format=json` log when the model server answered a prompt over the context limit with its
++    # placeholder (no tokens, finish_reason "length"): OpenCode ends its loop without an error and exits 0.
++    _OPENCODE_PLACEHOLDER_LOG = "\n".join(
++        json.dumps({"type": "step_finish", "sessionID": "ses_1", "part": {"type": "step-finish", **part}})
++        for part in (
++            {"reason": "tool-calls", "tokens": {"input": 5406, "output": 80, "reasoning": 0, "cache": {}}},
++            {"reason": "length", "tokens": {"input": 0, "output": 0, "reasoning": 0, "cache": {}}},
++        )
++    )
++    _TERMINUS_OVERFLOW_FLAGS = {
++        "end_reason": "ContextLengthExceededError",
++        "end_message": "Model m context length exceeded",
++        "context_length_exceeded": True,
++        "answered_model_calls": 9,
++    }
++
++    @staticmethod
++    def _capture_server(**config_overrides) -> HarborAgent:
++        server = _make_server(token_id_capture=True, **config_overrides)
++        server.server_client.global_config_dict = {"token_id_capture": {"enabled": True}}
++        return server
++
++    @staticmethod
++    def _capture_request() -> HarborRunRequest:
++        return HarborRunRequest.model_validate(
++            {"instance_id": "scientific::t", "responses_create_params": {"input": []}, "_ng_rollout_id": "3-1"}
++        )
++
++    @pytest.mark.parametrize("mask_context_overflow", [True, False])
++    async def test_run_classifies_an_opencode_context_overflow_and_masks_it_under_capture(
++        self, capsys, mask_context_overflow: bool
++    ):
++        # OpenCode writes no ATIF and no agent_error_flags.json; before, such a rollout read as ok and trained
++        server = self._capture_server(
++            harbor_agent_name=None,
++            harbor_agent_import_path="responses_api_agents.harbor_agent.custom_agents.opencode_nemo_gym:OpenCodeNemoGym",
++            harbor_mask_context_overflow=mask_context_overflow,
++        )
++        trial_result = {**DEFAULT_TRIAL_RESULT, "verifier_result": {"rewards": {"reward": 0.0}}}
++        with _harbor_run_mocks(
++            trial_result=trial_result, agent_files={"opencode.txt": self._OPENCODE_PLACEHOLDER_LOG}
++        ):
++            response = await server.run(self._capture_request())
++
++        dumped = response.model_dump()
++        assert response.response.output == []
++        assert (dumped["failure_class"], dumped["failure_context_overflow"]) == ("context_overflow", 1)
++        assert dumped["context_length_exceeded_error"] == 1
++        assert dumped["failure_detail"].startswith("ContextLengthExceededError: OpenCode: model call 2 ")
++        assert response.instance_config == {"mask_sample": mask_context_overflow}
++        assert "failure_class=context_overflow reward=0.0" in capsys.readouterr().out
++
++    async def test_run_opencode_reply_cut_by_the_context_limit_from_model_info(self):
++        log = json.dumps(
++            {
++                "type": "step_finish",
++                "part": {"type": "step-finish", "reason": "length", "tokens": {"input": 20000, "output": 4576}},
++            }
++        )
++        trial_result = {**DEFAULT_TRIAL_RESULT, "verifier_result": {"rewards": {"reward": 0.0}}}
++        for model_info, expected in (({"max_input_tokens": 24576}, "context_overflow"), ({}, "ok")):
++            server = self._capture_server(harbor_agent_kwargs={"model_info": model_info})
++            with _harbor_run_mocks(trial_result=trial_result, agent_files={"opencode.txt": log}):
++                response = await server.run(self._capture_request())
++            assert response.model_dump()["failure_class"] == expected
++
++    async def test_run_opencode_log_without_overflow_stays_ok(self):
++        log = json.dumps({"type": "step_finish", "part": {"reason": "stop", "tokens": {"input": 5600, "output": 40}}})
++        server = self._capture_server(harbor_mask_context_overflow=True)
++        with _harbor_run_mocks(trial_result=DEFAULT_TRIAL_RESULT, agent_files={"opencode.txt": log}):
++            response = await server.run(self._capture_request())
++
++        assert response.model_dump()["failure_class"] == "ok"
++        assert response.instance_config == {"mask_sample": False}
++
++    @pytest.mark.parametrize("mask_context_overflow", [True, False])
++    async def test_run_masks_a_terminus2_context_overflow_without_capture_only_with_the_flag(
++        self, mask_context_overflow: bool
++    ):
++        server = _make_server(harbor_mask_context_overflow=mask_context_overflow)
++        trial_result = {**DEFAULT_TRIAL_RESULT, "verifier_result": {"rewards": {"reward": 0.0}}}
++        with _harbor_run_mocks(
++            trial_result=trial_result, trajectory=DEFAULT_TRAJECTORY, agent_error_flags=self._TERMINUS_OVERFLOW_FLAGS
++        ):
++            response = await server.run(_make_run_request())
++
++        assert len(response.response.output) == 6
++        assert response.model_dump()["failure_class"] == "context_overflow"
++        assert response.instance_config == {"mask_sample": mask_context_overflow}
++
+     @pytest.mark.parametrize(
+         "model_name, expected",
+         [
+@@ -643,6 +738,26 @@ class TestApp:
+         for other_class in ("ok", "context_overflow", "agent_timeout", "other", None):
+             assert server._should_mask(verified, output, failure_class=other_class) is False
+ 
++    def test_mask_context_overflow_is_off_by_default(self) -> None:
++        assert _make_server().config.harbor_mask_context_overflow is False
++
++    @pytest.mark.parametrize("token_id_capture", [False, True])
++    @pytest.mark.parametrize("mask_context_overflow", [True, False])
++    def test_mask_context_overflow_follows_the_failure_class(
++        self, token_id_capture: bool, mask_context_overflow: bool
++    ) -> None:
++        server = _make_server(
++            token_id_capture=token_id_capture,
++            harbor_mask_context_overflow=mask_context_overflow,
++            harbor_mask_infra=False,
++        )
++        server.server_client.global_config_dict = {"token_id_capture": {"enabled": token_id_capture}}
++        verified = {"verifier_result": {"rewards": {"reward": 0.0}}}
++        output = [{"type": "message"}]
++        assert server._should_mask(verified, output, failure_class="context_overflow") is mask_context_overflow
++        for other_class in ("ok", "infra", "model_truncation_loop", "agent_timeout", "other", None):
++            assert server._should_mask(verified, output, failure_class=other_class) is False
++
+     def test_model_base_url_capture_needs_agent_opt_in(self) -> None:
+         server = _make_server()
+         server.server_client.global_config_dict = {"token_id_capture": {"enabled": True}}
+diff --git a/responses_api_agents/harbor_agent/tests/test_failure_classes.py b/responses_api_agents/harbor_agent/tests/test_failure_classes.py
+index 8ec914d8c..58645f02d 100644
+--- a/responses_api_agents/harbor_agent/tests/test_failure_classes.py
++++ b/responses_api_agents/harbor_agent/tests/test_failure_classes.py
+@@ -14,12 +14,17 @@
+ # limitations under the License.
+ """Failure classes of Harbor rollouts; cases taken from jobs 5356101, 5358015 and 5359900."""
+ 
++import json
++
+ import pytest
+ 
++from responses_api_agents.harbor_agent.custom_agents.llms.nemo_gym_llm import context_cut_margin
+ from responses_api_agents.harbor_agent.failure_classes import (
+     FAILURE_CLASSES,
+     classify_rollout,
+     mask_secrets,
++    opencode_context_cut_margin,
++    opencode_end_flags,
+ )
+ 
+ 
+@@ -328,3 +333,115 @@ def test_detail_is_one_short_line() -> None:
+     assert detail == "RuntimeError: first line"
+     long_detail = classify_rollout(_trial("RuntimeError", "y" * 1000), {}).detail
+     assert len(long_detail) <= 240
++
++
++# --- OpenCode: its `run --format=json` log (agent/opencode.txt) --------------------------------------------------
++# Event shapes of OpenCode v1.17.11 (cli/cmd/run.ts emit(); step-finish parts from session/processor.ts with
++# tokens from Session.getUsage), mixed with its debug log lines as under --print-logs.
++
++
++def _oc_event(event_type: str, **data) -> str:
++    return json.dumps({"type": event_type, "timestamp": 1763000000000, "sessionID": "ses_1", **data})
++
++
++def _oc_step(reason: str, prompt: int, completion: int, reasoning: int = 0, cache_read: int = 0) -> str:
++    tokens = {
++        "input": prompt - cache_read,
++        "output": completion - reasoning,
++        "reasoning": reasoning,
++        "cache": {"read": cache_read, "write": 0},
++    }
++    return "\n".join(
++        [
++            _oc_event("step_start", part={"type": "step-start"}),
++            _oc_event("step_finish", part={"type": "step-finish", "reason": reason, "tokens": tokens, "cost": 0}),
++        ]
++    )
++
++
++def _oc_log(*chunks: str) -> str:
++    return "\n".join(["INFO  2026-11-17T09:46:00 +1ms service=default version=1.17.11 opencode", *chunks]) + "\n"
++
++
++# The Gym model server answers vLLM's 400 "maximum context length" with a placeholder completion (no tokens,
++# no usage, finish_reason "length") unless propagate_context_overflow_errors is set; OpenCode then ends its
++# loop without an error and exits 0.
++_OC_PLACEHOLDER = _oc_step("length", 0, 0)
++_OC_TOOL_STEP = _oc_step("tool-calls", 5406, 80)
++
++
++def test_opencode_placeholder_on_the_first_call_is_a_prompt_that_does_not_fit() -> None:
++    flags = opencode_end_flags(_oc_log(_OC_PLACEHOLDER), context_limit=24576)
++
++    assert flags["context_length_exceeded"] is True
++    assert (flags["answered_model_calls"], flags["prompt_over_context_limit"]) == (0, True)
++    failure = classify_rollout(_trial(), flags)
++    assert failure.failure_class == "context_overflow"
++    assert failure.detail.startswith("prompt does not fit: ContextLengthExceededError: OpenCode: ")
++    assert "model call 1" in failure.detail and "placeholder" in failure.detail
++
++
++def test_opencode_placeholder_mid_episode_is_a_context_overflow() -> None:
++    log = _oc_log(_OC_TOOL_STEP, _oc_step("tool-calls", 9000, 200, reasoning=150, cache_read=5000), _OC_PLACEHOLDER)
++    flags = opencode_end_flags(log, context_limit=24576)
++
++    assert (flags["answered_model_calls"], flags["prompt_over_context_limit"]) == (2, True)
++    failure = classify_rollout(_trial(), flags)
++    assert failure.failure_class == "context_overflow"
++    assert failure.detail.startswith("ContextLengthExceededError: OpenCode: model call 3 ")
++
++
++def test_opencode_context_overflow_error_event() -> None:
++    # with propagate_context_overflow_errors the 400 reaches OpenCode, which reports it as ContextOverflowError
++    message = "Bad Request: This model's maximum context length is 24576 tokens. However, you requested 24601 tokens"
++    error = {"name": "ContextOverflowError", "data": {"message": message, "responseBody": "{}"}}
++    flags = opencode_end_flags(_oc_log(_OC_TOOL_STEP, _oc_event("error", error=error)), context_limit=None)
++
++    failure = classify_rollout(_trial(), flags)
++    assert failure.failure_class == "context_overflow"
++    assert failure.detail == "ContextLengthExceededError: OpenCode: ContextOverflowError: " + message
++
++
++def test_opencode_api_error_with_the_context_length_text_is_a_context_overflow() -> None:
++    error = {"name": "APIError", "data": {"message": "This model's maximum context length is 24576 tokens."}}
++    flags = opencode_end_flags(_oc_log(_oc_event("error", error=error)))
++
++    assert classify_rollout(_trial(), flags).failure_class == "context_overflow"
++
++
++def test_opencode_reply_cut_by_the_context_ceiling() -> None:
++    # the NeMo-RL endpoint clamps max_tokens to the room left: prompt + completion = the limit
++    flags = opencode_end_flags(_oc_log(_OC_TOOL_STEP, _oc_step("length", 20000, 4576)), context_limit=24576)
++
++    assert (flags["prompt_over_context_limit"], flags["last_truncation_at_context_limit"]) == (False, True)
++    failure = classify_rollout(_trial(), flags)
++    assert failure.failure_class == "context_overflow"
++    assert "reply cut by the context limit (prompt 20000 + completion 4576 of 24576)" in failure.detail
++    assert not failure.detail.startswith("prompt does not fit")
++
++
++@pytest.mark.parametrize(
++    "log, context_limit",
++    [
++        pytest.param(_oc_log(_OC_TOOL_STEP, _oc_step("stop", 5600, 40)), 24576, id="stopped"),
++        pytest.param(_oc_log(_OC_TOOL_STEP, _oc_step("length", 6000, 6144)), 24576, id="output-limit-room-left"),
++        pytest.param(_oc_log(_oc_step("length", 20000, 4576)), None, id="cut-but-no-limit-known"),
++        # all steps without usage: zero tokens do not single out the placeholder
++        pytest.param(_oc_log(_oc_step("tool-calls", 0, 0), _OC_PLACEHOLDER), 24576, id="no-usage-reported"),
++        pytest.param(_oc_log(_OC_PLACEHOLDER, _OC_TOOL_STEP), 24576, id="placeholder-not-last"),
++        pytest.param(
++            _oc_log(_oc_event("error", error={"name": "APIError", "data": {"message": "HTTP 500"}})),
++            None,
++            id="other-error",
++        ),
++        pytest.param("", 24576, id="empty-log"),
++        pytest.param("{not json\n[1, 2]\n" + _oc_event("text", part={"text": "{"}) + "\n", 24576, id="junk"),
++    ],
++)
++def test_opencode_logs_without_a_context_overflow_give_no_flags(log, context_limit) -> None:
++    assert opencode_end_flags(log, context_limit=context_limit) == {}
++
++
++def test_opencode_cut_margin_is_terminus2s() -> None:
++    for limit in (1, 4096, 16384, 24576, 25600, 25601, 65536, 131072):
++        assert opencode_context_cut_margin(limit) == context_cut_margin(limit)
+-- 
+2.56.0
+
