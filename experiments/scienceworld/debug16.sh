@@ -10,7 +10,7 @@ export RUN=${RUN:-sciworld-debug-16n}
 export NEMO_RL_DIR=/home01/hanint06/projects/nemo-rl-apertus2-sciworld
 export JOB_TIME=${JOB_TIME:-01:30:00}
 export SBATCH_EXTRA="--gres=gpu:4 --exclusive --comment=field=nlp;appl=pytorch --propagate=NONE --job-name=nrl-${RUN}"
-bash run.sh experiments/scienceworld/task-debug-16n.yaml \
+DEBUG=0 bash run.sh experiments/scienceworld/task-debug-16n.yaml \
     grpo.num_prompts_per_step=128 policy.train_global_batch_size=2048 \
     loss_fn.force_on_policy_ratio=true grpo.async_grpo.max_trajectory_age_steps=2 \
     checkpointing.enabled=false logger.wandb_enabled=false policy.megatron_cfg.optimizer.lr=2.0e-6 \

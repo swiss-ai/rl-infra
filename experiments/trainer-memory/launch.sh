@@ -54,5 +54,5 @@ for v in "$@"; do
     [[ -v "V[${v}]" ]] || { echo "unknown variant ${v}" >&2; exit 1; }
     if [[ "${v}" == *-ckpt ]]; then args=("${COMMON_CKPT[@]}"); else args=("${COMMON[@]}"); fi
     # shellcheck disable=SC2086
-    RUN="mem-${v}" JOB_TIME="${JOB_TIME:-02:30:00}" bash run.sh experts/code/code-gen-osb-sft.yaml "${args[@]}" ${V[${v}]}
+    RUN="mem-${v}" JOB_TIME="${JOB_TIME:-02:30:00}" DEBUG=0 bash run.sh experts/code/code-gen-osb-sft.yaml "${args[@]}" ${V[${v}]}
 done

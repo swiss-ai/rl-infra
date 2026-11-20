@@ -1,6 +1,6 @@
 # Repository map
 
-Every file of the repository and its role (346 files, branch `restructure`, 2026-11-20). Roles:
+Every file of the repository and its role (347 files, branch `restructure`, 2026-11-20). Roles:
 **run** = used by every training run, **setup** = prepares sources, images, models or data,
 **check** = a test or probe before or after a run, **tool** = analysis of a finished run,
 **history** = kept as the record of past runs, not used by new ones.
@@ -33,6 +33,7 @@ bash run.sh experts/stem/main.yaml
 | `.gitignore` | — | Keeps `site.env` and generated files out of git |
 | `docs/nemo-rl-architecture.md` | doc | How NeMo-RL works inside (driver, workers, refit) |
 | `docs/repository-map.md` | doc | This file |
+| `docs/MIGRATION.md` | doc | What changed with the restructure and how to move a branch from the old layout |
 
 ## `sites/` (cluster profiles) and `sizes/` (node tiers)
 

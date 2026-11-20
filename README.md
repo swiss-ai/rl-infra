@@ -6,6 +6,11 @@ each backend is an untouched local clone that this repo pins, mounts into a cont
 and launches, the same way a verl checkout sits next to the code that drives it. The
 only backend so far is [NeMo-RL](https://github.com/NVIDIA-NeMo/RL).
 
+> **Branch based on main before the restructure (November 2026)?** Task files moved from `envs/` to
+> `experts/<expert>/` and `shared/`, launch settings became task keys and node tiers, and every NeMo-RL change is a
+> patch here. [docs/MIGRATION.md](docs/MIGRATION.md) lists what changed and the steps to move a branch over;
+> [docs/repository-map.md](docs/repository-map.md) describes every file.
+
 ## Quick start: GRPO on Apertus 2
 
 ```bash

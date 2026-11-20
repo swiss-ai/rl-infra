@@ -12,6 +12,6 @@ export NEMO_RL_DIR=/home01/hanint06/projects/nemo-rl-apertus2-sciworld
 export RUN=${RUN:-sciworld-$(basename "${TASK_FILE}" .yaml)}
 export JOB_TIME=${JOB_TIME:-02:00:00}
 export SBATCH_EXTRA="--gres=gpu:4 --exclusive --comment=field=nlp;appl=pytorch --propagate=NONE --job-name=nrl-${RUN}"
-bash run.sh "${TASK_FILE}" logger.wandb_enabled=false checkpointing.enabled=false \
+DEBUG=0 bash run.sh "${TASK_FILE}" logger.wandb_enabled=false checkpointing.enabled=false \
     ++policy.generation.vllm_kwargs.max_num_seqs=256 \
     ++policy.generation.vllm_cfg.env_vars.NCCL_NET_PLUGIN=none ++policy.generation.vllm_cfg.env_vars.NCCL_NET=Socket "$@"

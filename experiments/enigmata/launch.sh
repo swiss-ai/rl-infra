@@ -20,7 +20,7 @@ fi
 if [[ "${VAL:-1}" == 0 ]]; then
     EXTRA+=(grpo.val_at_start=false grpo.val_period=1000 grpo.val_at_end=false)
 fi
-bash run.sh "${TASK:-envs/stem/archive/stem-mix-enigmata.yaml}" \
+DEBUG=0 bash run.sh "${TASK:-experts/stem/archive/stem-mix-enigmata.yaml}" \
     grpo.num_prompts_per_step=512 policy.train_global_batch_size=8192 \
     checkpointing.enabled=false \
     policy.megatron_cfg.optimizer.lr=2.0e-6 \

@@ -13,7 +13,7 @@ export RUN=${RUN:-sftv02-stem-mix-sciworld-32n}
 export NEMO_RL_DIR=/home01/hanint06/projects/nemo-rl-apertus2-sciworld
 export JOB_TIME=${JOB_TIME:-12:00:00}
 export SBATCH_EXTRA="--gres=gpu:4 --exclusive --comment=field=nlp;appl=pytorch --propagate=NONE --job-name=nrl-${RUN} ${SBATCH_MORE:-}"
-bash run.sh "${TASK:-envs/stem/archive/stem-mix-run3-sciworld.yaml}" \
+DEBUG=0 bash run.sh "${TASK:-experts/stem/archive/stem-mix-run3-sciworld.yaml}" \
     grpo.num_prompts_per_step=512 policy.train_global_batch_size=8192 \
     loss_fn.force_on_policy_ratio=true grpo.async_grpo.max_trajectory_age_steps=2 \
     checkpointing.enabled=false policy.megatron_cfg.optimizer.lr=2.0e-6 \

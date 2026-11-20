@@ -228,7 +228,9 @@ else
 fi
 export SBATCH_EXTRA="--gres=gpu:4 --exclusive --comment=field=nlp;appl=pytorch --propagate=NONE --job-name=nrl-${RUN} ${SBATCH_MORE:-}"
 cd "${INFRA}"
-bash run.sh "${TASK}" \
+# This launcher names debug runs and sets steps, validation and checkpoints itself; DEBUG=0 keeps run.sh's debug
+# defaults (3 steps, no validation, no checkpoints) out of it.
+DEBUG=0 bash run.sh "${TASK}" \
     grpo.num_prompts_per_step=${PROMPTS} policy.train_global_batch_size=$(( PROMPTS * 16 )) \
     grpo.async_grpo.max_trajectory_age_steps=${STALENESS:-2} loss_fn.force_on_policy_ratio=true \
     "++policy.megatron_cfg.env_vars.NRL_CUDA_MEMORY_FRACTION=\"'${CAP:-0.74}'\"" \
