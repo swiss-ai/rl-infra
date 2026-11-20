@@ -1,8 +1,8 @@
-From fec8ea64837e9b4fbbc96055111b069303d97f34 Mon Sep 17 00:00:00 2001
+From 6d2b1066c2f28f14ad9e9ee67c8c834080c3965b Mon Sep 17 00:00:00 2001
 From: Philip Mueller <claude@philipmueller.ch>
 Date: Tue, 10 Nov 2026 13:59:14 +0000
-Subject: [PATCH] fix(apertus2): answer an unencodable chat history with HTTP
- 400, not 500
+Subject: [PATCH 54/56] fix(apertus2): answer an unencodable chat history with
+ HTTP 400, not 500
 
 Cause: with output_format apertus2, a call without a token prefix encodes
 the full chat history again through encode_chat_prompt, and apertus-common's
@@ -87,7 +87,7 @@ index 8d9262eb3..a92d3c0ef 100644
  
  
 diff --git a/nemo_rl/models/generation/vllm/vllm_worker_async.py b/nemo_rl/models/generation/vllm/vllm_worker_async.py
-index d2c1f9125..b084a2783 100644
+index 0b4785fc8..e4a15b496 100644
 --- a/nemo_rl/models/generation/vllm/vllm_worker_async.py
 +++ b/nemo_rl/models/generation/vllm/vllm_worker_async.py
 @@ -840,6 +840,15 @@ class VllmAsyncGenerationWorkerImpl(
@@ -326,5 +326,5 @@ index d8a33e575..eb684f17c 100644
      monkeypatch,
  ):
 -- 
-2.56.0
+2.43.0
 

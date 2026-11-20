@@ -1,8 +1,8 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From fe5a19ac8e31f2414c86897f10868d1236cce4fe Mon Sep 17 00:00:00 2001
 From: Philip Mueller <claude@philipmueller.ch>
 Date: Mon, 9 Nov 2026 10:30:31 +0000
-Subject: [PATCH] fix(apertus2): answer a continuation after a truncated burst
- with a context-length error
+Subject: [PATCH 52/56] fix(apertus2): answer a continuation after a truncated
+ burst with a context-length error
 
 Cause: with output_format apertus2 and Gym token capture in token_in mode,
 each request extends the exact tokens of the previous call through
@@ -106,7 +106,7 @@ index fdfff58a9..8d9262eb3 100644
          tokenizer_path, prefix_token_ids[burst_start:], truncated=False
      ).calls
 diff --git a/nemo_rl/models/generation/vllm/vllm_worker_async.py b/nemo_rl/models/generation/vllm/vllm_worker_async.py
-index 73e063da8..d2c1f9125 100644
+index dae3b2c97..0b4785fc8 100644
 --- a/nemo_rl/models/generation/vllm/vllm_worker_async.py
 +++ b/nemo_rl/models/generation/vllm/vllm_worker_async.py
 @@ -31,6 +31,7 @@ from fastapi import FastAPI
@@ -624,5 +624,5 @@ index e69e4efe5..d8a33e575 100644
      monkeypatch,
  ):
 -- 
-2.56.0
+2.43.0
 

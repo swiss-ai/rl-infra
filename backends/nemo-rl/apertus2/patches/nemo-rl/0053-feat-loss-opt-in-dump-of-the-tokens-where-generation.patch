@@ -1,8 +1,8 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From cfc8a98e52cf0cf4f328f35d549e04c758f7effe Mon Sep 17 00:00:00 2001
 From: Philip Mueller <claude@philipmueller.ch>
 Date: Mon, 9 Nov 2026 12:23:52 +0000
-Subject: [PATCH] feat(loss): opt-in dump of the tokens where generation and
- trainer logprobs disagree
+Subject: [PATCH 53/56] feat(loss): opt-in dump of the tokens where generation
+ and trainer logprobs disagree
 
 token_mult_prob_error is a token mean of exp(|generation - prev|), so a
 handful of tokens with a gap of 10+ nats dominate it, and the metric does
@@ -688,5 +688,5 @@ index 000000000..7624e1ce8
 +    tokens = [r for r in _read(tmp_path) if r["kind"] == "tok"]
 +    assert [(t["pos"], t["token"], t["gap"]) for t in tokens] == [(10, 11, 12.0)]
 -- 
-2.56.0
+2.43.0
 

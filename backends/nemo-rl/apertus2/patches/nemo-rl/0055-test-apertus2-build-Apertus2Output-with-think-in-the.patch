@@ -1,8 +1,8 @@
-From 9c9c405da2eceac412b69769a66acd76819e6a45 Mon Sep 17 00:00:00 2001
+From 0207c1309d87cda502e5e320e6f0f4cb3037ddfe Mon Sep 17 00:00:00 2001
 From: Philip Mueller <claude@philipmueller.ch>
 Date: Sun, 15 Nov 2026 15:33:20 +0000
-Subject: [PATCH] test(apertus2): build Apertus2Output with think in the math
- environment tests
+Subject: [PATCH 55/56] test(apertus2): build Apertus2Output with think in the
+ math environment tests
 
 "Apertus 2 format: serve it on the chat endpoint for Gym" added the think
 field to Apertus2Output, but the frames helper of test_math_environment.py
@@ -30,5 +30,5 @@ index abe791255..d01356121 100644
                  reply=reply,
                  calls=[],
 -- 
-2.56.0
+2.43.0
 
