@@ -18,6 +18,9 @@ git clone https://github.com/swiss-ai/rl-infra.git && cd rl-infra
 bash run.sh experts/stem/dev/gsm8k.yaml
 ```
 
+A full run logs to Weights & Biases and needs `WANDB_PROJECT` and the key file in `site.env` (see
+`site.env.example`); without them, start with `DEBUG=1 bash run.sh ...`, a 3-step debug run.
+
 This trains Apertus 2 Chonk on GSM8K with GRPO, on 12 nodes of the cluster profile's account
 (`infra01` on Alps, `in0138` on HANGANG), in about an hour and a half, and saves the final weights. A new RL environment needs only a
 task file like `experts/stem/dev/gsm8k.yaml`, with its dataset, prompt and reward; the training recipe
