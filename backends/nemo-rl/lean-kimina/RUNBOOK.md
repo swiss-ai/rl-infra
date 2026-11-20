@@ -24,7 +24,7 @@ is requeued and resumes from its last checkpoint. It saves by `JOB_TIME` - 30 mi
 `SERVER=debug` runs the server as a 1-node debug job of its own instead (how the runs of 2026-11-15 worked). It
 limits the training to about 1:20 h and takes your one running debug job; see the comments in `train.sh`.
 
-## Status (2026-11-19)
+## Status (2026-11-20)
 
 Working on Clariden, shown by the runs below:
 - `train.sh` with the server inside the job, on 9 and 12 nodes; no server restart was seen in these runs
@@ -46,7 +46,11 @@ Results so far (details in the sections below):
   than new ones; entropy falls fast once the policy moves (no KL, no entropy bonus); routing is fine, but the
   routed-expert weights (95 % of the model) moved much less than the rest, probably because Adam's ε (1e-8) is
   above their tiny gradients.
-- Running: the ε ablation (H1 with ε 1e-14, job 3980716, 40 steps), to be compared with H1 prompt by prompt.
+- The ε ablation (H1 with Adam ε 1e-14, job 3980716, 40 steps) confirmed it: on the same prompts its training
+  reward was ahead of H1 from versions 10–19 on (+4.9 ± 0.8 points there), and step 40 is the best checkpoint so
+  far (valid +6.15 ± 1.69, test +7.54 ± 1.97 over the baseline; +2.8 ± 1.4 over H1's step 40). Entropy did not
+  collapse. The train/inference mismatch grew with the larger updates, and one sequence at step 40 was far off
+  (see "Learning speed", the ε ablation). The next runs use ε 1e-14 ("Next runs").
 
 Open:
 - `eval/run.sh` of the expert entry has run on the expert, not yet on `start` (its `start` row comes from the
@@ -272,7 +276,7 @@ over the pooled baseline to stand out (2 standard errors).
 | H8 twin | 3972629, resumed 3973966 | learning rate 5e-6 + the 736 mixed prompts (global batch 512) | 23, then 24– | step 23: +2.05 / +2.79; step 30: valid +2.46 ± 1.56, test +4.24 ± 1.61 |
 | No-std | 3972454, rerun 3972630 | advantages not divided by the group's standard deviation (`grpo.normalize_rewards=false`) | 51 | step 40: +1.23 / +2.79; step 50: +1.02 / +2.38 |
 | (H4) | not run | `loss_fn.positive_example_nll_weight` (NLL on correct samples) | | no effect at this NeMo-RL pin: GRPO's training batch carries no `rewards`, so the term is never computed |
-| ε (2026-11-19) | 3980716 | H1 + Adam ε 1e-14 (from 1e-8); 40 steps, checkpoint every 10 | running | see "Learning speed (2026-11-19)" |
+| **ε** (2026-11-19) | 3980716 | H1 + Adam ε 1e-14 (from 1e-8); 40 steps, checkpoint every 10 | 40 (5:02 h) | **step 40: valid +6.15 ± 1.69, test +7.54 ± 1.97**; step 30: +5.53 / +4.24; against H1 at the same step, paired: +2.78 ± 1.42 (both splits); see "Learning speed (2026-11-19)" |
 
 What they say, with the caveat that each arm ran once:
 - More movement per step helps: learning rate 1e-5 (H1) is the only arm up on both splits beyond 2 standard
@@ -379,12 +383,12 @@ A first version of `weight_movement.py` averaged the bf16 differences as if they
 "experts move 10–1000× less" and was wrong (moves under half a step vanish). The numbers above are from the
 corrected version.
 
-**What follows for a long run:** at 2e-6 nothing happens; a run needs at least 1e-5 or more movement per update,
-which drives entropy down with nothing holding it; gains carry over little between prompts, so a larger and more
-varied prompt pool helps more than more epochs; and ε may be the brake on the experts, tested next.
+**What follows for a long run:** at 2e-6 nothing happens; a run needs at least 1e-5 or more movement per update;
+gains carry over little between prompts, so a larger and more varied prompt pool helps more than more epochs; and
+ε was the brake on the experts (the ε ablation below).
 
-**The ε ablation** (job 3980716, run `lean-kimina-v02-abl-eps14-preemptable-20261119`, submitted 2026-11-19 16:45,
-running): H1 with `policy.megatron_cfg.optimizer.adam_eps=1.0e-14`, 40 steps (`grpo.max_num_steps=40`), a
+**The ε ablation** (job 3980716, run `lean-kimina-v02-abl-eps14-preemptable-20261119`, 2026-11-19 16:45–21:47,
+completed): H1 with `policy.megatron_cfg.optimizer.adam_eps=1.0e-14`, 40 steps (`grpo.max_num_steps=40`), a
 checkpoint every 10 steps (1.4 TB each), `JOB_TIME` 8 h, `preemptable`. Launched with
 
     RUN=lean-kimina-v02-abl-eps14-preemptable-20261119 JOB_TIME=08:00:00 \
@@ -393,12 +397,70 @@ checkpoint every 10 steps (1.4 TB each), `JOB_TIME` 8 h, `preemptable`. Launched
 
 (the later `checkpointing.save_period=10` wins over `ablations.sh`'s 5: Hydra 1.3.2, NeMo-RL's pin, applies
 overrides in order). Its base config and overrides match H1's but for these; H1 ran from an older clone whose
-`in_job.sbatch` still passed an 8 GB REPL limit, but its `kimina.sh` hard-codes 32 GB, as now. 1e-14 is far below the
-expert gradients that the weight movement suggests. Judge it by: the paired per-prompt reward against H1 in blocks
-of 10 versions (`learning_speed.py`, part B, with the run added); validation at steps 10/20/30/40 against H1's
-42.7 / 45.3 / 46.3 / 47.2 % (972 rows); `gen_kl_error` above H1's; entropy; and, for the mechanism, the weight
-movement of its step 40 after an HF export. Faster gains than H1 would make a low ε part of the long run; entropy
-collapse would call for a lower learning rate with it.
+`in_job.sbatch` still passed an 8 GB REPL limit, but its `kimina.sh` hard-codes 32 GB, as now. Steps took as long
+as H1's (about 7 min, 5:02 h for 40 steps with 4 validations).
+
+Validation (972 rows; `val_report.py` against the pooled baseline, and paired against H1 at the same step):
+
+| Step | ε, all rows | H1, all rows | ε valid (vs baseline) | ε test (vs baseline) | ε − H1, both splits (paired) |
+|---|---|---|---|---|---|
+| 10 | 44.0 % | 42.7 % | 48.36 % (+1.43 ± 1.53) | 39.67 % (+0.31 ± 1.93) | +1.34 ± 1.36 |
+| 20 | 46.0 % | 45.3 % | 49.80 % (+2.87 ± 1.82) | 42.15 % (+2.79 ± 1.70) | +0.72 ± 1.42 |
+| 30 | 48.1 % | 46.3 % | 52.46 % (+5.53 ± 1.93) | 43.60 % (+4.24 ± 1.79) | +1.75 ± 1.46 |
+| 40 | **50.0 %** | 47.2 % | **53.07 % (+6.15 ± 1.69)** | **46.90 % (+7.54 ± 1.97)** | **+2.78 ± 1.42** |
+
+Training reward on the same prompts (`learning_speed.py`, part B; ε, H1 and the Goedel run share the prompts of
+all 41 common weight versions):
+
+| Weight versions | ε − H1 | ε − Goedel run (2e-6) | H1 − Goedel run |
+|---|---|---|---|
+| 0–9 | +1.4 ± 0.7 | +0.6 ± 0.6 | −0.8 ± 0.7 |
+| 10–19 | **+4.9 ± 0.8** | +3.5 ± 0.8 | −1.4 ± 0.8 |
+| 20–29 | +1.6 ± 0.7 | +4.8 ± 0.9 | +3.2 ± 0.9 |
+| 30–39 | +2.9 ± 0.9 | +6.7 ± 0.9 | +3.8 ± 0.9 |
+
+Metrics (`tfevents.py ... trend`, first and last quarter; H1 in brackets): `gen_kl_error` 6.7e-4 → 1.7e-3
+(6.8e-4 → 9.0e-4); `approx_entropy` 0.25 → 0.30, peak 0.38 at step 30, 0.25 at step 40 (0.28 → 0.19);
+`grad_norm` 0.013 → 0.025 (0.012 → 0.020); mean reply 8,554 → 8,563 tokens (10,390 → 8,208); truncation 3.0 → 1.1 %
+(8.0 → 1.8 %); `token_mult_prob_error` 1.013 → 1.107 (1.013 → 1.013); TIS cap hits 8e-6 → 1.1e-4 of tokens
+(1e-5 → 8e-5); expert load (`train/moe/*`) flat.
+
+What it says:
+- **ε was a brake.** With ε 1e-14 learning on new prompts starts about 10 versions earlier (+4.9 points over H1 in
+  versions 10–19, where H1 still trailed the 2e-6 run), and step 40 is the best checkpoint so far. Over H1 directly
+  the validation gain is +2.8 ± 1.4 (2 SE, one run each); the training reward, paired on 1,312 prompt groups, is
+  the stronger evidence. The weight movement of ε's step 40 (expert weights should now move like the rest) was not
+  measured; it needs an HF export.
+- **Entropy no longer collapses**: it rose to 0.38 by step 30 and came back to 0.25; H1's fell steadily to 0.19.
+- **The train/inference mismatch grows with the larger updates.** `gen_kl_error` includes the one-step lag of async
+  GRPO, so bigger updates raise it; it stayed near H1's until step 23 (7.7e-4) and climbed to 1.9e-3 at step 38. At **step 40 one
+  sequence was far off**: `max_seq_mult_prob_error` 310 (every other step of ε and H1: at most 1.18), the step's
+  `token_mult_prob_error` 1.89 and `gen_kl_error` 3.8e-3. Nothing masked it (`seq_logprob_error_threshold` is not
+  set). The step-40 checkpoint and its 50.0 % validation both come after that update (log order: training, weight
+  sync, validation, save). The cause was not investigated.
+
+## Next runs (design of 2026-11-20)
+
+What the ε ablation changes for the next runs, beyond 40 steps:
+
+| Setting | Next runs | Why |
+|---|---|---|
+| Adam ε | **1e-14** | the ε ablation; Megatron passes it to the CPU AdamW unchanged |
+| Learning rate | 1e-5, constant, no warm-up; a decay for 200 steps | the mismatch grows with the update size, so not higher; a decay limits it late in a long run |
+| Outlier sequences | **`grpo.seq_logprob_error_threshold=1.5`** | masks sequences whose train/inference probability error exceeds 1.5 (same scale as `token_mult_prob_error`; NeMo-RL's own example value): in H1 and ε every sequence stayed at or below 1.18 except step 40's (310) |
+| Stop and look | `token_mult_prob_error` above about 1.05 for several steps, `gen_kl_error` above about 3e-3, entropy below 0.15 or above 0.45, `train/num_masked_seqs_by_logprob_error` rising, validation more than 3 points below the run's best | the warning signs in ε and H1 |
+| Rollouts per problem | **8** (from 16) | from the Goedel run's groups, 8 rollouts keep 44 % of problems mixed (16: 51 %), so for the same 512 rollouts 28 instead of 16 different problems carry a signal per step; transfer between problems is the bottleneck |
+| Problems per step | **64** (512 rollouts, as now) first; 128 (1,024) only after a throughput test | 64 × 8 changes nothing in step time, memory, vLLM's KV cache or the Kimina load. At 1,024 rollouts, 2 batches in flight reach the KV cache's capacity (about 890,000 tokens per GPU, about 1,400 sequences of 10,000 tokens on 16 GPUs) and double the proof checks on 16 REPLs; with ε fixed, a larger batch no longer shrinks the experts' effective step |
+| Updates per step | 1 | more ran out of host memory (H2); ε fixed the movement per update |
+| Training rows | **at least 13,000** Goedel RL V2 completion rows (about 37,000 usable of 49,913), filtered against `minif2f-corrected-x2` and chonk-tests' evaluation sample | 2,357 rows last 37 steps at 64 problems per step and 18 at 128; seen problems gain far more than new ones |
+| KL penalty, entropy bonus | none | entropy did not collapse with ε; kept as a fallback |
+| Validation | every 10 steps, 972 rows | as the ablations |
+| Checkpoints | every 10 steps, older ones deleted as the run goes (with the owner's OK) | 1.4 TB each: 20 for 200 steps would be 28 TB |
+| Partition, time | `preemptable` with requeue, or 2+ jobs of 12 h on `normal`; 200 steps at about 7 min is about 24 h | as the ablations |
+
+Open before a 200-step run: the larger row set (conversion and statement check), a short throughput test if 128
+problems per step is wanted, and whether to check ε's step-40 outlier and weight movement first. ε's step 40 is a
+better Lean expert than H1's step 40 (round 1); delivering it would need an HF export and `eval/run.sh` on it.
 
 ## Expert handover (Apertus 2 experts, round 1)
 
