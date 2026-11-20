@@ -24,7 +24,7 @@ is requeued and resumes from its last checkpoint. It saves by `JOB_TIME` - 30 mi
 `SERVER=debug` runs the server as a 1-node debug job of its own instead (how the runs of 2026-11-15 worked). It
 limits the training to about 1:20 h and takes your one running debug job; see the comments in `train.sh`.
 
-## Status (2026-11-20)
+## Status (2026-11-21)
 
 Working on Clariden, shown by the runs below:
 - `train.sh` with the server inside the job, on 9 and 12 nodes; no server restart was seen in these runs
@@ -51,8 +51,15 @@ Results so far (details in the sections below):
   far (valid +6.15 ± 1.69, test +7.54 ± 1.97 over the baseline; +2.8 ± 1.4 over H1's step 40). Entropy did not
   collapse. The train/inference mismatch grew with the larger updates, and one sequence at step 40 was far off
   (see "Learning speed", the ε ablation). The next runs use ε 1e-14 ("Next runs").
+- A larger row set (2026-11-20): 37,953 Goedel RL V2 rows that elaborate on our Lean, without miniF2F
+  near-duplicates ("Next runs", "The larger row set").
+- 128 problems × 8 rollouts with one update per step runs with `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
+  (job 3985875; without it, out of GPU memory, job 3984550) and gives 27–49 % more rollouts per hour than 32 × 16
+  ("Known problems", the 128 × 8 entry).
 
 Open:
+- The 200-step run is prepared, not started ("The 200-step run"; `run-200.sh`, Clariden clone
+  `$SCRATCH/rl-infra-245e760`, dry run passed).
 - `eval/run.sh` of the expert entry has run on the expert, not yet on `start` (its `start` row comes from the
   same pipeline's step-0 validations).
 

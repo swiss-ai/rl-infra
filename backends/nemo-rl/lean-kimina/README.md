@@ -11,19 +11,38 @@ Gym patch `0011` (`../apertus2/patches/gym`) adds `verifier: kimina` to `math_fo
 sandbox's result format, so scoring and correction prompts are unchanged. The task file is
 `envs/lean-kimina-sft.yaml`.
 
-**Status (2026-11-20):** the whole pipeline has run on Clariden: `train.sh` with the server inside the job,
+**Status (2026-11-21):** the whole pipeline has run on Clariden: `train.sh` with the server inside the job,
 16,000-token rollouts, validation, checkpoints every 5–10 steps (1.4 TB each), resuming from a checkpoint, and
-HF export of a checkpoint. GRPO runs of Chonk SFT v0.2 on Goedel-Prover problems ran on 2026-11-17/18 (one 9-node
-run, then six 12-node ablations, one of which failed, plus a rerun and two resumes); their results and lessons are in [`RUNBOOK.md`](RUNBOOK.md)
-("The Goedel run" and "Ablations"). The best one, learning rate 1e-5, step 40, is the Lean expert of
-Apertus 2 experts round 1: miniF2F-test (corrected, 242) pass@1 39.4 → 44.8 (+5.5 ± 2.0). Learning was slow
-mainly because Adam's ε (1e-8) damped the routed experts' tiny gradients ("Learning speed (2026-11-19)"): with
-ε 1e-14 (job 3980716) step 40 reached valid +6.2 ± 1.7 and test +7.5 ± 2.0 points (in-run validation), the best
-so far. The design of the next, longer runs is in "Next runs (design of 2026-11-20)".
+HF export of a checkpoint. Everything below is in [`RUNBOOK.md`](RUNBOOK.md), under the section named in brackets.
+- **Runs so far** ("The Goedel run", "Ablations"): GRPO of Chonk SFT v0.2 on Goedel-Prover problems, one 9-node
+  run (2026-11-17) and six 12-node ablations (2026-11-18, one failed). The best, learning rate 1e-5 at step 40, is
+  the Lean expert of Apertus 2 experts round 1: miniF2F-test (corrected, 242) pass@1 39.4 → 44.8 (+5.5 ± 2.0).
+- **Why learning was slow** ("Learning speed (2026-11-19)"): at 2e-6 the policy does not move; Adam's ε (1e-8)
+  damped the routed experts' tiny gradients. With ε 1e-14 (job 3980716) step 40 reached valid +6.2 ± 1.7 and test
+  +7.5 ± 2.0 points over the baseline (in-run validation), the best checkpoint so far, and learning on new
+  prompts started about 10 steps earlier than with 1e-8.
+- **A larger row set** ("Next runs", "The larger row set"): all 49,913 distinct Goedel RL V2 completion
+  statements converted, checked on our Lean with a Kimina server in a job (`check-statements-job.sh`, job
+  3984438), and cleaned of near-duplicates of corrected miniF2F: 37,953 rows in
+  `$SCRATCH/lean/goedel-full-5c99dce/goedel-clean.v434.jsonl` (the old set has 2,357). Three of the old rows are
+  near-copies of miniF2F test problems; they did not affect the reported results.
+- **128 problems × 8 rollouts** ("Known problems", the 128 × 8 entry): one update of 1,024 rollouts ran out of
+  trainer GPU memory from allocator fragmentation (job 3984550); with
+  `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` it runs (job 3985875) and gives 27–49 % more rollouts per hour
+  than 32 × 16. Earlier runs were close to the same failure without that setting.
+- **Next: the 200-step run** ("The 200-step run"), prepared, not started: `run-200.sh` (128 × 8, ε 1e-14,
+  learning rate 1e-5 cosine to 1e-6, the 37,953 rows, validation and permanent checkpoints every 20 steps, a
+  recovery checkpoint every 10), cloned on Clariden as `$SCRATCH/rl-infra-245e760`; its dry run passed. Start it,
+  and after the first 24-h job resume it, with the same command:
+  `cd $SCRATCH/rl-infra-245e760 && bash backends/nemo-rl/lean-kimina/run-200.sh`. The section lists every spec
+  with its reason, and what to check once it runs (first `train/lr` at step 2).
+
 **To train, follow [`RUNBOOK.md`](RUNBOOK.md)**: it starts from an account that never ran the stack, and uses
 `train.sh`, which submits the training with its server inside the job (or, with `SERVER=debug`, as a debug job
-of its own). The run of 2026-11-17 (9 nodes) is `run-goedel-9n.sh`. The ablations of 2026-11-18 are `ablations.sh` on the
-12-node recipe; their tools are listed in RUNBOOK.md ("Tools of 2026-11-18").
+of its own). The run of 2026-11-17 (9 nodes) is `run-goedel-9n.sh`, the ablations of 2026-11-18 are `ablations.sh`
+on the 12-node recipe, and the 200-step run is `run-200.sh`. The tools (status, validation report, HF export,
+handover, learning-speed analysis, TensorBoard reader, weight movement, statement check) are listed in RUNBOOK.md
+("Tools of 2026-11-18").
 
 ## Before the first run: Lean and Mathlib
 
