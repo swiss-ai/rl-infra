@@ -3,9 +3,9 @@
 # text: the same 123 RDKit properties (fragment counts, ring and atom counts, Ro5, Veber and QED checks), molecules from
 # COCONUT (CC0, minus its ChEMBL collection) and the NCI DTP Open set (US public domain), answers computed with
 # RDKit 2025.09.5 (which reproduces all 5,714 Litmus v0.1 answers). Every answer is an integer or 0/1, so the math
-# environment grades the claim unchanged. Rows from experts/stem/prepare_chem_rdkit.py, which puts the answer-line instruction
+# environment grades the claim unchanged. Rows from experts/stem/scripts/prepare_chem_rdkit.py, which puts the answer-line instruction
 # of the math rows ("…the last line of your response should be of the form Answer: $Answer…") around each prompt:
-#   python3.12 experts/stem/prepare_chem_rdkit.py <generator output dir> $SCRATCH/chem-rdkit/native --val-rows 512
+#   python3.12 experts/stem/scripts/prepare_chem_rdkit.py <generator output dir> $SCRATCH/chem-rdkit/native --val-rows 512
 #   bash run.sh experts/stem/dev/chem-rdkit-sft.yaml
 # What this setup needs, from the runs in experiments/runs.md:
 #  - A model that claims on these prompts. SFT v0.2 answers them in the reply and claimed in 1 of 128 (claim-graded

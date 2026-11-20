@@ -1,6 +1,6 @@
 # Medical expert: every dataset, environment and validation set, defined once. TEMPLATE: the datasets below are
 # placeholders. Fill in the TODOs, then delete `template: true` (run.sh refuses to submit a template; DRY_RUN=1
-# shows it). Layout as experts/stem/base.yaml; main.yaml is the official run, dev/*.yaml development variants.
+# shows it). Layout as experts/stem/base.yaml; this file is the official run (bash run.sh medical).
 # Starting point: medical multiple choice (e.g. MedQA, MedMCQA) graded on the option letter in the claim frame. For
 # open answers graded by a judge, add `defaults: ../../shared/judges/llm-judge.yaml` and a dataset with env_name llm_judge.
 template: true
@@ -13,7 +13,7 @@ frames:
 
 grpo:
   max_num_epochs: 1
-  val_period: 20
+  max_num_steps: 100            # TODO: steps of the official run
   val_batch_size: 1000           # TODO: number of validation prompts
   max_val_samples: 1000
 

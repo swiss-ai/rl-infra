@@ -1,0 +1,9 @@
+# Lean (formal proofs) expert, its official run. TEMPLATE: this expert's runs so far are task files in archive/
+# (older layout: recipe in `defaults`, launch settings on the command line). Until this file is written, it
+# takes lean-sft.yaml (Lean 4 proving with Gym math_formal_lean) through `defaults`, so `DRY_RUN=1 bash run.sh
+# lean` shows that run; run.sh refuses to submit it.  To make it the expert's base (as experts/stem/base.yaml):
+# move the datasets, environments and validation of the run that becomes official here, name its recipe with
+# `recipe:`, set `context:`, `size:`, `job_time:` and its steps, drop the defaults line, then delete `template:
+# true`. Variants go to dev/, finished runs to archive/, data builders to scripts/.
+template: true
+defaults: archive/lean-sft.yaml

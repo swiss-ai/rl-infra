@@ -7,8 +7,8 @@
 # medium the model leaves the think frame empty on those prompts (runs.md: PR swiss-ai/rl-infra#5 and the RDKit
 # chemistry section).
 # Chemistry: Antonio Lopardo's rows (PR swiss-ai/rl-infra#6; /scratch/hanint09/chem/data/faithful-qwen-v1/rows,
-# molecules from COCONUT and NCI DTP only), prepared with experts/stem/prepare_chem_rdkit.py --val-rows 246; graded by the
-# math environment on the claim, every prompt with DAPO-Math's answer-line instruction. experts/stem/gen_chem_rdkit.py makes
+# molecules from COCONUT and NCI DTP only), prepared with experts/stem/scripts/prepare_chem_rdkit.py --val-rows 246; graded by the
+# math environment on the claim, every prompt with DAPO-Math's answer-line instruction. experts/stem/scripts/gen_chem_rdkit.py makes
 # a template alternative (/scratch/hanint06/data/stem-rl/chem_rdkit).
 # Validation every 20 steps: AIME 2024 mean@32 and GPQA-Diamond mean@8 as in runs 3 and 4, plus 246 held-out
 # chemistry prompts (2 per RDKit property; molecules share no Bemis-Murcko scaffold with train).

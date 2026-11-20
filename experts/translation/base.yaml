@@ -1,6 +1,6 @@
 # Translation (MT) expert: every dataset, environment and validation set, defined once. TEMPLATE: the datasets
 # below are placeholders. Fill in the TODOs, then delete `template: true` (run.sh refuses to submit a template;
-# DRY_RUN=1 shows it). Layout as experts/stem/base.yaml; main.yaml is the official run, dev/*.yaml variants.
+# DRY_RUN=1 shows it). Layout as experts/stem/base.yaml; this file is the official run (bash run.sh translation).
 # Starting point: source sentences graded by the shared LLM judge (../../shared/judges/llm-judge.yaml) against a reference
 # translation. TODO: NeMo-RL has no metric environment for translation (chrF, COMET); the judge asks whether the
 # reply matches the reference, which a translation task may need to phrase as adequacy and fluency.
@@ -15,7 +15,7 @@ frames:
 
 grpo:
   max_num_epochs: 1
-  val_period: 20
+  max_num_steps: 100            # TODO: steps of the official run
   val_batch_size: 1000           # TODO: number of validation prompts
   max_val_samples: 1000
 

@@ -1,8 +1,12 @@
 #!/bin/bash
-# Train Apertus 2 Chonk with GRPO from a task file (on any cluster with a sites/ profile):
-#   bash run.sh <task.yaml> [overrides...]        e.g.  bash run.sh experts/stem/main.yaml
-# The task file says what to train on (datasets, environments, their shares of a step, steps,
-# validation) and, with the rl-infra keys below, which recipe, context and node tier the run uses.
+# Train Apertus 2 Chonk with GRPO for one RL expert (on any cluster with a sites/ profile):
+#   bash run.sh <expert> [overrides...]           e.g.  bash run.sh stem     (experts/stem/base.yaml)
+#   bash run.sh <task.yaml> [overrides...]        e.g.  bash run.sh experts/stem/dev/<variant>.yaml
+# An expert's base.yaml says what to train on (datasets, environments, their shares of a step,
+# validation) and, with the rl-infra keys below, which recipe, context and node tier its run uses.
+# Under it run.sh puts experts/main.yaml, the run settings every expert shares (checkpoints, rollout
+# dump, validation period, default tier and time); a task in the older layout (recipe in `defaults`,
+# the files in archive/) does not take it and runs as it ran.
 # Every launch first brings the setup up to date; the first one clones the sources and stages the
 # model, later ones take seconds. Hydra overrides after the task file win over everything.
 #
@@ -26,7 +30,8 @@
 # A task without `recipe:` names its recipe in `defaults` (the older layout).
 #
 # Environment: RUN names the run (default: the task's path under experts/ and the time, e.g.
-# stem-main-20261120-081500). RECIPE, SIZE and JOB_TIME replace the task's recipe, size and job_time.
+# stem-20261120-081500, stem-dev-<variant>-20261120-081500). RECIPE, SIZE and JOB_TIME replace the
+# task's recipe, size and job_time.
 # W&B: WANDB_PROJECT, WANDB_ENTITY and WANDB_KEY_FILE in site.env. PARTITION, ACCOUNT as usual.
 #
 # The job reads a copy of every config file made at launch (${OUT}/configs/<run>-<time>/), so an edit
@@ -34,8 +39,17 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-[[ $# -ge 1 && -f "$1" ]] || { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 1; }
-TASK="$(realpath "$1")"; shift
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 1; }
+[[ $# -ge 1 ]] || usage
+# An expert name or folder stands for that expert's base.yaml.
+if [[ -f "$1" ]]; then TASK="$1"
+elif [[ -d "$1" && -f "$1/base.yaml" ]]; then TASK="$1/base.yaml"
+elif [[ -f "${ROOT}/experts/$1/base.yaml" ]]; then TASK="${ROOT}/experts/$1/base.yaml"
+else echo "ERROR: $1 is neither a task file nor an expert ($(cd "${ROOT}/experts" && ls -d */ | tr -d / | tr '\n' ' '))" >&2; exit 1
+fi
+TASK="$(realpath "${TASK}")"; shift
+# The run settings every expert shares; taken by tasks in the expert layout (with a `recipe:` key).
+MAIN="${ROOT}/experts/main.yaml"
 APERTUS2_DIR="${ROOT}/backends/nemo-rl/apertus2"
 source "${ROOT}/sites/load.sh" && rl_infra_load "${APERTUS2_DIR}/env"
 source "${ROOT}/backends/nemo-rl/config.sh"
@@ -43,10 +57,14 @@ TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
 # The NeMo-RL clone may not exist yet (setup.sh below makes it); its files hold no rl-infra keys.
 export CONFIG_SKIP_MISSING_NEMO_RL=1
 
-# --- rl-infra keys of the task
+# --- rl-infra keys of the task (with experts/main.yaml under it in the expert layout)
 config_resolve "${TASK}" "${TMP}/task.yaml"
 task_key() { local v; v="$(yq r "${TMP}/task.yaml" "$1")"; [[ "${v}" == null ]] && v=""; echo "${v}"; }
 TASK_RECIPE="$(task_key recipe)"
+if [[ -n "${TASK_RECIPE}" ]]; then
+    printf 'defaults:\n  - %s\n  - %s\n' "${MAIN}" "${TASK}" > "${TMP}/with-main.yaml"
+    config_resolve "${TMP}/with-main.yaml" "${TMP}/task.yaml"
+fi
 CONTEXT="$(task_key context)"
 SIZE="${SIZE:-$(task_key size)}"
 DEBUG="${DEBUG:-0}"; DRY_RUN="${DRY_RUN:-0}"
@@ -61,9 +79,9 @@ fi
 
 # --- run name and W&B
 if [[ -z "${RUN:-}" ]]; then
-    # experts/stem/dev/mix-a.yaml -> stem-dev-mix-a-<time>
+    # experts/stem/base.yaml -> stem-<time>, experts/stem/dev/mix-a.yaml -> stem-dev-mix-a-<time>
     if [[ "${TASK}" == "${ROOT}/experts/"* ]]; then name="${TASK#"${ROOT}"/experts/}"; else name="$(basename "${TASK}")"; fi
-    name="${name%.yaml}"
+    name="${name%.yaml}"; name="${name%/base}"
     RUN="${name//\//-}-$(date +%Y%m%d-%H%M%S)"
 fi
 [[ "${DEBUG}" == 1 && "${RUN}" != *-DEBUG ]] && RUN="${RUN}-DEBUG"
@@ -84,8 +102,14 @@ if [[ -n "${RECIPE:-}" || -n "${TASK_RECIPE}" ]]; then
     if [[ -n "${RECIPE:-}" ]]; then R="$(realpath "${RECIPE}")"; else R="${ROOT}/${TASK_RECIPE}"; fi
     [[ -f "${R}" ]] || { echo "ERROR: recipe ${R} not found" >&2; exit 1; }
     config_freeze "${R}" "${DIR}"; parents+=("${FROZEN}")
-    # Older layout: the task names its recipe in `defaults`, which RECIPE replaces.
-    if [[ -z "${TASK_RECIPE}" ]]; then config_freeze "${TASK}" "${DIR}" nodefaults; else config_freeze "${TASK}" "${DIR}"; fi
+    if [[ -n "${TASK_RECIPE}" ]]; then
+        # Expert layout: recipe, then the shared run settings, then the expert's files.
+        config_freeze "${MAIN}" "${DIR}"; parents+=("${FROZEN}")
+        config_freeze "${TASK}" "${DIR}"
+    else
+        # Older layout: the task names its recipe in `defaults`, which RECIPE replaces.
+        config_freeze "${TASK}" "${DIR}" nodefaults
+    fi
 else
     R="(the task's defaults)"
     config_freeze "${TASK}" "${DIR}"

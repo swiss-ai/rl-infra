@@ -1,5 +1,5 @@
 #!/bin/bash
-# Download the judge model to scratch; experts/chat/ultrafeedback-rubric.yaml reads it from there. Safe to
+# Download the judge model to scratch; experts/chat/archive/ultrafeedback-rubric.yaml reads it from there. Safe to
 # re-run: finished files are skipped. Plain curl, because a login node has no huggingface_hub, and
 # 4 files at a time, because one connection stays near 50 MB/s from Hugging Face on HANGANG.
 #   bash shared/scripts/stage_judge_model.sh [repo] [dest]

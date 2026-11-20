@@ -47,10 +47,10 @@ General chat on the UltraFeedback prompts, rewarded by an LLM judge on rubrics a
 AlpacaEval, on 8 trainer, 4 vLLM and 1 judge node of one job:
 
 ```bash
-python3.12 experts/chat/prepare_ultrafeedback.py $SCRATCH/rubric-judge/ultrafeedback
-python3.12 experts/chat/prepare_alpaca_eval.py $SCRATCH/rubric-judge/alpaca_eval
+python3.12 experts/chat/scripts/prepare_ultrafeedback.py $SCRATCH/rubric-judge/ultrafeedback
+python3.12 experts/chat/scripts/prepare_alpaca_eval.py $SCRATCH/rubric-judge/alpaca_eval
 bash shared/scripts/stage_judge_model.sh
-bash run.sh experts/chat/ultrafeedback-rubric.yaml grpo.max_num_steps=3 grpo.val_at_start=false
+bash run.sh experts/chat/archive/ultrafeedback-rubric.yaml grpo.max_num_steps=3 grpo.val_at_start=false
 ```
 
 The task names its entry `script`, the NeMo Gym one, so `run.sh` also sets up Gym, without touching
@@ -61,7 +61,7 @@ The rubrics and their weights are in the task. Validation is AlpacaEval 2.0's pr
 references and judge prompt with the same judge model, reported as
 `validation/alpaca_eval_simple_agent/reward/mean`. Every rollout is saved to `<checkpoint_dir>/rollouts/`.
 The few-shot prompt is written into the data rows by the two `prepare_*` scripts, so changing
-`experts/chat/ultrafeedback-few-shot.txt` means running them again.
+`experts/chat/scripts/ultrafeedback-few-shot.txt` means running them again.
 
 To see how loaded the judge is, each replica writes its state to `<checkpoint_dir>/judge_stats.jsonl`
 every few seconds. `python3.12 backends/nemo-rl/apertus2/judge_stats.py <file> [start] [end]` sums it
@@ -81,16 +81,16 @@ prompt, so a lenient judge only moves its own prompts. Validation stays on `env.
 AlpacaEval stays comparable with one-judge runs. Each pool writes its own stats file and each agent logs
 its own metrics, so read the reward per agent.
 
-`experts/chat/ultrafeedback-rubric-sft-3judges.yaml` runs three judges on the SFT checkpoint, 16 nodes in all:
+`experts/chat/archive/ultrafeedback-rubric-sft-3judges.yaml` runs three judges on the SFT checkpoint, 16 nodes in all:
 Qwen and Gemma 4 on one node each, and Nemotron 3 Super as one replica across two.
-`experts/chat/ultrafeedback-rubric-sft-2judges.yaml` leaves Nemotron out, on 14 nodes. After the data steps at
-the top of `experts/chat/ultrafeedback-rubric-sft.yaml`:
+`experts/chat/archive/ultrafeedback-rubric-sft-2judges.yaml` leaves Nemotron out, on 14 nodes. After the data steps at
+the top of `experts/chat/archive/ultrafeedback-rubric-sft.yaml`:
 
 ```bash
 bash shared/scripts/stage_judge_model.sh
 HF_REPO=google/gemma-4-26B-A4B-it CHECK_SCRIPT=download_model.sh bash backends/nemo-rl/apertus2/check_env_job.sh
 HF_REPO=nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8 CHECK_SCRIPT=download_model.sh bash backends/nemo-rl/apertus2/check_env_job.sh
-bash run.sh experts/chat/ultrafeedback-rubric-sft-3judges.yaml grpo.max_num_steps=3
+bash run.sh experts/chat/archive/ultrafeedback-rubric-sft-3judges.yaml grpo.max_num_steps=3
 ```
 
 The commands of the full runs are in `experiments/runs.md`. Nemotron's first start builds its kernels
@@ -118,20 +118,23 @@ across nodes needs the three settings in the Nemotron block, or vLLM hangs at st
 ## Task files, recipes, node tiers and context
 
 ```
-experts/<expert>/       what to train on, one folder per RL expert (experts/README.md): medical, safety, chat,
-                        stem, code, knowledge, tool-use, translation, lean (four of them templates so far)
-  base.yaml             every dataset, environment and validation set of the expert, defined once
-  main.yaml             the official run (defaults: base.yaml)
-  dev/<name>.yaml       development variants (defaults: ../main.yaml), e.g. another mix or thinking level
-  archive/              earlier run files, kept as they ran
+experts/                what to train on (experts/README.md)
+  main.yaml             run settings every expert shares (checkpoints, rollout dump, validation, default tier/time)
+  <expert>/             medical, safety, chat, stem, code, knowledge, tool-use, translation, lean
+    base.yaml           the expert's official run: datasets, environments, validation, recipe, context, its steps
+    dev/<name>.yaml     variants in progress (defaults: ../base.yaml), e.g. another mix or thinking level
+    archive/            task files of runs that happened, as they ran (to reproduce them)
+    scripts/            data builders and checks of the expert
 shared/                 pieces task files take in: frames/ (system frames: thinking level, tools),
-                        judges/llm-judge.yaml, scripts/ (judge download, few-shot removal), debug/
+                        judges/llm-judge.yaml, prompts/ (few-shot), scripts/ (judge download, few-shot removal), debug/
 recipes/                model and algorithm (SFT export, lr, loss, async, FP8, optimizer)
 sizes/                  node tiers: cheap (8 trainer + 16 vLLM), expensive (16 + 32), ultra (32 + 64, batch x2)
 backends/nemo-rl/apertus2/contexts.tsv   CP, packing and memory per context length
 ```
 
-A run is `bash run.sh <task file> [overrides]`. Besides NeMo-RL settings, a task file holds rl-infra
+A run is `bash run.sh <expert> [overrides]` (the expert's `base.yaml`) or `bash run.sh <task file>
+[overrides]` (a dev or archive file); `run.sh` puts `experts/main.yaml` between the recipe and the
+expert's files. Besides NeMo-RL settings, a task file holds rl-infra
 keys, inherited through `defaults` like any other key: `recipe` (a file under `recipes/`), `context`
 (longest prompt + answer), `size` (a tier in `sizes/`), `job_time`, `pydeps` and `script`. From them
 `run.sh` derives the node counts (tier nodes plus the task's judge nodes), the batch (scaled by the
@@ -141,10 +144,10 @@ use), and the checkpoint deadline 30 minutes before `job_time`. `RECIPE`, `SIZE`
 environment replace the task's values, and overrides on the command line win over everything.
 
 ```bash
-bash run.sh experts/stem/main.yaml                   # full run; refuses to start without W&B (site.env)
-DEBUG=1 bash run.sh experts/stem/main.yaml           # debug run: name ends in -DEBUG, 3 steps, no validation,
+bash run.sh stem                                  # full run; refuses to start without W&B (site.env)
+DEBUG=1 bash run.sh stem                          # debug run: name ends in -DEBUG, 3 steps, no validation,
                                                   # no checkpoints, 2 hours (the command line can change each)
-DRY_RUN=1 bash run.sh experts/stem/main.yaml         # shows nodes, context, overrides, config copies, preflight
+DRY_RUN=1 bash run.sh stem                        # shows nodes, context, overrides, config copies, preflight
                                                   # and the sbatch command; no setup, no job (also with DEBUG=1)
 SIZE=ultra bash run.sh experts/stem/dev/<name>.yaml
 ```

@@ -1,8 +1,13 @@
-# STEM expert: every dataset, environment and validation set, defined once. Run files (main.yaml, dev/*.yaml) take
-# this as `defaults` and change what they need: the shares of a step (data.num_prompts_per_dataloader), the thinking
-# level of each dataset (frames), steps, checkpoints, context and node tier.
+# STEM expert, its official run: every dataset, environment and validation set, and the run settings of STEM
+# (run 5's mix: 512 prompts per step, 96 each from DAPO, NuminaMath, multiple choice and openqa, 32 each from Reasoning
+# Gym, Enigmata, ScienceWorld and chemistry; 135 steps, 32K context, thinking high everywhere, expensive tier).
+#   bash run.sh stem            full run (W&B); DEBUG=1 for a short debug run, DRY_RUN=1 to see it first
+# run.sh layers experts/main.yaml (settings every expert shares) under this file. Development variants go to dev/
+# with `defaults: ../base.yaml` and change what they need: the shares of a step (data.num_prompts_per_dataloader),
+# the thinking level of each dataset (frames), steps, context, tier. A variant that wins moves its changes here; a
+# finished run's file goes to archive/.
 #
-# Training data (8 datasets, ${oc.env:RL_DATA_DIR}/stem-rl, prepared by experts/stem/prepare_*.py and the handovers):
+# Training data (8 datasets, ${oc.env:RL_DATA_DIR}/stem-rl, prepared by experts/stem/scripts/prepare_*.py and the handovers):
 #   DAPOMath17K                      DAPO-Math-17K, deduplicated              math environment, claim frame
 #   run3-numina_clean                cleaned NuminaMath-1.5                   math environment, claim frame
 #   run3-mcqa_science_cs             science + CS multiple choice             math_default (option letter in claim)
@@ -20,6 +25,8 @@ recipe: recipes/apertus2-chonk-sftv02-grpo.yaml
 # Reasoning Gym's scorers in the pydeps overlay (run.sh).
 pydeps: reasoning_gym
 context: 32768
+size: expensive
+job_time: 2-00:00:00
 
 # Thinking level per dataset: the system frame its prompts start with. The data entries below refer to these keys,
 # so a run file changes a level by overriding one key here. ScienceWorld's frame also declares the act tool.
@@ -30,13 +37,18 @@ frames:
   scienceworld: ${oc.env:RL_INFRA_DIR}/shared/frames/apertus2-system-sciworld-act-high.json
 
 grpo:
+  # Enigmata's 4,002 rows run out at step 125 and its dataloader restarts.
+  max_num_steps: 135
   max_num_epochs: 1
-  val_period: 20
   # 960 AIME + 1,584 GPQA-Diamond + 246 chemistry.
   val_batch_size: 2790
   max_val_samples: 2790
   # ScienceWorld turns (at most 50 actions per episode); the single-turn environments end after one.
   max_rollout_turns: 60
+
+checkpointing:
+  # The last 10 checkpoints kept (experts/main.yaml keeps 3).
+  keep_top_k: 10
 
 data:
   _override_: true

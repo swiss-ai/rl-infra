@@ -1,7 +1,7 @@
 # Long context: GRPO at 32K, 64K and 128K tokens
 
 GRPO on the SFT v0.2 checkpoint of Apertus 2 "Chonk" with a context limit of 32K, 64K and 128K tokens instead of 16K,
-on KISTI HANGANG (November 2026). Two task families: the STEM mix (`bash run.sh experts/stem/main.yaml`, which sets the
+on KISTI HANGANG (November 2026). Two task families: the STEM mix (`bash run.sh stem`, which sets the
 context with its `context:` key) and competitive coding on Gym's `code_gen` (`launch-code-ctx.sh`). Results and run
 commands are in `../runs.md`; commands there that name `launch-stem-ctx.sh` refer to the commit before the
 restructure, where that launcher still exists.
@@ -13,7 +13,7 @@ restructure, where that launcher still exists.
 | NeMo-RL patches 0040-0046 | `backends/nemo-rl/apertus2/patches/nemo-rl/`, applied by `setup.sh` like the others |
 | Ray on Slingshot by default | `sites/hangang.env` (`RAY_NODE_NAME_SUFFIX=-hsn0`, read by patch 0041) |
 | KCP context parallelism, for more than 4 context-parallel ranks | `backends/nemo-rl/apertus2/kcp/`: run.sh sets it up and uses it for a context above 32K (`contexts.tsv`); `launch-code-ctx.sh` with `KCP=1` |
-| STEM task files | `experts/stem/` (`base.yaml`, `main.yaml`, `dev/`; the earlier run files in `archive/`) |
+| STEM task files | `experts/stem/` (`base.yaml`, `dev/`, `archive/`, `scripts/`) |
 | Code sandbox node, for coding | `backends/nemo-rl/sandbox/start.sh`, then `SANDBOX=<endpoint file>` |
 | W&B key | `WANDB_KEY_FILE` (default `~/.wandb_api_key`); a full run (`DEBUG=0`) refuses to start without it |
 

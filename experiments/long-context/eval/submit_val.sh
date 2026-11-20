@@ -1,7 +1,7 @@
 #!/bin/bash
 # bash submit_val.sh <HF export dir> <step> <name> [gen nodes, default 8]
 # One evaluation job with vLLM only (run_val.py): <gen nodes> vLLM nodes plus the judge node when the open-QA set is
-# included. Container, mounts and environment come from a dry run of run.sh experts/stem/main.yaml (run 5's mix) and the
+# included. Container, mounts and environment come from a dry run of run.sh stem (run 5's mix) and the
 # NeMo-RL clone of setup.sh (patches 0045 and 0046 load the export into vLLM), so the job sees exactly what run 5 at 32K saw. Ray on Slingshot.
 #   SETS=aime25,math500,...  subset of run_val.py's sets (default all)     LIMIT=N  first N rows of every set (debug)
 #   THINKING=high (default, the user's rule since 2026-11-19) or medium: the system frame of every set; the level is
@@ -23,7 +23,7 @@ SETS=${SETS:-aime25,aime26,math500,mmlu_pro,reasoning_gym,enigmata,scienceworld,
 JUDGE=0; [[ ",${SETS}," == *",openqa,"* ]] && JUDGE=1
 OUT=${SCRATCH}/long-context
 DRY=${OUT}/dry-val-${NAME}.txt
-env DEBUG=1 NEMO_RL_DIR=${CLONE} RUN=val-dry DRY_RUN=1 bash ${HERE}/../../../run.sh ${HERE}/../../../experts/stem/main.yaml > "${DRY}" 2>&1
+env DEBUG=1 NEMO_RL_DIR=${CLONE} RUN=val-dry DRY_RUN=1 bash ${HERE}/../../../run.sh stem > "${DRY}" 2>&1
 grep -q "DRY_RUN: site" "${DRY}" || { echo "ERROR: the dry run printed no settings, see ${DRY}" >&2; exit 1; }
 while IFS= read -r line; do
     line="${line#"${line%%[![:space:]]*}"}"

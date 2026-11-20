@@ -1,6 +1,6 @@
 # Repository map
 
-Every file of the repository and its role (347 files, branch `restructure`, 2026-11-20). Roles:
+Every file of the repository and its role (359 files, branch `restructure`, 2026-11-20). Roles:
 **run** = used by every training run, **setup** = prepares sources, images, models or data,
 **check** = a test or probe before or after a run, **tool** = analysis of a finished run,
 **history** = kept as the record of past runs, not used by new ones.
@@ -8,7 +8,7 @@ Every file of the repository and its role (347 files, branch `restructure`, 2026
 ## How a run passes through the files
 
 ```
-bash run.sh experts/stem/main.yaml
+bash run.sh stem      (experts/main.yaml + experts/stem/base.yaml)
  └ run.sh ─ sites/load.sh (sites/hangang.env, site.env, backends/nemo-rl/apertus2/env, backends/nemo-rl/env)
    ├ backends/nemo-rl/config.sh       merges the task's defaults chain, copies every config file for the job
    ├ sizes/<tier>.yaml                node counts and batch scale
@@ -48,29 +48,29 @@ bash run.sh experts/stem/main.yaml
 
 ## `experts/` (what to train on, one folder per RL expert)
 
+Every expert folder has `base.yaml` (its official run), `dev/` (variants), `archive/` (task files of runs that
+happened, as they ran) and `scripts/` (data builders and checks); empty folders hold a `.gitkeep`.
+
 | File | Role | Purpose |
 |---|---|---|
-| `stem/base.yaml` | run | STEM: 8 training sets, 3 validation sets, all environments, judge node, thinking level per dataset (`frames`) |
-| `stem/main.yaml` | run | STEM official run: run 5's mix, 135 steps, 32K, thinking high, checkpoints, text rollouts, expensive tier |
-| `stem/dev/run5-32k-job1299180.yaml` | run | Reproduces job 1299180 (thinking medium except Reasoning Gym and chemistry) |
-| `stem/dev/chem-rdkit-sft.yaml`, `stem/dev/reasoning-gym-sft.yaml` | run | Single-environment tasks: chemistry alone, Reasoning Gym alone (older layout: recipe in `defaults`) |
-| `stem/archive/stem-mix-run1.yaml` … `run5.yaml`, `-run3-base`, `-run3-sciworld`, `-enigmata`, `-openqa-judge` | history | Task files of the STEM runs 1-5 and their single-environment trials, as they ran |
-| `stem/prepare_chem_rdkit.py`, `stem/gen_chem_rdkit.py` | setup | Chemistry rows (from Antonio's generator; a template generator of our own) |
-| `stem/prepare_reasoning_gym.py` | setup | Reasoning Gym rows from nvidia/Nemotron-RL-ReasoningGym-v1 |
-| `stem/stem-mix-four-shot.txt` | history | Few-shot prompt of runs 1-2 (pretraining checkpoint) |
+| `main.yaml` | run | Run settings every expert shares (checkpoints, rollout dump, validation period, default tier and time); run.sh puts it under an expert's files |
+| `README.md` | doc | The layout and the experts with their status |
+| `stem/base.yaml` | run | STEM official run: 8 training sets, 3 validation sets, all environments, thinking level per dataset (`frames`), 135 steps, 32K, expensive tier |
 | `stem/dev/gsm8k.yaml`, `stem/dev/dapo-math.yaml` | run | GSM8K and DAPO-Math on the pretraining checkpoint (the quick start) |
-| `stem/dev/gsm8k-sft.yaml`, `stem/dev/dapo-math-sft.yaml`, `stem/dev/dapo-gsm8k-sft.yaml` | run | The same on an SFT checkpoint; DAPO + GSM8K 70/30 mix |
-| `stem/gsm8k-five-shot.txt` | run | Few-shot prompt of the pretraining-checkpoint GSM8K task |
-| `code/code-gen-sft.yaml`, `code/code-gen-osb-sft.yaml` | run | Competitive coding on Gym's code_gen, tests on a sandbox node or on OpenSandbox pods |
-| `code/harbor-osb-sft.yaml`, `code/harbor-verified-sft.yaml` | run | Harbor terminal/SWE tasks with Terminus-2 on OpenSandbox |
-| `code/collect_harbor_verified_tasks.py`, `prepare_harbor_osb_dataset.py`, `prepare_harbor_verified_tasks.sh` | setup | Harbor task sets |
-| `code/make_micro_tasks.py`, `code/validate_micro_tasks.py` | check | Harbor micro-tasks for plumbing runs; nop/oracle check of tasks on real pods |
-| `tool-use/workplace-assistant-sft.yaml` | run | Tool calls on Gym's workplace assistant (27 simulated tools) |
-| `chat/ultrafeedback-rubric.yaml`, `-sft.yaml`, `-sft-2judges.yaml`, `-sft-3judges.yaml` | run | General chat rewarded by one, two or three LLM judges on rubrics, AlpacaEval validation |
-| `chat/prepare_ultrafeedback.py`, `chat/prepare_alpaca_eval.py`, `chat/ultrafeedback-few-shot.txt` | setup | Rows and few-shot prompt of the rubric tasks |
-| `lean/lean-sft.yaml` | run | Lean 4 proving with Gym math_formal_lean |
-| `medical/`, `safety/`, `knowledge/`, `translation/` (`base.yaml`, `main.yaml`) | template | Placeholders of the experts without tasks yet: medical multiple choice; safety, knowledge and translation graded by the shared judge; `template: true` until filled in |
-| `README.md` | doc | The RL experts and their folders; medical, safety, knowledge and translation are templates |
+| `stem/dev/gsm8k-sft.yaml`, `dapo-math-sft.yaml`, `dapo-gsm8k-sft.yaml` | run | The same on an SFT checkpoint; DAPO + GSM8K 70/30 mix |
+| `stem/dev/chem-rdkit-sft.yaml`, `stem/dev/reasoning-gym-sft.yaml` | run | Single-environment tasks: chemistry alone, Reasoning Gym alone (older layout) |
+| `stem/archive/run5-32k-job1299180.yaml` | history | Run 5 at 32K (job 1299180) in the expert layout; its merged config equals the run's |
+| `stem/archive/stem-mix-run1.yaml` … `run5.yaml`, `-run3-base`, `-run3-sciworld`, `-enigmata`, `-openqa-judge` | history | Task files of the STEM runs 1-5 and their trials, as they ran |
+| `stem/scripts/prepare_chem_rdkit.py`, `gen_chem_rdkit.py`, `prepare_reasoning_gym.py` | setup | Chemistry and Reasoning Gym rows |
+| `code/base.yaml`, `chat/base.yaml`, `tool-use/base.yaml`, `lean/base.yaml` | template | Take the latest archived run through `defaults` until written; `template: true` |
+| `code/archive/code-gen-sft.yaml`, `code-gen-osb-sft.yaml` | history | Competitive coding on Gym's code_gen, tests on a sandbox node or on OpenSandbox pods |
+| `code/archive/harbor-osb-sft.yaml`, `harbor-verified-sft.yaml` | history | Harbor terminal/SWE tasks with Terminus-2 on OpenSandbox |
+| `code/scripts/` (5 files) | setup / check | Harbor task sets; micro-tasks and their nop/oracle check on real pods |
+| `chat/archive/ultrafeedback-rubric.yaml`, `-sft.yaml`, `-sft-2judges.yaml`, `-sft-3judges.yaml` | history | General chat rewarded by one, two or three LLM judges on rubrics, AlpacaEval validation |
+| `chat/scripts/prepare_ultrafeedback.py`, `prepare_alpaca_eval.py`, `ultrafeedback-few-shot.txt` | setup | Rows and few-shot prompt of the rubric tasks |
+| `tool-use/archive/workplace-assistant-sft.yaml` | history | Tool calls on Gym's workplace assistant (27 simulated tools) |
+| `lean/archive/lean-sft.yaml` | history | Lean 4 proving with Gym math_formal_lean |
+| `medical/`, `safety/`, `knowledge/`, `translation/` `base.yaml` | template | Placeholders: medical multiple choice; safety, knowledge and translation graded by the shared judge |
 
 ## `shared/` (pieces the task files take in; not experts)
 
@@ -79,6 +79,7 @@ bash run.sh experts/stem/main.yaml
 | `frames/apertus2-system.json`, `-high.json` | run | System frame of the Apertus 2 format: thinking medium, high |
 | `frames/apertus2-system-sciworld-act.json`, `-high.json` | run | The same with ScienceWorld's `act` tool declared |
 | `judges/llm-judge.yaml` | run | The LLM judge environment and its node (gemma-4-26B-A4B), taken in by STEM and the judge-based templates |
+| `prompts/gsm8k-five-shot.txt`, `stem-mix-four-shot.txt` | run / history | Few-shot prompts read at run time (GSM8K on the pretraining checkpoint; STEM runs 1-2) |
 | `scripts/stage_judge_model.sh` | setup | Downloads a judge model to scratch |
 | `scripts/strip_few_shot.py` | setup | Removes the few-shot prompt from prepared Gym rows (for SFT checkpoints) |
 | `debug/score-text.yaml` | check | Teacher-forced log-probabilities of plain text (not a training task) |
@@ -152,7 +153,7 @@ Most recipes are a chain of small files ending in `experiments/grpo-chonk/` and 
 
 - `experiments/grpo-chonk/stage_model.sh` is part of every run but lives in an experiment folder.
 - `experiments/long-context/launch-code-ctx.sh` duplicates `run.sh` for coding (sandbox job, KCP, node
-  layouts); the code domain needs `experts/code/base.yaml`/`main.yaml` and tiers like STEM.
+  layouts); the code expert needs its `experts/code/base.yaml` written (now a template) and tiers like STEM.
 - `experiments/enigmata/launch.sh`, `scienceworld/launch.sh`, `debug16.sh`, `probe.sh`,
   `trainer-memory/launch.sh`: more launchers with their own variables.
 - `experiments/long-context/tools/` are general run-analysis tools, not long-context ones.

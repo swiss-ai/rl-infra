@@ -1,0 +1,24 @@
+# Run settings every expert shares. run.sh puts this file between the recipe and the expert's own files:
+#   bash run.sh <expert>                  recipe, then this file, then experts/<expert>/base.yaml
+#   bash run.sh experts/<expert>/dev/x.yaml   recipe, then this file, then base.yaml and the dev file
+# so an expert's base.yaml (its official run) and a dev file override any of it. Task files in the older layout
+# (archive/ files that name their recipe in `defaults`) do not take it and run as they ran.
+size: cheap
+job_time: "12:00:00"
+
+grpo:
+  val_period: 20
+
+checkpointing:
+  # Weights only (no optimizer state), every 20 steps; run.sh sets the deadline 30 minutes before job_time.
+  enabled: true
+  save_period: 20
+  keep_top_k: 3
+  metric_name: null
+  save_optimizer: false
+
+env:
+  # Every step's rollouts as text (prompt, answer, reward, length) without the per-token arrays (NeMo-RL patch
+  # 0043): train_data_step<N>.jsonl in the log directory, about 200 MB per step at 32K.
+  should_log_nemo_gym_responses: false
+  train_dump_text_only: true

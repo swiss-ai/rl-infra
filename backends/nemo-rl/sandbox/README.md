@@ -12,7 +12,7 @@ mounts `/scratch` into every container.
 ```bash
 GYM_DIR=$NEMO_RL_DIR/3rdparty/Gym-workspace/Gym bash setup.sh   # once, on the login node: only copies files
 JOB_TIME=06:00:00 bash start.sh                                 # one node, as a job of its own
-bash ../../../run.sh ../../../experts/code/code-gen-sft.yaml            # reads $SCRATCH/code-sandbox/endpoint.json
+bash ../../../run.sh ../../../experts/code/archive/code-gen-sft.yaml            # reads $SCRATCH/code-sandbox/endpoint.json
 ```
 
 `setup-data.sh` downloads the dataset and writes the two files the task reads. It has no default row

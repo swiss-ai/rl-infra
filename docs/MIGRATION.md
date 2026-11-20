@@ -8,8 +8,9 @@ to follow, and the steps to move one over. `docs/repository-map.md` describes th
 
 | Area | Before | Now |
 |---|---|---|
-| Task files | `envs/<task>.yaml`, all side by side | `experts/<expert>/`: one folder per RL expert (medical, safety, chat, stem, code, knowledge, tool-use, translation, lean); inside: `base.yaml`, `main.yaml`, `dev/`, `archive/` (`experts/README.md`) |
-| Shared pieces | `envs/apertus2-system*.json`, `envs/stage_judge_model.sh`, ... | `shared/frames/`, `shared/judges/llm-judge.yaml`, `shared/scripts/`, `shared/debug/` |
+| Task files | `envs/<task>.yaml`, all side by side | `experts/<expert>/`: one folder per RL expert (medical, safety, chat, stem, code, knowledge, tool-use, translation, lean); inside: `base.yaml` (the official run), `dev/`, `archive/` (runs as they ran), `scripts/` (data builders); `experts/main.yaml` holds the run settings all experts share (`experts/README.md`) |
+| Launch command | `bash run.sh envs/<task>.yaml` or a launcher | `bash run.sh <expert>` (the expert's `base.yaml` with `experts/main.yaml` under it), `bash run.sh experts/<expert>/dev/<file>.yaml`, `bash run.sh experts/<expert>/archive/<file>.yaml` |
+| Shared pieces | `envs/apertus2-system*.json`, `envs/stage_judge_model.sh`, ... | `shared/frames/`, `shared/judges/llm-judge.yaml`, `shared/prompts/`, `shared/scripts/`, `shared/debug/` |
 | Launch settings | launcher variables (`CP`, `CAP`, `GEN_NODES`, `STEPS`, `SAVE_BY`, ...) in a launcher per experiment | rl-infra keys in the task file (`recipe`, `context`, `size`, `job_time`, `template`) read by `run.sh`; Hydra overrides on the command line |
 | Node layouts | one recipe per node split | node tiers in `sizes/` (cheap 8+16, expensive 16+32, ultra 32+64 with batch x2); judge nodes come from the task |
 | Context length | `CP`, `KCP`, `CAP`, packing set by hand | `context:` in the task; `backends/nemo-rl/apertus2/contexts.tsv` gives CP, KCP, packing and memory fraction (the next row up: 50K gets the 64K settings) |
@@ -51,11 +52,13 @@ them refer to the commit before the restructure (`965e15c` on main, `f1ec52e` on
 
 1. **Rebase or merge onto `restructure`** (main once it is merged). Git follows the renames for files you edited;
    expect conflicts in `experiments/runs.md`, `README.md` and `run.sh`.
-2. **Move the task files you added** into the expert they train (`experts/README.md`): an official run as `main.yaml`
-   (or a variant in `dev/`), a finished run's file in `archive/`. Then fix the paths in them:
+2. **Move the task files you added** into the expert they train (`experts/README.md`): a variant in `dev/`
+   (`defaults: ../base.yaml` in the expert layout), a finished run's file in `archive/` (as it ran), data builders in
+   `scripts/`. What becomes the expert's official run goes into its `base.yaml`; settings all experts share go into
+   `experts/main.yaml`, not into each expert. Then fix the paths in the moved files:
    ```bash
-   # recipe one level deeper (two levels in dev/ and archive/)
-   sed -i 's#^defaults: \.\./recipes/#defaults: ../../recipes/#' experts/<expert>/<task>.yaml
+   # recipe two levels deeper in dev/ and archive/
+   sed -i 's#^defaults: \.\./recipes/#defaults: ../../../recipes/#' experts/<expert>/<dev or archive>/<task>.yaml
    # shared pieces
    sed -i -e 's#/envs/apertus2-system#/shared/frames/apertus2-system#g' \
           -e 's#envs/stage_judge_model\.sh#shared/scripts/stage_judge_model.sh#g' \
@@ -110,16 +113,18 @@ The NeMo-RL clones of these branches may also hold commits that are not patches 
 | `envs/stem-mix-run1.yaml` … `stem-mix-run5.yaml`, `stem-mix-run3-base.yaml`, `stem-mix-run3-sciworld.yaml`, `stem-mix-enigmata.yaml`, `stem-mix-openqa-judge.yaml` | `experts/stem/archive/` |
 | `envs/gsm8k.yaml`, `gsm8k-sft.yaml`, `dapo-math.yaml`, `dapo-math-sft.yaml`, `dapo-gsm8k-sft.yaml` | `experts/stem/dev/` |
 | `envs/chem-rdkit-sft.yaml`, `reasoning-gym-sft.yaml` | `experts/stem/dev/` |
-| `envs/gsm8k-five-shot.txt`, `stem-mix-four-shot.txt`, `prepare_chem_rdkit.py`, `gen_chem_rdkit.py`, `prepare_reasoning_gym.py` | `experts/stem/` |
-| `envs/code-gen-sft.yaml`, `code-gen-osb-sft.yaml`, `harbor-osb-sft.yaml`, `harbor-verified-sft.yaml` | `experts/code/` |
-| `envs/collect_harbor_verified_tasks.py`, `prepare_harbor_osb_dataset.py`, `prepare_harbor_verified_tasks.sh`, `make_micro_tasks.py`, `validate_micro_tasks.py` | `experts/code/` |
-| `envs/ultrafeedback-rubric.yaml`, `-sft.yaml`, `-sft-2judges.yaml`, `-sft-3judges.yaml`, `ultrafeedback-few-shot.txt`, `prepare_ultrafeedback.py`, `prepare_alpaca_eval.py` | `experts/chat/` |
-| `envs/workplace-assistant-sft.yaml` | `experts/tool-use/` |
-| `envs/lean-sft.yaml` | `experts/lean/` |
+| `envs/prepare_chem_rdkit.py`, `gen_chem_rdkit.py`, `prepare_reasoning_gym.py` | `experts/stem/scripts/` |
+| `envs/gsm8k-five-shot.txt`, `stem-mix-four-shot.txt` | `shared/prompts/` |
+| `envs/code-gen-sft.yaml`, `code-gen-osb-sft.yaml`, `harbor-osb-sft.yaml`, `harbor-verified-sft.yaml` | `experts/code/archive/` |
+| `envs/collect_harbor_verified_tasks.py`, `prepare_harbor_osb_dataset.py`, `prepare_harbor_verified_tasks.sh`, `make_micro_tasks.py`, `validate_micro_tasks.py` | `experts/code/scripts/` |
+| `envs/ultrafeedback-rubric.yaml`, `-sft.yaml`, `-sft-2judges.yaml`, `-sft-3judges.yaml` | `experts/chat/archive/` |
+| `envs/ultrafeedback-few-shot.txt`, `prepare_ultrafeedback.py`, `prepare_alpaca_eval.py` | `experts/chat/scripts/` |
+| `envs/workplace-assistant-sft.yaml` | `experts/tool-use/archive/` |
+| `envs/lean-sft.yaml` | `experts/lean/archive/` |
 | `envs/apertus2-system.json`, `-high.json`, `-sciworld-act.json`, `-sciworld-act-high.json` | `shared/frames/` |
 | `envs/stage_judge_model.sh`, `envs/strip_few_shot.py` | `shared/scripts/` |
 | `envs/score-text.yaml` | `shared/debug/` |
 | the judge blocks of `envs/stem-mix-run4.yaml` / `run5.yaml` (`env.llm_judge`, `env.judge_pool`) | `shared/judges/llm-judge.yaml` (taken in with `defaults:`) |
 | `experiments/long-context/setup-kcp.sh`, `experiments/long-context/kcp/` | `backends/nemo-rl/apertus2/kcp/setup.sh`, `kcp/` |
 | `experiments/long-context/recipes/sftv02-stem-*.yaml` | `sizes/` tiers |
-| `experiments/long-context/launch-stem-ctx.sh` | `run.sh experts/stem/main.yaml` (run 5 again: `experts/stem/dev/run5-32k-job1299180.yaml`) |
+| `experiments/long-context/launch-stem-ctx.sh` | `run.sh stem` (run 5 again: `run.sh experts/stem/archive/run5-32k-job1299180.yaml`) |

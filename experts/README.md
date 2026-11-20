@@ -1,29 +1,51 @@
 # RL experts
 
-One folder per RL expert (the domain teachers trained in parallel). Inside a folder: `base.yaml` defines the
-expert's datasets, environments and validation once, `main.yaml` is its official run, `dev/` holds development
-variants and single-environment tasks, `archive/` the run files of earlier runs as they ran. `stem/` and the
-templates of the new experts (medical, safety, knowledge, translation) have this layout; chat, code, tool-use and
-lean still hold one task file per run. A template carries `template: true`, which run.sh refuses to submit; fill in
-its datasets, then delete that key.
+One folder per RL expert (the domain teachers trained in parallel), all with the same layout:
 
-| Expert | Folder | Task files |
+```
+experts/
+  main.yaml          run settings every expert shares: checkpoints, rollout dump, validation period, default tier
+                     and time limit
+  <expert>/
+    base.yaml        the expert's official run: its datasets, environments, validation, recipe, context and
+                     its own run settings (steps, tier, time) where they differ from main.yaml
+    dev/             variants in progress (`defaults: ../base.yaml` plus what they change)
+    archive/         the task files of runs that happened, as they ran: the record to reproduce a run
+    scripts/         data builders and checks of the expert (not read by a run)
+```
+
+```bash
+bash run.sh stem                           # the official STEM run: recipe, main.yaml, stem/base.yaml
+bash run.sh experts/stem/dev/<variant>.yaml   # a variant: recipe, main.yaml, stem/base.yaml, the variant
+bash run.sh experts/stem/archive/<run>.yaml   # a past run again
+```
+
+`run.sh` puts `main.yaml` between the recipe and the expert's files, so `base.yaml` and dev files override any
+of it. Files in `archive/` written in the older layout (recipe in `defaults`) do not take `main.yaml` and run as
+they ran. A variant that wins moves its changes into `base.yaml`; when a run is done, its task file goes to
+`archive/` with the job and the command in its header.
+
+| Expert | Folder | Status |
 |---|---|---|
-| Medical | `medical/` | template: medical multiple choice (`base.yaml`, `main.yaml`) |
+| Medical | `medical/` | template: medical multiple choice |
 | Safety | `safety/` | template: prompts graded by the shared LLM judge |
-| General chat, helpfulness, instruction following | `chat/` | UltraFeedback prompts rewarded by one, two or three LLM judges on rubrics, AlpacaEval validation |
-| STEM: math, reasoning, physics, chemistry | `stem/` | `main.yaml` (8-dataset mix of run 5), GSM8K and DAPO-Math, Reasoning Gym and chemistry alone (`dev/`), runs 1-5 (`archive/`) |
-| Code, SWE, terminal, agentic | `code/` | competitive coding on Gym's code_gen (sandbox node or OpenSandbox pods), Harbor terminal/SWE tasks with Terminus-2 |
+| General chat, helpfulness, instruction following | `chat/` | template on the archived rubric-judge runs (UltraFeedback, one to three judges, AlpacaEval validation) |
+| STEM: math, reasoning, physics, chemistry | `stem/` | `base.yaml`: the 8-dataset mix of run 5; GSM8K, DAPO-Math, Reasoning Gym and chemistry alone in `dev/`; runs 1-5 in `archive/` |
+| Code, SWE, terminal, agentic | `code/` | template on the archived runs: competitive coding on Gym's code_gen (sandbox node or OpenSandbox pods), Harbor terminal/SWE tasks |
 | Knowledge, factuality, QA | `knowledge/` | template: open QA (judge) and multiple choice; the STEM mix already trains science multiple choice and open science QA |
-| Tool use, web search | `tool-use/` | Gym's workplace assistant (27 simulated tools) |
+| Tool use, web search | `tool-use/` | template on the archived workplace-assistant run (27 simulated tools) |
 | Translation | `translation/` | template: translations graded by the shared LLM judge |
-| Lean (formal proofs) | `lean/` | Lean 4 proving with Gym math_formal_lean |
+| Lean (formal proofs) | `lean/` | template on the archived Lean 4 run (Gym math_formal_lean) |
 
-What several experts take in lives in `shared/` at the top of the repository, not here:
+A template carries `template: true`, which `run.sh` refuses to submit (`DRY_RUN=1` shows it). The templates of
+chat, code, tool-use and lean take their latest archived run through `defaults` until their `base.yaml` is written.
+
+What several experts take in lives in `shared/` at the top of the repository:
 - `shared/frames/`: the system frame every prompt of the Apertus 2 message format starts with, as small JSON files:
   the thinking level (`{"thinking":"high","tools":[]}`) and the tools the model may call (ScienceWorld's `act`). A
-  dataset picks one with `system_prompt_file`; in the base/main layout through `frames.<key>`.
+  dataset picks one with `system_prompt_file`; in `base.yaml` through `frames.<key>`.
 - `shared/judges/llm-judge.yaml`: the judge environment and its node, taken in with
   `defaults: ../../shared/judges/llm-judge.yaml`.
+- `shared/prompts/`: few-shot prompts read at run time (GSM8K five-shot, STEM four-shot).
 - `shared/scripts/`: `stage_judge_model.sh` (downloads the judge model), `strip_few_shot.py` (removes the few-shot
   prompt from prepared Gym rows); `shared/debug/score-text.yaml`, a log-probability debug task.

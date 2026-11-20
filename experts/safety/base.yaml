@@ -1,6 +1,6 @@
 # Safety expert: every dataset, environment and validation set, defined once. TEMPLATE: the datasets below are
 # placeholders. Fill in the TODOs, then delete `template: true` (run.sh refuses to submit a template; DRY_RUN=1
-# shows it). Layout as experts/stem/base.yaml; main.yaml is the official run, dev/*.yaml development variants.
+# shows it). Layout as experts/stem/base.yaml; this file is the official run (bash run.sh safety).
 # Starting point: prompts graded by the shared LLM judge (../../shared/judges/llm-judge.yaml) against a reference answer.
 # TODO: the llm_judge environment asks whether the reply matches the reference; grading harmlessness or refusals
 # needs a judge prompt of its own, or the rubric judge of experts/chat/ (Gym rubric_judge).
@@ -15,7 +15,7 @@ frames:
 
 grpo:
   max_num_epochs: 1
-  val_period: 20
+  max_num_steps: 100            # TODO: steps of the official run
   val_batch_size: 1000           # TODO: number of validation prompts
   max_val_samples: 1000
 

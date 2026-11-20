@@ -180,7 +180,7 @@ Recipes and experiment files:
 | `experts/stem/archive/stem-mix-run3-base.yaml` | STEM mix task: DAPO-Math, NuminaMath, science multiple choice; AIME and GPQA validation |
 | `experiments/grpo-chonk/megachonk-dapo-16k-megatron-128x16-async-fp8-skip-trunc0.yaml`, `recipes/apertus2-megachonk-vllm-adamw-dapo.yaml` | DAPO-Math only with AIME validation, the setup of the pretrained-Chonk AIME runs (not run) |
 | `shared/debug/score-text.yaml` | debug tool: the trainer's log-probabilities of plain text |
-| `experts/stem/stem-mix-four-shot.txt` | four worked examples as a prompt prefix for the STEM mix (not run) |
+| `shared/prompts/stem-mix-four-shot.txt` | four worked examples as a prompt prefix for the STEM mix (not run) |
 
 NeMo-RL changes, as patches applied by `setup.sh` (`backends/nemo-rl/apertus2/patches/nemo-rl/`):
 - `0050`: the `policy.megatron_cfg.distributed_timeout_minutes` key.
