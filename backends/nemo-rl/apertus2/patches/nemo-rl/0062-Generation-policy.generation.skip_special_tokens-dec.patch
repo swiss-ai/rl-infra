@@ -1,0 +1,93 @@
+From b33e93c9bbebdb199185dd69837fb01129aed2d8 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Thu, 19 Nov 2026 08:20:46 +0900
+Subject: [PATCH] Generation: policy.generation.skip_special_tokens decides
+ whether answer text drops special tokens
+
+Apertus 1 tokenizers (Apertus-8B, Apertus-v1.1) mark LaTeX pieces such as \boxed{ and \text{ as special tokens. Answers were always decoded with skip_special_tokens=True, so a math answer lost its \boxed{ and math-verify found no answer (GSM8K reward 0.04 for Apertus-v1.1-0.5B-Instruct, job 1308820). The default stays True.
+---
+ nemo_rl/experience/rollout_manager.py   |  6 +++++-
+ nemo_rl/experience/rollouts.py          | 13 +++++++++++--
+ nemo_rl/models/generation/interfaces.py |  4 ++++
+ 3 files changed, 20 insertions(+), 3 deletions(-)
+
+diff --git a/nemo_rl/experience/rollout_manager.py b/nemo_rl/experience/rollout_manager.py
+index ad149d689..f6bbb6e4b 100644
+--- a/nemo_rl/experience/rollout_manager.py
++++ b/nemo_rl/experience/rollout_manager.py
+@@ -81,6 +81,7 @@ from nemo_rl.experience.rollouts import (
+     _effort_shaping_metrics,
+     _EffortShapingMetrics,
+     _find_routed_experts_template,
++    _skip_special_tokens,
+     _tensorize_by_key,
+     apply_reward_penalties,
+     attach_static_multimodal_payload,
+@@ -809,7 +810,10 @@ class AsyncRolloutImpl:
+ 
+         assistant_message: dict = {
+             "role": "assistant",
+-            "content": self._tokenizer.decode(generated_ids, skip_special_tokens=True),
++            "content": self._tokenizer.decode(
++                generated_ids,
++                skip_special_tokens=_skip_special_tokens(self._policy_generation),
++            ),
+             "token_ids": generated_ids,
+         }
+         if "logprobs" in output:
+diff --git a/nemo_rl/experience/rollouts.py b/nemo_rl/experience/rollouts.py
+index 96b18db49..291ebeca3 100644
+--- a/nemo_rl/experience/rollouts.py
++++ b/nemo_rl/experience/rollouts.py
+@@ -634,6 +634,12 @@ def _effort_shaping_metrics(shaping: _EffortShapingMetrics) -> dict[str, float]:
+     return metrics
+ 
+ 
++def _skip_special_tokens(policy_generation: GenerationInterface) -> bool:
++    """policy.generation.skip_special_tokens (default True): whether decoded answers drop special tokens."""
++    generation_config = getattr(policy_generation, "cfg", None) or {}
++    return bool(generation_config.get("skip_special_tokens", True))
++
++
+ def generate_responses(
+     policy_generation: GenerationInterface,
+     generation_input_data: BatchedDataDict[GenerationDatumSpec],
+@@ -673,7 +679,9 @@ def generate_responses(
+         generated_part = full_output[input_len:total_length]
+         generated_ids.append(generated_part)
+ 
+-    generated_texts = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
++    generated_texts = tokenizer.batch_decode(
++        generated_ids, skip_special_tokens=_skip_special_tokens(policy_generation)
++    )
+ 
+     # Append to message log
+     for i, (text, input_length, total_length) in enumerate(
+@@ -822,7 +830,8 @@ async def generate_responses_async(
+ 
+     # The Apertus 2 frames stay readable in the logged text; rewards read parsed frames.
+     generated_texts = tokenizer.batch_decode(
+-        generated_ids, skip_special_tokens=not is_apertus2
++        generated_ids,
++        skip_special_tokens=not is_apertus2 and _skip_special_tokens(policy_generation),
+     )
+ 
+     # Append to message log
+diff --git a/nemo_rl/models/generation/interfaces.py b/nemo_rl/models/generation/interfaces.py
+index 84a29ab51..38ea0d2ab 100644
+--- a/nemo_rl/models/generation/interfaces.py
++++ b/nemo_rl/models/generation/interfaces.py
+@@ -240,6 +240,10 @@ class GenerationConfig(TypedDict):
+     # Apertus 2: tokens a think frame may take before vLLM closes it, so that a reply
+     # always has room within max_new_tokens. None leaves thinking unlimited.
+     thinking_token_budget: NotRequired[int | None]
++    # Whether the answer text the rewards read drops special tokens (default True). Apertus 1
++    # tokenizers (Apertus-8B, Apertus-v1.1) mark LaTeX pieces such as "\boxed{" and "\text{" as
++    # special, so with True a math answer loses its \boxed{ and earns no reward.
++    skip_special_tokens: NotRequired[bool]
+     colocated: NotRequired[ColocationConfig]
+     port_range_low: NotRequired[int]
+     port_range_high: NotRequired[int]
+-- 
+2.43.0
+

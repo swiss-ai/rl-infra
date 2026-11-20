@@ -20,7 +20,8 @@
 #
 # rl-infra keys (top level of a task file, inherited through `defaults` like any other key):
 #   recipe:    model and algorithm, a file under recipes/ (path relative to this repository); the recipe may
-#              name its own context table with contexts: (default backends/nemo-rl/apertus2/contexts.tsv)
+#              name its own context table with contexts: (default backends/nemo-rl/apertus2/contexts.tsv),
+#              and `stage_model: false` for a model Transformers loads as it is (no Chonk checkpoint staged)
 #   context:   longest prompt + answer in tokens; sets CP, packing and memory from the first row of
 #              backends/nemo-rl/apertus2/contexts.tsv that covers it (up to 131072)
 #   size:      nodes: a tier of the recipe's base layout (`nodes:` in the recipe; Chonk 8 trainer x 8 vLLM):
@@ -145,7 +146,10 @@ if [[ -n "${SIZE}" ]]; then
         esac
     fi
     NODES=$(( TRAIN + GEN + JUDGE ))
-    OVR+=(cluster.num_nodes="${NODES}" policy.generation.colocated.resources.num_nodes="${GEN}")
+    OVR+=(cluster.num_nodes="${NODES}")
+    # A one-node job without colocation splits the node's GPUs (colocated.resources.gpus_per_node for vLLM);
+    # NeMo-RL then takes 1 or null as the vLLM node count, which stays as the recipe has it.
+    (( NODES == 1 )) || OVR+=(policy.generation.colocated.resources.num_nodes="${GEN}")
 else
     NODES="$(cfg cluster.num_nodes)"
     GEN=0; [[ "$(cfg policy.generation.colocated.enabled)" == false ]] && GEN="$(cfg policy.generation.colocated.resources.num_nodes)"
@@ -260,7 +264,11 @@ fi
 
 LOG="${OUT}/setup.log"
 echo "== setup (log: ${LOG})"
-{ SKIP_VLLM_IMAGE=1 bash "${APERTUS2_DIR}/setup.sh" && bash "${ROOT}/backends/nemo-rl/apertus2/stage_model.sh" \
+# A recipe for a model Transformers loads as it is (Apertus-v1.1) says `stage_model: false`: no Chonk
+# checkpoint is staged for it.
+STAGE_MODEL="$(cfg stage_model)"
+{ SKIP_VLLM_IMAGE=1 bash "${APERTUS2_DIR}/setup.sh" \
+    && { [[ "${STAGE_MODEL}" == false ]] || bash "${ROOT}/backends/nemo-rl/apertus2/stage_model.sh"; } \
     && { [[ -z "${TASK_SCRIPT}" ]] || bash "${APERTUS2_DIR}/setup-gym.sh"; }; } \
     > "${LOG}" 2>&1 || { tail -n 20 "${LOG}"; echo "ERROR: setup failed, see ${LOG}" >&2; exit 1; }
 cp "${LOG}" "${DIR}/setup.log"

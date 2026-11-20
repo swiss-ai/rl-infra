@@ -41,9 +41,11 @@ STAMP="${PKGS[*]}${PKGS_PY313[*]:+ ${PKGS_PY313[*]}}"
 if [[ "$(cat "${PYDEPS}/.complete" 2>/dev/null)" != "${STAMP}" ]]; then
     mkdir -p "$(dirname "${PYDEPS}")"
     tmp="${PYDEPS}.tmp.$$"
-    uv pip install --python /usr/bin/python3.12 --no-deps --target "${tmp}" "${PKGS[@]}"
+    # Without PYTHONPATH: it holds the old overlay, and a scratch purge that removed a package's METADATA
+    # there makes importlib.metadata report version None to the build (nemo-lens reads its version that way).
+    env -u PYTHONPATH uv pip install --python /usr/bin/python3.12 --no-deps --target "${tmp}" "${PKGS[@]}"
     if (( ${#PKGS_PY313[@]} )); then
-        uv pip install --python /usr/bin/python3.12 --python-version 3.13 --no-deps --target "${tmp}" "${PKGS_PY313[@]}"
+        env -u PYTHONPATH uv pip install --python /usr/bin/python3.12 --python-version 3.13 --no-deps --target "${tmp}" "${PKGS_PY313[@]}"
     fi
     printf '%s' "${STAMP}" > "${tmp}/.complete"
     rm -rf "${PYDEPS}"

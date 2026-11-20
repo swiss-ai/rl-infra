@@ -58,7 +58,17 @@ echo "== preflight: $(basename "${CONFIG}") ($(( ${#chain[@]} )) files: $(for f 
 gen_nodes=$(r policy.generation.colocated.resources.num_nodes)
 colocated=$(r policy.generation.colocated.enabled)
 train_nodes=${NODES}
-[[ "${colocated}" == false ]] && train_nodes=$(( NODES - ${gen_nodes:-0} ))
+# On one node NeMo-RL splits the GPUs instead: generation gets colocated.resources.gpus_per_node of
+# them and the trainer the rest.
+gen_gpus=$(r policy.generation.colocated.resources.gpus_per_node)
+split_node=false
+if [[ "${colocated}" == false ]]; then
+  if (( NODES == 1 )); then
+    split_node=true
+  else
+    train_nodes=$(( NODES - ${gen_nodes:-0} ))
+  fi
+fi
 # LLM judges on nodes of their own (env.judge_pool, env.extra_judge_pools): NeMo-RL takes them out
 # of the same total.
 judge_nodes=$(r env.judge_pool.num_nodes)
@@ -80,7 +90,11 @@ gen_pp=$(g pipeline_model_parallel_size); gen_pp=${gen_pp:-$(r policy.megatron_c
 gen_ep=$(g expert_model_parallel_size); gen_ep=${gen_ep:-$(r policy.megatron_cfg.expert_model_parallel_size)}
 gen_dispatcher=$(g moe_token_dispatcher_type); gen_dispatcher=${gen_dispatcher:-$(r policy.megatron_cfg.moe_token_dispatcher_type)}
 gen_deepep=$(g moe_enable_deepep); gen_deepep=${gen_deepep:-$(r policy.megatron_cfg.moe_enable_deepep)}
-echo "  nodes: ${NODES} = ${train_nodes} train + ${gen_nodes:-0} generation$( (( judge_nodes > 0 )) && echo " + ${judge_nodes} judge") (colocated: ${colocated})"
+if [[ "${split_node}" == true ]]; then
+  echo "  nodes: 1, split: $(( 4 - ${gen_gpus:-0} )) GPUs train + ${gen_gpus} GPUs generation (colocated: false)"
+else
+  echo "  nodes: ${NODES} = ${train_nodes} train + ${gen_nodes:-0} generation$( (( judge_nodes > 0 )) && echo " + ${judge_nodes} judge") (colocated: ${colocated})"
+fi
 if [[ "${backend}" == megatron ]]; then
   echo "  generation: megatron TP${gen_tp} PP${gen_pp} EP${gen_ep}, dispatcher ${gen_dispatcher} (deepep ${gen_deepep}), buffer $(g buffer_size_gb) GB, max requests $(g max_requests), cuda graphs $(g cuda_graph_impl)/$(g inference_cuda_graph_scope), kv cache $(g kv_cache_management_mode), logprobs $(g logprobs_mode), refit $(r policy.generation.refit_transport)"
 else
@@ -103,6 +117,10 @@ fi
 
 isnum() { [[ "$1" =~ ^[0-9]+$ ]]; }
 (( train_nodes > 0 )) || err "no trainer nodes left (${NODES} nodes, ${gen_nodes} for generation)"
+if [[ "${split_node}" == true ]]; then
+  isnum "${gen_gpus}" && (( gen_gpus >= 1 && gen_gpus <= 3 )) \
+    || err "one node without colocation needs policy.generation.colocated.resources.gpus_per_node between 1 and 3 (is '${gen_gpus}')"
+fi
 if [[ "${megatron}" == true ]]; then
   tp=$(r policy.megatron_cfg.tensor_model_parallel_size); pp=$(r policy.megatron_cfg.pipeline_model_parallel_size)
   ep=$(r policy.megatron_cfg.expert_model_parallel_size); etp=$(r policy.megatron_cfg.expert_tensor_parallel_size)

@@ -131,6 +131,12 @@ cluster.num_nodes=${NODES} cluster.gpus_per_node=${GPUS_PER_NODE} \
 checkpointing.checkpoint_dir=${OUT}/results/${RUN} \
 logger.log_dir=${OUT}/logs/${RUN} ${WANDB_ARGS} $*"
 
+# A one-node job gets the site's SINGLE_NODE_ENV on top of SITE_ENV (HANGANG: NCCL without its
+# network plugin, which needs a multi-node Slingshot service).
+if (( NODES == 1 )); then
+    SITE_ENV+=(${SINGLE_NODE_ENV[@]+"${SINGLE_NODE_ENV[@]}"})
+fi
+
 # Container: EDF names the installed ~/.edf file; pyxis gets CONTAINER, MOUNTS and
 # PYXIS_EXTRA_ARGS, with the spec's environment exported here (sbatch passes it on).
 case "${CONTAINER_RUNTIME}" in
