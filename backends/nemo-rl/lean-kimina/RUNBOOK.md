@@ -452,13 +452,39 @@ What the ε ablation changes for the next runs, beyond 40 steps:
 | Rollouts per problem | **8** (from 16) | from the Goedel run's groups, 8 rollouts keep 44 % of problems mixed (16: 51 %), so for the same 512 rollouts 28 instead of 16 different problems carry a signal per step; transfer between problems is the bottleneck |
 | Problems per step | **64** (512 rollouts, as now) first; 128 (1,024) only after a throughput test | 64 × 8 changes nothing in step time, memory, vLLM's KV cache or the Kimina load. At 1,024 rollouts, 2 batches in flight reach the KV cache's capacity (about 890,000 tokens per GPU, about 1,400 sequences of 10,000 tokens on 16 GPUs) and double the proof checks on 16 REPLs; with ε fixed, a larger batch no longer shrinks the experts' effective step |
 | Updates per step | 1 | more ran out of host memory (H2); ε fixed the movement per update |
-| Training rows | **at least 13,000** Goedel RL V2 completion rows (about 37,000 usable of 49,913), filtered against `minif2f-corrected-x2` and chonk-tests' evaluation sample | 2,357 rows last 37 steps at 64 problems per step and 18 at 128; seen problems gain far more than new ones |
+| Training rows | **`goedel-clean.v434.jsonl`: 37,953** Goedel RL V2 completion rows (below), checked on our Lean, without chonk-tests' evaluation sample and miniF2F near-duplicates | 2,357 rows last 37 steps at 64 problems per step and 18 at 128; seen problems gain far more than new ones; 37,953 last 593 steps at 64 |
 | KL penalty, entropy bonus | none | entropy did not collapse with ε; kept as a fallback |
 | Validation | every 10 steps, 972 rows | as the ablations |
 | Checkpoints | every 10 steps, older ones deleted as the run goes (with the owner's OK) | 1.4 TB each: 20 for 200 steps would be 28 TB |
 | Partition, time | `preemptable` with requeue, or 2+ jobs of 12 h on `normal`; 200 steps at about 7 min is about 24 h | as the ablations |
 
-Open before a 200-step run: the larger row set (conversion and statement check), a short throughput test if 128
+**The larger row set (built 2026-11-20 on Clariden, in `$SCRATCH/lean/goedel-full-5c99dce/`):**
+1. `goedel_rows.py --cache cache --n 49913 --seed 1 --exclude-sample 500:0 --exclude-statements
+   $SCRATCH/lean/data/validation.v434.jsonl --exclude-statements $SCRATCH/lean/data/minif2f-corrected-x2.v434.jsonl
+   goedel-all.jsonl` (Kimina venv's Python, which has pyarrow): all 49,913 distinct completion statements;
+   dropped 5,681 with `let … :=`, 537 of chonk-tests' evaluation sample, 1,426 duplicates, 0 identical to
+   miniF2F; **42,269 rows** (sha256 `203703ce…`).
+2. `check-statements-job.sh` (job 3984438, 1 node, `preemptable`, 8 min): a Kimina server with 128 REPLs, warmed
+   with the rows' header, passed its controls; `validate_statements.py` kept **38,864** (`goedel-all.v434.jsonl`,
+   `c5abb92a…`). The 3,405 dropped are almost all `∑ x in s` syntax (3,051, removed from this Mathlib),
+   `Complex.abs` (183), `Nat.factors` (31) and `FiniteDimensional.finrank` (28).
+3. Near-duplicates of corrected miniF2F, which exact comparison misses (restatements with other hypothesis names,
+   `≥` for `≤`, ℚ for ℝ): flagged if the token multiset of the statement has Jaccard ≥ 0.70 with a miniF2F
+   statement, or ≥ 0.50 and contains all of that statement's numbers of two or more digits (at least two). That
+   flags 982 statements (`flagged-minif2f.json`, with the matched names); a manual look found true duplicates down
+   to 0.53 (e.g. aime_1994_p3, aime_1990_p15, imo_1973_p3, amc12b_2021_p3, aime_1987_p5, imo_1968_p5_1, aime_1990_p2,
+   aime_1984_p15, amc12_2000_p20, imo_1997_p5, imo_1959_p1, aime_1997_p9, aime_1988_p8, amc12a_2013_p7) and many
+   false positives (removing them costs 2.3 % of the rows). **`goedel-clean.v434.jsonl`: 37,953 rows**
+   (`95c620a7…`; OMR 13,291, Lean Workbook Plus 13,064, Lean Workbook 5,655, other 5,622). Restatements that share
+   neither tokens nor numbers can still slip through.
+4. All 2,357 current training rows are in it. Of them, 56 are flagged and 3 are near-copies of miniF2F **test**
+   problems: `lean_workbook_11420` (imo_1964_p2, generalized), `mersenne_prime_implies_exponent_prime`
+   (numbertheory_2pownm1prime_nprime) and `lean_workbook_plus_28703` (amc12_2000_p1). They did not affect the
+   step-40 results of H1 and ε: imo_1964_p2 was solved at the baseline already (H1 trained on its copy only at
+   version 42, ε never), the Mersenne copy was trained on once with all 16 rollouts wrong (no gradient), and the
+   amc12_2000_p1 copy was never drawn.
+
+Open before a 200-step run: moving `goedel-clean.v434.jsonl` into `$SCRATCH/lean/data/`, a short throughput test if 128
 problems per step is wanted, and whether to check ε's step-40 outlier and weight movement first. ε's step 40 is a
 better Lean expert than H1's step 40 (round 1); delivering it would need an HF export and `eval/run.sh` on it.
 
@@ -505,6 +531,7 @@ H1 step 40 is staged as `lean__lean-kimina-v02-abl-h1-20261118` in
 | `learning_speed.py` (2026-11-19) | from the runs' rollout files: A, prompts seen twice (first against second visit); B, runs on the same prompts compared prompt by prompt per block of weight versions. The runs are listed in `RUNS` |
 | `tfevents.py <events> tags\|dump\|trend <tags>` (2026-11-19) | TensorBoard scalars without TensorFlow: list, dump as JSON lines, or first/last-quarter means |
 | `weight_movement.py <start> <trained>` (2026-11-19) | which kinds of weights moved between two HF checkpoints, at matched \|w\| (a bf16 export only shows moves over half a bf16 step); reads sampled layers in chunks, about 5 min and 1 GB on a login node |
+| `check-statements-job.sh` (2026-11-20) | job body: a Kimina server in the job and `validate_statements.py` on any Gym row file (`SRC` → `DST`, `DST.dropped.jsonl`); see "Next runs", the larger row set |
 
 These were run on Clariden from copies with fixed paths; the versions here take the checkout, run and files as
 arguments. `ablations.sh` was dry-run from a fresh clone on 2026-11-19 (variants h1 and h8s, empty `LEAN_DATA`:
