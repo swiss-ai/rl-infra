@@ -14,7 +14,8 @@ SFT_RECIPE="${ROOT}/recipes/apertus2-chonk-sft-vllm-adamw-tools.yaml"
 SFT_TASK="${ROOT}/envs/harbor-osb-sft.yaml"
 # The SFT exports on /capstor and the names they are staged under in $SCRATCH/models (run.sh: sft_stage_as).
 # v0.1 iter_0019374 (Rob's export, no modeling code): runs S/O/W and the 24k runs V/OV. v0.2 iter_0018315: main's
-# long-context runs; path from origin/lean-kimina-verifier (UNVERIFIED from Daint: exists, readable, MODELING_SOURCE).
+# long-context runs; path from origin/lean-kimina-verifier. Daint 2026-11-20: 51 shards, 202G, config.json identical to
+# v0.1's, no MODELING_SOURCE (so staged like v0.1: small files copied, shards linked, modeling code from hfconverter).
 SFT_V01_SRC=/capstor/store/cscs/swissai/infra01/hf-checkpoints/chonk-lc-16k-v0.1-ep1/iter_0019374
 SFT_V01_NAME=chonk-lc-16k-v0.1-ep1-iter_0019374
 SFT_V02_SRC=/capstor/store/cscs/swissai/infra01/apertus_checkpoints/v2/hf/chonk/posttraining/chonk-lc-16k-v0.2-iter_0018315
