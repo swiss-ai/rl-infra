@@ -25,9 +25,9 @@ SFT_MODEL_DIR="${SCRATCH}/models/${SFT_V01_NAME}"
 # Its own EDF: run S needs the apertus-common overlay in the container spec, which setup.sh bakes into
 # ~/.edf/<EDF_NAME>.toml; a shared EDF would change under jobs of the other runs waiting in the queue.
 SFT_EDF_NAME="${SFT_EDF_NAME:-nemo-rl-apertus2-sft}"
-# TODO(NeMo-RL 0057, valid_mask in the group baseline on the Gym entrypoint, rule (ii)): once the patch is in, set
-# this default to a string only 0057 adds to nemo_rl/algorithms/grpo.py; check_nemo_rl_clone then requires it.
-: "${NRL_0057_MARKER:=}"
+# NeMo-RL 0057 (valid_mask in the group baseline on the Gym entrypoint, rule (ii)): a string only 0057 adds to
+# nemo_rl/algorithms/grpo.py (twice: sync and async compute_advantage); check_nemo_rl_clone requires it. Empty = skip.
+: "${NRL_0057_MARKER=valid_mask=sample_mask}"
 
 # --- Long context: runs V (run-v-24k.sh) and OV (run-agent-v.sh) above 24576 tokens --------------------------------
 # Plan research/reports/2026-11-20-long-context-agent-runs-plan.md (workspace), user decisions 2026-11-20. The profile
