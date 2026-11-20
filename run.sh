@@ -106,9 +106,18 @@ if [[ -n "${RECIPE:-}" || -n "${TASK_RECIPE}" ]]; then
     [[ -f "${R}" ]] || { echo "ERROR: recipe ${R} not found" >&2; exit 1; }
     config_freeze "${R}" "${DIR}"; parents+=("${FROZEN}")
     if [[ -n "${TASK_RECIPE}" ]]; then
-        # Expert layout: recipe, then the shared run settings, then the expert's files.
-        config_freeze "${MAIN}" "${DIR}"; parents+=("${FROZEN}")
+        # Expert layout: recipe, then the shared run settings, then the expert's files. NeMo-RL applies a file's
+        # `_override_: true` only against that file's own `defaults` chain (and OmegaConf refuses to merge a list
+        # into a dict), so the recipe and main.yaml become parents of the task chain instead of siblings in
+        # config.yaml: they go into the `defaults` of its first file without parents (e.g. shared/judges/
+        # llm-judge.yaml under stem/base.yaml), and base.yaml's `data: {_override_: true}` replaces the recipe's.
+        config_freeze "${MAIN}" "${DIR}"; MAIN_FROZEN="${FROZEN}"
         config_freeze "${TASK}" "${DIR}"
+        leaf="${FROZEN}"
+        while first="$(_config_defaults "${leaf}" | head -1)"; [[ -n "${first}" ]]; do leaf="$(_config_parent "${leaf}" "${first}")"; done
+        { printf 'defaults:\n  - %s\n  - %s\n' "${parents[0]}" "${MAIN_FROZEN}"; cat "${leaf}"; } > "${leaf}.tmp"
+        mv "${leaf}.tmp" "${leaf}"
+        parents=()
     else
         # Older layout: the task names its recipe in `defaults`, which RECIPE replaces.
         config_freeze "${TASK}" "${DIR}" nodefaults
