@@ -47,6 +47,9 @@ them refer to the commit before the restructure (`965e15c` on main, `f1ec52e` on
 - **Environment names must be registered in NeMo-RL** (`nemo_rl/environments/utils.py`). The math environment is
   registered twice (`math`, `math_default`), so a task has two math configurations at most, plus `reasoning_gym`,
   `llm_judge`, `enigmata`, `scienceworld`, `nemo_gym` and the others listed there.
+- **`policy.model_name` follows `sft_export`.** For a recipe with `sft_export`, run.sh sets `policy.model_name` to the
+  staged export (`$SCRATCH/models/<name>`); `sft_export` may now be absolute. A recipe for another model names its
+  context table with `contexts:`; padding now includes TP with sequence parallelism (2 x CP x TP).
 - **`driver_retry.sh`** now reads the quoted deadline and shortens it for a retry, which it never did before.
 
 ## 3. Steps to move a branch

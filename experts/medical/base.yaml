@@ -40,7 +40,7 @@ data:
     prompt_file: null
     system_prompt_file: ${frames.default}
     processor: apertus2_math_data_processor
-    env_name: math
+    env_name: math_default
 
 env:
   # Multiple choice: NeMo-RL's math environment grading the option letter in the claim (as STEM's math_default).

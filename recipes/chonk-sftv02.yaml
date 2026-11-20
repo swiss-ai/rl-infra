@@ -7,13 +7,13 @@
 defaults: /opt/nemo-rl/examples/configs/grpo_math_1B.yaml
 
 # ======================================================================== model: checkpoint and message format
-# run.sh stages this export (under $SCRATCH) as policy.model_name.
+# The checkpoint: an HF export, relative to $SCRATCH or absolute (a symlink works). run.sh stages it as
+# $SCRATCH/models/<name> (shards linked, small files copied to add the modeling code) and sets policy.model_name.
 sft_export: chonk-sft/models/chonk-lc-16k-v0.2-iter_0018315
 
 policy:
-  model_name: ${oc.env:SCRATCH}/models/chonk-lc-16k-v0.2-iter_0018315
   # Apertus 2 message format: apertus-common encodes the prompt to token IDs (no chat template), generation stops at
-  # <|wait|> (token 12, policy.generation below), the reward reads one frame of the output (env.math.reward_frame).
+  # <|wait|> (token 12, policy.generation below); the environments grade one frame of the output (reward_frame).
   tokenizer:
     chat_template: null
 
@@ -162,8 +162,3 @@ loss_fn:
   use_importance_sampling_correction: true
   truncated_importance_sampling_type: tis
   truncated_importance_sampling_ratio: 2.0
-
-env:
-  # Apertus 2 format: the math environment grades the claim frame of the output.
-  math:
-    reward_frame: claim

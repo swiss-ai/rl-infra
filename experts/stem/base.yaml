@@ -109,6 +109,9 @@ data:
     env_name: math
 
 env:
+  # Math answers (DAPO, NuminaMath, chemistry): NeMo-RL's math environment, grading the claim frame of the output.
+  math:
+    reward_frame: claim
   # Multiple-choice questions: the same environment class, grading the option letter in the claim.
   math_default:
     num_workers: 8

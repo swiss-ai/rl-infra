@@ -1,0 +1,5 @@
+# Context settings of the MegaChonk trainer (recipes/megachonk.yaml names this table), same columns as contexts.tsv.
+# Measured: 16K at CP 4 (the 48-node STEM runs, experiments/megachonk.md). memfrac "-": NRL_CUDA_MEMORY_FRACTION is
+# not set (those runs did not set it). A longer context needs a measured row first; run.sh refuses it until then.
+# max_tokens  cp  scheme  pack    memfrac
+16384         4   head    16384   -

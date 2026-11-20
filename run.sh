@@ -19,7 +19,8 @@
 #                                  setup (it may change the NeMo-RL clone), no job
 #
 # rl-infra keys (top level of a task file, inherited through `defaults` like any other key):
-#   recipe:    model and algorithm, a file under recipes/ (path relative to this repository)
+#   recipe:    model and algorithm, a file under recipes/ (path relative to this repository); the recipe may
+#              name its own context table with contexts: (default backends/nemo-rl/apertus2/contexts.tsv)
 #   context:   longest prompt + answer in tokens; sets CP, packing and memory from the first row of
 #              backends/nemo-rl/apertus2/contexts.tsv that covers it (up to 131072)
 #   size:      node tier, a file in sizes/ (cheap, expensive, ultra)
@@ -143,19 +144,23 @@ else
     TRAIN=$(( NODES - GEN - JUDGE ))
 fi
 
-# --- context: CP, packing and memory from the table
+# --- context: CP, packing and memory from the recipe's table (contexts: in the recipe, Chonk's table by default)
 if [[ -n "${CONTEXT}" ]]; then
-    read -r _ CP SCHEME PACK MEMFRAC < <(awk -v c="${CONTEXT}" '!/^#/ && NF == 5 && $1 >= c { print; exit }' "${APERTUS2_DIR}/contexts.tsv") || true
-    [[ -n "${CP:-}" ]] || { echo "ERROR: context ${CONTEXT} is above the longest one in contexts.tsv" >&2; exit 1; }
+    TABLE="${ROOT}/$(cfg contexts)"; [[ "${TABLE}" != "${ROOT}/" ]] || TABLE="${APERTUS2_DIR}/contexts.tsv"
+    read -r _ CP SCHEME PACK MEMFRAC < <(awk -v c="${CONTEXT}" '!/^#/ && NF == 5 && $1 >= c { print; exit }' "${TABLE}") || true
+    [[ -n "${CP:-}" ]] || { echo "ERROR: context ${CONTEXT} is above the longest one in ${TABLE#${ROOT}/}" >&2; exit 1; }
     PP="$(cfg policy.megatron_cfg.pipeline_model_parallel_size)"; RANKS=$(( TRAIN * GPUS_PER_NODE / ${PP:-1} ))
     (( RANKS % CP == 0 )) || { echo "ERROR: CP ${CP} (context ${CONTEXT}) does not divide the ${RANKS} trainer ranks of a pipeline stage" >&2; exit 1; }
+    # Every packed sequence is padded to a multiple of 2 x CP, times TP with sequence parallelism (NeMo-RL's check).
+    PAD=$(( CP > 1 ? 2 * CP : 2 )); TP="$(cfg policy.megatron_cfg.tensor_model_parallel_size)"
+    [[ "$(cfg policy.megatron_cfg.sequence_parallel)" == true && "${TP:-1}" -gt 1 ]] && PAD=$(( PAD * TP ))
     OVR+=(policy.max_total_sequence_length="${CONTEXT}" policy.generation.max_new_tokens="${CONTEXT}"
           policy.sequence_packing.train_mb_tokens="${PACK}" policy.sequence_packing.logprob_mb_tokens="${PACK}"
-          policy.megatron_cfg.context_parallel_size="${CP}" policy.make_sequence_length_divisible_by=$(( CP > 1 ? 2 * CP : 2 ))
-          "++policy.megatron_cfg.env_vars.NRL_CUDA_MEMORY_FRACTION=\"'${MEMFRAC}'\""
+          policy.megatron_cfg.context_parallel_size="${CP}" policy.make_sequence_length_divisible_by="${PAD}"
           # vLLM refuses a limit above the export's max_position_embeddings (16,384 for the SFT checkpoints)
           # unless this is set; the model has no position table, so the value is only that check.
           "++policy.generation.vllm_cfg.env_vars.VLLM_ALLOW_LONG_MAX_MODEL_LEN=\"'1'\"")
+    [[ "${MEMFRAC}" == - ]] || OVR+=("++policy.megatron_cfg.env_vars.NRL_CUDA_MEMORY_FRACTION=\"'${MEMFRAC}'\"")
     if [[ "${SCHEME}" == kcp ]]; then
         source "${APERTUS2_DIR}/kcp/use.sh"
         OVR+=(++policy.megatron_cfg.model_overrides.linear_attention_cp_impl=kcp)
@@ -207,14 +212,19 @@ if [[ "${TASK_PYDEPS}" == reasoning_gym ]]; then
 elif [[ -n "${TASK_PYDEPS}" ]]; then
     echo "ERROR: unknown pydeps '${TASK_PYDEPS}' in ${TASK} (known: reasoning_gym)" >&2; exit 1
 fi
-# A recipe on an SFT checkpoint names its export. apertus-common goes in an overlay of its own, for
-# the same reason, and the export is staged next to the base model.
+# A recipe on an SFT checkpoint names its export (absolute, or relative to $SCRATCH; a symlink to an
+# export elsewhere works). apertus-common goes in an overlay of its own, for the same reason. The export
+# is staged as $SCRATCH/models/<name>: its shards are linked, not copied; only the small files are copied
+# when the modeling code has to be added to them. policy.model_name is set to that path here, so a recipe
+# names the model once.
 SFT_EXPORT="$(cfg sft_export)"
 if [[ -n "${SFT_EXPORT}" ]]; then
     source "${PIN_FILE}"
     export PYDEPS_APERTUS2="${SCRATCH}/nemo-rl-apertus2/apertus-common-${APERTUS_COMMON_COMMIT:0:9}"
     export PYDEPS="${PYDEPS}-apertus2"
-    export SRC="${SCRATCH}/${SFT_EXPORT}" DST="${SCRATCH}/models/$(basename "${SFT_EXPORT}")"
+    if [[ "${SFT_EXPORT}" == /* ]]; then SRC="${SFT_EXPORT}"; else SRC="${SCRATCH}/${SFT_EXPORT}"; fi
+    export SRC DST="${SCRATCH}/models/$(basename "${SFT_EXPORT}")"
+    OVR+=(policy.model_name="${DST}")
     # An export that already carries the modeling code (MODELING_SOURCE) is linked whole and only read;
     # stage_model.sh checks its hfconverter commit and auto_map.
     if [[ -f "${SRC}/MODELING_SOURCE" ]]; then

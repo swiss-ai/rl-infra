@@ -1,6 +1,6 @@
 # Repository map
 
-Every file of the repository and its role (365 files, branch `restructure`, 2026-11-20). Roles:
+Every file of the repository and its role (369 files, branch `restructure`, 2026-11-20). Roles:
 **run** = used by every training run, **setup** = prepares sources, images, models or data,
 **check** = a test or probe before or after a run, **tool** = analysis of a finished run,
 **history** = kept as the record of past runs, not used by new ones.
@@ -89,6 +89,7 @@ happened, as they ran) and `scripts/` (data builders and checks); empty folders 
 | File | Role | Purpose |
 |---|---|---|
 | `chonk-sftv02.yaml` | run | The active recipe, one file on NeMo-RL's defaults: Chonk SFT v0.2; Megatron trainer (TP1 PP2 EP16, Adam lr 2e-6 constant, optimizer on CPU); vLLM FP8 (EP4 per node); async GRPO (512 x 16, one optimizer step, staleness 4, TIS 2.0) |
+| `megachonk.yaml` | template | MegaChonk pretraining checkpoint: TP4 PP8 EP16, vLLM TP4 EP32 replicas of 8 nodes, its own context table; no expert yet |
 | `README.md` | doc | What a recipe is, the active ones, how to add a variant |
 | `archive/*.yaml` (34) | history | Recipes of earlier runs as they were (pretraining checkpoint, SFT v0.1 / 19374 / v0.2, MegaChonk, AdamW or Muon, judge-node layouts); archived task files and launchers use them |
 | `archive/chain/*.yaml` (27) | history | The experiment chain they build on (GSM8K -> DAPO -> FP8 -> Apertus 2 format), formerly `experiments/grpo-chonk/` |
@@ -116,6 +117,7 @@ happened, as they ran) and `scripts/` (data builders and checks); empty folders 
 | `apertus2/driver.sh` | run | Driver entry in the container: overlay, W&B key, unbuffered Python |
 | `apertus2/pydeps.sh` | run | Python overlay the image lacks (nemo-lens, soundfile; Gym, Reasoning Gym, apertus-common when needed) |
 | `apertus2/edf.toml.template` | run | Container image, mounts and environment of the Apertus 2 stack |
+| `apertus2/contexts-megachonk.tsv` | run | MegaChonk's context table (16K at CP 4 only), named by recipes/megachonk.yaml |
 | `apertus2/contexts.tsv` | run | CP, scheme, packing, memory fraction per context length |
 | `apertus2/kcp/setup.sh`, `use.sh`, `0001-*.patch` | run | KCP context parallelism: Megatron copy with PR 112, flash-linear-attention 0.5.2 |
 | `apertus2/setup-gym.sh` | run | NeMo Gym checkout for Gym tasks (`script:`) |
