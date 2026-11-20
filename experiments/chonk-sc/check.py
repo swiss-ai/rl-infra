@@ -385,8 +385,9 @@ else:
         mev = mg.get("env_vars") or {}
         expect("NRL_CUDA_MEMORY_FRACTION (CAP)", str(mev.get("NRL_CUDA_MEMORY_FRACTION", "")).strip("'\""), ENV.get("CAP", ""))
         expect("NRL_NCCL_TIMEOUT_MINUTES (NCCL_MIN)", str(mev.get("NRL_NCCL_TIMEOUT_MINUTES", "")).strip("'\""), ENV.get("NCCL_MIN", ""))
-        expect("model is the SFT export staged by the launcher (SFT_CKPT)",
-               p["model_name"], os.path.join(ENV.get("SCRATCH", ""), "models", os.path.basename(ENV.get("SFT_MODEL_DIR", ""))))
+        # normpath both: the config concatenates ${oc.env:SCRATCH}/models/..., and CSCS's SCRATCH ends in '/'
+        expect("model is the SFT export staged by the launcher (SFT_CKPT)", os.path.normpath(p["model_name"]),
+               os.path.normpath(os.path.join(ENV.get("SCRATCH", ""), "models", os.path.basename(ENV.get("SFT_MODEL_DIR", "")))))
         # one prompt group, worst case: two pod creates (<= 1800 s each) + agent cap + verifier cap 1200 s
         expect("rollout_timeout_s (run-agent-v.yaml; AGENT_CAP + 4800)", rf.nemo_gym.rollout_timeout_s, av_cap + 4800)
         expect("stall_timeout_s (rollout_timeout_s + 300)", a.stall_watchdog.stall_timeout_s, av_cap + 5100)
