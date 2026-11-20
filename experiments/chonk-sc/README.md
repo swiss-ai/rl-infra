@@ -306,8 +306,8 @@ nothing changes; above it the defaults are:
 | `MAX_TURNS` | 30 | 100 | `harbor_agent_kwargs.max_turns` (OpenCode: steps) |
 | `AGENT_CAP` | 1800 | 3000 | `harbor_agent_max_timeout`; OV: OpenCode `AGENT_CAP - 60` (2940), rollout/stall timeout `+4800` / `+5100` (7800/8100) |
 | `TTL` | 3600 | 4800 | `harbor_environment_kwargs.sandbox_ttl_s` |
-| `MASK_AGENT_TIMEOUT` | 0 | 1 | `harbor_mask_agent_timeout` (rule ii; on run V's Gym entrypoint masked rows stay in the group baseline until NeMo-RL 0057) |
-| `MASK_OVERFLOW` | 0 | 0 (TODO Gym 0043) | `harbor_mask_context_overflow` (rule i); `check_gym_capture` requires Gym 0043 when 1 |
+| `MASK_AGENT_TIMEOUT` | 0 | 1 | `harbor_mask_agent_timeout` (rule ii; on run V's Gym entrypoint NeMo-RL 0057 keeps masked rows out of the group baseline) |
+| `MASK_OVERFLOW` | 0 | 1 | `harbor_mask_context_overflow` (rule i, Gym 0043); `check_gym_capture` requires Gym 0043 when 1 |
 | `HANG_DUMP_AFTER_S` / `HANG_KILL_AFTER_S` | 900 / 2700 | 3600 / 14400 (from 65536) | hang watchdog (exported; reaching the job on Alps UNVERIFIED) |
 | `STEPS` / `JOB_TIME` | 20 (V), 10 (OV) / 08:00:00 | 10 / 12:00:00; `SMOKE=1`: 1 step, 4 x 8, 03:00:00 | Daint's time limit for `normal`: UNVERIFIED |
 
@@ -316,11 +316,18 @@ Every knob can be set at any context (e.g. `THINKING=high` at 24k). At long cont
 (`kcp_setup`): pin copy with the `rl-kcp` commit and a container spec with fla 0.5.2 on `PYTHONPATH` in
 `$SCRATCH/chonk-sc/kcp/`, and an EDF of their own (`nemo-rl-apertus2-kcp` for V, `nemo-rl-apertus2-sft-kcp` for OV).
 The checkpoint export is linked whole when it carries `MODELING_SOURCE`, else its small files are copied (both
-launchers, the same directory). The first run converts v0.2 to Megatron; whether `linear_attention_cp_impl` changes
-the conversion directory is UNVERIFIED.
+launchers, the same directory). The first run converts v0.2 to Megatron, and **that first conversion must not run
+at CP 8**: NeMo-RL's `import_model_from_hf_name` does not apply `megatron_cfg.model_overrides`, so the conversion
+builds the model without `linear_attention_cp_impl=kcp` and fails the a2a check `linear_num_key_heads // TP (28)
+must be a multiple of CP (8)`. Convert once at CP 4 (`SMOKE=1 CTX=32768 NCCL_MIN=60 HANG_DUMP_AFTER_S=3600
+HANG_KILL_AFTER_S=14400 bash experiments/chonk-sc/run-v-24k.sh`, ~30 min). The conversion directory
+`$HF_HOME/nemo_rl/model_<model path with / as _>` depends only on the model path (not on CP, CTX or the overrides),
+so every later run at CP 8 reuses it; the training model itself does get the overrides. Check it with
+`ls "$SCRATCH/huggingface/nemo_rl/"*<checkpoint name>*` (`iter_0000000`, `latest_checkpointed_iteration.txt`).
 
 ```bash
 CTX=65536 RUNS=ov bash experiments/chonk-sc/check.sh          # step 0 for both runs (SMOKE=1 for the smoke values)
+SMOKE=1 CTX=32768 NCCL_MIN=60 HANG_DUMP_AFTER_S=3600 HANG_KILL_AFTER_S=14400 bash experiments/chonk-sc/run-v-24k.sh  # once: conversion at CP 4
 SMOKE=1 CTX=65536 DRY_RUN=1 bash experiments/chonk-sc/run-v-24k.sh        # run V smoke: setup + job script only
 SMOKE=1 CTX=65536 bash experiments/chonk-sc/run-v-24k.sh                  # run V smoke: 1 step, 4 x 8, 03:00:00
 CTX=65536 bash experiments/chonk-sc/run-v-24k.sh                          # run V: 10 steps, 8 x 8, 12:00:00
