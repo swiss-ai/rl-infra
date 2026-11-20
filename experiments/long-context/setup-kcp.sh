@@ -22,7 +22,13 @@ git -C "${DIR}" -c user.name="${GIT_AUTHOR_NAME:-kcp-setup}" -c user.email="${GI
     am --committer-date-is-author-date "${HERE}"/kcp/*.patch
 echo "== Megatron with KCP: ${DIR} at $(git -C "${DIR}" rev-parse --short rl-kcp)"
 if [[ ! -d "${FLA}/fla" ]]; then
-    "${UV:-uv}" pip install --python /usr/bin/python3.12 --no-deps --target "${FLA}" \
+    # The interpreter uv resolves the wheels for: python3.12 (the image's, HANGANG's login node), else python3.14
+    # (Alps login nodes have no python3.12). fla is imported by the image's 3.12; --no-deps, so only the wheel tags
+    # of fla itself depend on this choice.
+    PY="$(command -v python3.12 || command -v python3.14 || true)"
+    [[ -n "${PY}" ]] || { echo "ERROR: neither python3.12 nor python3.14 on PATH; needed to install flash-linear-attention" >&2; exit 1; }
+    echo "== installing flash-linear-attention 0.5.2 with ${PY}"
+    "${UV:-uv}" pip install --python "${PY}" --no-deps --target "${FLA}" \
         flash-linear-attention==0.5.2 fla-core==0.5.2
 fi
 echo "== flash-linear-attention 0.5.2: ${FLA}"
