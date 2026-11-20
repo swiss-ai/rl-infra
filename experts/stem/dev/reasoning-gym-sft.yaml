@@ -15,7 +15,7 @@
 #   data.num_prompts_per_dataloader: {..., native-train: <prompts per step>}
 #   data.train: [..., {dataset_name: ResponseDataset, data_path: <train.jsonl>, env_name: reasoning_gym}]
 #   env.reasoning_gym: {num_workers: 8, verifier_type: reasoning_gym, reward_frame: claim}
-defaults: ../../../recipes/apertus2-chonk-sftv02-18315-vllm-adamw-rg.yaml
+defaults: ../../../recipes/archive/apertus2-chonk-sftv02-18315-vllm-adamw-rg.yaml
 # reasoning-gym in an overlay of its own (run.sh, backends/nemo-rl/apertus2/pydeps.sh).
 pydeps: reasoning_gym
 

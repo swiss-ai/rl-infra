@@ -9,7 +9,7 @@
 # Chonk is a pretraining checkpoint, so prompts are few-shot (experts/chat/scripts/ultrafeedback-few-shot.txt) and a
 # reply ends at the next turn marker. The judge reads the bare question and the reply. The win rate
 # is validation/alpaca_eval_simple_agent/reward/mean, and every rollout is saved under env.rollout_dir.
-defaults: ../../../recipes/apertus2-chonk-vllm-adamw-rubric.yaml
+defaults: ../../../recipes/archive/apertus2-chonk-vllm-adamw-rubric.yaml
 script: examples/nemo_gym/run_grpo_nemo_gym.py
 
 grpo:

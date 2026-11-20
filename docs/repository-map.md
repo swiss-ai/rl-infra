@@ -14,7 +14,7 @@ bash run.sh stem      (experts/main.yaml + experts/stem/base.yaml)
    ├ sizes/<tier>.yaml                node counts and batch scale
    ├ backends/nemo-rl/apertus2/contexts.tsv (+ kcp/use.sh above 32K)   CP, packing, memory fraction
    ├ backends/nemo-rl/apertus2/setup.sh         NeMo-RL clone at the pin + patches, Megatron, Bridge, vLLM files, image
-   ├ experiments/grpo-chonk/stage_model.sh      model export staged on scratch
+   ├ backends/nemo-rl/apertus2/stage_model.sh      model export staged on scratch
    └ backends/nemo-rl/apertus2/launch.sh → backends/nemo-rl/launch.sh
        ├ backends/nemo-rl/preflight.sh          config check, report next to the Slurm log
        ├ backends/nemo-rl/container.sh          container flags from apertus2/edf.toml.template
@@ -84,19 +84,14 @@ happened, as they ran) and `scripts/` (data builders and checks); empty folders 
 | `scripts/strip_few_shot.py` | setup | Removes the few-shot prompt from prepared Gym rows (for SFT checkpoints) |
 | `debug/score-text.yaml` | check | Teacher-forced log-probabilities of plain text (not a training task) |
 
-## `recipes/` (model and algorithm, 34 files)
+## `recipes/` (how to train: model and algorithm)
 
-| Files | Role | Purpose |
+| File | Role | Purpose |
 |---|---|---|
-| `apertus2-chonk-sftv02-grpo.yaml` | run | Algorithm of the STEM runs on SFT v0.2 (512 x 16, one optimizer step, lr 2e-6, staleness 4) |
-| `apertus2-chonk-sftv02-18315-*.yaml` | run | SFT v0.2 on 32 nodes, with 1, 2 or 4 judge nodes; Reasoning Gym variant |
-| `apertus2-chonk-sft-vllm-*.yaml`, `apertus2-chonk-sft19374-*.yaml` | run | SFT checkpoints v0.1 / 19374 with AdamW or Muon, for DAPO, code, tools, rubric |
-| `apertus2-chonk-vllm-*.yaml`, `apertus2-chonk-megatron-*.yaml` | run | Pretraining checkpoint, vLLM or Megatron inference, AdamW or Muon, with judges |
-| `apertus2-megachonk-*.yaml` | run | MegaChonk (the larger model) recipes, DAPO and STEM at 16K on 36/64 nodes |
-| `apertus2-chonk-sftv02-stemmix-run4-100-*.yaml` | run | Continuing from the run-4 checkpoint at step 100 (chemistry task) |
-
-Most recipes are a chain of small files ending in `experiments/grpo-chonk/` and NeMo-RL's
-`grpo_math_1B.yaml`; `DRY_RUN=1 bash run.sh <task>` (its preflight report) lists the files of a run's chain.
+| `chonk-sftv02.yaml` | run | The active recipe, one file on NeMo-RL's defaults: Chonk SFT v0.2; Megatron trainer (TP1 PP2 EP16, Adam lr 2e-6 constant, optimizer on CPU); vLLM FP8 (EP4 per node); async GRPO (512 x 16, one optimizer step, staleness 4, TIS 2.0) |
+| `README.md` | doc | What a recipe is, the active ones, how to add a variant |
+| `archive/*.yaml` (34) | history | Recipes of earlier runs as they were (pretraining checkpoint, SFT v0.1 / 19374 / v0.2, MegaChonk, AdamW or Muon, judge-node layouts); archived task files and launchers use them |
+| `archive/chain/*.yaml` (27) | history | The experiment chain they build on (GSM8K -> DAPO -> FP8 -> Apertus 2 format), formerly `experiments/grpo-chonk/` |
 
 ## `backends/nemo-rl/` (launching NeMo-RL)
 
@@ -116,6 +111,7 @@ Most recipes are a chain of small files ending in `experiments/grpo-chonk/` and 
 | `apertus2/env` | run | The Apertus 2 stack: clone paths, image, overlay, driver |
 | `apertus2/pin` | run | NeMo-RL fork commit + PRs, Automodel, Megatron-LM-MoE, Bridge, vLLM files, Gym, apertus-common commits |
 | `apertus2/setup.sh` | run | Builds or updates the clone (PRs, patches by subject), Megatron, Bridge, vLLM files, image |
+| `apertus2/stage_model.sh` | run | Stages the model export on scratch (copied small files, linked shards; modeling code check), every launch |
 | `apertus2/launch.sh` | run | `launch.sh` with the Apertus 2 stack variables |
 | `apertus2/driver.sh` | run | Driver entry in the container: overlay, W&B key, unbuffered Python |
 | `apertus2/pydeps.sh` | run | Python overlay the image lacks (nemo-lens, soundfile; Gym, Reasoning Gym, apertus-common when needed) |
@@ -138,7 +134,7 @@ Most recipes are a chain of small files ending in `experiments/grpo-chonk/` and 
 | Folder | Role | Purpose |
 |---|---|---|
 | `runs.md`, `megachonk.md` | history | Every run with its command, job, result; MegaChonk notes |
-| `grpo-chonk/` (29) | run | The config chain under every Chonk recipe (GSM8K → DAPO → FP8 → Apertus 2 format), `stage_model.sh` (used by every run), README of the vLLM/Megatron and AdamW/Muon comparison |
+| `grpo-chonk/README.md` | history | The GSM8K -> DAPO experiments on Chonk (vLLM against Megatron inference, AdamW against Muon); their configs are now in `recipes/archive/chain/` |
 | `long-context/` | run / tool | `launch-code-ctx.sh` (coding at 32K-128K) and its node recipes, checkpoint export, `eval/` (vLLM-only validation), `tools/` (rollout index and statistics, step timings, network and pod probes), README with the context measurements |
 | `enigmata/` (16) | setup / check / history | Puzzle pool generation and dataset build, pass-rate scoring, environment tests, its debug launcher |
 | `scienceworld/` (18) | setup / check / history | ScienceWorld install, data build, probes and scoring, environment tests, its debug launcher |
@@ -151,7 +147,6 @@ Most recipes are a chain of small files ending in `experiments/grpo-chonk/` and 
 
 ## Still out of place (next cleanup steps)
 
-- `experiments/grpo-chonk/stage_model.sh` is part of every run but lives in an experiment folder.
 - `experiments/long-context/launch-code-ctx.sh` duplicates `run.sh` for coding (sandbox job, KCP, node
   layouts); the code expert needs its `experts/code/base.yaml` written (now a template) and tiers like STEM.
 - `experiments/enigmata/launch.sh`, `scienceworld/launch.sh`, `debug16.sh`, `probe.sh`,
@@ -159,5 +154,3 @@ Most recipes are a chain of small files ending in `experiments/grpo-chonk/` and 
 - `experiments/long-context/tools/` are general run-analysis tools, not long-context ones.
 - `backends/nemo-rl/sandbox/` and `lean/` are services of the code and Lean domains.
 - Two stacks (stock NeMo-RL for Qwen, Apertus 2): the stock one is only used by `experiments/grpo-math`.
-- The recipe chain under `experiments/grpo-chonk/` (13+ files deep) could be flattened into one recipe
-  per model.

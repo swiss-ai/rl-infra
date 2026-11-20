@@ -3,7 +3,7 @@
 # Nemotron-RL-knowledge-mcqa (6,480 multiple-choice questions, decontaminated against GPQA-Diamond).
 # Validation every 20 steps: AIME 2024 mean@32 and GPQA-Diamond mean@8.
 # Data files: /scratch/hanint06/data/stem-rl, built by the STEM data script (see runs.md).
-defaults: ../../../recipes/apertus2-chonk-sft19374-vllm-adamw-dapo-32n.yaml
+defaults: ../../../recipes/archive/apertus2-chonk-sft19374-vllm-adamw-dapo-32n.yaml
 
 grpo:
   max_num_steps: 270

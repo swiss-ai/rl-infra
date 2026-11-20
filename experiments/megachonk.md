@@ -78,7 +78,7 @@ Job 1285740, run `megachonk-gsm8k-58steps-1`, 2026-11-16, 09:21 to 13:15 KST.
 | Steps | 58 (one epoch) |
 | Validation | GSM8K test, 1,319 questions, at steps 0, 20, 40 and 58 |
 | Layout | 40 nodes: 32 trainer + 8 inference |
-| Recipe | `recipes/apertus2-megachonk-vllm-adamw.yaml` with `experts/stem/dev/gsm8k.yaml` |
+| Recipe | `recipes/archive/apertus2-megachonk-vllm-adamw.yaml` with `experts/stem/dev/gsm8k.yaml` |
 
 **Result: completed 58 of 58 steps in 3 h 53 min 37 s.**
 
@@ -171,14 +171,14 @@ Recipes and experiment files:
 
 | File | What |
 |---|---|
-| `experiments/grpo-chonk/megachonk-gsm8k-40n-megatron-128x16-2k-async-fp8.yaml` | base settings: model, trainer and vLLM layout, memory, timeouts |
-| `recipes/apertus2-megachonk-vllm-adamw.yaml` | GSM8K, 40 nodes |
-| `recipes/apertus2-megachonk-vllm-adamw-36n.yaml` | GSM8K, 36 nodes (one 4-node vLLM replica) |
-| `experiments/grpo-chonk/megachonk-stem-16k-megatron-512x16-async-fp8.yaml` | 16K, 512 × 16, one optimizer step, CP4 |
-| `recipes/apertus2-megachonk-vllm-adamw-stem16k.yaml` | 16K, 48 nodes (two 8-node vLLM replicas) |
-| `recipes/apertus2-megachonk-vllm-adamw-stem16k-36n.yaml`, `-64n.yaml` | 16K on 36 nodes (debug runs), on 64 nodes (four replicas, not run) |
+| `recipes/archive/chain/megachonk-gsm8k-40n-megatron-128x16-2k-async-fp8.yaml` | base settings: model, trainer and vLLM layout, memory, timeouts |
+| `recipes/archive/apertus2-megachonk-vllm-adamw.yaml` | GSM8K, 40 nodes |
+| `recipes/archive/apertus2-megachonk-vllm-adamw-36n.yaml` | GSM8K, 36 nodes (one 4-node vLLM replica) |
+| `recipes/archive/chain/megachonk-stem-16k-megatron-512x16-async-fp8.yaml` | 16K, 512 × 16, one optimizer step, CP4 |
+| `recipes/archive/apertus2-megachonk-vllm-adamw-stem16k.yaml` | 16K, 48 nodes (two 8-node vLLM replicas) |
+| `recipes/archive/apertus2-megachonk-vllm-adamw-stem16k-36n.yaml`, `-64n.yaml` | 16K on 36 nodes (debug runs), on 64 nodes (four replicas, not run) |
 | `experts/stem/archive/stem-mix-run3-base.yaml` | STEM mix task: DAPO-Math, NuminaMath, science multiple choice; AIME and GPQA validation |
-| `experiments/grpo-chonk/megachonk-dapo-16k-megatron-128x16-async-fp8-skip-trunc0.yaml`, `recipes/apertus2-megachonk-vllm-adamw-dapo.yaml` | DAPO-Math only with AIME validation, the setup of the pretrained-Chonk AIME runs (not run) |
+| `recipes/archive/chain/megachonk-dapo-16k-megatron-128x16-async-fp8-skip-trunc0.yaml`, `recipes/archive/apertus2-megachonk-vllm-adamw-dapo.yaml` | DAPO-Math only with AIME validation, the setup of the pretrained-Chonk AIME runs (not run) |
 | `shared/debug/score-text.yaml` | debug tool: the trainer's log-probabilities of plain text |
 | `shared/prompts/stem-mix-four-shot.txt` | four worked examples as a prompt prefix for the STEM mix (not run) |
 
@@ -202,7 +202,7 @@ The model must be staged first (once). The Chonk staging script does the same st
 ```bash
 SRC=/scratch/hanint06/models/megachonk-pretraining-iter_0042000 \
 DST=$SCRATCH/models/apertus2-megachonk-iter42000 CHONK_MODEL_STAGE=copy STAGE_SHARDS=link \
-bash experiments/grpo-chonk/stage_model.sh
+bash backends/nemo-rl/apertus2/stage_model.sh
 ```
 
 (The folder used so far was staged by hand with the same content; the command above has not been
@@ -222,7 +222,7 @@ of the timeout and warm-up patches, which later 16K runs needed):
 
 ```bash
 env $COMMON RUN=<run name> SBATCH_EXTRA="$SBATCH_EXTRA" \
-RECIPE=recipes/apertus2-megachonk-vllm-adamw.yaml bash run.sh experts/stem/dev/gsm8k.yaml
+RECIPE=recipes/archive/apertus2-megachonk-vllm-adamw.yaml bash run.sh experts/stem/dev/gsm8k.yaml
 ```
 
 STEM mix, 16K context, 48 nodes (the current full run):
@@ -236,12 +236,12 @@ DAPO-Math with AIME validation, 16K context, 48 nodes (not run yet):
 
 ```bash
 env $COMMON RUN=<run name> SBATCH_EXTRA="$SBATCH_EXTRA" \
-RECIPE=recipes/apertus2-megachonk-vllm-adamw-dapo.yaml bash run.sh experts/stem/dev/dapo-math.yaml \
+RECIPE=recipes/archive/apertus2-megachonk-vllm-adamw-dapo.yaml bash run.sh experts/stem/dev/dapo-math.yaml \
   grpo.max_num_steps=140 ++env.should_log_nemo_gym_responses=true
 ```
 
 A debug run: append `-DEBUG` to the run name and use the 36-node recipes with fewer prompts, for
-example `RECIPE=recipes/apertus2-megachonk-vllm-adamw-stem16k-36n.yaml` with
+example `RECIPE=recipes/archive/apertus2-megachonk-vllm-adamw-stem16k-36n.yaml` with
 `grpo.max_num_steps=3 grpo.val_at_start=false grpo.num_prompts_per_step=64
 policy.train_global_batch_size=1024` and the three `data.num_prompts_per_dataloader.*` set to
 16, 32 and 16.

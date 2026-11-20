@@ -1,0 +1,169 @@
+# Chonk SFT v0.2 (iteration 18,315) trained with async GRPO: the recipe of the STEM runs, in one file. It holds what
+# differs from NeMo-RL's defaults (examples/configs/grpo_math_1B.yaml in the NeMo-RL clone) and replaces the chain of
+# 14 files it was written out from (recipes/archive/apertus2-chonk-sftv02-grpo.yaml and its parents, kept for the
+# archived runs). Set elsewhere, so not here: datasets and environments (experts/<expert>/base.yaml), sequence lengths,
+# packing and context parallelism (run.sh, from `context`), node counts (sizes/), checkpoints, validation schedule
+# and logging (experts/main.yaml).
+defaults: /opt/nemo-rl/examples/configs/grpo_math_1B.yaml
+
+# ======================================================================== model: checkpoint and message format
+# run.sh stages this export (under $SCRATCH) as policy.model_name.
+sft_export: chonk-sft/models/chonk-lc-16k-v0.2-iter_0018315
+
+policy:
+  model_name: ${oc.env:SCRATCH}/models/chonk-lc-16k-v0.2-iter_0018315
+  # Apertus 2 message format: apertus-common encodes the prompt to token IDs (no chat template), generation stops at
+  # <|wait|> (token 12, policy.generation below), the reward reads one frame of the output (env.math.reward_frame).
+  tokenizer:
+    chat_template: null
+
+  # ====================================================================== trainer: Megatron (DTensor trainer off)
+  # Global batch = prompts per step x 16 answers: one optimizer step per GRPO step.
+  train_global_batch_size: 8192
+  train_micro_batch_size: 1
+  logprob_batch_size: 1
+  logprob_chunk_size: 512
+  sequence_packing:
+    enabled: true
+  # The DTensor trainer's optimizer and schedule; the Megatron trainer's are in megatron_cfg.
+  optimizer: null
+  scheduler: null
+  dtensor_cfg:
+    enabled: false
+  megatron_cfg:
+    enabled: true
+    # Parallelism of the 108B MoE: TP1, PP2, EP16 over the experts, sequence parallel; CP comes from the context.
+    tensor_model_parallel_size: 1
+    pipeline_model_parallel_size: 2
+    expert_model_parallel_size: 16
+    sequence_parallel: true
+    activation_checkpointing: true
+    gradient_accumulation_fusion: true
+    apply_rope_fusion: false
+    defer_fp32_logits: true
+    # MoE router and expert dispatch: quantile balancing with the router frozen ("seq_aux_loss" makes the log-probs
+    # of trainer and vLLM diverge in GRPO), fp32 router, flex dispatcher with DeepEP kernels (UCCL over Slingshot).
+    moe_router_load_balancing_type: quantile_balancing
+    moe_router_dtype: fp32
+    moe_token_dispatcher_type: flex
+    moe_flex_dispatcher_backend: deepep
+    moe_enable_deepep: true
+    model_overrides:
+      moe_router_quantile_balancing_freeze: true
+    # Optimizer: Adam (NeMo-RL default: weight decay 0.01, betas 0.9/0.999), lr 2e-6 constant from the first step,
+    # the whole optimizer state on the CPU (GPU memory goes to activations).
+    optimizer:
+      lr: 2.0e-6
+      optimizer_cpu_offload: true
+      optimizer_offload_fraction: 1.0
+    scheduler:
+      lr_warmup_iters: 0
+      lr_warmup_init: 0.0
+    distributed_data_parallel_config:
+      grad_reduce_in_fp32: true
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+    checkpoint:
+      async_save: false
+    env_vars:
+      CUDA_DEVICE_MAX_CONNECTIONS: "1"
+      TORCHINDUCTOR_COMPILE_THREADS: "1"
+      # UCCL expert dispatch over Slingshot: transport, chunk sizes for EP16 across 4 nodes, CPU-side timeout.
+      UCCL_EP_TRANSPORT: cxi
+      UCCL_EP_DISPATCH_CONFIG: "24,40,512,32,512"
+      UCCL_EP_COMBINE_CONFIG: "24,7,512,32,512"
+      UCCL_EP_CPU_TIMEOUT_SECS: "480"
+      # Weight transfer to vLLM (refit): buffer share and count; vllm_cfg.env_vars must match or the transfer hangs.
+      NRL_REFIT_BUFFER_MEMORY_RATIO: "0.005"
+      NRL_REFIT_NUM_BUFFERS: "1"
+      # HANGANG: keep the CPU-offloaded optimizer's host memory off the GPU's HBM (NeMo-RL hbm_spill).
+      NRL_HBM_BIND_CPU: "1"
+      # Minutes a collective waits for its peers (NeMo-RL patch 0040; default 10).
+      NRL_NCCL_TIMEOUT_MINUTES: "60"
+      # Debugging and forensics: NCCL logs, flight recorder, memory history, core dumps (files in the log directory).
+      NRL_LOG_LEVEL: DEBUG
+      NRL_FORENSICS_DIR: ${logger.log_dir}/forensics
+      NRL_MEM_HISTORY: "1"
+      NRL_NCCL_WARMUP: "1"
+      NCCL_DEBUG: INFO
+      NCCL_DEBUG_SUBSYS: INIT,ALLOC
+      NCCL_DEBUG_FILE: ${logger.log_dir}/forensics/nccl-%h-%p.log
+      TORCH_SHOW_CPP_STACKTRACES: "1"
+      TORCH_NCCL_TRACE_BUFFER_SIZE: "2000"
+      TORCH_NCCL_DUMP_ON_TIMEOUT: "1"
+      TORCH_FR_DUMP_TEMP_FILE: ${logger.log_dir}/fr-rank
+      TORCH_NCCL_DEBUG_INFO_TEMP_FILE: ${logger.log_dir}/fr-rank
+      CUDA_ENABLE_COREDUMP_ON_EXCEPTION: "1"
+      CUDA_COREDUMP_GENERATION_FLAGS: skip_nonrelocated_elf_images,skip_global_memory,skip_shared_memory,skip_local_memory,skip_abort
+      CUDA_COREDUMP_FILE: ${logger.log_dir}/core_%h_%p
+
+  # ====================================================================== inference: vLLM on nodes of its own
+  generation:
+    output_format: apertus2
+    stop_token_ids: [12]
+    colocated:
+      enabled: false
+      resources:
+        gpus_per_node: 4
+    vllm_cfg:
+      # Block FP8 weights, attention kept in BF16 (the refit cannot map its projections onto FP8), no DeepGEMM (it
+      # lacks Apertus 2's activation). Starts on dummy weights; the first refit loads the trainer's.
+      precision: fp8
+      quantization_ignored_layer_kws:
+        - self_attn
+      use_deep_gemm: false
+      kv_cache_dtype: auto
+      load_format: dummy
+      # One engine per node: TP1, EP4 over the node's 4 GPUs; asynchronous engine with CUDA graphs.
+      expert_parallel_size: 4
+      async_engine: true
+      enforce_eager: false
+      gpu_memory_utilization: 0.88
+      env_vars:
+        NRL_REFIT_BUFFER_MEMORY_RATIO: "0.005"
+        NRL_REFIT_NUM_BUFFERS: "1"
+        NCCL_DEBUG: WARN
+        CUDA_ENABLE_COREDUMP_ON_EXCEPTION: "1"
+        CUDA_COREDUMP_GENERATION_FLAGS: skip_nonrelocated_elf_images,skip_global_memory,skip_shared_memory,skip_local_memory,skip_abort
+        CUDA_COREDUMP_FILE: ${logger.log_dir}/core_vllm_%h_%p
+    vllm_kwargs:
+      all2all_backend: allgather_reducescatter
+      max_num_batched_tokens: 16384
+      max_num_seqs: 256
+
+# ======================================================================== algorithm: async GRPO
+grpo:
+  num_prompts_per_step: 512
+  # Advantage: the group's mean subtracted and its standard deviation divided (NeMo-RL default), no leave-one-out;
+  # groups whose answers all got the same reward are left out of the step.
+  use_leave_one_out_baseline: false
+  skip_zero_advantage_groups: true
+  # A truncated answer gets reward 0 (no other length penalty).
+  reward_shaping:
+    enabled: true
+    stop_properly_penalty_coef: 0.0
+    overlong_buffer_length: null
+    overlong_buffer_penalty: null
+    max_response_length: null
+  # Generation runs ahead of training; a rollout may be up to 4 weight versions old, and vLLM takes new weights
+  # while requests are in flight.
+  async_grpo:
+    enabled: true
+    max_trajectory_age_steps: 4
+    in_flight_weight_updates: true
+
+loss_fn:
+  # PPO clip 0.2/0.2 (default) with dual clip 3.0, no KL penalty; one optimizer step per batch, so the ratio is 1 and
+  # the log-prob pass before training is skipped; truncated importance sampling (cap 2.0) corrects for the gap
+  # between vLLM's and the trainer's probabilities.
+  ratio_clip_c: 3.0
+  reference_policy_kl_penalty: 0
+  force_on_policy_ratio: true
+  use_importance_sampling_correction: true
+  truncated_importance_sampling_type: tis
+  truncated_importance_sampling_ratio: 2.0
+
+env:
+  # Apertus 2 format: the math environment grades the claim frame of the output.
+  math:
+    reward_frame: claim

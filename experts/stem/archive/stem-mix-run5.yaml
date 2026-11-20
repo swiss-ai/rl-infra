@@ -12,7 +12,7 @@
 # a template alternative (/scratch/hanint06/data/stem-rl/chem_rdkit).
 # Validation every 20 steps: AIME 2024 mean@32 and GPQA-Diamond mean@8 as in runs 3 and 4, plus 246 held-out
 # chemistry prompts (2 per RDKit property; molecules share no Bemis-Murcko scaffold with train).
-defaults: ../../../recipes/apertus2-chonk-sftv02-18315-vllm-adamw-dapo-32n-judge1.yaml
+defaults: ../../../recipes/archive/apertus2-chonk-sftv02-18315-vllm-adamw-dapo-32n-judge1.yaml
 
 # Reasoning Gym's scorers in the pydeps overlay (run.sh).
 pydeps: reasoning_gym

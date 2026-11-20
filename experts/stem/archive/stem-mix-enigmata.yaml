@@ -6,7 +6,7 @@
 # Validation every 20 steps: AIME 2024 mean@32 and GPQA-Diamond mean@8 (as run 3).
 # Puzzle file: the task/difficulty cells SFT v0.2 solves sometimes but not always (offline pass rates), equal
 # rows per cell; see handover/enigmata-integration.md and experiments/enigmata/.
-defaults: ../../../recipes/apertus2-chonk-sftv02-18315-vllm-adamw-dapo-32n.yaml
+defaults: ../../../recipes/archive/apertus2-chonk-sftv02-18315-vllm-adamw-dapo-32n.yaml
 
 grpo:
   max_num_steps: 100

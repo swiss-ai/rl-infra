@@ -1,4 +1,4 @@
-defaults: ../../recipes/apertus2-chonk-vllm-adamw.yaml
+defaults: ../apertus2-chonk-vllm-adamw.yaml
 
 policy:
   megatron_cfg:

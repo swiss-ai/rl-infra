@@ -11,7 +11,7 @@
 # step and PyTorch's memory capped (jobs 1222762, 1222763). They need NeMo-RL patches 0029, 0030 and 0033;
 # setup.sh adds them to an older clone. The reward is 1 only if every test passes, Gym's standard
 # score, so a time-out on any test scores 0.
-defaults: ../../../recipes/apertus2-chonk-sft-vllm-adamw-code.yaml
+defaults: ../../../recipes/archive/apertus2-chonk-sft-vllm-adamw-code.yaml
 script: examples/nemo_gym/run_grpo_nemo_gym.py
 
 grpo:

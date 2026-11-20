@@ -4,7 +4,7 @@
 # Starting point: medical multiple choice (e.g. MedQA, MedMCQA) graded on the option letter in the claim frame. For
 # open answers graded by a judge, add `defaults: ../../shared/judges/llm-judge.yaml` and a dataset with env_name llm_judge.
 template: true
-recipe: recipes/apertus2-chonk-sftv02-grpo.yaml
+recipe: recipes/chonk-sftv02.yaml
 
 # Thinking level per dataset (the system frame its prompts start with); a run file overrides one key.
 frames:

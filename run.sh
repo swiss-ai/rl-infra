@@ -96,7 +96,7 @@ DIR="${OUT}/configs/${RUN}-$(date +%Y%m%d-%H%M%S)"
 parents=()
 # A task that names no recipe at all (no `recipe:`, no `defaults`) gets vLLM + AdamW on the pretraining checkpoint.
 if [[ -z "${RECIPE:-}" && -z "${TASK_RECIPE}" && -z "$(yq r "${TASK}" defaults)" ]]; then
-    RECIPE="${ROOT}/recipes/apertus2-chonk-vllm-adamw.yaml"
+    RECIPE="${ROOT}/recipes/archive/apertus2-chonk-vllm-adamw.yaml"
 fi
 if [[ -n "${RECIPE:-}" || -n "${TASK_RECIPE}" ]]; then
     if [[ -n "${RECIPE:-}" ]]; then R="$(realpath "${RECIPE}")"; else R="${ROOT}/${TASK_RECIPE}"; fi
@@ -242,7 +242,7 @@ fi
 
 LOG="${OUT}/setup.log"
 echo "== setup (log: ${LOG})"
-{ SKIP_VLLM_IMAGE=1 bash "${APERTUS2_DIR}/setup.sh" && bash "${ROOT}/experiments/grpo-chonk/stage_model.sh" \
+{ SKIP_VLLM_IMAGE=1 bash "${APERTUS2_DIR}/setup.sh" && bash "${ROOT}/backends/nemo-rl/apertus2/stage_model.sh" \
     && { [[ -z "${TASK_SCRIPT}" ]] || bash "${APERTUS2_DIR}/setup-gym.sh"; }; } \
     > "${LOG}" 2>&1 || { tail -n 20 "${LOG}"; echo "ERROR: setup failed, see ${LOG}" >&2; exit 1; }
 cp "${LOG}" "${DIR}/setup.log"

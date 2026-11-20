@@ -17,7 +17,7 @@
 # Validation rows are held-out molecules whose Bemis-Murcko scaffolds are not in train.
 # As a set in a native mix: data.train entry {dataset_name: ResponseDataset, data_path: <train.jsonl>, env_name: math},
 # the dataloader key is "<parent dir>-<file stem>".
-defaults: ../../../recipes/apertus2-chonk-sftv02-stemmix-run4-100-vllm-adamw-14n.yaml
+defaults: ../../../recipes/archive/apertus2-chonk-sftv02-stemmix-run4-100-vllm-adamw-14n.yaml
 
 grpo:
   num_prompts_per_step: 64

@@ -2,7 +2,7 @@
 # step from Enigmata puzzles of all 81 generated cells (provisional uniform file, select-uniform.json), graded by
 # the native enigmata environment. Per step: 128 DAPO-Math-17K, 192 cleaned NuminaMath-1.5, 128 science + CS
 # knowledge-mcqa, 64 Enigmata. Launch: STEPS=4 VAL=0 TASK=experiments/enigmata/task-debug-uniform.yaml launch.sh.
-defaults: ../../recipes/apertus2-chonk-sftv02-18315-vllm-adamw-dapo-32n.yaml
+defaults: ../../recipes/archive/apertus2-chonk-sftv02-18315-vllm-adamw-dapo-32n.yaml
 
 grpo:
   max_num_steps: 100

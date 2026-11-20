@@ -1,4 +1,4 @@
-defaults: ../experiments/grpo-chonk/chonk-gsm8k-12n-megatron-128x16-2k-async.yaml
+defaults: chain/chonk-gsm8k-12n-megatron-128x16-2k-async-mcoregen.yaml
 
 cluster:
   num_nodes: 12

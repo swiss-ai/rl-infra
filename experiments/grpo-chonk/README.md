@@ -1,5 +1,8 @@
 # Chonk GRPO on GSM8K
 
+> The config files of these experiments moved to `recipes/archive/chain/` (the recipes built on them to
+> `recipes/archive/`), and `stage_model.sh` to `backends/nemo-rl/apertus2/`; file names below are unchanged.
+
 These configs train Apertus 2 Chonk (the long-context checkpoint at iteration 3576) with
 async GRPO on GSM8K, on the Apertus 2 NeMo-RL stack in `backends/nemo-rl/apertus2`. That
 stack pins the swiss-ai NeMo-RL fork together with the PRs and patches these runs need, and
@@ -13,10 +16,10 @@ with 16 generations each, at most one step off-policy, and evaluates on the GSM8
 at steps 0, 20, 40 and 58:
 
 ```bash
-RECIPE=recipes/apertus2-chonk-vllm-adamw.yaml      bash run.sh experts/stem/dev/gsm8k.yaml   # 8 + 4 nodes
-RECIPE=recipes/apertus2-chonk-megatron-adamw.yaml  bash run.sh experts/stem/dev/gsm8k.yaml   # 8 + 4 nodes
-RECIPE=recipes/apertus2-chonk-vllm-muon.yaml       bash run.sh experts/stem/dev/gsm8k.yaml   # 16 + 4 nodes
-RECIPE=recipes/apertus2-chonk-megatron-muon.yaml   bash run.sh experts/stem/dev/gsm8k.yaml   # 16 + 4 nodes
+RECIPE=recipes/archive/apertus2-chonk-vllm-adamw.yaml      bash run.sh experts/stem/dev/gsm8k.yaml   # 8 + 4 nodes
+RECIPE=recipes/archive/apertus2-chonk-megatron-adamw.yaml  bash run.sh experts/stem/dev/gsm8k.yaml   # 8 + 4 nodes
+RECIPE=recipes/archive/apertus2-chonk-vllm-muon.yaml       bash run.sh experts/stem/dev/gsm8k.yaml   # 16 + 4 nodes
+RECIPE=recipes/archive/apertus2-chonk-megatron-muon.yaml   bash run.sh experts/stem/dev/gsm8k.yaml   # 16 + 4 nodes
 ```
 
 vLLM runs one inference replica per node. A Megatron inference replica spans two nodes,

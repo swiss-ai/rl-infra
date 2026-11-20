@@ -6,8 +6,8 @@
 #   python3.12 shared/scripts/strip_few_shot.py $SCRATCH/rubric-judge/ultrafeedback $SCRATCH/rubric-judge/ultrafeedback-bare
 #   python3.12 shared/scripts/strip_few_shot.py $SCRATCH/rubric-judge/alpaca_eval $SCRATCH/rubric-judge/alpaca_eval-bare
 #   bash run.sh experts/chat/archive/ultrafeedback-rubric-sft.yaml
-#   RECIPE=recipes/apertus2-chonk-sft-vllm-muon-rubric.yaml bash run.sh experts/chat/archive/ultrafeedback-rubric-sft.yaml
-defaults: ../../../recipes/apertus2-chonk-sft-vllm-adamw-rubric.yaml
+#   RECIPE=recipes/archive/apertus2-chonk-sft-vllm-muon-rubric.yaml bash run.sh experts/chat/archive/ultrafeedback-rubric-sft.yaml
+defaults: ../../../recipes/archive/apertus2-chonk-sft-vllm-adamw-rubric.yaml
 script: examples/nemo_gym/run_grpo_nemo_gym.py
 
 grpo:

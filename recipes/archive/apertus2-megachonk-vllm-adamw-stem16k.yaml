@@ -1,4 +1,4 @@
-defaults: ../experiments/grpo-chonk/megachonk-stem-16k-megatron-512x16-async-fp8.yaml
+defaults: chain/megachonk-stem-16k-megatron-512x16-async-fp8.yaml
 
 cluster:
   num_nodes: 48

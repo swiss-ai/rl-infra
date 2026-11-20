@@ -68,7 +68,7 @@ every few seconds. `python3.12 backends/nemo-rl/apertus2/judge_stats.py <file> [
 up per replica, for a window in seconds from the start of the run. Requests waiting and `queue_s`
 well above 0 mean the judge's GPUs are full: check `max_num_batched_tokens` in its `vllm_kwargs`, then
 add judge nodes with `env.judge_pool.num_nodes` and a recipe of the matching size, as in
-`recipes/apertus2-chonk-vllm-adamw-rubric-2judge.yaml`. Replicas with room while batches still take much longer than their generation mean the
+`recipes/archive/apertus2-chonk-vllm-adamw-rubric-2judge.yaml`. Replicas with room while batches still take much longer than their generation mean the
 limit is in front of them, in Gym's servers, so try `num_workers`. Replicas with very different load
 mean Gym is not spreading the calls evenly.
 
@@ -127,7 +127,8 @@ experts/                what to train on (experts/README.md)
     scripts/            data builders and checks of the expert
 shared/                 pieces task files take in: frames/ (system frames: thinking level, tools),
                         judges/llm-judge.yaml, prompts/ (few-shot), scripts/ (judge download, few-shot removal), debug/
-recipes/                model and algorithm (SFT export, lr, loss, async, FP8, optimizer)
+recipes/                how to train: one flat file per model (chonk-sftv02.yaml: checkpoint, trainer, optimizer,
+                        vLLM, GRPO); earlier recipes in recipes/archive/ (recipes/README.md)
 sizes/                  node tiers: cheap (8 trainer + 16 vLLM), expensive (16 + 32), ultra (32 + 64, batch x2)
 backends/nemo-rl/apertus2/contexts.tsv   CP, packing and memory per context length
 ```

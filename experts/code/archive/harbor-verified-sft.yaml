@@ -15,7 +15,7 @@
 #       env.nemo_gym.harbor_agent.responses_api_agents.harbor_agent.harbor_jobs_dir=$HOME/harbor-jobs/<run>
 # On HANGANG, harbor_jobs_dir goes to home: Harbor writes about 35 files per trial, and the group's
 # /scratch file quota (5M, shared by in0138) is close to full. The recipe is the SFT checkpoint
-# iter_0019374; RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-tools.yaml starts from iter_0008075.
+# iter_0019374; RECIPE=recipes/archive/apertus2-chonk-sft-vllm-adamw-tools.yaml starts from iter_0008075.
 # A recipe on an SFT checkpoint needs swiss-ai/apertus-common, a private repository that setup.sh
 # clones over HTTPS when its checkout is missing or behind the pin. Without HTTPS credentials for
 # GitHub on the login node that fails with "could not read Username". Either run `gh auth setup-git`
@@ -24,7 +24,7 @@
 #       GIT_CONFIG_VALUE_0=https://github.com/swiss-ai/apertus-common.git
 # The pods of a run carry the labels user=rl-infra and run=<run name> and live at most sandbox_ttl_s;
 # to delete the ones a run leaves behind, see experiments/runs.md.
-defaults: ../../../recipes/apertus2-chonk-sft19374-vllm-adamw-tools.yaml
+defaults: ../../../recipes/archive/apertus2-chonk-sft19374-vllm-adamw-tools.yaml
 script: examples/nemo_gym/run_grpo_nemo_gym.py
 
 # train.jsonl, validation.jsonl and tasks/, as experts/code/scripts/prepare_harbor_verified_tasks.sh writes them.

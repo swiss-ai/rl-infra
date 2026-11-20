@@ -14,7 +14,13 @@ job_time: 2-00:00:00
 context: 32768
 
 grpo:
+  # Validation before the first step, every 20 steps and after the last.
+  val_at_start: true
+  val_at_end: true
   val_period: 20
+
+logger:
+  tensorboard_enabled: true
 
 checkpointing:
   # Weights only (no optimizer state), every 20 steps, the last 10 kept (about 200 GB each for Chonk, so about
@@ -24,6 +30,8 @@ checkpointing:
   keep_top_k: 10
   metric_name: null
   save_optimizer: false
+  # A step that saves and validates saves first (NeMo-RL patch 0047): a failure in the validation loses nothing.
+  save_before_validation: true
 
 env:
   # Every step's rollouts as text (prompt, answer, reward, length) without the per-token arrays (NeMo-RL patch

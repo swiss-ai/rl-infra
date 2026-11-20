@@ -10,27 +10,27 @@ only by code that is off for them. Before a run on another machine, see `README.
 Job 1173382, 12 nodes:
 
 ```bash
-RUN=gsm8k-adamw-opt1 RECIPE=recipes/apertus2-chonk-vllm-adamw.yaml JOB_TIME=05:00:00 bash run.sh experts/stem/dev/gsm8k.yaml \
+RUN=gsm8k-adamw-opt1 RECIPE=recipes/archive/apertus2-chonk-vllm-adamw.yaml JOB_TIME=05:00:00 bash run.sh experts/stem/dev/gsm8k.yaml \
     policy.train_global_batch_size=2048
 ```
 
 Job 1173403, 12 nodes:
 
 ```bash
-RUN=gsm8k-adamw-opt2 RECIPE=recipes/apertus2-chonk-vllm-adamw.yaml JOB_TIME=05:00:00 bash run.sh experts/stem/dev/gsm8k.yaml \
+RUN=gsm8k-adamw-opt2 RECIPE=recipes/archive/apertus2-chonk-vllm-adamw.yaml JOB_TIME=05:00:00 bash run.sh experts/stem/dev/gsm8k.yaml \
     policy.train_global_batch_size=1024
 ```
 
 Job 1173380, 12 nodes:
 
 ```bash
-RUN=gsm8k-adamw-opt4 RECIPE=recipes/apertus2-chonk-vllm-adamw.yaml JOB_TIME=05:00:00 bash run.sh experts/stem/dev/gsm8k.yaml
+RUN=gsm8k-adamw-opt4 RECIPE=recipes/archive/apertus2-chonk-vllm-adamw.yaml JOB_TIME=05:00:00 bash run.sh experts/stem/dev/gsm8k.yaml
 ```
 
 Job 1180612, 12 nodes:
 
 ```bash
-RUN=gsm8k-adamw-lr2e-6-opt1 RECIPE=recipes/apertus2-chonk-vllm-adamw.yaml JOB_TIME=05:00:00 bash run.sh experts/stem/dev/gsm8k.yaml \
+RUN=gsm8k-adamw-lr2e-6-opt1 RECIPE=recipes/archive/apertus2-chonk-vllm-adamw.yaml JOB_TIME=05:00:00 bash run.sh experts/stem/dev/gsm8k.yaml \
     policy.megatron_cfg.optimizer.lr=2.0e-6 \
     policy.train_global_batch_size=2048 \
     checkpointing.enabled=false
@@ -39,7 +39,7 @@ RUN=gsm8k-adamw-lr2e-6-opt1 RECIPE=recipes/apertus2-chonk-vllm-adamw.yaml JOB_TI
 Job 1180613, 12 nodes:
 
 ```bash
-RUN=gsm8k-adamw-lr2e-6-opt2 RECIPE=recipes/apertus2-chonk-vllm-adamw.yaml JOB_TIME=05:00:00 bash run.sh experts/stem/dev/gsm8k.yaml \
+RUN=gsm8k-adamw-lr2e-6-opt2 RECIPE=recipes/archive/apertus2-chonk-vllm-adamw.yaml JOB_TIME=05:00:00 bash run.sh experts/stem/dev/gsm8k.yaml \
     policy.megatron_cfg.optimizer.lr=2.0e-6 \
     policy.train_global_batch_size=1024 \
     checkpointing.enabled=false
@@ -48,7 +48,7 @@ RUN=gsm8k-adamw-lr2e-6-opt2 RECIPE=recipes/apertus2-chonk-vllm-adamw.yaml JOB_TI
 Job 1180614, 12 nodes:
 
 ```bash
-RUN=gsm8k-adamw-lr2e-6-opt4 RECIPE=recipes/apertus2-chonk-vllm-adamw.yaml JOB_TIME=05:00:00 bash run.sh experts/stem/dev/gsm8k.yaml \
+RUN=gsm8k-adamw-lr2e-6-opt4 RECIPE=recipes/archive/apertus2-chonk-vllm-adamw.yaml JOB_TIME=05:00:00 bash run.sh experts/stem/dev/gsm8k.yaml \
     policy.megatron_cfg.optimizer.lr=2.0e-6 \
     policy.train_global_batch_size=512 \
     checkpointing.enabled=false
@@ -57,7 +57,7 @@ RUN=gsm8k-adamw-lr2e-6-opt4 RECIPE=recipes/apertus2-chonk-vllm-adamw.yaml JOB_TI
 Job 1180783, 12 nodes:
 
 ```bash
-RUN=gsm8k-adamw-lr4e-6-opt1 RECIPE=recipes/apertus2-chonk-vllm-adamw.yaml JOB_TIME=05:00:00 bash run.sh experts/stem/dev/gsm8k.yaml \
+RUN=gsm8k-adamw-lr4e-6-opt1 RECIPE=recipes/archive/apertus2-chonk-vllm-adamw.yaml JOB_TIME=05:00:00 bash run.sh experts/stem/dev/gsm8k.yaml \
     policy.megatron_cfg.optimizer.lr=4.0e-6 \
     policy.train_global_batch_size=2048 \
     checkpointing.enabled=false
@@ -66,7 +66,7 @@ RUN=gsm8k-adamw-lr4e-6-opt1 RECIPE=recipes/apertus2-chonk-vllm-adamw.yaml JOB_TI
 Job 1180789, 12 nodes:
 
 ```bash
-RUN=gsm8k-adamw-lr4e-6-opt2 RECIPE=recipes/apertus2-chonk-vllm-adamw.yaml JOB_TIME=05:00:00 bash run.sh experts/stem/dev/gsm8k.yaml \
+RUN=gsm8k-adamw-lr4e-6-opt2 RECIPE=recipes/archive/apertus2-chonk-vllm-adamw.yaml JOB_TIME=05:00:00 bash run.sh experts/stem/dev/gsm8k.yaml \
     policy.megatron_cfg.optimizer.lr=4.0e-6 \
     policy.train_global_batch_size=1024 \
     checkpointing.enabled=false
@@ -75,7 +75,7 @@ RUN=gsm8k-adamw-lr4e-6-opt2 RECIPE=recipes/apertus2-chonk-vllm-adamw.yaml JOB_TI
 Job 1180793, 12 nodes:
 
 ```bash
-RUN=gsm8k-adamw-lr4e-6-opt4 RECIPE=recipes/apertus2-chonk-vllm-adamw.yaml JOB_TIME=05:00:00 bash run.sh experts/stem/dev/gsm8k.yaml \
+RUN=gsm8k-adamw-lr4e-6-opt4 RECIPE=recipes/archive/apertus2-chonk-vllm-adamw.yaml JOB_TIME=05:00:00 bash run.sh experts/stem/dev/gsm8k.yaml \
     policy.megatron_cfg.optimizer.lr=4.0e-6 \
     policy.train_global_batch_size=512 \
     checkpointing.enabled=false
@@ -84,7 +84,7 @@ RUN=gsm8k-adamw-lr4e-6-opt4 RECIPE=recipes/apertus2-chonk-vllm-adamw.yaml JOB_TI
 Job 1178777, 20 nodes:
 
 ```bash
-RUN=gsm8k-muon-lr1e-6-matrix1e-5 RECIPE=recipes/apertus2-chonk-vllm-muon.yaml JOB_TIME=05:00:00 bash run.sh experts/stem/dev/gsm8k.yaml \
+RUN=gsm8k-muon-lr1e-6-matrix1e-5 RECIPE=recipes/archive/apertus2-chonk-vllm-muon.yaml JOB_TIME=05:00:00 bash run.sh experts/stem/dev/gsm8k.yaml \
     policy.megatron_cfg.optimizer.lr=1.0e-6 \
     policy.megatron_cfg.optimizer.matrix_lr=1.0e-5 \
     checkpointing.enabled=false
@@ -93,7 +93,7 @@ RUN=gsm8k-muon-lr1e-6-matrix1e-5 RECIPE=recipes/apertus2-chonk-vllm-muon.yaml JO
 Job 1178778, 20 nodes:
 
 ```bash
-RUN=gsm8k-muon-lr1e-6-gains1e-6-matrix1e-5 RECIPE=recipes/apertus2-chonk-vllm-muon.yaml JOB_TIME=05:00:00 bash run.sh experts/stem/dev/gsm8k.yaml \
+RUN=gsm8k-muon-lr1e-6-gains1e-6-matrix1e-5 RECIPE=recipes/archive/apertus2-chonk-vllm-muon.yaml JOB_TIME=05:00:00 bash run.sh experts/stem/dev/gsm8k.yaml \
     policy.megatron_cfg.optimizer.lr=1.0e-6 \
     policy.megatron_cfg.optimizer.gains_lr=1.0e-6 \
     policy.megatron_cfg.optimizer.matrix_lr=1.0e-5 \
@@ -103,7 +103,7 @@ RUN=gsm8k-muon-lr1e-6-gains1e-6-matrix1e-5 RECIPE=recipes/apertus2-chonk-vllm-mu
 Job 1180618, 20 nodes:
 
 ```bash
-RUN=gsm8k-muon-lr1e-6-matrix2e-5 RECIPE=recipes/apertus2-chonk-vllm-muon.yaml JOB_TIME=05:00:00 bash run.sh experts/stem/dev/gsm8k.yaml \
+RUN=gsm8k-muon-lr1e-6-matrix2e-5 RECIPE=recipes/archive/apertus2-chonk-vllm-muon.yaml JOB_TIME=05:00:00 bash run.sh experts/stem/dev/gsm8k.yaml \
     policy.megatron_cfg.optimizer.lr=1.0e-6 \
     policy.megatron_cfg.optimizer.matrix_lr=2.0e-5 \
     checkpointing.enabled=false
@@ -112,7 +112,7 @@ RUN=gsm8k-muon-lr1e-6-matrix2e-5 RECIPE=recipes/apertus2-chonk-vllm-muon.yaml JO
 Job 1183563, 20 nodes:
 
 ```bash
-RUN=gsm8k-muon-lr1e-6-gains1e-6-matrix4e-5 RECIPE=recipes/apertus2-chonk-vllm-muon.yaml JOB_TIME=05:00:00 bash run.sh experts/stem/dev/gsm8k.yaml \
+RUN=gsm8k-muon-lr1e-6-gains1e-6-matrix4e-5 RECIPE=recipes/archive/apertus2-chonk-vllm-muon.yaml JOB_TIME=05:00:00 bash run.sh experts/stem/dev/gsm8k.yaml \
     policy.megatron_cfg.optimizer.lr=1.0e-6 \
     policy.megatron_cfg.optimizer.gains_lr=1.0e-6 \
     policy.megatron_cfg.optimizer.matrix_lr=4.0e-5 \
@@ -127,52 +127,52 @@ vLLM memory at 0.8, the value then. To match them, add `policy.generation.vllm_c
 Job 1173197, 16 nodes:
 
 ```bash
-JOB_TIME=1-00:00:00 bash backends/nemo-rl/apertus2/launch.sh experiments/grpo-chonk/chonk-dapo-16n-megatron-128x16-16k-async-pp2-dedup.yaml 16 hangang-dapo
+JOB_TIME=1-00:00:00 bash backends/nemo-rl/apertus2/launch.sh recipes/archive/chain/chonk-dapo-16n-megatron-128x16-16k-async-pp2-dedup.yaml 16 hangang-dapo
 ```
 
 Job 1173598, 16 nodes:
 
 ```bash
-JOB_TIME=1-00:00:00 bash backends/nemo-rl/apertus2/launch.sh experiments/grpo-chonk/chonk-dapo-16n-megatron-128x16-16k-async-pp2-dedup.yaml 16 hangang-dapo-lr2e-6 \
+JOB_TIME=1-00:00:00 bash backends/nemo-rl/apertus2/launch.sh recipes/archive/chain/chonk-dapo-16n-megatron-128x16-16k-async-pp2-dedup.yaml 16 hangang-dapo-lr2e-6 \
     policy.megatron_cfg.optimizer.lr=2.0e-6
 ```
 
 Job 1180617, 16 nodes:
 
 ```bash
-JOB_TIME=1-00:00:00 bash backends/nemo-rl/apertus2/launch.sh experiments/grpo-chonk/chonk-dapo-16n-megatron-128x16-16k-async-pp2-dedup-fp8-skip-trunc0.yaml 16 hangang-dapo-fp8-skip-trunc0
+JOB_TIME=1-00:00:00 bash backends/nemo-rl/apertus2/launch.sh recipes/archive/chain/chonk-dapo-16n-megatron-128x16-16k-async-pp2-dedup-fp8-skip-trunc0.yaml 16 hangang-dapo-fp8-skip-trunc0
 ```
 
 Job 1186409, 16 nodes:
 
 ```bash
-JOB_TIME=1-00:00:00 bash backends/nemo-rl/apertus2/launch.sh experiments/grpo-chonk/chonk-dapo-16n-megatron-128x16-16k-async-pp2-dedup-fp8-skip-trunc0.yaml 16 hangang-dapo-fp8-skip-trunc0-lr2e-6 \
+JOB_TIME=1-00:00:00 bash backends/nemo-rl/apertus2/launch.sh recipes/archive/chain/chonk-dapo-16n-megatron-128x16-16k-async-pp2-dedup-fp8-skip-trunc0.yaml 16 hangang-dapo-fp8-skip-trunc0-lr2e-6 \
     policy.megatron_cfg.optimizer.lr=2.0e-6
 ```
 
 Job 1185235, 16 nodes:
 
 ```bash
-JOB_TIME=1-00:00:00 bash backends/nemo-rl/apertus2/launch.sh experiments/grpo-chonk/chonk-dapo-16n-megatron-128x16-16k-async-pp2-dedup-fp8-skip-trunc0.yaml 16 hangang-dapo-fp8-skip-trunc0-lr4e-6 \
+JOB_TIME=1-00:00:00 bash backends/nemo-rl/apertus2/launch.sh recipes/archive/chain/chonk-dapo-16n-megatron-128x16-16k-async-pp2-dedup-fp8-skip-trunc0.yaml 16 hangang-dapo-fp8-skip-trunc0-lr4e-6 \
     policy.megatron_cfg.optimizer.lr=4.0e-6
 ```
 
 Job 1184046, 16 nodes:
 
 ```bash
-JOB_TIME=1-00:00:00 bash backends/nemo-rl/apertus2/launch.sh experiments/grpo-chonk/chonk-dapo-16n-megatron-128x16-16k-async-pp2-dedup-fp8-skip-trunc0.yaml 16 hangang-dapo-fp8-skip-trunc0-mem088
+JOB_TIME=1-00:00:00 bash backends/nemo-rl/apertus2/launch.sh recipes/archive/chain/chonk-dapo-16n-megatron-128x16-16k-async-pp2-dedup-fp8-skip-trunc0.yaml 16 hangang-dapo-fp8-skip-trunc0-mem088
 ```
 
 Job 1180620, 24 nodes:
 
 ```bash
-JOB_TIME=1-00:00:00 bash backends/nemo-rl/apertus2/launch.sh experiments/grpo-chonk/chonk-dapo-24n-megatron-128x16-16k-async-pp4-dedup-md-fp8-skip-trunc0.yaml 24 hangang-dapo-muon-fp8-skip-trunc0
+JOB_TIME=1-00:00:00 bash backends/nemo-rl/apertus2/launch.sh recipes/archive/chain/chonk-dapo-24n-megatron-128x16-16k-async-pp4-dedup-md-fp8-skip-trunc0.yaml 24 hangang-dapo-muon-fp8-skip-trunc0
 ```
 
 Job 1184044, 24 nodes:
 
 ```bash
-JOB_TIME=1-00:00:00 bash backends/nemo-rl/apertus2/launch.sh experiments/grpo-chonk/chonk-dapo-24n-megatron-128x16-16k-async-pp4-dedup-md-fp8-skip-trunc0.yaml 24 hangang-dapo-muon-fp8-skip-trunc0-lr1e-6-gains1e-6-matrix4e-5 \
+JOB_TIME=1-00:00:00 bash backends/nemo-rl/apertus2/launch.sh recipes/archive/chain/chonk-dapo-24n-megatron-128x16-16k-async-pp4-dedup-md-fp8-skip-trunc0.yaml 24 hangang-dapo-muon-fp8-skip-trunc0-lr1e-6-gains1e-6-matrix4e-5 \
     policy.megatron_cfg.optimizer.lr=1.0e-6 \
     policy.megatron_cfg.optimizer.gains_lr=1.0e-6 \
     policy.megatron_cfg.optimizer.matrix_lr=4.0e-5
@@ -183,7 +183,7 @@ JOB_TIME=1-00:00:00 bash backends/nemo-rl/apertus2/launch.sh experiments/grpo-ch
 Job 1190668, resumed as job 1193455, 14 nodes:
 
 ```bash
-RUN=rubric-adamw-lr1e-6 RECIPE=recipes/apertus2-chonk-vllm-adamw-rubric-2judge.yaml JOB_TIME=16:00:00 bash run.sh experts/chat/archive/ultrafeedback-rubric.yaml \
+RUN=rubric-adamw-lr1e-6 RECIPE=recipes/archive/apertus2-chonk-vllm-adamw-rubric-2judge.yaml JOB_TIME=16:00:00 bash run.sh experts/chat/archive/ultrafeedback-rubric.yaml \
     policy.megatron_cfg.optimizer.lr=1.0e-6 \
     env.judge_pool.num_nodes=2 \
     grpo.max_num_steps=431 \
@@ -195,7 +195,7 @@ RUN=rubric-adamw-lr1e-6 RECIPE=recipes/apertus2-chonk-vllm-adamw-rubric-2judge.y
 Job 1190666, 14 nodes:
 
 ```bash
-RUN=rubric-adamw-lr2e-6 RECIPE=recipes/apertus2-chonk-vllm-adamw-rubric-2judge.yaml JOB_TIME=16:00:00 bash run.sh experts/chat/archive/ultrafeedback-rubric.yaml \
+RUN=rubric-adamw-lr2e-6 RECIPE=recipes/archive/apertus2-chonk-vllm-adamw-rubric-2judge.yaml JOB_TIME=16:00:00 bash run.sh experts/chat/archive/ultrafeedback-rubric.yaml \
     policy.megatron_cfg.optimizer.lr=2.0e-6 \
     env.judge_pool.num_nodes=2 \
     grpo.max_num_steps=431 \
@@ -207,7 +207,7 @@ RUN=rubric-adamw-lr2e-6 RECIPE=recipes/apertus2-chonk-vllm-adamw-rubric-2judge.y
 Job 1190667, 22 nodes:
 
 ```bash
-RUN=rubric-muon-lr1e-6-gains1e-6-matrix4e-5 RECIPE=recipes/apertus2-chonk-vllm-muon-rubric-2judge.yaml JOB_TIME=16:00:00 bash run.sh experts/chat/archive/ultrafeedback-rubric.yaml \
+RUN=rubric-muon-lr1e-6-gains1e-6-matrix4e-5 RECIPE=recipes/archive/apertus2-chonk-vllm-muon-rubric-2judge.yaml JOB_TIME=16:00:00 bash run.sh experts/chat/archive/ultrafeedback-rubric.yaml \
     policy.megatron_cfg.optimizer.lr=1.0e-6 \
     policy.megatron_cfg.optimizer.gains_lr=1.0e-6 \
     policy.megatron_cfg.optimizer.matrix_lr=4.0e-5 \
@@ -223,20 +223,20 @@ RUN=rubric-muon-lr1e-6-gains1e-6-matrix4e-5 RECIPE=recipes/apertus2-chonk-vllm-m
 Job 1190614, 16 nodes:
 
 ```bash
-RUN=sft-dapo-adamw-lr1e-6 RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-dapo.yaml JOB_TIME=1-00:00:00 bash run.sh experts/stem/dev/dapo-math-sft.yaml
+RUN=sft-dapo-adamw-lr1e-6 RECIPE=recipes/archive/apertus2-chonk-sft-vllm-adamw-dapo.yaml JOB_TIME=1-00:00:00 bash run.sh experts/stem/dev/dapo-math-sft.yaml
 ```
 
 Job 1190615, 16 nodes:
 
 ```bash
-RUN=sft-dapo-adamw-lr2e-6 RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-dapo.yaml JOB_TIME=1-00:00:00 bash run.sh experts/stem/dev/dapo-math-sft.yaml \
+RUN=sft-dapo-adamw-lr2e-6 RECIPE=recipes/archive/apertus2-chonk-sft-vllm-adamw-dapo.yaml JOB_TIME=1-00:00:00 bash run.sh experts/stem/dev/dapo-math-sft.yaml \
     policy.megatron_cfg.optimizer.lr=2.0e-6
 ```
 
 Job 1190617, 24 nodes:
 
 ```bash
-RUN=sft-dapo-muon-lr1e-6-gains1e-6-matrix4e-5 RECIPE=recipes/apertus2-chonk-sft-vllm-muon-dapo.yaml JOB_TIME=1-00:00:00 bash run.sh experts/stem/dev/dapo-math-sft.yaml
+RUN=sft-dapo-muon-lr1e-6-gains1e-6-matrix4e-5 RECIPE=recipes/archive/apertus2-chonk-sft-vllm-muon-dapo.yaml JOB_TIME=1-00:00:00 bash run.sh experts/stem/dev/dapo-math-sft.yaml
 ```
 
 ## SFT, DAPO and GSM8K
@@ -258,7 +258,7 @@ Job 1210085, 16 nodes. The same run as 1190615, from iter_0019374, the last save
 stages hanint05's HF export of it by link:
 
 ```bash
-RUN=sft19374-dapo-adamw-lr2e-6 RECIPE=recipes/apertus2-chonk-sft19374-vllm-adamw-dapo.yaml JOB_TIME=1-00:00:00 bash run.sh experts/stem/dev/dapo-math-sft.yaml \
+RUN=sft19374-dapo-adamw-lr2e-6 RECIPE=recipes/archive/apertus2-chonk-sft19374-vllm-adamw-dapo.yaml JOB_TIME=1-00:00:00 bash run.sh experts/stem/dev/dapo-math-sft.yaml \
     policy.megatron_cfg.optimizer.lr=2.0e-6
 ```
 
@@ -267,7 +267,7 @@ RUN=sft19374-dapo-adamw-lr2e-6 RECIPE=recipes/apertus2-chonk-sft19374-vllm-adamw
 Job 1192745, 14 nodes:
 
 ```bash
-RUN=sft-rubric-full-adamw-lr1e-6 RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-rubric.yaml JOB_TIME=16:00:00 bash run.sh experts/chat/archive/ultrafeedback-rubric-sft.yaml \
+RUN=sft-rubric-full-adamw-lr1e-6 RECIPE=recipes/archive/apertus2-chonk-sft-vllm-adamw-rubric.yaml JOB_TIME=16:00:00 bash run.sh experts/chat/archive/ultrafeedback-rubric-sft.yaml \
     grpo.max_num_steps=431 \
     checkpointing.save_period=220 \
     checkpointing.save_optimizer=true \
@@ -277,7 +277,7 @@ RUN=sft-rubric-full-adamw-lr1e-6 RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-ru
 Job 1192750, 14 nodes:
 
 ```bash
-RUN=sft-rubric-full-adamw-lr2e-6 RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-rubric.yaml JOB_TIME=16:00:00 bash run.sh experts/chat/archive/ultrafeedback-rubric-sft.yaml \
+RUN=sft-rubric-full-adamw-lr2e-6 RECIPE=recipes/archive/apertus2-chonk-sft-vllm-adamw-rubric.yaml JOB_TIME=16:00:00 bash run.sh experts/chat/archive/ultrafeedback-rubric-sft.yaml \
     grpo.max_num_steps=431 \
     checkpointing.save_period=220 \
     checkpointing.save_optimizer=true \
@@ -288,7 +288,7 @@ RUN=sft-rubric-full-adamw-lr2e-6 RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-ru
 Job 1192752, 22 nodes:
 
 ```bash
-RUN=sft-rubric-full-muon-lr1e-6-gains1e-6-matrix4e-5 RECIPE=recipes/apertus2-chonk-sft-vllm-muon-rubric.yaml JOB_TIME=16:00:00 bash run.sh experts/chat/archive/ultrafeedback-rubric-sft.yaml \
+RUN=sft-rubric-full-muon-lr1e-6-gains1e-6-matrix4e-5 RECIPE=recipes/archive/apertus2-chonk-sft-vllm-muon-rubric.yaml JOB_TIME=16:00:00 bash run.sh experts/chat/archive/ultrafeedback-rubric-sft.yaml \
     grpo.max_num_steps=431 \
     checkpointing.save_period=220 \
     checkpointing.save_optimizer=true \
@@ -321,7 +321,7 @@ RUN=sft-rubric-full-3judges-adamw-lr2e-6 JOB_TIME=16:00:00 bash run.sh experts/c
 Job 1194398, 12 nodes:
 
 ```bash
-RUN=sft-tools-nocap-adamw-lr2e-6 RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-tools.yaml JOB_TIME=06:00:00 bash run.sh experts/tool-use/archive/workplace-assistant-sft.yaml \
+RUN=sft-tools-nocap-adamw-lr2e-6 RECIPE=recipes/archive/apertus2-chonk-sft-vllm-adamw-tools.yaml JOB_TIME=06:00:00 bash run.sh experts/tool-use/archive/workplace-assistant-sft.yaml \
     grpo.max_num_steps=39 \
     grpo.val_period=10 \
     grpo.val_at_start=true \
@@ -336,7 +336,7 @@ RUN=sft-tools-nocap-adamw-lr2e-6 RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-to
 Job 1194832, 12 nodes:
 
 ```bash
-RUN=sft-code-debug-1 RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-tools.yaml JOB_TIME=01:30:00 bash run.sh experts/code/archive/code-gen-sft.yaml \
+RUN=sft-code-debug-1 RECIPE=recipes/archive/apertus2-chonk-sft-vllm-adamw-tools.yaml JOB_TIME=01:30:00 bash run.sh experts/code/archive/code-gen-sft.yaml \
     grpo.num_prompts_per_step=32 \
     grpo.max_num_steps=3 \
     grpo.val_period=0 \
@@ -347,7 +347,7 @@ RUN=sft-code-debug-1 RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-tools.yaml JOB
 Job 1195452, 16 nodes:
 
 ```bash
-RUN=sft-code-40-budget12k RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-code.yaml JOB_TIME=05:00:00 bash run.sh experts/code/archive/code-gen-sft.yaml \
+RUN=sft-code-40-budget12k RECIPE=recipes/archive/apertus2-chonk-sft-vllm-adamw-code.yaml JOB_TIME=05:00:00 bash run.sh experts/code/archive/code-gen-sft.yaml \
     grpo.num_prompts_per_step=32 \
     grpo.max_num_steps=40 \
     checkpointing.enabled=false
@@ -356,7 +356,7 @@ RUN=sft-code-40-budget12k RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-code.yaml
 Job 1195564, 12 nodes:
 
 ```bash
-RUN=sft-code-8k-lr2e-6 RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-tools.yaml JOB_TIME=04:00:00 bash run.sh experts/code/archive/code-gen-sft.yaml \
+RUN=sft-code-8k-lr2e-6 RECIPE=recipes/archive/apertus2-chonk-sft-vllm-adamw-tools.yaml JOB_TIME=04:00:00 bash run.sh experts/code/archive/code-gen-sft.yaml \
     grpo.num_prompts_per_step=32 \
     grpo.max_num_steps=40 \
     grpo.val_period=10 \
@@ -369,7 +369,7 @@ RUN=sft-code-8k-lr2e-6 RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-tools.yaml J
 Job 1195905, 16 nodes:
 
 ```bash
-RUN=sft-code-full-128x16-wandb RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-code.yaml JOB_TIME=1-05:00:00 bash run.sh experts/code/archive/code-gen-sft.yaml \
+RUN=sft-code-full-128x16-wandb RECIPE=recipes/archive/apertus2-chonk-sft-vllm-adamw-code.yaml JOB_TIME=1-05:00:00 bash run.sh experts/code/archive/code-gen-sft.yaml \
     grpo.max_num_steps=184 \
     grpo.val_period=20 \
     policy.generation.max_new_tokens=8192 \
@@ -383,7 +383,7 @@ RUN=sft-code-full-128x16-wandb RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-code
 Job 1195570, 12 nodes:
 
 ```bash
-RUN=sft-mbpp-lr2e-6 RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-tools.yaml JOB_TIME=03:00:00 bash run.sh experts/code/archive/code-gen-sft.yaml \
+RUN=sft-mbpp-lr2e-6 RECIPE=recipes/archive/apertus2-chonk-sft-vllm-adamw-tools.yaml JOB_TIME=03:00:00 bash run.sh experts/code/archive/code-gen-sft.yaml \
     grpo.num_prompts_per_step=32 \
     grpo.max_num_steps=40 \
     grpo.val_period=10 \
@@ -584,7 +584,7 @@ Debug run of 2 steps, 8x8 trials, no weights saved:
 
 ```bash
 RUN=sft19374-harbor-verified-debug3 JOB_TIME=02:00:00 WANDB_PROJECT=grpo-dev WANDB_ENTITY=apertus \
-RECIPE=recipes/apertus2-chonk-sft19374-vllm-adamw-tools.yaml bash run.sh experts/code/archive/harbor-verified-sft.yaml \
+RECIPE=recipes/archive/apertus2-chonk-sft19374-vllm-adamw-tools.yaml bash run.sh experts/code/archive/harbor-verified-sft.yaml \
     grpo.max_num_steps=2 \
     checkpointing.enabled=false \
     harbor_data_dir=$HOME/projects/task_datasets/harbor_verified \
@@ -753,7 +753,7 @@ repair.
 
 ### From the STEM-mix climb: it claims, with the answer-line instruction
 
-`recipes/apertus2-chonk-sftv02-stemmix-run4-100-vllm-adamw.yaml` starts from step 100 of hanint06's
+`recipes/archive/apertus2-chonk-sftv02-stemmix-run4-100-vllm-adamw.yaml` starts from step 100 of hanint06's
 `sftv02-stem-mix-run4-33n`, converted to HF (`/scratch/hanint09/exports/sftv02-stem-mix-run4-step100`). That run
 claims on 959 of its 960 DAPO-Math validation prompts. On chemistry, step 0 of
 validation (128 prompts):

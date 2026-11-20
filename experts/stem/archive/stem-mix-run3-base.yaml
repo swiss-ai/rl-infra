@@ -2,7 +2,7 @@
 # step of 512) for a pretrained checkpoint without the Apertus 2 message format: the rows already
 # carry their answer-line instruction, so the prompt is the row text and the reply is graded on its
 # "Answer:" line. Validation as in run 3: AIME 2024 x32 and GPQA-Diamond x8.
-defaults: ../../../recipes/apertus2-megachonk-vllm-adamw-stem16k.yaml
+defaults: ../../../recipes/archive/apertus2-megachonk-vllm-adamw-stem16k.yaml
 
 grpo:
   max_num_steps: 100

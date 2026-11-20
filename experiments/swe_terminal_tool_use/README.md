@@ -4,7 +4,7 @@ GRPO on the Harbor verified tasks: SWE and terminal tasks from 15 validation cam
 against its own solution. The agent is Terminus-2 through Gym's `harbor_agent`. Every trial runs in a
 fresh OpenSandbox pod, and the task's tests, run in a second pod, give the reward. The task file is
 `experts/code/archive/harbor-verified-sft.yaml`, and the starting point is the SFT checkpoint in
-`recipes/apertus2-chonk-sft19374-vllm-adamw-tools.yaml`, the task file's recipe.
+`recipes/archive/apertus2-chonk-sft19374-vllm-adamw-tools.yaml`, the task file's recipe.
 
 The commands below are for HANGANG and run from the repository root on a login node.
 
@@ -129,7 +129,7 @@ The task file also sets the recipe and where your credentials are read from:
 
 | Setting | Default | To change |
 |---|---|---|
-| Recipe | `defaults: ../recipes/apertus2-chonk-sft19374-vllm-adamw-tools.yaml`, SFT checkpoint `iter_0019374` | `RECIPE=recipes/<recipe>.yaml` at launch, e.g. `apertus2-chonk-sft-vllm-adamw-tools.yaml` for `iter_0008075` |
+| Recipe | `defaults: ../recipes/archive/apertus2-chonk-sft19374-vllm-adamw-tools.yaml`, SFT checkpoint `iter_0019374` | `RECIPE=recipes/<recipe>.yaml` at launch, e.g. `apertus2-chonk-sft-vllm-adamw-tools.yaml` for `iter_0008075` |
 | Registry credentials | `registry_cred_file: ${oc.env:RL_USER_HOME}/.rl_registry_cred` | `registry_cred_file=<path>` |
 | OpenSandbox API key | `…connection.api_key_file: ${oc.env:RL_USER_HOME}/.opensandbox_token` | `env.nemo_gym.sandbox.opensandbox.connection.api_key_file=<path>` |
 

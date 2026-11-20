@@ -13,7 +13,7 @@
 # SRC and the mode come from the cluster profile (sites/<SITE>.env).
 set -euo pipefail
 
-source "$(dirname "$0")/../../sites/load.sh" && rl_infra_load
+source "$(dirname "$0")/../../../sites/load.sh" && rl_infra_load
 SRC="${SRC:-${CHONK_MODEL_SRC}}"
 DST="${DST:-${SCRATCH}/models/apertus2-chonk-lc-iter3576}"
 JOBS="${JOBS:-8}"

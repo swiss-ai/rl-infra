@@ -2,7 +2,7 @@
 # apertus2-chonk-vllm-adamw-dapo.yaml: 32 trainer nodes and 16 vLLM nodes (two 8-node replicas).
 # No checkpoints (one with optimizer state is several TB); the timer below still ends the run
 # 30 minutes before a 2-day job limit.
-defaults: ../experiments/grpo-chonk/megachonk-dapo-16k-megatron-128x16-async-fp8-skip-trunc0.yaml
+defaults: chain/megachonk-dapo-16k-megatron-128x16-async-fp8-skip-trunc0.yaml
 
 cluster:
   num_nodes: 48

@@ -4,7 +4,7 @@
 # nodes. Each prompt draws one of the three judges at random when it is read.
 #   HF_REPO=nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8 CHECK_SCRIPT=download_model.sh bash backends/nemo-rl/apertus2/check_env_job.sh
 #   bash run.sh experts/chat/archive/ultrafeedback-rubric-sft-3judges.yaml
-defaults: ../../../recipes/apertus2-chonk-sft-vllm-adamw-rubric-3judges.yaml
+defaults: ../../../recipes/archive/apertus2-chonk-sft-vllm-adamw-rubric-3judges.yaml
 script: examples/nemo_gym/run_grpo_nemo_gym.py
 
 grpo:

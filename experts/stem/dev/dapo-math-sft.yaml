@@ -1,4 +1,4 @@
-defaults: ../../../recipes/apertus2-chonk-sft-vllm-adamw-dapo.yaml
+defaults: ../../../recipes/archive/apertus2-chonk-sft-vllm-adamw-dapo.yaml
 
 data:
   train:

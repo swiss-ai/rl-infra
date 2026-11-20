@@ -9,7 +9,7 @@
 # Reward: the episode's last score / 100, negative (failed) scores as 0.
 # Validation every 20 steps: AIME 2024 mean@32 and GPQA-Diamond mean@8 (as run 3) plus the ScienceWorld dev set
 # (5 dev variations per kept task, played once).
-defaults: ../../../recipes/apertus2-chonk-sftv02-18315-vllm-adamw-dapo-32n.yaml
+defaults: ../../../recipes/archive/apertus2-chonk-sftv02-18315-vllm-adamw-dapo-32n.yaml
 
 grpo:
   max_num_steps: 100

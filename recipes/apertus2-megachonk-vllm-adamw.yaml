@@ -1,7 +1,0 @@
-defaults: ../experiments/grpo-chonk/megachonk-gsm8k-40n-megatron-128x16-2k-async-fp8.yaml
-
-cluster:
-  num_nodes: 40
-
-checkpointing:
-  enabled: false

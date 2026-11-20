@@ -7,7 +7,7 @@
 #   bash run.sh experts/lean/archive/lean-sft.yaml env.nemo_gym.math_formal_lean.resources_servers.math_formal_lean.sandbox_host=<node>
 # Training rows: Nemotron-Math-Proofs-v1 selected by Gym prepare_nemotron_math_proofs.py with its defaults
 # (hard, medium and easy theorems, not the ones used for Nano v3 SFT). Validation: miniF2F test, 244 theorems.
-defaults: ../../../recipes/apertus2-chonk-sft-vllm-adamw-code.yaml
+defaults: ../../../recipes/archive/apertus2-chonk-sft-vllm-adamw-code.yaml
 script: examples/nemo_gym/run_grpo_nemo_gym.py
 
 grpo:

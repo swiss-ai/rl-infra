@@ -6,7 +6,7 @@
 # reply matches the reference, which a translation task may need to phrase as adequacy and fluency.
 defaults: ../../shared/judges/llm-judge.yaml
 template: true
-recipe: recipes/apertus2-chonk-sftv02-grpo.yaml
+recipe: recipes/chonk-sftv02.yaml
 
 # Thinking level per dataset (the system frame its prompts start with); a run file overrides one key.
 frames:

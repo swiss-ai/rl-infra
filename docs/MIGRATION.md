@@ -12,6 +12,7 @@ to follow, and the steps to move one over. `docs/repository-map.md` describes th
 | Launch command | `bash run.sh envs/<task>.yaml` or a launcher | `bash run.sh <expert>` (the expert's `base.yaml` with `experts/main.yaml` under it), `bash run.sh experts/<expert>/dev/<file>.yaml`, `bash run.sh experts/<expert>/archive/<file>.yaml` |
 | Shared pieces | `envs/apertus2-system*.json`, `envs/stage_judge_model.sh`, ... | `shared/frames/`, `shared/judges/llm-judge.yaml`, `shared/prompts/`, `shared/scripts/`, `shared/debug/` |
 | Launch settings | launcher variables (`CP`, `CAP`, `GEN_NODES`, `STEPS`, `SAVE_BY`, ...) in a launcher per experiment | rl-infra keys read by `run.sh`: `size`, `job_time`, `context` in `experts/main.yaml` (a dev file may change them), `recipe` and `template` in the expert's `base.yaml`; Hydra overrides on the command line |
+| Recipes | 34 recipes, each a few keys on a chain of up to 14 files (`recipes/`, `experiments/grpo-chonk/`) | one flat file per active model, on NeMo-RL's defaults only: `recipes/chonk-sftv02.yaml`; the rest in `recipes/archive/` and `recipes/archive/chain/` (`recipes/README.md`) |
 | Node layouts | one recipe per node split | node tiers in `sizes/` (cheap 8+16, expensive 16+32, ultra 32+64 with batch x2); judge nodes come from the task |
 | Context length | `CP`, `KCP`, `CAP`, packing set by hand | `context:` in the task; `backends/nemo-rl/apertus2/contexts.tsv` gives CP, KCP, packing and memory fraction (the next row up: 50K gets the 64K settings) |
 | Run modes | `DRY_RUN=1` ran setup and printed the job; launchers had `DEBUG=1` by default | plain `run.sh` = full run (W&B required); `DEBUG=1` = debug run; `DRY_RUN=1` = everything shown, no setup, no job |
@@ -68,7 +69,7 @@ them refer to the commit before the restructure (`965e15c` on main, `f1ec52e` on
 3. **Use the new keys where they replace launcher variables:** `recipe:` (instead of naming the recipe in
    `defaults`), `context:` (instead of CP, KCP, cap and packing), `size:` (instead of a recipe per node split),
    `job_time:` (instead of `JOB_TIME` and `SAVE_BY`). Settings that were fixed overrides of a launcher (batch, lr,
-   staleness) belong in a recipe (example: `recipes/apertus2-chonk-sftv02-grpo.yaml`). A task in the older layout
+   staleness) belong in a recipe (example: `recipes/chonk-sftv02.yaml`). A task in the older layout
    (recipe in `defaults`, no keys) still runs as before.
 4. **Delete your launcher** once its variables are keys or overrides. Keep a script only for what `run.sh` cannot
    do (for example starting a sandbox job first).
@@ -127,4 +128,7 @@ The NeMo-RL clones of these branches may also hold commits that are not patches 
 | the judge blocks of `envs/stem-mix-run4.yaml` / `run5.yaml` (`env.llm_judge`, `env.judge_pool`) | `shared/judges/llm-judge.yaml` (taken in with `defaults:`) |
 | `experiments/long-context/setup-kcp.sh`, `experiments/long-context/kcp/` | `backends/nemo-rl/apertus2/kcp/setup.sh`, `kcp/` |
 | `experiments/long-context/recipes/sftv02-stem-*.yaml` | `sizes/` tiers |
+| `recipes/apertus2-*.yaml` (all 34) | `recipes/archive/`; the STEM recipe written out as `recipes/chonk-sftv02.yaml` |
+| `experiments/grpo-chonk/*.yaml` (27) | `recipes/archive/chain/` |
+| `experiments/grpo-chonk/stage_model.sh` | `backends/nemo-rl/apertus2/stage_model.sh` |
 | `experiments/long-context/launch-stem-ctx.sh` | `run.sh stem` (run 5 again: `run.sh experts/stem/archive/run5-32k-job1299180.yaml`) |

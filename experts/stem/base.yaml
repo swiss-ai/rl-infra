@@ -22,7 +22,7 @@
 # Each user needs: the judge model in ${SCRATCH}/models (shared/scripts/stage_judge_model.sh) and ScienceWorld's JRE and
 # package in ~/sciworld (handover/scienceworld-integration.md).
 defaults: ../../shared/judges/llm-judge.yaml
-recipe: recipes/apertus2-chonk-sftv02-grpo.yaml
+recipe: recipes/chonk-sftv02.yaml
 # Reasoning Gym's scorers in the pydeps overlay (run.sh).
 pydeps: reasoning_gym
 

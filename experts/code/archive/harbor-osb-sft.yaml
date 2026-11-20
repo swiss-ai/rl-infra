@@ -10,7 +10,7 @@
 #       env.nemo_gym.sandbox.opensandbox.connection.api_key_file=$HOME/.opensandbox_token
 # The pods of a run carry the labels user=rl-infra and run=<run name> and live at most sandbox_ttl_s;
 # to delete the ones a run leaves behind, see experiments/runs.md.
-defaults: ../../../recipes/apertus2-chonk-sft-vllm-adamw-tools.yaml
+defaults: ../../../recipes/archive/apertus2-chonk-sft-vllm-adamw-tools.yaml
 script: examples/nemo_gym/run_grpo_nemo_gym.py
 
 # train.jsonl, validation.jsonl and tasks/, as experts/code/scripts/make_micro_tasks.py writes them.

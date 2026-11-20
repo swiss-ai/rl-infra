@@ -1,4 +1,4 @@
-defaults: ../experiments/grpo-chonk/chonk-dapo-16n-megatron-128x16-16k-async-pp2-dedup-fp8-skip-trunc0.yaml
+defaults: chain/chonk-dapo-16n-megatron-128x16-16k-async-pp2-dedup-fp8-skip-trunc0.yaml
 
 cluster:
   num_nodes: 16
