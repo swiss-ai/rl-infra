@@ -41,6 +41,9 @@ STAMP="${PKGS[*]}${PKGS_PY313[*]:+ ${PKGS_PY313[*]}}"
 if [[ "$(cat "${PYDEPS}/.complete" 2>/dev/null)" != "${STAMP}" ]]; then
     mkdir -p "$(dirname "${PYDEPS}")"
     tmp="${PYDEPS}.tmp.$$"
+    # No uv cache: the overlay is built only when its package list changes, and a scratch purge leaves the cache
+    # with entries whose files are gone (uv then fails on a missing METADATA; Clariden 2026-11-20).
+    export UV_NO_CACHE=1
     uv pip install --python /usr/bin/python3.12 --no-deps --target "${tmp}" "${PKGS[@]}"
     if (( ${#PKGS_PY313[@]} )); then
         uv pip install --python /usr/bin/python3.12 --python-version 3.13 --no-deps --target "${tmp}" "${PKGS_PY313[@]}"
