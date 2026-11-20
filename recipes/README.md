@@ -11,7 +11,7 @@ expert's files. Each active recipe is one file that builds only on NeMo-RL's own
 |---|---|---|
 | `chonk-sftv02.yaml` | Chonk SFT v0.2 (iteration 18,315), async GRPO: 512 x 16, one optimizer step, lr 2e-6 constant, staleness 4, vLLM FP8 | STEM, and the templates of medical, safety, knowledge, translation |
 | `megachonk.yaml` | MegaChonk pretraining checkpoint (iteration 42,000), pretraining format; TP4 x PP8 x EP16 (32 trainer nodes or more), vLLM replicas of 8 nodes, staleness 2 | template: no expert yet; needs a tier with 32+ trainer nodes |
-| `apertus-v11.yaml` | Apertus-v1.1 0.5B / 1.5B / 4B (dense, chat template, 4K context) on one node: DTensor trainer and vLLM colocated, synchronous GRPO 64 x 8, lr 2e-6 | `experts/stem/dev/gsm8k-cot.yaml` (docs/apertus-v11.md) |
+| `apertus-v11.yaml` | Apertus-v1.1 0.5B / 1.5B / 4B (dense, chat template, 4K context) on one node: DTensor trainer and vLLM colocated, synchronous GRPO 64 x 8, lr 2e-6 | `nano/gsm8k` (docs/apertus-v11.md) |
 | `apertus-v11-async.yaml` | the same, asynchronous: vLLM on two GPUs, the trainer on the other two, answers at most one step old | the same, with `RECIPE=` |
 
 `sft_export` names an SFT checkpoint (relative to $SCRATCH or absolute; a symlink works); run.sh stages it and sets

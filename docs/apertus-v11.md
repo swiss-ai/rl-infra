@@ -6,8 +6,8 @@ two stages of one to four hours each:
 
 1. **SFT** of a base model on a subset of the public Apertus SFT mixture, with the final Apertus SFT recipe:
    `sft.sh`, which drives [swiss-ai/posttraining](https://github.com/swiss-ai/posttraining) (`backends/posttraining`).
-2. **GRPO** on GSM8K from the SFT model (or from a released Instruct model): `run.sh` with
-   `experts/stem/dev/gsm8k-cot.yaml` and the recipe `recipes/apertus-v11.yaml` (NeMo-RL, DTensor trainer, vLLM).
+2. **GRPO** on GSM8K from the SFT model (or from a released Instruct model): `run.sh` with the task `nano/gsm8k`
+   (`nano/main.yaml` under it) and the recipe `recipes/apertus-v11.yaml` (NeMo-RL, DTensor trainer, vLLM).
 
 Both run on KISTI HANGANG (120 GB GPUs) and CSCS Alps (95 GB GPUs) with the cluster profiles in `sites/`. The models
 are not reasoning models: the reasoning is written in the answer itself.
@@ -66,14 +66,16 @@ and the backend's mechanics: `backends/posttraining/README.md`.
 ## GRPO
 
 ```bash
-bash run.sh experts/stem/dev/gsm8k-cot.yaml policy.model_name=<SFT model folder>        # synchronous
-RECIPE=recipes/apertus-v11-async.yaml bash run.sh experts/stem/dev/gsm8k-cot.yaml policy.model_name=<folder>
-DEBUG=1 bash run.sh experts/stem/dev/gsm8k-cot.yaml                                     # 3 steps, 0.5B Instruct
+bash run.sh nano/gsm8k policy.model_name=<SFT model folder>        # synchronous
+RECIPE=recipes/apertus-v11-async.yaml bash run.sh nano/gsm8k policy.model_name=<folder>
+DEBUG=1 bash run.sh nano/gsm8k                                     # 3 steps, 0.5B Instruct
 ```
 
 Without `policy.model_name` the run starts from Apertus-v1.1-0.5B-Instruct. One GSM8K epoch is 116 steps of 64
 questions with 8 answers each (512 answers, four optimizer steps of 128 at learning rate 2e-6, no KL penalty);
-validation uses the 1,319 test questions every 10 steps. `run.sh` prints where the training log, the metrics and
+validation uses the 1,319 test questions every 10 steps. The time limit (2.5 hours), the validation schedule and the
+checkpoints (weights every 20 steps, the last 3 kept) are in `nano/main.yaml`, which every nano task takes in; a
+variant goes in `nano/gsm8k/dev/` (`nano/README.md`). `run.sh` prints where the training log, the metrics and
 the checkpoints go. On Alps, `PARTITION=debug` allows at most 1.5 hours: a debug run there needs `JOB_TIME=01:00:00`
 (its default limit is 2 hours).
 
@@ -83,7 +85,7 @@ the checkpoints go. On Alps, `PARTITION=debug` allows at most 1.5 hours: a debug
 | `recipes/apertus-v11-async.yaml` | vLLM keeps two GPUs and generates the next batch while the trainer updates on the other two (answers at most one step old, importance-sampling correction). |
 
 The task puts each question in the user turn of the chat template, after the instruction in
-`shared/prompts/gsm8k-cot.txt` (reason step by step, final answer in `\boxed{}`); the reward is 1 when math-verify
+`nano/gsm8k/prompt.txt` (reason step by step, final answer in `\boxed{}`); the reward is 1 when math-verify
 matches the boxed answer to the reference. The Apertus 1 tokenizer marks LaTeX pieces such as `\boxed{` as special
 tokens, which NeMo-RL removed when it decoded an answer: a correct answer then earned 0. The recipe keeps them
 (`policy.generation.skip_special_tokens: false`, NeMo-RL patch 0062).
@@ -94,7 +96,7 @@ logits of a micro-batch). On the 120 GB GPUs of HANGANG, 0.5B also fits four seq
 is faster and gives the same update:
 
 ```bash
-bash run.sh experts/stem/dev/gsm8k-cot.yaml policy.sequence_packing.train_mb_tokens=16384 \
+bash run.sh nano/gsm8k policy.sequence_packing.train_mb_tokens=16384 \
     policy.sequence_packing.logprob_mb_tokens=16384 policy.dtensor_cfg.activation_checkpointing=false
 ```
 

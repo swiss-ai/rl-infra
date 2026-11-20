@@ -2,11 +2,13 @@
 # Train Apertus 2 Chonk with GRPO for one RL expert (on any cluster with a sites/ profile):
 #   bash run.sh <expert> [overrides...]           e.g.  bash run.sh stem     (experts/stem/base.yaml)
 #   bash run.sh <task.yaml> [overrides...]        e.g.  bash run.sh experts/stem/dev/<variant>.yaml
+#   bash run.sh nano/<task> [overrides...]        the Apertus-v1.1 tasks, e.g. bash run.sh nano/gsm8k
 # An expert's base.yaml says what to train on (datasets, environments, their shares of a step,
 # validation) and, with the rl-infra keys below, which recipe, context and node tier its run uses.
-# Under it run.sh puts experts/main.yaml, the run settings every expert shares (checkpoints, rollout
-# dump, validation period, default tier and time); a task in the older layout (recipe in `defaults`,
-# the files in archive/) does not take it and runs as it ran.
+# Under it run.sh puts the main.yaml of the task's tree: experts/main.yaml, the run settings every
+# expert shares (checkpoints, rollout dump, validation period, default tier and time), or
+# nano/main.yaml for the Apertus-v1.1 tasks; a task in the older layout (recipe in `defaults`, the
+# files in archive/) does not take it and runs as it ran.
 # Every launch first brings the setup up to date; the first one clones the sources and stages the
 # model, later ones take seconds. Hydra overrides after the task file win over everything.
 #
@@ -52,8 +54,14 @@ elif [[ -f "${ROOT}/experts/$1/base.yaml" ]]; then TASK="${ROOT}/experts/$1/base
 else echo "ERROR: $1 is neither a task file nor an expert ($(cd "${ROOT}/experts" && ls -d */ | tr -d / | tr '\n' ' '))" >&2; exit 1
 fi
 TASK="$(realpath "${TASK}")"; shift
-# The run settings every expert shares; taken by tasks in the expert layout (with a `recipe:` key).
-MAIN="${ROOT}/experts/main.yaml"
+# The run settings every task of a tree shares, taken by tasks in the expert layout (with a `recipe:` key): the
+# main.yaml nearest above the task file (experts/main.yaml, nano/main.yaml), experts/main.yaml outside the trees.
+ROOT_REAL="$(realpath "${ROOT}")"; MAIN=""; TREE=""; dir="$(dirname "${TASK}")"
+while [[ "${dir}" == "${ROOT_REAL}/"* ]]; do
+    if [[ -f "${dir}/main.yaml" ]]; then MAIN="${dir}/main.yaml"; TREE="${dir}"; break; fi
+    dir="$(dirname "${dir}")"
+done
+MAIN="${MAIN:-${ROOT}/experts/main.yaml}"
 APERTUS2_DIR="${ROOT}/backends/nemo-rl/apertus2"
 source "${ROOT}/sites/load.sh" && rl_infra_load "${APERTUS2_DIR}/env"
 source "${ROOT}/backends/nemo-rl/config.sh"
@@ -83,8 +91,11 @@ fi
 
 # --- run name and W&B
 if [[ -z "${RUN:-}" ]]; then
-    # experts/stem/base.yaml -> stem-<time>, experts/stem/dev/mix-a.yaml -> stem-dev-mix-a-<time>
-    if [[ "${TASK}" == "${ROOT}/experts/"* ]]; then name="${TASK#"${ROOT}"/experts/}"; else name="$(basename "${TASK}")"; fi
+    # experts/stem/base.yaml -> stem-<time>, experts/stem/dev/mix-a.yaml -> stem-dev-mix-a-<time>; another tree
+    # keeps its folder in the name: nano/gsm8k/base.yaml -> nano-gsm8k-<time>
+    if [[ "${TASK}" == "${ROOT_REAL}/experts/"* ]]; then name="${TASK#"${ROOT_REAL}"/experts/}"
+    elif [[ -n "${TREE}" ]]; then name="${TASK#"${ROOT_REAL}"/}"
+    else name="$(basename "${TASK}")"; fi
     name="${name%.yaml}"; name="${name%/base}"
     RUN="${name//\//-}-$(date +%Y%m%d-%H%M%S)"
 fi

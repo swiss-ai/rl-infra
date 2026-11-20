@@ -1,0 +1,35 @@
+# The run every nano task shares (the Apertus-v1.1 models, 0.5B to 4B, on one node): run.sh puts this file between
+# the recipe and the task's files, as experts/main.yaml for the experts:
+#   bash run.sh nano/<task>                  recipe, then this file, then nano/<task>/base.yaml
+#   bash run.sh nano/<task>/dev/x.yaml       recipe, then this file, then base.yaml and the dev file
+# A task's base.yaml defines what to train on (datasets, environment, validation set, steps); a dev file may also
+# change anything here for one variant.
+
+# Resources (rl-infra keys, read by run.sh): the node tier (cheap = the recipe's base layout, one node for
+# recipes/apertus-v11.yaml), the Slurm time limit (checkpoints are saved and the run stops 30 minutes before it) and
+# the longest prompt + answer, the models' pre-training context. Also replaceable per launch: SIZE=, JOB_TIME=.
+size: cheap
+job_time: "02:30:00"
+context: 4096
+
+grpo:
+  # Validation before the first step, every 10 steps and after the last.
+  val_at_start: true
+  val_at_end: true
+  val_period: 10
+
+logger:
+  tensorboard_enabled: true
+
+checkpointing:
+  # Weights only (no optimizer state), every 20 steps, the last 3 kept.
+  enabled: true
+  save_period: 20
+  keep_top_k: 3
+  metric_name: null
+  save_optimizer: false
+
+env:
+  # Every step's rollouts as text (prompt, answer, reward, length) without the per-token arrays (NeMo-RL patch
+  # 0043): train_data_step<N>.jsonl in the log directory.
+  train_dump_text_only: true

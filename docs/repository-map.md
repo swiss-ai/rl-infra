@@ -1,6 +1,6 @@
 # Repository map
 
-Every file of the repository and its role (384 files, branch `apertus-v11`, 2026-11-20). Roles:
+Every file of the repository and its role (387 files, branch `apertus-v11`, 2026-11-20). Roles:
 **run** = used by every training run, **setup** = prepares sources, images, models or data,
 **check** = a test or probe before or after a run, **tool** = analysis of a finished run,
 **history** = kept as the record of past runs, not used by new ones.
@@ -59,7 +59,6 @@ happened, as they ran) and `scripts/` (data builders and checks); empty folders 
 | `README.md` | doc | The layout and the experts with their status |
 | `stem/base.yaml` | run | STEM official run: 8 training sets, 3 validation sets, all environments, thinking level per dataset (`frames`), 135 steps (resources from main.yaml) |
 | `stem/dev/gsm8k.yaml`, `stem/dev/dapo-math.yaml` | run | GSM8K and DAPO-Math on the pretraining checkpoint (the quick start) |
-| `stem/dev/gsm8k-cot.yaml` | run | GSM8K for chat models (chat template, `\boxed{}` answer), the one-node Apertus-v1.1 run (`recipes/apertus-v11.yaml`) |
 | `stem/dev/gsm8k-sft.yaml`, `dapo-math-sft.yaml`, `dapo-gsm8k-sft.yaml` | run | The same on an SFT checkpoint; DAPO + GSM8K 70/30 mix |
 | `stem/dev/chem-rdkit-sft.yaml`, `stem/dev/reasoning-gym-sft.yaml` | run | Single-environment tasks: chemistry alone, Reasoning Gym alone (older layout) |
 | `stem/archive/run5-32k-job1299180.yaml` | history | Run 5 at 32K (job 1299180) in the expert layout; its merged config equals the run's |
@@ -81,6 +80,15 @@ happened, as they ran) and `scripts/` (data builders and checks); empty folders 
 | `lean/archive/lean-sft.yaml` | history | Lean 4 proving with Gym math_formal_lean |
 | `medical/`, `safety/`, `knowledge/`, `translation/` `base.yaml` | template | Placeholders: medical multiple choice; safety, knowledge and translation graded by the shared judge |
 
+## `nano/` (what to train the Apertus-v1.1 models on, one node; apart from the experts)
+
+| File | Role | Purpose |
+|---|---|---|
+| `main.yaml` | run | The run every nano task shares: one node (tier cheap of recipes/apertus-v11.yaml), 4K context, 2.5-hour limit, validation every 10 steps, checkpoints; run.sh puts it under a nano task's files |
+| `README.md` | doc | The layout and the tasks |
+| `gsm8k/base.yaml`, `gsm8k/prompt.txt` | run | GSM8K for chat models: chat template, step-by-step instruction, `\boxed{}` answer, one epoch of 116 steps, full test set every 10 steps |
+| `gsm8k/dev/` | run | Variants in progress |
+
 ## `shared/` (pieces the task files take in; not experts)
 
 | File | Role | Purpose |
@@ -89,7 +97,6 @@ happened, as they ran) and `scripts/` (data builders and checks); empty folders 
 | `frames/apertus2-system-sciworld-act.json`, `-high.json` | run | The same with ScienceWorld's `act` tool declared |
 | `judges/llm-judge.yaml` | run | The LLM judge environment and its node (gemma-4-26B-A4B), taken in by STEM and the judge-based templates |
 | `prompts/gsm8k-five-shot.txt`, `stem-mix-four-shot.txt` | run / history | Few-shot prompts read at run time (GSM8K on the pretraining checkpoint; STEM runs 1-2) |
-| `prompts/gsm8k-cot.txt` | run | GSM8K instruction for chat models (step by step, answer in `\boxed{}`) |
 | `scripts/stage_judge_model.sh` | setup | Downloads a judge model to scratch |
 | `scripts/strip_few_shot.py` | setup | Removes the few-shot prompt from prepared Gym rows (for SFT checkpoints) |
 | `scripts/convert_rl_ckpt.sh` | tool | NeMo-RL checkpoint to an HF export |

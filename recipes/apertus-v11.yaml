@@ -2,8 +2,8 @@
 # GPUs, synchronous: NeMo-RL's PyTorch trainer (DTensor, FSDP2) and vLLM take turns on the same GPUs (colocated), so
 # every answer comes from the current policy. recipes/apertus-v11-async.yaml splits the node instead. It holds what
 # differs from NeMo-RL's defaults (examples/configs/grpo_math_1B.yaml in the NeMo-RL clone). Set elsewhere, so not
-# here: datasets and environments (the task file, e.g. experts/stem/dev/gsm8k-cot.yaml), sequence lengths and packing
-# (run.sh, from `context`, with the table below), checkpoints, validation schedule and logging (experts/main.yaml).
+# here: datasets and environments (the task file, e.g. nano/gsm8k/base.yaml), sequence lengths and packing
+# (run.sh, from `context`, with the table below), checkpoints, validation schedule and logging (nano/main.yaml).
 # Results and the SFT that comes before: docs/apertus-v11.md.
 defaults: /opt/nemo-rl/examples/configs/grpo_math_1B.yaml
 # Base node layout, the "cheap" tier: one node, trainer and vLLM colocated (expensive = two such nodes).

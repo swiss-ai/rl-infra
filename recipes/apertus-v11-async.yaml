@@ -1,7 +1,7 @@
 # Asynchronous variant of apertus-v11.yaml on the same single node: vLLM keeps two GPUs and generates the next batch
 # while the trainer updates on the other two. Answers may come from the policy one step old
 # (max_trajectory_age_steps), corrected by importance sampling.
-#   RECIPE=recipes/apertus-v11-async.yaml bash run.sh experts/stem/dev/gsm8k-cot.yaml
+#   RECIPE=recipes/apertus-v11-async.yaml bash run.sh nano/gsm8k
 defaults: apertus-v11.yaml
 
 grpo:

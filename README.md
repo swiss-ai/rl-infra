@@ -119,11 +119,12 @@ across nodes needs the three settings in the Nemotron block, or vLLM hangs at st
 
 The dense Apertus-v1.1 models (0.5B, 1.5B, 4B) train on one node of four GPUs: SFT of a base model with the final
 Apertus SFT recipe (`sft.sh`, which drives swiss-ai/posttraining in `backends/posttraining`), then GRPO on GSM8K
-(`recipes/apertus-v11.yaml`, synchronous; `apertus-v11-async.yaml`, two GPUs each for vLLM and the trainer):
+(`recipes/apertus-v11.yaml`, synchronous; `apertus-v11-async.yaml`, two GPUs each for vLLM and the trainer). Their
+task files are in `nano/`, apart from the Apertus 2 experts ([nano/README.md](nano/README.md)):
 
 ```bash
 bash sft.sh 1.5B 320000                                     # about four hours; prints the model folder
-bash run.sh experts/stem/dev/gsm8k-cot.yaml policy.model_name=<that folder>   # one epoch, about an hour
+bash run.sh nano/gsm8k policy.model_name=<that folder>      # one epoch, about an hour
 ```
 
 [docs/apertus-v11.md](docs/apertus-v11.md) has the downloads, the recipe, run sizes and results (GSM8K 16.5% ->

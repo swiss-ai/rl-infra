@@ -1,0 +1,32 @@
+# GSM8K for chat models, the GRPO run of the one-node Apertus-v1.1 setup (docs/apertus-v11.md): each question goes
+# into the user turn of the model's chat template, after an instruction to reason step by step and give the final
+# answer in \boxed{} (prompt.txt, filled in with str.format, so literal braces are doubled). The reward is 1 when
+# math-verify matches the boxed answer to the reference, else 0. One epoch is 116 steps of 64 questions; validation
+# is the full test set (1,319 questions), every 10 steps (nano/main.yaml).
+#   bash run.sh nano/gsm8k policy.model_name=<HF folder>                                   synchronous, one node
+#   RECIPE=recipes/apertus-v11-async.yaml bash run.sh nano/gsm8k policy.model_name=<HF folder>   asynchronous
+recipe: recipes/apertus-v11.yaml
+
+grpo:
+  max_num_steps: 116
+  max_num_epochs: 1
+  max_val_samples: 1319
+  val_batch_size: 1319
+
+data:
+  max_input_seq_length: 1024
+  train:
+    dataset_name: gsm8k
+    split_validation_size: 0.0
+  validation:
+    dataset_name: gsm8k
+    split: test
+  default:
+    prompt_file: ${oc.env:RL_INFRA_DIR}/nano/gsm8k/prompt.txt
+    processor: math_hf_data_processor
+    env_name: math
+
+env:
+  math:
+    num_workers: 8
+    math_verify_impl: hf_math_verify
