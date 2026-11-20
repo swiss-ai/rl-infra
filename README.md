@@ -115,6 +115,20 @@ error. Turn thinking off with `chat_template_kwargs: {enable_thinking: false}`, 
 `check_judge.sh`, which fails when under 95% of that token's probability is on a verdict. A replica
 across nodes needs the three settings in the Nemotron block, or vLLM hangs at start-up.
 
+## Small models on one node: SFT and GRPO on Apertus-v1.1
+
+The dense Apertus-v1.1 models (0.5B, 1.5B, 4B) train on one node of four GPUs: SFT of a base model with the final
+Apertus SFT recipe (`sft.sh`, which drives swiss-ai/posttraining in `backends/posttraining`), then GRPO on GSM8K
+(`recipes/apertus-v11.yaml`, synchronous; `apertus-v11-async.yaml`, two GPUs each for vLLM and the trainer):
+
+```bash
+bash sft.sh 1.5B 320000                                     # about four hours; prints the model folder
+bash run.sh experts/stem/dev/gsm8k-cot.yaml policy.model_name=<that folder>   # one epoch, about an hour
+```
+
+[docs/apertus-v11.md](docs/apertus-v11.md) has the downloads, the recipe, run sizes and results (GSM8K 16.5% ->
+37.5% for 4B, 4.5% -> 16.9% for 1.5B).
+
 ## Task files, recipes, node tiers and context
 
 ```

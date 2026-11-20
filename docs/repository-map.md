@@ -1,6 +1,6 @@
 # Repository map
 
-Every file of the repository and its role (364 files, branch `restructure`, 2026-11-20). Roles:
+Every file of the repository and its role (384 files, branch `apertus-v11`, 2026-11-20). Roles:
 **run** = used by every training run, **setup** = prepares sources, images, models or data,
 **check** = a test or probe before or after a run, **tool** = analysis of a finished run,
 **history** = kept as the record of past runs, not used by new ones.
@@ -27,6 +27,7 @@ bash run.sh stem      (experts/main.yaml + experts/stem/base.yaml)
 | File | Role | Purpose |
 |---|---|---|
 | `run.sh` | run | The entry point: task file in, Slurm job out (rl-infra keys, tiers, context, config copies, setup, launch) |
+| `sft.sh` | run | SFT entry point: an Apertus-v1.1 base model and a number of conversations in, one-node Slurm job out (`backends/posttraining`) |
 | `setup.sh` | setup | Setup of the stock NeMo-RL stack (the Qwen experiments in `backends/nemo-rl/examples`); the Apertus 2 setup is `backends/nemo-rl/apertus2/setup.sh` |
 | `README.md` | doc | Quick start, task files and tiers, NeMo-RL development, cluster notes |
 | `site.env.example` | doc | Template of the personal, gitignored `site.env` (account, scratch, W&B) |
@@ -36,6 +37,7 @@ bash run.sh stem      (experts/main.yaml + experts/stem/base.yaml)
 | `docs/MIGRATION.md` | doc | What changed with the restructure and how to move a branch from the old layout |
 | `docs/runs.md` | history | Every run with its command, job and result |
 | `docs/megachonk.md` | history | The MegaChonk runs: checkpoint, layouts, results |
+| `docs/apertus-v11.md` | doc / history | SFT and GRPO of Apertus-v1.1 on one node: downloads, commands, recipe, run sizes, results |
 | `docs/long-context.md` | history | GRPO at 32K-128K: patches, measurements, what limits a step |
 
 ## `sites/` (cluster profiles)
@@ -57,6 +59,7 @@ happened, as they ran) and `scripts/` (data builders and checks); empty folders 
 | `README.md` | doc | The layout and the experts with their status |
 | `stem/base.yaml` | run | STEM official run: 8 training sets, 3 validation sets, all environments, thinking level per dataset (`frames`), 135 steps (resources from main.yaml) |
 | `stem/dev/gsm8k.yaml`, `stem/dev/dapo-math.yaml` | run | GSM8K and DAPO-Math on the pretraining checkpoint (the quick start) |
+| `stem/dev/gsm8k-cot.yaml` | run | GSM8K for chat models (chat template, `\boxed{}` answer), the one-node Apertus-v1.1 run (`recipes/apertus-v11.yaml`) |
 | `stem/dev/gsm8k-sft.yaml`, `dapo-math-sft.yaml`, `dapo-gsm8k-sft.yaml` | run | The same on an SFT checkpoint; DAPO + GSM8K 70/30 mix |
 | `stem/dev/chem-rdkit-sft.yaml`, `stem/dev/reasoning-gym-sft.yaml` | run | Single-environment tasks: chemistry alone, Reasoning Gym alone (older layout) |
 | `stem/archive/run5-32k-job1299180.yaml` | history | Run 5 at 32K (job 1299180) in the expert layout; its merged config equals the run's |
@@ -86,6 +89,7 @@ happened, as they ran) and `scripts/` (data builders and checks); empty folders 
 | `frames/apertus2-system-sciworld-act.json`, `-high.json` | run | The same with ScienceWorld's `act` tool declared |
 | `judges/llm-judge.yaml` | run | The LLM judge environment and its node (gemma-4-26B-A4B), taken in by STEM and the judge-based templates |
 | `prompts/gsm8k-five-shot.txt`, `stem-mix-four-shot.txt` | run / history | Few-shot prompts read at run time (GSM8K on the pretraining checkpoint; STEM runs 1-2) |
+| `prompts/gsm8k-cot.txt` | run | GSM8K instruction for chat models (step by step, answer in `\boxed{}`) |
 | `scripts/stage_judge_model.sh` | setup | Downloads a judge model to scratch |
 | `scripts/strip_few_shot.py` | setup | Removes the few-shot prompt from prepared Gym rows (for SFT checkpoints) |
 | `scripts/convert_rl_ckpt.sh` | tool | NeMo-RL checkpoint to an HF export |
@@ -101,6 +105,7 @@ happened, as they ran) and `scripts/` (data builders and checks); empty folders 
 |---|---|---|
 | `chonk-sftv02.yaml` | run | The active recipe, one file on NeMo-RL's defaults: Chonk SFT v0.2; Megatron trainer (TP1 PP2 EP16, Adam lr 2e-6 constant, optimizer on CPU); vLLM FP8 (EP4 per node); async GRPO (512 x 16, one optimizer step, staleness 4, TIS 2.0) |
 | `megachonk.yaml` | template | MegaChonk pretraining checkpoint: TP4 PP8 EP16, vLLM TP4 EP32 replicas of 8 nodes, its own context table; no expert yet |
+| `apertus-v11.yaml`, `apertus-v11-async.yaml` | run | Apertus-v1.1 0.5B-4B on one node: DTensor trainer and vLLM colocated (synchronous) or on two GPUs each (asynchronous), GRPO 64 x 8, lr 2e-6 |
 | `README.md` | doc | What a recipe is, the active ones, how to add a variant |
 | `archive/*.yaml` (34) | history | Recipes of earlier runs as they were (pretraining checkpoint, SFT v0.1 / 19374 / v0.2, MegaChonk, AdamW or Muon, judge-node layouts); archived task files and launchers use them |
 | `archive/chain/*.yaml` (27) | history | The experiment chain they build on (GSM8K -> DAPO -> FP8 -> Apertus 2 format), formerly `experiments/grpo-chonk/`; `README.md` there: the GSM8K -> DAPO comparison (vLLM against Megatron inference, AdamW against Muon) |
@@ -130,10 +135,11 @@ happened, as they ran) and `scripts/` (data builders and checks); empty folders 
 | `apertus2/pydeps.sh` | run | Python overlay the image lacks (nemo-lens, soundfile; Gym, Reasoning Gym, apertus-common when needed) |
 | `apertus2/edf.toml.template` | run | Container image, mounts and environment of the Apertus 2 stack |
 | `apertus2/contexts-megachonk.tsv` | run | MegaChonk's context table (16K at CP 4 only), named by recipes/megachonk.yaml |
+| `apertus2/contexts-v11.tsv` | run | Apertus-v1.1's context table (4K, one sequence per micro-batch), named by recipes/apertus-v11.yaml |
 | `apertus2/contexts.tsv` | run | CP, scheme, packing, memory fraction per context length |
 | `apertus2/kcp/setup.sh`, `use.sh`, `0001-*.patch` | run | KCP context parallelism: Megatron copy with PR 112, flash-linear-attention 0.5.2 |
 | `apertus2/setup-gym.sh` | run | NeMo Gym checkout for Gym tasks (`script:`) |
-| `apertus2/patches/nemo-rl/0001-0061` (53 files) | run | Our NeMo-RL changes on top of the pin, applied in order |
+| `apertus2/patches/nemo-rl/0001-0062` (54 files) | run | Our NeMo-RL changes on top of the pin, applied in order |
 | `apertus2/patches/gym/` (15), `automodel/` (2), `megatron/` (6), `vllm/` (1), `uccl/` (2) | run / setup | Changes to Gym, Automodel, Megatron, the vLLM Apertus 2 model, UCCL |
 | `apertus2/uccl-fix/build_image.sh`, `rebuild_uccl.sh` | setup | Builds the image jobs run (UCCL rebuilt with the two patches) |
 | `apertus2/check_env.sh`, `check_env_job.sh` | check | Stack sanity check on one GPU node (also runs `download_model.sh`, `check_judge.sh`) |
@@ -142,6 +148,19 @@ happened, as they ran) and `scripts/` (data builders and checks); empty folders 
 | `apertus2/check_rg_verifier.sh` | check | Test of the Reasoning Gym verifier (patch 0034) |
 | `sandbox/*` (9) | setup / run | Code sandbox node for code_gen: server, harness, data, start script, attack test |
 | `lean/*` (11) | setup / run | Lean 4 sandbox (NeMo-Skills image) and its data |
+
+## `backends/posttraining/` (SFT with swiss-ai/posttraining)
+
+| File | Role | Purpose |
+|---|---|---|
+| `README.md` | doc | How the backend works, throughput and memory per model size, long runs |
+| `pin`, `env` | setup | posttraining's repository and commit; defaults (clone, `$SCRATCH/apertus-v11-sft`, downloads) |
+| `setup.sh` | setup | Login node: posttraining clone at the pin + patches, container image staged (run by `sft.sh`) |
+| `patches/0001-0002` | run | posttraining configs for Apertus-v1.1 and the public mixture; `try_sync_wandb` without `scontrol` |
+| `submit.sh` | run | One script of the folder as a one-node job in the container (pyxis flags or a per-job EDF) |
+| `train.sh` | run | One SFT run: overlay, mixture, training, final model linked as `$SFT_ROOT/models/<run name>` |
+| `build_env.sh`, `prepare_data.py` | setup | Python overlay (Transformers 4.57, TRL 0.16, DeepSpeed, bitsandbytes); the mixture in `load_from_disk` format |
+| `check.sh`, `check_env.py` | check | Packages, one AdEMAMix step, encoding against the Instruct chat template, token lengths |
 
 ## Still out of place (next cleanup steps)
 

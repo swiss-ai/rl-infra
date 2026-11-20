@@ -30,7 +30,7 @@ they ran. A variant that wins moves its changes into `base.yaml`; when a run is 
 | Medical | `medical/` | template: medical multiple choice |
 | Safety | `safety/` | template: prompts graded by the shared LLM judge |
 | General chat, helpfulness, instruction following | `chat/` | template on the archived rubric-judge runs (UltraFeedback, one to three judges, AlpacaEval validation) |
-| STEM: math, reasoning, physics, chemistry | `stem/` | `base.yaml`: the 8-dataset mix of run 5; GSM8K, DAPO-Math, Reasoning Gym and chemistry alone in `dev/`; runs 1-5 in `archive/` |
+| STEM: math, reasoning, physics, chemistry | `stem/` | `base.yaml`: the 8-dataset mix of run 5; GSM8K, DAPO-Math, Reasoning Gym and chemistry alone in `dev/` (`gsm8k-cot.yaml`: GSM8K for chat models, the one-node Apertus-v1.1 run); runs 1-5 in `archive/` |
 | Code, SWE, terminal, agentic | `code/` | template on the archived runs: competitive coding on Gym's code_gen (sandbox node or OpenSandbox pods), Harbor terminal/SWE tasks |
 | Knowledge, factuality, QA | `knowledge/` | template: open QA (judge) and multiple choice; the STEM mix already trains science multiple choice and open science QA |
 | Tool use, web search | `tool-use/` | template on the archived workplace-assistant run (27 simulated tools) |

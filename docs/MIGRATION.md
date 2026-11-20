@@ -99,7 +99,7 @@ Commits not in `restructure`, per local branch of `~/projects/rl-infra`:
 
 | Branch | Commits | Last commit | Note |
 |---|---|---|---|
-| `apertus-v11` | 7 | 2026-11-20 | in progress |
+| `apertus-v11-pre-restructure` | 7 | 2026-11-20 | migrated: `apertus-v11` now starts from `restructure` (`recipes/apertus-v11*.yaml`, `backends/posttraining`, `docs/apertus-v11.md`) |
 | `megachonk` | 5 | 2026-11-18 | |
 | `pr6` | 3 | 2026-11-15 | |
 | `chonk-debug` | 2 | 2026-10-28 | |
