@@ -1,0 +1,19 @@
+# apertus2-chonk-sft19374-alps-vllm-adamw-tools-20n.yaml (20 nodes: 16 trainer PP2 EP32 + 4 vLLM TP1 EP4 FP8) on the
+# SFT v0.2 checkpoint, iteration 18,315, the checkpoint of main's long-context runs (experiments/long-context/recipes/
+# code-sftv02-*.yaml) and of Kostas' and Davit's current recipes. The export on /capstor is the one of
+# origin/lean-kimina-verifier's recipes/apertus2-chonk-sftv02-18315-vllm-adamw-code.yaml (UNVERIFIED from Daint: that it
+# exists, is readable and whether it carries the modeling code, MODELING_SOURCE; run.sh links an export with it whole
+# and copies the small files of one without). Used by experiments/chonk-sc/run-v-24k.sh and run-agent-v.sh at
+# CTX > 24576 (context parallelism comes from the launchers' overrides, not from here). The first run converts the
+# checkpoint to Megatron (a new conversion directory).
+defaults: apertus2-chonk-sft19374-alps-vllm-adamw-tools-20n.yaml
+
+# run.sh reads these two and cluster.num_nodes from this file itself (yq), not through the defaults
+sft_export: /capstor/store/cscs/swissai/infra01/apertus_checkpoints/v2/hf/chonk/posttraining/chonk-lc-16k-v0.2-iter_0018315
+sft_stage_as: chonk-lc-16k-v0.2-iter_0018315
+
+cluster:
+  num_nodes: 20
+
+policy:
+  model_name: ${oc.env:SCRATCH}/models/chonk-lc-16k-v0.2-iter_0018315
