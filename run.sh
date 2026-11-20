@@ -1,5 +1,5 @@
 #!/bin/bash
-# Train Apertus 2 Chonk with GRPO for one RL expert (on any cluster with a sites/ profile):
+# Train with GRPO on rl-infra: one RL expert, or any task file (on any cluster with a sites/ profile):
 #   bash run.sh <expert> [overrides...]           e.g.  bash run.sh stem     (experts/stem/base.yaml)
 #   bash run.sh <task.yaml> [overrides...]        e.g.  bash run.sh experts/stem/dev/<variant>.yaml
 # An expert's base.yaml says what to train on (datasets, environments, their shares of a step,
