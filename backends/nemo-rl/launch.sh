@@ -131,10 +131,15 @@ cluster.num_nodes=${NODES} cluster.gpus_per_node=${GPUS_PER_NODE} \
 checkpointing.checkpoint_dir=${OUT}/results/${RUN} \
 logger.log_dir=${OUT}/logs/${RUN} ${WANDB_ARGS} $*"
 
-# Container: EDF names the installed ~/.edf file; pyxis gets CONTAINER, MOUNTS and
+# Container: EDF is a spec rendered for this job; pyxis gets CONTAINER, MOUNTS and
 # PYXIS_EXTRA_ARGS, with the spec's environment exported here (sbatch passes it on).
+# The Container Engine reads the EDF when the job starts, not at submission, so a shared ~/.edf file
+# would give a queued job the overlays (PYDEPS...) of whichever launch came last (Clariden 2026-11-20:
+# a Gym task started with the Reasoning Gym overlay and lacked devtools). Each job gets a file of its own.
 case "${CONTAINER_RUNTIME}" in
-    edf)   export EDF="${EDF_NAME}" ;;
+    edf)   EDF="${OUT}/edf/${RUN}-$(date +%Y%m%d-%H%M%S).toml"
+           if [[ "${DRY_RUN:-0}" != 1 ]]; then mkdir -p "${OUT}/edf" && container_render > "${EDF}"; fi
+           export EDF ;;
     pyxis) unset EDF; container_pyxis_env ;;
     *)     echo "ERROR: unknown CONTAINER_RUNTIME '${CONTAINER_RUNTIME}' (edf or pyxis)" >&2; exit 1 ;;
 esac
