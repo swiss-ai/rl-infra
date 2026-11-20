@@ -44,10 +44,6 @@ grpo:
   # ScienceWorld turns (at most 50 actions per episode); the single-turn environments end after one.
   max_rollout_turns: 60
 
-checkpointing:
-  # The last 10 checkpoints kept (experts/main.yaml keeps 3).
-  keep_top_k: 10
-
 data:
   _override_: true
   # Reasoning Gym prompts reach 3.6k tokens; chemistry prompts at most 1,897 characters.

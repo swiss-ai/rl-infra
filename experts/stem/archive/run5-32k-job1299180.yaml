@@ -5,10 +5,25 @@
 # are part of the code now. The task file the run itself read is stem-mix-run5.yaml next to this one.
 #   RUN=sftv02-stem-mix-run5-32k-49n bash run.sh experts/stem/archive/run5-32k-job1299180.yaml
 defaults: ../base.yaml
-# The resources that run had, pinned here so that a change to experts/main.yaml does not change this record.
+# What that run had from experts/main.yaml, pinned here so that a later change to main.yaml does not change this
+# record: resources, validation period, checkpoints, rollout dump.
 size: expensive
 job_time: 2-00:00:00
 context: 32768
+
+grpo:
+  val_period: 20
+
+checkpointing:
+  enabled: true
+  save_period: 20
+  keep_top_k: 10
+  metric_name: null
+  save_optimizer: false
+
+env:
+  should_log_nemo_gym_responses: false
+  train_dump_text_only: true
 
 frames:
   default: ${oc.env:RL_INFRA_DIR}/shared/frames/apertus2-system.json
