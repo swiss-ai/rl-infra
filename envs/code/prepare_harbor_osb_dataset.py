@@ -34,7 +34,7 @@ Tasks without `docker_image` are skipped, not fatal, so a partially built
 image set can already be trained on; the counts are reported.
 
 Usage:
-    python3.12 envs/agents/prepare_harbor_osb_dataset.py \\
+    python3.12 envs/code/prepare_harbor_osb_dataset.py \\
         --tasks-dir "$HARBOR_TASKS_DIR" \\
         --output-dir "$HARBOR_ROOT" \\
         --limit 64 --num-validation 8

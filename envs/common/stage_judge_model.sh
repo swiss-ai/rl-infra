@@ -1,8 +1,8 @@
 #!/bin/bash
-# Download the judge model to scratch; envs/rubric/ultrafeedback-rubric.yaml reads it from there. Safe to
+# Download the judge model to scratch; envs/chat/ultrafeedback-rubric.yaml reads it from there. Safe to
 # re-run: finished files are skipped. Plain curl, because a login node has no huggingface_hub, and
 # 4 files at a time, because one connection stays near 50 MB/s from Hugging Face on HANGANG.
-#   bash envs/tools/stage_judge_model.sh [repo] [dest]
+#   bash envs/common/stage_judge_model.sh [repo] [dest]
 set -euo pipefail
 
 REPO="${1:-Qwen/Qwen3.8-27B-FP8}"

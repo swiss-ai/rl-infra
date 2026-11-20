@@ -1,11 +1,11 @@
-# Task file: envs/rubric/ultrafeedback-rubric-sft.yaml with two judge models, Qwen and Gemma 4, on one node each.
+# Task file: envs/chat/ultrafeedback-rubric-sft.yaml with two judge models, Qwen and Gemma 4, on one node each.
 # Each prompt draws one judge at random when it is read (data.train.gym_agent_choices), so all its
 # rollouts go to one judge and nothing is averaged across judges. Advantages are normalized per prompt,
 # so a lenient judge does not reach other prompts. Validation stays on Qwen, so AlpacaEval stays
 # comparable with the one-judge runs. Each agent logs its own metrics. For a third judge, add a pool to
 # extra_judge_pools, copy the three Gym entries at the end of this file, and add its agent to the choices.
 #   HF_REPO=google/gemma-4-26B-A4B-it CHECK_SCRIPT=download_model.sh bash backends/nemo-rl/apertus2/check_env_job.sh
-#   bash run.sh envs/rubric/ultrafeedback-rubric-sft-2judges.yaml
+#   bash run.sh envs/chat/ultrafeedback-rubric-sft-2judges.yaml
 defaults: ../../recipes/apertus2-chonk-sft-vllm-adamw-rubric.yaml
 script: examples/nemo_gym/run_grpo_nemo_gym.py
 

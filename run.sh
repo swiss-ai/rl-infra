@@ -71,6 +71,10 @@ export RUN
 # --- config: frozen copies of the recipe and task chains, merged by NeMo-RL in the job
 DIR="${OUT}/configs/${RUN}-$(date +%Y%m%d-%H%M%S)"
 parents=()
+# A task that names no recipe at all (no `recipe:`, no `defaults`) gets vLLM + AdamW on the pretraining checkpoint.
+if [[ -z "${RECIPE:-}" && -z "${TASK_RECIPE}" && -z "$(yq r "${TASK}" defaults)" ]]; then
+    RECIPE="${ROOT}/recipes/apertus2-chonk-vllm-adamw.yaml"
+fi
 if [[ -n "${RECIPE:-}" || -n "${TASK_RECIPE}" ]]; then
     if [[ -n "${RECIPE:-}" ]]; then R="$(realpath "${RECIPE}")"; else R="${ROOT}/${TASK_RECIPE}"; fi
     [[ -f "${R}" ]] || { echo "ERROR: recipe ${R} not found" >&2; exit 1; }

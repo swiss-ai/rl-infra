@@ -1,6 +1,6 @@
 #!/bin/bash
 # Download a Hugging Face repository to scratch from a compute node, in the Apertus 2 container, which
-# has huggingface_hub and hf_xet. Much faster than envs/tools/stage_judge_model.sh on a login node for a big
+# has huggingface_hub and hf_xet. Much faster than envs/common/stage_judge_model.sh on a login node for a big
 # model. HF_DEST defaults to $SCRATCH/models/<name>, and finished files are skipped on a re-run:
 #   HF_REPO=openai/gpt-oss-safeguard-120b CHECK_SCRIPT=download_model.sh JOB_TIME=01:00:00 \
 #       bash backends/nemo-rl/apertus2/check_env_job.sh

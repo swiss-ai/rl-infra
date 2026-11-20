@@ -1,5 +1,5 @@
 # Tool calls on an SFT checkpoint with AdamW. A rollout of several turns needs the long sequences of
-# the DAPO layout, so this recipe keeps those and serves on 4 vLLM nodes; envs/agents/workplace-assistant-sft.yaml
+# the DAPO layout, so this recipe keeps those and serves on 4 vLLM nodes; envs/tool-use/workplace-assistant-sft.yaml
 # holds the task and the format.
 defaults: apertus2-chonk-vllm-adamw-dapo.yaml
 

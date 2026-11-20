@@ -9,7 +9,7 @@ tests-passing solution in solution/solve.sh, used to check the verifier (not use
         [--families reverse,sorted]   (default: all 8; the validation rows are split evenly over them)
 
 Writes <dir>/tasks/<task>/..., plus <dir>/train.jsonl, <dir>/validation.jsonl and <dir>/task_names.txt
-(<dir> is the parent of --out). Every row's instance_id is `micro::<task>`: envs/agents/harbor-osb-sft.yaml
+(<dir> is the parent of --out). Every row's instance_id is `micro::<task>`: envs/code/harbor-osb-sft.yaml
 maps the dataset alias micro to <dir>/tasks. Standard library only. From Robert's branch harbor-osb.
 """
 

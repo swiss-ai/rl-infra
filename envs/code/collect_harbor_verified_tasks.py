@@ -53,7 +53,7 @@ re-run only re-extracts tasks whose tarball actually changed. `--force`
 re-extracts everything.
 
 Usage:
-    python3.12 envs/agents/collect_harbor_verified_tasks.py \\
+    python3.12 envs/code/collect_harbor_verified_tasks.py \\
         --verified-dir <store>/harbor_verified_tasks \\
         --out-dir "$HARBOR_TASKS_DIR"
 """

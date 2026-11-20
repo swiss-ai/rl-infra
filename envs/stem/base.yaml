@@ -13,7 +13,7 @@
 #   chem_faithful-train              RDKit chemistry (molecules from COCONUT and NCI DTP)  math environment
 # Validation (2,790 prompts): AIME 2024 x32, GPQA-Diamond x8, 246 held-out chemistry prompts (2 per RDKit property;
 # no Bemis-Murcko scaffold shared with train).
-# Each user needs: the judge model in ${SCRATCH}/models (envs/tools/stage_judge_model.sh) and ScienceWorld's JRE and
+# Each user needs: the judge model in ${SCRATCH}/models (envs/common/stage_judge_model.sh) and ScienceWorld's JRE and
 # package in ~/sciworld (handover/scienceworld-integration.md).
 recipe: recipes/apertus2-chonk-sftv02-grpo.yaml
 # Reasoning Gym's scorers in the pydeps overlay (run.sh).

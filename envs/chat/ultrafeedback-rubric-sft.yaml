@@ -1,15 +1,13 @@
-# Task file: general chat on the UltraFeedback prompts, rewarded by an LLM judge on rubrics and
-# validated with AlpacaEval 2.0's prompts, references and judge prompt, with the same judge model.
-# Runs on NeMo Gym (`script`), with the judge on its own node of the same job (env.judge_pool):
-#   python3.12 envs/rubric/prepare_ultrafeedback.py $SCRATCH/rubric-judge/ultrafeedback
-#   python3.12 envs/rubric/prepare_alpaca_eval.py $SCRATCH/rubric-judge/alpaca_eval
-#   bash envs/tools/stage_judge_model.sh
-#   bash run.sh envs/rubric/ultrafeedback-rubric.yaml grpo.max_num_steps=3 grpo.val_at_start=false
-#
-# Chonk is a pretraining checkpoint, so prompts are few-shot (envs/rubric/ultrafeedback-few-shot.txt) and a
-# reply ends at the next turn marker. The judge reads the bare question and the reply. The win rate
-# is validation/alpaca_eval_simple_agent/reward/mean, and every rollout is saved under env.rollout_dir.
-defaults: ../../recipes/apertus2-chonk-vllm-adamw-rubric.yaml
+# Task file: envs/chat/ultrafeedback-rubric.yaml on an SFT checkpoint, on the same rows without the few-shot
+# prompts, with the judge on two nodes. NeMo-RL's chat server encodes each request in the Apertus 2
+# format and returns the reply as content and the thinking as reasoning, parsed from the tokens. An
+# output without a reply comes back as cut off by the token limit, which gets truncated_reward
+# without a judge call. First strip the few-shot prompts:
+#   python3.12 envs/common/strip_few_shot.py $SCRATCH/rubric-judge/ultrafeedback $SCRATCH/rubric-judge/ultrafeedback-bare
+#   python3.12 envs/common/strip_few_shot.py $SCRATCH/rubric-judge/alpaca_eval $SCRATCH/rubric-judge/alpaca_eval-bare
+#   bash run.sh envs/chat/ultrafeedback-rubric-sft.yaml
+#   RECIPE=recipes/apertus2-chonk-sft-vllm-muon-rubric.yaml bash run.sh envs/chat/ultrafeedback-rubric-sft.yaml
+defaults: ../../recipes/apertus2-chonk-sft-vllm-adamw-rubric.yaml
 script: examples/nemo_gym/run_grpo_nemo_gym.py
 
 grpo:
@@ -30,6 +28,9 @@ policy:
   generation:
     # As in the GSM8K runs: a reply gets whatever the prompt leaves of the sequence limit.
     max_new_tokens: 2048
+    output_format: apertus2
+    system_prompt_file: ${oc.env:RL_INFRA_DIR}/envs/frames/apertus2-system.json
+    stop_token_ids: [12]
     stop_strings: null
     vllm_cfg:
       max_model_len: ${policy.max_total_sequence_length}
@@ -51,10 +52,10 @@ data:
   use_multiple_dataloader: false
   train:
     dataset_name: NemoGymDataset
-    data_path: ${oc.env:SCRATCH}/rubric-judge/ultrafeedback/train.jsonl
+    data_path: ${oc.env:SCRATCH}/rubric-judge/ultrafeedback-bare/train.jsonl
   validation:
     dataset_name: NemoGymDataset
-    data_path: ${oc.env:SCRATCH}/rubric-judge/alpaca_eval/validation.jsonl
+    data_path: ${oc.env:SCRATCH}/rubric-judge/alpaca_eval-bare/validation.jsonl
   default:
     dataset_name: NemoGymDataset
     env_name: nemo_gym
@@ -71,7 +72,7 @@ env:
   # Full results of every rollout, next to the weights. Never in W&B.
   rollout_dir: ${checkpointing.checkpoint_dir}/rollouts
   judge_pool:
-    num_nodes: 1
+    num_nodes: 2
     # How full each replica is, for tuning the judge: see judge_stats.py.
     stats_path: ${checkpointing.checkpoint_dir}/judge_stats.jsonl
     stats_interval_s: 2.0
@@ -132,8 +133,8 @@ env:
         vllm_model:
           # NeMo-RL clears its own stop settings for Gym, so they travel with each request.
           extra_body:
-            stop: ["\nUser:", "\nAssistant:"]
-            stop_token_ids: [2, 0]
+            stop: []
+            stop_token_ids: [12]
     judge_model:
       responses_api_models:
         vllm_model:
@@ -143,7 +144,7 @@ env:
     rubric_judge:
       resources_servers:
         rubric_judge:
-          stop_strings: ["\nUser:", "\nAssistant:"]
+          stop_strings: []
           rubric_weights:
             helpfulness: 1.0
             instruction_following: 1.0
@@ -155,7 +156,7 @@ env:
     alpaca_eval_judge:
       resources_servers:
         rubric_judge:
-          stop_strings: ["\nUser:", "\nAssistant:"]
+          stop_strings: []
   _override_: true
 
 logger:

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Turn the UltraFeedback prompts into the rows of envs/rubric/ultrafeedback-rubric.yaml.
+"""Turn the UltraFeedback prompts into the rows of envs/chat/ultrafeedback-rubric.yaml.
 
 Standard library only, so it runs on a login node:
-    python3.12 envs/rubric/prepare_ultrafeedback.py $SCRATCH/rubric-judge/ultrafeedback
+    python3.12 envs/chat/prepare_ultrafeedback.py $SCRATCH/rubric-judge/ultrafeedback
 
 Runs train on train.jsonl only; validation.jsonl is the held-out split, and they validate on
-AlpacaEval (envs/rubric/prepare_alpaca_eval.py). A Gym rollout does not pass through NeMo-RL's prompt_file, so the few-shot prompt goes into each
+AlpacaEval (envs/chat/prepare_alpaca_eval.py). A Gym rollout does not pass through NeMo-RL's prompt_file, so the few-shot prompt goes into each
 row here, and `question` keeps the bare request for the judge.
 """
 

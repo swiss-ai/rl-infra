@@ -3,8 +3,8 @@
 
 The prompts stay the same rows in the same order, so runs on the pretraining checkpoint and on an SFT
 checkpoint train and validate on the same questions. Each row's `question` becomes its only message.
-    python3.12 envs/tools/strip_few_shot.py $SCRATCH/rubric-judge/ultrafeedback $SCRATCH/rubric-judge/ultrafeedback-bare
-    python3.12 envs/tools/strip_few_shot.py $SCRATCH/rubric-judge/alpaca_eval $SCRATCH/rubric-judge/alpaca_eval-bare
+    python3.12 envs/common/strip_few_shot.py $SCRATCH/rubric-judge/ultrafeedback $SCRATCH/rubric-judge/ultrafeedback-bare
+    python3.12 envs/common/strip_few_shot.py $SCRATCH/rubric-judge/alpaca_eval $SCRATCH/rubric-judge/alpaca_eval-bare
 """
 import argparse
 import json

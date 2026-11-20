@@ -1,7 +1,7 @@
 #!/bin/bash
-# Build the Harbor verified-task set for envs/agents/harbor-verified-sft.yaml, on a login node (no GPU,
+# Build the Harbor verified-task set for envs/code/harbor-verified-sft.yaml, on a login node (no GPU,
 # container or Slurm; standard library only):
-#   bash envs/agents/prepare_harbor_verified_tasks.sh <store> <harbor_data_dir>
+#   bash envs/code/prepare_harbor_verified_tasks.sh <store> <harbor_data_dir>
 # <store> is the harbor_verified_tasks store, one directory per validation campaign with its tasks
 # as tarballs under <campaign>/tasks/, possibly in subdirectories (or a single campaign directory). It writes
 # <harbor_data_dir>/tasks/<campaign>__<task>/ plus train.jsonl, validation.jsonl and task_names.txt;

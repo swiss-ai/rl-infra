@@ -2,7 +2,7 @@
 # Each row of the file ({"input": <text>, "output": "0"}) is one prompt; the model adds 4 tokens,
 # and one GRPO step writes train_data_step1.jsonl, whose prev_logprobs hold the trainer's
 # log-probability of every prompt token. Rewards are all 0, so the step changes no weights.
-#   RECIPE=recipes/<model recipe>.yaml bash run.sh envs/tools/score-text.yaml data.train.data_path=<file.jsonl>
+#   RECIPE=recipes/<model recipe>.yaml bash run.sh envs/common/score-text.yaml data.train.data_path=<file.jsonl>
 grpo:
   num_prompts_per_step: 300
   num_generations_per_prompt: 2

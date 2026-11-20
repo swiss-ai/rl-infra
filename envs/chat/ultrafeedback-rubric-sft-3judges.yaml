@@ -1,9 +1,9 @@
-# Task file: envs/rubric/ultrafeedback-rubric-sft-2judges.yaml with a third judge, Nemotron 3 Super, as one
+# Task file: envs/chat/ultrafeedback-rubric-sft-2judges.yaml with a third judge, Nemotron 3 Super, as one
 # replica split across 2 nodes (tensor_parallel_size 8). It needs 2 GPUs at least, so tensor_parallel_size 2
 # on the same 2 nodes would give 4 replicas instead of this one; this setup is here to run a judge across
 # nodes. Each prompt draws one of the three judges at random when it is read.
 #   HF_REPO=nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8 CHECK_SCRIPT=download_model.sh bash backends/nemo-rl/apertus2/check_env_job.sh
-#   bash run.sh envs/rubric/ultrafeedback-rubric-sft-3judges.yaml
+#   bash run.sh envs/chat/ultrafeedback-rubric-sft-3judges.yaml
 defaults: ../../recipes/apertus2-chonk-sft-vllm-adamw-rubric-3judges.yaml
 script: examples/nemo_gym/run_grpo_nemo_gym.py
 

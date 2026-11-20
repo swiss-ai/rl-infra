@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Turn AlpacaEval 2.0 into the validation rows of envs/rubric/ultrafeedback-rubric.yaml.
+"""Turn AlpacaEval 2.0 into the validation rows of envs/chat/ultrafeedback-rubric.yaml.
 
 Standard library only, so it runs on a login node:
-    python3.12 envs/rubric/prepare_alpaca_eval.py $SCRATCH/rubric-judge/alpaca_eval
+    python3.12 envs/chat/prepare_alpaca_eval.py $SCRATCH/rubric-judge/alpaca_eval
 
 Its 805 prompts with the GPT-4 Turbo references of its default baseline. As in the training rows, the
 few-shot prompt goes into each row for the policy, and the judge reads `question` and the reply.

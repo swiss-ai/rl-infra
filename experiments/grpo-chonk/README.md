@@ -13,10 +13,10 @@ with 16 generations each, at most one step off-policy, and evaluates on the GSM8
 at steps 0, 20, 40 and 58:
 
 ```bash
-RECIPE=recipes/apertus2-chonk-vllm-adamw.yaml      bash run.sh envs/math/gsm8k.yaml   # 8 + 4 nodes
-RECIPE=recipes/apertus2-chonk-megatron-adamw.yaml  bash run.sh envs/math/gsm8k.yaml   # 8 + 4 nodes
-RECIPE=recipes/apertus2-chonk-vllm-muon.yaml       bash run.sh envs/math/gsm8k.yaml   # 16 + 4 nodes
-RECIPE=recipes/apertus2-chonk-megatron-muon.yaml   bash run.sh envs/math/gsm8k.yaml   # 16 + 4 nodes
+RECIPE=recipes/apertus2-chonk-vllm-adamw.yaml      bash run.sh envs/stem/dev/gsm8k.yaml   # 8 + 4 nodes
+RECIPE=recipes/apertus2-chonk-megatron-adamw.yaml  bash run.sh envs/stem/dev/gsm8k.yaml   # 8 + 4 nodes
+RECIPE=recipes/apertus2-chonk-vllm-muon.yaml       bash run.sh envs/stem/dev/gsm8k.yaml   # 16 + 4 nodes
+RECIPE=recipes/apertus2-chonk-megatron-muon.yaml   bash run.sh envs/stem/dev/gsm8k.yaml   # 16 + 4 nodes
 ```
 
 vLLM runs one inference replica per node. A Megatron inference replica spans two nodes,

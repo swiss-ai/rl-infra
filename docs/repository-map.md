@@ -1,6 +1,6 @@
 # Repository map
 
-Every file of the repository and its role (335 files, branch `restructure`, 2026-11-20). Roles:
+Every file of the repository and its role (336 files, branch `restructure`, 2026-11-20). Roles:
 **run** = used by every training run, **setup** = prepares sources, images, models or data,
 **check** = a test or probe before or after a run, **tool** = analysis of a finished run,
 **history** = kept as the record of past runs, not used by new ones.
@@ -57,22 +57,23 @@ bash run.sh envs/stem/main.yaml
 | `stem/prepare_chem_rdkit.py`, `stem/gen_chem_rdkit.py` | setup | Chemistry rows (from Antonio's generator; a template generator of our own) |
 | `stem/prepare_reasoning_gym.py` | setup | Reasoning Gym rows from nvidia/Nemotron-RL-ReasoningGym-v1 |
 | `stem/stem-mix-four-shot.txt` | history | Few-shot prompt of runs 1-2 (pretraining checkpoint) |
-| `math/gsm8k.yaml`, `math/dapo-math.yaml` | run | GSM8K and DAPO-Math on the pretraining checkpoint (the quick start) |
-| `math/gsm8k-sft.yaml`, `math/dapo-math-sft.yaml`, `math/dapo-gsm8k-sft.yaml` | run | The same on an SFT checkpoint; DAPO + GSM8K 70/30 mix |
-| `math/gsm8k-five-shot.txt` | run | Few-shot prompt of the pretraining-checkpoint GSM8K task |
+| `stem/dev/gsm8k.yaml`, `stem/dev/dapo-math.yaml` | run | GSM8K and DAPO-Math on the pretraining checkpoint (the quick start) |
+| `stem/dev/gsm8k-sft.yaml`, `stem/dev/dapo-math-sft.yaml`, `stem/dev/dapo-gsm8k-sft.yaml` | run | The same on an SFT checkpoint; DAPO + GSM8K 70/30 mix |
+| `stem/gsm8k-five-shot.txt` | run | Few-shot prompt of the pretraining-checkpoint GSM8K task |
 | `code/code-gen-sft.yaml`, `code/code-gen-osb-sft.yaml` | run | Competitive coding on Gym's code_gen, tests on a sandbox node or on OpenSandbox pods |
-| `agents/harbor-osb-sft.yaml`, `agents/harbor-verified-sft.yaml` | run | Harbor terminal/SWE tasks with Terminus-2 on OpenSandbox |
-| `agents/workplace-assistant-sft.yaml` | run | Tool calls on Gym's workplace assistant (27 simulated tools) |
-| `agents/collect_harbor_verified_tasks.py`, `prepare_harbor_osb_dataset.py`, `prepare_harbor_verified_tasks.sh` | setup | Harbor task sets |
-| `agents/make_micro_tasks.py`, `agents/validate_micro_tasks.py` | check | Harbor micro-tasks for plumbing runs; nop/oracle check of tasks on real pods |
-| `rubric/ultrafeedback-rubric.yaml`, `-sft.yaml`, `-sft-2judges.yaml`, `-sft-3judges.yaml` | run | General chat rewarded by one, two or three LLM judges on rubrics, AlpacaEval validation |
-| `rubric/prepare_ultrafeedback.py`, `rubric/prepare_alpaca_eval.py`, `rubric/ultrafeedback-few-shot.txt` | setup | Rows and few-shot prompt of the rubric tasks |
+| `code/harbor-osb-sft.yaml`, `code/harbor-verified-sft.yaml` | run | Harbor terminal/SWE tasks with Terminus-2 on OpenSandbox |
+| `code/collect_harbor_verified_tasks.py`, `prepare_harbor_osb_dataset.py`, `prepare_harbor_verified_tasks.sh` | setup | Harbor task sets |
+| `code/make_micro_tasks.py`, `code/validate_micro_tasks.py` | check | Harbor micro-tasks for plumbing runs; nop/oracle check of tasks on real pods |
+| `tool-use/workplace-assistant-sft.yaml` | run | Tool calls on Gym's workplace assistant (27 simulated tools) |
+| `chat/ultrafeedback-rubric.yaml`, `-sft.yaml`, `-sft-2judges.yaml`, `-sft-3judges.yaml` | run | General chat rewarded by one, two or three LLM judges on rubrics, AlpacaEval validation |
+| `chat/prepare_ultrafeedback.py`, `chat/prepare_alpaca_eval.py`, `chat/ultrafeedback-few-shot.txt` | setup | Rows and few-shot prompt of the rubric tasks |
 | `lean/lean-sft.yaml` | run | Lean 4 proving with Gym math_formal_lean |
 | `frames/apertus2-system.json`, `-high.json` | run | System frame of the Apertus 2 format: thinking medium, high |
 | `frames/apertus2-system-sciworld-act.json`, `-high.json` | run | The same with ScienceWorld's `act` tool declared |
-| `tools/stage_judge_model.sh` | setup | Downloads a judge model to scratch |
-| `tools/strip_few_shot.py` | setup | Removes the few-shot prompt from prepared Gym rows (for SFT checkpoints) |
-| `tools/score-text.yaml` | check | Teacher-forced log-probabilities of plain text (not a training task) |
+| `common/stage_judge_model.sh` | setup | Downloads a judge model to scratch |
+| `common/strip_few_shot.py` | setup | Removes the few-shot prompt from prepared Gym rows (for SFT checkpoints) |
+| `common/score-text.yaml` | check | Teacher-forced log-probabilities of plain text (not a training task) |
+| `README.md` | doc | The RL experts and their folders; medical, safety, knowledge and translation have none yet |
 
 ## `recipes/` (model and algorithm, 34 files)
 

@@ -4,7 +4,7 @@
 # into the system frame, returns call frames as tool calls, and extends the exact tokens of the last turn
 # with each result. A bad call reaches the agent as written and its error goes back to the model. The
 # data is in $SCRATCH/tool-test/workplace_assistant, from nvidia/Nemotron-RL-agent-workplace_assistant.
-#   bash run.sh envs/agents/workplace-assistant-sft.yaml
+#   bash run.sh envs/tool-use/workplace-assistant-sft.yaml
 defaults: ../../recipes/apertus2-chonk-sft-vllm-adamw-tools.yaml
 script: examples/nemo_gym/run_grpo_nemo_gym.py
 
