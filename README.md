@@ -28,7 +28,7 @@ stays as it is. The first run also sets everything up, cloning the pinned source
 copying the 200 GB model to your scratch, so it takes a while to start; later runs start
 right away. `run.sh` prints where the training log, the metrics and the weights go, and
 `RECIPE=recipes/<name>.yaml` selects one of the other setups in `recipes/`;
-[experiments/grpo-chonk/README.md](experiments/grpo-chonk/README.md) shows how to
+[recipes/archive/chain/README.md](recipes/archive/chain/README.md) shows how to
 reproduce the comparison of vLLM against Megatron inference and of AdamW against Muon.
 The sections below describe the general launcher underneath.
 
@@ -93,7 +93,7 @@ HF_REPO=nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8 CHECK_SCRIPT=download_model
 bash run.sh experts/chat/archive/ultrafeedback-rubric-sft-3judges.yaml grpo.max_num_steps=3
 ```
 
-The commands of the full runs are in `experiments/runs.md`. Nemotron's first start builds its kernels
+The commands of the full runs are in `docs/runs.md`. Nemotron's first start builds its kernels
 into scratch, which `check_judge.sh` does in about 13 minutes on 64 CPUs, after `setup-gym.sh`:
 
 ```bash
@@ -211,7 +211,7 @@ container. Stock `ray.sub` does not run on Alps, so the clone sits on a local br
 applied by `setup.sh`. Once all GPUs have joined, the head runs `examples/run_grpo.py` from the clone
 with the given config, and the job's exit code is the training script's.
 
-Configs in `experiments/` inherit from NeMo-RL's own example configs through
+Configs in `backends/nemo-rl/examples/` inherit from NeMo-RL's own example configs through
 `defaults: /opt/nemo-rl/examples/configs/...` and only state what differs. Overrides on
 the command line (`grpo.max_num_steps=50`) are applied last.
 
@@ -229,7 +229,7 @@ overrides any of it for you, and `sites/load.sh` documents the order.
 
 ```bash
 PARTITION=preemptable bash backends/nemo-rl/launch.sh \
-    experiments/grpo-math/qwen3-32b-4n4g-fsdp2tp2.yaml 4 qwen3-32b-probe \
+    backends/nemo-rl/examples/qwen3-32b-4n4g-fsdp2tp2.yaml 4 qwen3-32b-probe \
     grpo.max_num_steps=3 checkpointing.enabled=false
 ```
 
@@ -278,7 +278,7 @@ on one node and Qwen3-32B on four (about 10 minutes per GRPO step with 64 prompt
 generations). Qwen3-32B needs the older v1 DTensor worker (`dtensor_cfg._v2: false`),
 which loads the checkpoint once and broadcasts it instead of loading it on every GPU.
 The Megatron backend's weight refit to vLLM is broken in NeMo-RL v0.7.0 for the MoE/VLM
-models tried (`experiments/vlm-geo3k/`).
+models tried (`backends/nemo-rl/examples/`).
 
 The patches in `backends/nemo-rl/patches/` modify NeMo-RL's `ray.sub` (Copyright NVIDIA,
 Apache-2.0); it adds the container-engine (EDF) mode, the single-step launch, memory

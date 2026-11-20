@@ -6,7 +6,7 @@
 #   JOB_TIME=1-05:00:00 bash run.sh experts/code/archive/code-gen-osb-sft.yaml \
 #       env.nemo_gym.code_gen.resources_servers.code_gen.opensandbox.api_key_file=$HOME/.opensandbox_token \
 #       checkpointing.checkpoint_must_save_by=01:04:30:00
-# The settings are those of jobs 1202265 and 1202946 (experiments/runs.md), with 16k tokens, no thinking
+# The settings are those of jobs 1202265 and 1202946 (docs/runs.md), with 16k tokens, no thinking
 # budget and Gym on a generation node, as in jobs 1210281 and 1213376, plus one optimizer step per GRPO
 # step and PyTorch's memory capped (jobs 1222762, 1222763). They need NeMo-RL patches 0029, 0030 and 0033;
 # setup.sh adds them to an older clone. The reward is 1 only if every test passes, Gym's standard

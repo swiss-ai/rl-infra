@@ -6,7 +6,7 @@
 # SFT model leaves the think frame empty on those prompts (PR swiss-ai/rl-infra#5, runs.md).
 # Validation every 20 steps: AIME 2024 mean@32 and GPQA-Diamond mean@8, as in run 3.
 # Sources: experts/stem/archive/stem-mix-run3.yaml, experts/stem/archive/stem-mix-openqa-judge.yaml, experts/stem/dev/reasoning-gym-sft.yaml,
-# experiments/enigmata/task-debug-uniform.yaml, experiments/scienceworld/.
+# experts/stem/scripts/enigmata/task-debug-uniform.yaml, experts/stem/scripts/scienceworld/.
 defaults: ../../../recipes/archive/apertus2-chonk-sftv02-18315-vllm-adamw-dapo-32n-judge1.yaml
 
 # Reasoning Gym's scorers in the pydeps overlay (run.sh).

@@ -3,7 +3,7 @@
 # container runtime (sites/<SITE>.env: the EDF installed by setup.sh on Alps, pyxis flags on HANGANG).
 #
 # Usage: bash backends/nemo-rl/launch.sh <config> <num_nodes> <run_name> [overrides...]
-#   <config>     a YAML in this repo (e.g. experiments/grpo-math/qwen3-32b-4n4g-fsdp2tp2.yaml),
+#   <config>     a YAML in this repo (e.g. backends/nemo-rl/examples/qwen3-32b-4n4g-fsdp2tp2.yaml),
 #                any other path on a mounted filesystem, or an upstream recipe relative to
 #                the NeMo-RL clone (e.g. examples/configs/grpo_math_1B.yaml)
 #   overrides    passed to the training script, e.g. grpo.max_num_steps=50

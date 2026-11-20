@@ -7,7 +7,7 @@
 # of the math rows ("…the last line of your response should be of the form Answer: $Answer…") around each prompt:
 #   python3.12 experts/stem/scripts/prepare_chem_rdkit.py <generator output dir> $SCRATCH/chem-rdkit/native --val-rows 512
 #   bash run.sh experts/stem/dev/chem-rdkit-sft.yaml
-# What this setup needs, from the runs in experiments/runs.md:
+# What this setup needs, from the runs in docs/runs.md:
 #  - A model that claims on these prompts. SFT v0.2 answers them in the reply and claimed in 1 of 128 (claim-graded
 #    reward 0, the async trainer stalls); step 100 of the native STEM-mix climb sftv02-stem-mix-run4-33n claims on all
 #    of them, but only with the answer-line instruction (0 of 128 without it). Hence the recipe and the instruction.

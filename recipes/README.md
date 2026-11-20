@@ -25,6 +25,6 @@ datasets and environments (`experts/<expert>/base.yaml`), sequence lengths, pack
 
 `archive/` holds the recipes of earlier runs as they were, and `archive/chain/` the experiment chain they build on
 (GSM8K, DAPO, FP8, Apertus 2 format, ...): the archived task files under `experts/*/archive/` and `dev/`, the
-coding and experiment launchers and the commands in `experiments/runs.md` use them. `chonk-sftv02.yaml` was written
+coding and experiment launchers and the commands in `docs/runs.md` use them. `chonk-sftv02.yaml` was written
 out from `archive/apertus2-chonk-sftv02-grpo.yaml` (14 files deep); the STEM run gives the same config with either,
 apart from five settings of the DTensor trainer, which this recipe switches off.

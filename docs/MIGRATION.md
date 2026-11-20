@@ -22,7 +22,7 @@ to follow, and the steps to move one over. `docs/repository-map.md` describes th
 | Data paths | absolute paths in task files (`/scratch/hanint06/data/...`) | `${oc.env:RL_DATA_DIR}/...` (set in `sites/<site>.env` or `site.env`); your own files under `${oc.env:RL_USER_HOME}` |
 
 Removed: `experiments/long-context/launch-stem-ctx.sh` and its three node-split recipes, the launchers of
-`experiments/stem-mix-run4`, `stem-mix-run5` and `openqa-judge`. Run commands in `experiments/runs.md` that name
+`experiments/stem-mix-run4`, `stem-mix-run5` and `openqa-judge`. Run commands in `docs/runs.md` (formerly `experiments/runs.md`) that name
 them refer to the commit before the restructure (`965e15c` on main, `f1ec52e` on `stem5`).
 
 ## 2. Behaviour changes that can surprise you
@@ -135,3 +135,16 @@ The NeMo-RL clones of these branches may also hold commits that are not patches 
 | `experiments/grpo-chonk/*.yaml` (27) | `recipes/archive/chain/` |
 | `experiments/grpo-chonk/stage_model.sh` | `backends/nemo-rl/apertus2/stage_model.sh` |
 | `experiments/long-context/launch-stem-ctx.sh` | `run.sh stem` (run 5 again: `run.sh experts/stem/archive/run5-32k-job1299180.yaml`) |
+| `sizes/cheap.yaml`, `expensive.yaml`, `ultra.yaml` | `size:` tiers computed from the recipe's `nodes:` (old expensive 16+32 = new `ultra`; old cheap 8+16 = `size: 8+16`); no batch scaling |
+| `experiments/enigmata/`, `experiments/scienceworld/` | `experts/stem/scripts/enigmata/`, `scienceworld/` (launchers now run from this repository: `recipes/archive/`, the NeMo-RL clone of `site.env`) |
+| `experiments/stem-mix-run5/gen_chem.sbatch` | `experts/stem/scripts/gen_chem_rdkit.sbatch` |
+| `experiments/long-context/eval/` | `experts/stem/scripts/eval/` |
+| `experiments/long-context/launch-code-ctx.sh`, `recipes/code-*.yaml` | `experts/code/scripts/long-context/` |
+| `experiments/trainer-memory/launch.sh` | `experts/code/scripts/trainer-memory.sh` |
+| `experiments/swe_terminal_tool_use/README.md` | `experts/code/README.md` |
+| `experiments/long-context/convert_rl_ckpt.sh` | `shared/scripts/convert_rl_ckpt.sh` |
+| `experiments/long-context/tools/` | `shared/scripts/analysis/` (rollouts, timings), `network/` (netcheck, Ray transfer), `sandbox/` (pod probes) |
+| `experiments/chonk-sft/` | `shared/sft-checkpoint/` |
+| `experiments/grpo-math/`, `experiments/vlm-geo3k/` | `backends/nemo-rl/examples/` |
+| `experiments/grpo-chonk/README.md` | `recipes/archive/chain/README.md` |
+| `experiments/runs.md`, `megachonk.md`, `long-context/README.md` | `docs/runs.md`, `docs/megachonk.md`, `docs/long-context.md` |

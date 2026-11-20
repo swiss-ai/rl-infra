@@ -3,7 +3,7 @@
 # Nemotron-RL-knowledge-mcqa (as run 3, with NuminaMath reduced from 256), and 32 ScienceWorld episodes.
 # ScienceWorld (AllenAI, Apache-2.0): multi-turn text simulator of 30 elementary-school science tasks, played by the
 # scienceworld environment (NeMo-RL branch apertus2-sciworld). Rows: train variations only, task-balanced (see
-# experiments/scienceworld/build_data.py); simplifications teleportAction, openDoors, openContainers,
+# experts/stem/scripts/scienceworld/build_data.py); simplifications teleportAction, openDoors, openContainers,
 # selfWateringFlowerPots. The model acts through the act tool (system frame shared/frames/apertus2-system-sciworld-act.json,
 # copied next to the data).
 # Reward: the episode's last score / 100, negative (failed) scores as 0.

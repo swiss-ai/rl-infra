@@ -5,7 +5,7 @@
 # (run 3: 256), 128 science + CS knowledge-mcqa, 64 Enigmata. 100 steps (51,200 prompts; 6,400 puzzles).
 # Validation every 20 steps: AIME 2024 mean@32 and GPQA-Diamond mean@8 (as run 3).
 # Puzzle file: the task/difficulty cells SFT v0.2 solves sometimes but not always (offline pass rates), equal
-# rows per cell; see handover/enigmata-integration.md and experiments/enigmata/.
+# rows per cell; see handover/enigmata-integration.md and experts/stem/scripts/enigmata/.
 defaults: ../../../recipes/archive/apertus2-chonk-sftv02-18315-vllm-adamw-dapo-32n.yaml
 
 grpo:

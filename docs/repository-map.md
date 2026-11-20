@@ -1,6 +1,6 @@
 # Repository map
 
-Every file of the repository and its role (369 files, branch `restructure`, 2026-11-20). Roles:
+Every file of the repository and its role (364 files, branch `restructure`, 2026-11-20). Roles:
 **run** = used by every training run, **setup** = prepares sources, images, models or data,
 **check** = a test or probe before or after a run, **tool** = analysis of a finished run,
 **history** = kept as the record of past runs, not used by new ones.
@@ -27,13 +27,16 @@ bash run.sh stem      (experts/main.yaml + experts/stem/base.yaml)
 | File | Role | Purpose |
 |---|---|---|
 | `run.sh` | run | The entry point: task file in, Slurm job out (rl-infra keys, tiers, context, config copies, setup, launch) |
-| `setup.sh` | setup | Setup of the stock NeMo-RL stack (the Qwen experiments in `experiments/grpo-math`); the Apertus 2 setup is `backends/nemo-rl/apertus2/setup.sh` |
+| `setup.sh` | setup | Setup of the stock NeMo-RL stack (the Qwen experiments in `backends/nemo-rl/examples`); the Apertus 2 setup is `backends/nemo-rl/apertus2/setup.sh` |
 | `README.md` | doc | Quick start, task files and tiers, NeMo-RL development, cluster notes |
 | `site.env.example` | doc | Template of the personal, gitignored `site.env` (account, scratch, W&B) |
 | `.gitignore` | — | Keeps `site.env` and generated files out of git |
 | `docs/nemo-rl-architecture.md` | doc | How NeMo-RL works inside (driver, workers, refit) |
 | `docs/repository-map.md` | doc | This file |
 | `docs/MIGRATION.md` | doc | What changed with the restructure and how to move a branch from the old layout |
+| `docs/runs.md` | history | Every run with its command, job and result |
+| `docs/megachonk.md` | history | The MegaChonk runs: checkpoint, layouts, results |
+| `docs/long-context.md` | history | GRPO at 32K-128K: patches, measurements, what limits a step |
 
 ## `sites/` (cluster profiles)
 
@@ -58,11 +61,17 @@ happened, as they ran) and `scripts/` (data builders and checks); empty folders 
 | `stem/dev/chem-rdkit-sft.yaml`, `stem/dev/reasoning-gym-sft.yaml` | run | Single-environment tasks: chemistry alone, Reasoning Gym alone (older layout) |
 | `stem/archive/run5-32k-job1299180.yaml` | history | Run 5 at 32K (job 1299180) in the expert layout; its merged config equals the run's |
 | `stem/archive/stem-mix-run1.yaml` … `run5.yaml`, `-run3-base`, `-run3-sciworld`, `-enigmata`, `-openqa-judge` | history | Task files of the STEM runs 1-5 and their trials, as they ran |
-| `stem/scripts/prepare_chem_rdkit.py`, `gen_chem_rdkit.py`, `prepare_reasoning_gym.py` | setup | Chemistry and Reasoning Gym rows |
+| `stem/scripts/prepare_chem_rdkit.py`, `gen_chem_rdkit.py`, `gen_chem_rdkit.sbatch`, `prepare_reasoning_gym.py` | setup | Chemistry and Reasoning Gym rows |
+| `stem/scripts/enigmata/` (15) | setup / check / history | Enigmata puzzle pool and dataset build, pass-rate scoring (its one-node recipe and tasks), environment test, the launcher of the Enigmata trial |
+| `stem/scripts/scienceworld/` (18) | setup / check / history | ScienceWorld install, data build, episode probes and scoring, environment test, the launchers of its trial and debug run |
+| `stem/scripts/eval/` | tool | Validation of an HF export with vLLM only (the run's own `grpo.validate()`), benchmark sets (AIME, MATH-500, MMLU-Pro, held-out training sets) |
 | `code/base.yaml`, `chat/base.yaml`, `tool-use/base.yaml`, `lean/base.yaml` | template | Take the latest archived run through `defaults` until written; `template: true` |
 | `code/archive/code-gen-sft.yaml`, `code-gen-osb-sft.yaml` | history | Competitive coding on Gym's code_gen, tests on a sandbox node or on OpenSandbox pods |
 | `code/archive/harbor-osb-sft.yaml`, `harbor-verified-sft.yaml` | history | Harbor terminal/SWE tasks with Terminus-2 on OpenSandbox |
+| `code/README.md` | doc | How to run the Harbor SWE/terminal tasks (prerequisites, credentials, commands) |
 | `code/scripts/` (5 files) | setup / check | Harbor task sets; micro-tasks and their nop/oracle check on real pods |
+| `code/scripts/long-context/launch-code-ctx.sh`, `recipes/` (4) | run / history | Coding on code_gen at 32K-128K (sandbox node or pods, CP, KCP, driver node) and its node layouts |
+| `code/scripts/trainer-memory.sh` | check | Trainer memory tests on the 16K coding task |
 | `chat/archive/ultrafeedback-rubric.yaml`, `-sft.yaml`, `-sft-2judges.yaml`, `-sft-3judges.yaml` | history | General chat rewarded by one, two or three LLM judges on rubrics, AlpacaEval validation |
 | `chat/scripts/prepare_ultrafeedback.py`, `prepare_alpaca_eval.py`, `ultrafeedback-few-shot.txt` | setup | Rows and few-shot prompt of the rubric tasks |
 | `tool-use/archive/workplace-assistant-sft.yaml` | history | Tool calls on Gym's workplace assistant (27 simulated tools) |
@@ -79,6 +88,11 @@ happened, as they ran) and `scripts/` (data builders and checks); empty folders 
 | `prompts/gsm8k-five-shot.txt`, `stem-mix-four-shot.txt` | run / history | Few-shot prompts read at run time (GSM8K on the pretraining checkpoint; STEM runs 1-2) |
 | `scripts/stage_judge_model.sh` | setup | Downloads a judge model to scratch |
 | `scripts/strip_few_shot.py` | setup | Removes the few-shot prompt from prepared Gym rows (for SFT checkpoints) |
+| `scripts/convert_rl_ckpt.sh` | tool | NeMo-RL checkpoint to an HF export |
+| `scripts/analysis/` (5) | tool | Rollout index and statistics, per-step timings and rewards, vLLM load, rank start stagger |
+| `scripts/network/` (3) | check | Network interfaces and Ray transfer speed between two nodes |
+| `scripts/sandbox/` (4) | check | OpenSandbox pod health and capacity |
+| `sft-checkpoint/` (8) | check | Serving and chatting with SFT checkpoints, AIME check, SFT data audit, conversion; README: the Apertus 2 message format |
 | `debug/score-text.yaml` | check | Teacher-forced log-probabilities of plain text (not a training task) |
 
 ## `recipes/` (how to train: model and algorithm)
@@ -89,7 +103,7 @@ happened, as they ran) and `scripts/` (data builders and checks); empty folders 
 | `megachonk.yaml` | template | MegaChonk pretraining checkpoint: TP4 PP8 EP16, vLLM TP4 EP32 replicas of 8 nodes, its own context table; no expert yet |
 | `README.md` | doc | What a recipe is, the active ones, how to add a variant |
 | `archive/*.yaml` (34) | history | Recipes of earlier runs as they were (pretraining checkpoint, SFT v0.1 / 19374 / v0.2, MegaChonk, AdamW or Muon, judge-node layouts); archived task files and launchers use them |
-| `archive/chain/*.yaml` (27) | history | The experiment chain they build on (GSM8K -> DAPO -> FP8 -> Apertus 2 format), formerly `experiments/grpo-chonk/` |
+| `archive/chain/*.yaml` (27) | history | The experiment chain they build on (GSM8K -> DAPO -> FP8 -> Apertus 2 format), formerly `experiments/grpo-chonk/`; `README.md` there: the GSM8K -> DAPO comparison (vLLM against Megatron inference, AdamW against Muon) |
 
 ## `backends/nemo-rl/` (launching NeMo-RL)
 
@@ -104,7 +118,8 @@ happened, as they ran) and `scripts/` (data builders and checks); empty folders 
 | `numa_watch.sh`, `hang_watch.sh` | run | Per node: host memory on GPU HBM, Ray log copies; stack dumps when the job looks stuck, stops a hung driver |
 | `strtok_ts.c` | run | Thread-safe strtok preloaded into job processes (UCCL NIC parsing on HANGANG) |
 | `patches/0001-0002` | run | `ray.sub` for the Alps container engine / pyxis; applied to the clone by setup |
-| `pin`, `env`, `edf.toml.template`, `check_env.sh` | run (stock) | The stock NeMo-RL stack (NGC image) used by `experiments/grpo-math` |
+| `pin`, `env`, `edf.toml.template`, `check_env.sh` | run (stock) | The stock NeMo-RL stack (NGC image), for the configs in `examples/` |
+| `examples/` (5) | history | Qwen3 GRPO on math (8B, 32B) on the stock stack, a math-verify debug script, two Qwen VL configs (Megatron refit broken in NeMo-RL v0.7.0) |
 | `strip_optimizer.py` | tool | Removes optimizer state from finished checkpoints (frees scratch) |
 | `apertus2/env` | run | The Apertus 2 stack: clone paths, image, overlay, driver |
 | `apertus2/pin` | run | NeMo-RL fork commit + PRs, Automodel, Megatron-LM-MoE, Bridge, vLLM files, Gym, apertus-common commits |
@@ -128,28 +143,11 @@ happened, as they ran) and `scripts/` (data builders and checks); empty folders 
 | `sandbox/*` (9) | setup / run | Code sandbox node for code_gen: server, harness, data, start script, attack test |
 | `lean/*` (11) | setup / run | Lean 4 sandbox (NeMo-Skills image) and its data |
 
-## `experiments/` (records and experiment tooling)
-
-| Folder | Role | Purpose |
-|---|---|---|
-| `runs.md`, `megachonk.md` | history | Every run with its command, job, result; MegaChonk notes |
-| `grpo-chonk/README.md` | history | The GSM8K -> DAPO experiments on Chonk (vLLM against Megatron inference, AdamW against Muon); their configs are now in `recipes/archive/chain/` |
-| `long-context/` | run / tool | `launch-code-ctx.sh` (coding at 32K-128K) and its node recipes, checkpoint export, `eval/` (vLLM-only validation), `tools/` (rollout index and statistics, step timings, network and pod probes), README with the context measurements |
-| `enigmata/` (16) | setup / check / history | Puzzle pool generation and dataset build, pass-rate scoring, environment tests, its debug launcher |
-| `scienceworld/` (18) | setup / check / history | ScienceWorld install, data build, probes and scoring, environment tests, its debug launcher |
-| `chonk-sft/` (9) | check | Serving and chatting with SFT checkpoints, AIME check, SFT data audit, conversion |
-| `trainer-memory/launch.sh` | check | Trainer memory tests on the 16K coding task |
-| `stem-mix-run5/gen_chem.sbatch` | setup | Chemistry rows job for run 5 |
-| `grpo-math/` (3) | history | Qwen3 GRPO on math with the stock stack |
-| `vlm-geo3k/` (2) | history | Qwen VL configs, marked broken in NeMo-RL v0.7.0 |
-| `swe_terminal_tool_use/README.md` | doc | Notes on the SWE/terminal tool-use tasks |
-
 ## Still out of place (next cleanup steps)
 
-- `experiments/long-context/launch-code-ctx.sh` duplicates `run.sh` for coding (sandbox job, KCP, node
+- `experts/code/scripts/long-context/launch-code-ctx.sh` duplicates `run.sh` for coding (sandbox job, KCP, node
   layouts); the code expert needs its `experts/code/base.yaml` written (now a template) and tiers like STEM.
-- `experiments/enigmata/launch.sh`, `scienceworld/launch.sh`, `debug16.sh`, `probe.sh`,
-  `trainer-memory/launch.sh`: more launchers with their own variables.
-- `experiments/long-context/tools/` are general run-analysis tools, not long-context ones.
+- `experts/stem/scripts/enigmata/launch.sh`, `scienceworld/launch.sh`, `debug16.sh`, `probe.sh`,
+  `experts/code/scripts/trainer-memory.sh`: launchers with their own overrides (they now run from this repository).
 - `backends/nemo-rl/sandbox/` and `lean/` are services of the code and Lean domains.
-- Two stacks (stock NeMo-RL for Qwen, Apertus 2): the stock one is only used by `experiments/grpo-math`.
+- Two stacks (stock NeMo-RL for Qwen, Apertus 2): the stock one is only used by `backends/nemo-rl/examples/`.

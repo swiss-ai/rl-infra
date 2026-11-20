@@ -1,8 +1,0 @@
-# SFT v0.2 (iteration 18,315) DAPO recipe on 16 nodes (8 trainer + 8 vLLM), as rl-step-scaling's 16-node v0.2 recipe.
-# run.sh reads sft_export and cluster.num_nodes from this file only.
-defaults: /home01/hanint06/projects/rl-infra-sciworld/recipes/apertus2-chonk-sft-vllm-adamw-dapo.yaml
-sft_export: chonk-sft/models/chonk-lc-16k-v0.2-iter_0018315
-cluster:
-  num_nodes: 16
-policy:
-  model_name: ${oc.env:SCRATCH}/models/chonk-lc-16k-v0.2-iter_0018315

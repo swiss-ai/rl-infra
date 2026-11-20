@@ -6,7 +6,7 @@
 #                   split, any CP that divides the ranks of a pipeline stage
 #   pack      sequence-packing budget of a micro-batch (train and log-prob)
 #   memfrac   NRL_CUDA_MEMORY_FRACTION: PyTorch's share of a trainer GPU; the rest is NCCL, Triton and CUDA
-# Measured on 16 trainer nodes (PP2, EP16) in experiments/long-context/README.md: 32K at CP4 peaks at 8,192 tokens
+# Measured on 16 trainer nodes (PP2, EP16) in docs/long-context.md: 32K at CP4 peaks at 8,192 tokens
 # per GPU; CP2 also fits at 32K (60.1 GB), not compared for speed yet.
 # max_tokens  cp  scheme  pack    memfrac
 16384         1   head    16384   0.84

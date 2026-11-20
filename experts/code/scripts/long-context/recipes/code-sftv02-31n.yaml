@@ -1,0 +1,18 @@
+# Competitive coding (rl-infra-main recipes/archive/apertus2-chonk-sft-vllm-adamw-code.yaml) on the SFT v0.2 checkpoint
+# (iteration 18,315): 31 GPU nodes = 16 trainer + 15 vLLM. With HEAD=1 in launch-code-ctx.sh the job has 32 nodes
+# and the first runs only the driver: the 128K layout when the driver's batch does not fit next to GPU workers
+# (generation is not the limit: the trainer waits about 10 s per step for answers with 16 vLLM nodes).
+defaults: ../../../../../recipes/archive/apertus2-chonk-sft-vllm-adamw-code.yaml
+
+# run.sh reads sft_export and cluster.num_nodes from this file only, not from its defaults.
+sft_export: chonk-sft/models/chonk-lc-16k-v0.2-iter_0018315
+
+cluster:
+  num_nodes: 31
+
+policy:
+  model_name: ${oc.env:SCRATCH}/models/chonk-lc-16k-v0.2-iter_0018315
+  generation:
+    colocated:
+      resources:
+        num_nodes: 15
