@@ -1,0 +1,26 @@
+# Asynchronous variant of apertus-v11.yaml on the same single node: vLLM keeps two GPUs and generates the next batch
+# while the trainer updates on the other two. Answers may come from the policy one step old
+# (max_trajectory_age_steps), corrected by importance sampling.
+#   RECIPE=recipes/apertus-v11-async.yaml bash run.sh experts/stem/dev/gsm8k-cot.yaml
+defaults: apertus-v11.yaml
+
+grpo:
+  async_grpo:
+    enabled: true
+    max_trajectory_age_steps: 1
+    in_flight_weight_updates: true
+
+loss_fn:
+  use_importance_sampling_correction: true
+
+policy:
+  generation:
+    colocated:
+      enabled: false
+      # On one node NeMo-RL gives vLLM this many of the node's GPUs and the trainer the rest.
+      resources:
+        gpus_per_node: 2
+        num_nodes: 1
+    vllm_cfg:
+      async_engine: true
+      gpu_memory_utilization: 0.88

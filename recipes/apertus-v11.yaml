@@ -1,0 +1,46 @@
+# Apertus-v1.1 (0.5B, 1.5B, 4B: dense, Apertus 1 tokenizer and chat template) trained with GRPO on one node of four
+# GPUs, synchronous: NeMo-RL's PyTorch trainer (DTensor, FSDP2) and vLLM take turns on the same GPUs (colocated), so
+# every answer comes from the current policy. recipes/apertus-v11-async.yaml splits the node instead. It holds what
+# differs from NeMo-RL's defaults (examples/configs/grpo_math_1B.yaml in the NeMo-RL clone). Set elsewhere, so not
+# here: datasets and environments (the task file, e.g. experts/stem/dev/gsm8k-cot.yaml), sequence lengths and packing
+# (run.sh, from `context`, with the table below), checkpoints, validation schedule and logging (experts/main.yaml).
+# Results and the SFT that comes before: docs/apertus-v11.md.
+defaults: /opt/nemo-rl/examples/configs/grpo_math_1B.yaml
+# Base node layout, the "cheap" tier: one node, trainer and vLLM colocated (expensive = two such nodes).
+nodes: {trainer: 1, inference: 0}
+# Context table of these models: 4,096 tokens (their pre-training context), one sequence per micro-batch.
+contexts: backends/nemo-rl/apertus2/contexts-v11.tsv
+# Transformers loads the model as it is: no Chonk checkpoint to stage (run.sh).
+stage_model: false
+
+grpo:
+  # 64 prompts x 8 answers = 512 answers per step, four optimizer steps of 128.
+  num_prompts_per_step: 64
+  num_generations_per_prompt: 8
+
+loss_fn:
+  reference_policy_kl_penalty: 0
+
+policy:
+  # An HF folder: a released Instruct model, or an SFT model of backends/posttraining
+  # ($SCRATCH/apertus-v11-sft/models/<run name>), given as policy.model_name=<folder> on the command line.
+  model_name: ${oc.env:SCRATCH}/models/apertus-v1.1/Apertus-v1.1-0.5B-Instruct
+  train_global_batch_size: 128
+  # One sequence per micro-batch with activation checkpointing fits all three sizes on the 95 GB GPUs of Alps, in
+  # both layouts; four sequences ran out of memory there with 1.5B (8 GB of fp32 logits per micro-batch).
+  train_micro_batch_size: 1
+  logprob_batch_size: 2
+  dtensor_cfg:
+    activation_checkpointing: true
+    automodel_kwargs:
+      force_hf: true
+      attn_implementation: flash_attention_2
+  optimizer:
+    kwargs:
+      lr: 2.0e-6
+  generation:
+    # The Apertus 1 tokenizer marks "\boxed{", "\text{" and other LaTeX pieces as special tokens; decoded without
+    # them, a correct answer loses its \boxed{} and earns 0 (NeMo-RL patch 0062).
+    skip_special_tokens: false
+    vllm_cfg:
+      gpu_memory_utilization: 0.6

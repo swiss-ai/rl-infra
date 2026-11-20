@@ -1,0 +1,6 @@
+# Context settings of the Apertus-v1.1 recipes (recipes/apertus-v11.yaml names this table), same columns as
+# contexts.tsv. 4,096 tokens is the models' pre-training context (max_position_embeddings), so no longer row.
+# cp and scheme apply to the Megatron trainer only and are unused by the DTensor trainer of these recipes. pack 4096
+# is one sequence per micro-batch, train and log-prob, as measured on the 95 GB GPUs of Alps (docs/apertus-v11.md).
+# max_tokens  cp  scheme  pack    memfrac
+4096          1   head    4096    -
