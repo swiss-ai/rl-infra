@@ -4,11 +4,11 @@ One folder per RL expert (the domain teachers trained in parallel), all with the
 
 ```
 experts/
-  main.yaml          run settings every expert shares: checkpoints, rollout dump, validation period, default tier
-                     and time limit
+  main.yaml          the run every expert shares: resources (tier, time limit, context), checkpoints, rollout
+                     dump, validation period
   <expert>/
-    base.yaml        the expert's official run: its datasets, environments, validation, recipe, context and
-                     its own run settings (steps, tier, time) where they differ from main.yaml
+    base.yaml        the expert's official run: its datasets, environments, validation, recipe and steps;
+                     tier, time limit and context come from main.yaml
     dev/             variants in progress (`defaults: ../base.yaml` plus what they change)
     archive/         the task files of runs that happened, as they ran: the record to reproduce a run
     scripts/         data builders and checks of the expert (not read by a run)

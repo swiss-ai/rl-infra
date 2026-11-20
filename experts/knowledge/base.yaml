@@ -7,7 +7,6 @@
 defaults: ../../shared/judges/llm-judge.yaml
 template: true
 recipe: recipes/apertus2-chonk-sftv02-grpo.yaml
-context: 16384
 
 # Thinking level per dataset (the system frame its prompts start with); a run file overrides one key.
 frames:

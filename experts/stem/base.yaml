@@ -1,11 +1,12 @@
 # STEM expert, its official run: every dataset, environment and validation set, and the run settings of STEM
-# (run 5's mix: 512 prompts per step, 96 each from DAPO, NuminaMath, multiple choice and openqa, 32 each from Reasoning
-# Gym, Enigmata, ScienceWorld and chemistry; 135 steps, 32K context, thinking high everywhere, expensive tier).
+# (run 5's mix: 512 prompts per step, 96 each from DAPO, NuminaMath, multiple choice and openqa, 32 each from
+# Reasoning Gym, Enigmata, ScienceWorld and chemistry; 135 steps, thinking high everywhere; tier, time limit
+# and context come from experts/main.yaml).
 #   bash run.sh stem            full run (W&B); DEBUG=1 for a short debug run, DRY_RUN=1 to see it first
 # run.sh layers experts/main.yaml (settings every expert shares) under this file. Development variants go to dev/
 # with `defaults: ../base.yaml` and change what they need: the shares of a step (data.num_prompts_per_dataloader),
-# the thinking level of each dataset (frames), steps, context, tier. A variant that wins moves its changes here; a
-# finished run's file goes to archive/.
+# the thinking level of each dataset (frames), steps; a variant may also set size, job_time or context. A variant
+# that wins moves its changes here; a finished run's file goes to archive/.
 #
 # Training data (8 datasets, ${oc.env:RL_DATA_DIR}/stem-rl, prepared by experts/stem/scripts/prepare_*.py and the handovers):
 #   DAPOMath17K                      DAPO-Math-17K, deduplicated              math environment, claim frame
@@ -24,9 +25,6 @@ defaults: ../../shared/judges/llm-judge.yaml
 recipe: recipes/apertus2-chonk-sftv02-grpo.yaml
 # Reasoning Gym's scorers in the pydeps overlay (run.sh).
 pydeps: reasoning_gym
-context: 32768
-size: expensive
-job_time: 2-00:00:00
 
 # Thinking level per dataset: the system frame its prompts start with. The data entries below refer to these keys,
 # so a run file changes a level by overriding one key here. ScienceWorld's frame also declares the act tool.

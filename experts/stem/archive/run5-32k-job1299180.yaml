@@ -5,6 +5,10 @@
 # are part of the code now. The task file the run itself read is stem-mix-run5.yaml next to this one.
 #   RUN=sftv02-stem-mix-run5-32k-49n bash run.sh experts/stem/archive/run5-32k-job1299180.yaml
 defaults: ../base.yaml
+# The resources that run had, pinned here so that a change to experts/main.yaml does not change this record.
+size: expensive
+job_time: 2-00:00:00
+context: 32768
 
 frames:
   default: ${oc.env:RL_INFRA_DIR}/shared/frames/apertus2-system.json

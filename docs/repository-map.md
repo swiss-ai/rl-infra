@@ -53,9 +53,9 @@ happened, as they ran) and `scripts/` (data builders and checks); empty folders 
 
 | File | Role | Purpose |
 |---|---|---|
-| `main.yaml` | run | Run settings every expert shares (checkpoints, rollout dump, validation period, default tier and time); run.sh puts it under an expert's files |
+| `main.yaml` | run | The run every expert shares: tier, time limit and context (resources), checkpoints, rollout dump, validation period; run.sh puts it under an expert's files |
 | `README.md` | doc | The layout and the experts with their status |
-| `stem/base.yaml` | run | STEM official run: 8 training sets, 3 validation sets, all environments, thinking level per dataset (`frames`), 135 steps, 32K, expensive tier |
+| `stem/base.yaml` | run | STEM official run: 8 training sets, 3 validation sets, all environments, thinking level per dataset (`frames`), 135 steps (resources from main.yaml) |
 | `stem/dev/gsm8k.yaml`, `stem/dev/dapo-math.yaml` | run | GSM8K and DAPO-Math on the pretraining checkpoint (the quick start) |
 | `stem/dev/gsm8k-sft.yaml`, `dapo-math-sft.yaml`, `dapo-gsm8k-sft.yaml` | run | The same on an SFT checkpoint; DAPO + GSM8K 70/30 mix |
 | `stem/dev/chem-rdkit-sft.yaml`, `stem/dev/reasoning-gym-sft.yaml` | run | Single-environment tasks: chemistry alone, Reasoning Gym alone (older layout) |

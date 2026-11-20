@@ -119,9 +119,9 @@ across nodes needs the three settings in the Nemotron block, or vLLM hangs at st
 
 ```
 experts/                what to train on (experts/README.md)
-  main.yaml             run settings every expert shares (checkpoints, rollout dump, validation, default tier/time)
+  main.yaml             the run every expert shares: tier, time limit, context, checkpoints, rollout dump, validation
   <expert>/             medical, safety, chat, stem, code, knowledge, tool-use, translation, lean
-    base.yaml           the expert's official run: datasets, environments, validation, recipe, context, its steps
+    base.yaml           the expert's official run: datasets, environments, validation, recipe, steps
     dev/<name>.yaml     variants in progress (defaults: ../base.yaml), e.g. another mix or thinking level
     archive/            task files of runs that happened, as they ran (to reproduce them)
     scripts/            data builders and checks of the expert
