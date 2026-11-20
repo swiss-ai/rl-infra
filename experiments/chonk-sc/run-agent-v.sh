@@ -9,6 +9,11 @@
 # IDs come from Gym's token capture at the model endpoint, so these runs go through the Single Controller
 # (examples/run_grpo_single_controller.py via ../../run-harbor-osb.sh, as run-s.sh), not run V's Gym entrypoint,
 # which has no token capture. Layout as run-v-24k.sh: 24576 tokens on 20 nodes (16 trainer EP32 + 4 vLLM).
+# Long context (CTX > 24576, e.g. CTX=65536): run-v-24k.sh's long-context profile (common.sh long_ctx_defaults:
+# SFT v0.2, thinking high, CP8 KCP at 64K, 16384 tokens per turn, 100 turns, agent cap 3000 s, OpenCode 2940 s,
+# rollout/stall timeouts 7800/8100 s, TTL 4800 s, harbor_mask_agent_timeout, memory cap 0.74, NCCL 60 min, hang
+# watchdog 3600/14400 s); SMOKE=1 = 1 step 4 x 8 JOB_TIME 03:00:00, else 10 steps 12:00:00 (Daint limit UNVERIFIED).
+#   SMOKE=1 CTX=65536 AGENT=opencode bash experiments/chonk-sc/run-agent-v.sh
 #   AGENT=opencode bash experiments/chonk-sc/run-agent-v.sh [overrides...]
 #   DRY_RUN=1 ...   setup and the job script, no submission (launch.sh)
 # Smoke (one step, one sample per trainer data-parallel rank: 32 at 24k = 4 prompts x 8, 2 x 8 at 16k):
@@ -23,7 +28,9 @@
 # the tunnel's WebSocket through the ingress gateway, use_server_proxy false as run V; 1 = through the
 # OpenSandbox server proxy, the path the tunnel was tested on in runs S/O: use it if the gymtunnel gateway test
 # fails), MODEL_CALLS (1: Gym model-call capture under $SCRATCH/harbor-jobs/<run>/model-calls; 0 off),
-# OPENCODE_TIMEOUT_SEC (1740), OPENCODE_VERSION, OPENCODE_DEBUG, CHISEL_DIR ($SCRATCH/chisel),
+# OPENCODE_TIMEOUT_SEC (1740; AGENT_CAP - 60 when AGENT_CAP is set), OPENCODE_VERSION, OPENCODE_DEBUG, CHISEL_DIR
+# ($SCRATCH/chisel), the long-context knobs (common.sh: SFT_CKPT, THINKING, CP, KCP, CAP, NCCL_MIN, MAX_NEW, MAX_TURNS,
+# AGENT_CAP, TTL, MASK_AGENT_TIMEOUT, MASK_OVERFLOW, KCP_MEGATRON_DIR, KCP_FLA_DIR, KCP_EDF_NAME, HANG_*),
 # and as run-v.sh: VERIFIED_STORE, HARBOR_ROOT ($SCRATCH/osb/harbor_verified), COLLECT_ARGS, EXCLUDE_CAMPAIGNS,
 # EXCLUDE_TASKS, RL_REGISTRY_CRED_FILE (~/.rl_registry_cred), OPENSANDBOX_API_KEY_FILE (~/.opensandbox_token);
 # as run-s.sh: SFT_MODEL_SRC, SFT_EDF_NAME, ACCOUNT, PARTITION (normal), DRIVER_RETRIES (0), OVERLAY;
@@ -107,13 +114,20 @@ export RL_USER_HOME="${HOME}"
 export APERTUS_COMMON_URL="${APERTUS_COMMON_URL:-git@github.com:swiss-ai/apertus-common.git}"
 source "${PIN_FILE}"
 export EDF_NAME="${SFT_EDF_NAME}"
+# KCP (long context): the Megatron checkout with the KCP path, fla 0.5.2 and an EDF of their own (common.sh kcp_setup)
+if [[ "${KCP}" == 1 ]]; then kcp_setup "${SFT_EDF_NAME}" || exit 1; fi
+long_ctx_job_env
 export PYDEPS_APERTUS2="${SCRATCH}/nemo-rl-apertus2/apertus-common-${APERTUS_COMMON_COMMIT:0:9}"
 export PYDEPS="${PYDEPS}-apertus2"
 mkdir -p "${OUT}/configs"
 LOG="${OUT}/setup-${RUN}.log"
 echo "== setup for run ${TAG^^} (EDF ${EDF_NAME}, overlay ${PYDEPS}; log ${LOG})"
+# as run.sh: an export that carries the modeling code (MODELING_SOURCE) is linked whole, one without (v0.1) gets a copy
+# of its small files, linked shards and the code; run V stages the same export to the same directory the same way
+STAGE=(CHONK_MODEL_STAGE=copy STAGE_SHARDS=link)
+[[ ! -f "${SFT_MODEL_SRC}/MODELING_SOURCE" ]] || STAGE=(CHONK_MODEL_STAGE=link)
 { SKIP_VLLM_IMAGE=1 bash "${APERTUS2_DIR}/setup.sh" \
-    && SRC="${SFT_MODEL_SRC}" DST="${SFT_MODEL_DIR}" CHONK_MODEL_STAGE=copy STAGE_SHARDS=link \
+    && env SRC="${SFT_MODEL_SRC}" DST="${SFT_MODEL_DIR}" "${STAGE[@]}" \
        bash "${ROOT}/experiments/grpo-chonk/stage_model.sh"; } > "${LOG}" 2>&1 \
     || { tail -n 20 "${LOG}"; echo "ERROR: setup or model staging failed, see ${LOG}" >&2; exit 1; }
 grep -E '^== (EDF|done|image)|^WARNING' "${LOG}" || true
@@ -135,10 +149,15 @@ bash "${APERTUS2_DIR}/fetch-chisel.sh"
 TASK_COPY="${OUT}/configs/${RUN}-task.yaml"
 verified_task_copy "${TASK_COPY}"
 mapfile -t AGENT_OVERLAYS < <(agent_v_overlays "${AGENT}")
+# long context: the job reads a copy of the recipe made now, not the worktree's file (common.sh recipe_copy)
+if [[ "${LONG_CTX}" == 1 ]]; then AGENT_V_RECIPE="$(recipe_copy "${AGENT_V_RECIPE}" "${RUN}")" || exit 1; fi
 export SCRIPT="${SC_SCRIPT}" RECIPE="${AGENT_V_RECIPE}" TASK="${TASK_COPY}"
 export OVERLAY="${AGENT_OVERLAYS[*]}${OVERLAY:+ ${OVERLAY}}"
 export NEMO_GYM_WORKLOAD="${NEMO_GYM_WORKLOAD:-chonk-${AGENT}-verified-sc}"
 agent_v_args "${TRAIN}" "${CRED}" "${JOBS}"
 echo "== run ${RUN} (${AGENT}): ${STEPS} steps, ${PROMPTS} x 8 rollouts, at most ${SANDBOXES} sandboxes, ${CTX} tokens," \
      "recipe $(basename "${AGENT_V_RECIPE}"), GATEWAY_PROXY=${GATEWAY_PROXY}, model calls ${MODEL_CALLS}; Harbor trial dirs in ${JOBS}"
+[[ "${LONG_CTX}" != 1 ]] || echo "== long context: SFT ${SFT_CKPT}, thinking ${THINKING}, CP ${CP} KCP ${KCP}, cap ${CAP:-none}," \
+     "${MAX_NEW:-6144} tokens per turn, ${MAX_TURNS:-30} turns, agent cap ${AGENT_CAP:-1800} s, OpenCode ${OPENCODE_TIMEOUT_SEC:-1740} s," \
+     "TTL ${TTL:-3600} s, mask agent timeout ${MASK_AGENT_TIMEOUT}, mask overflow ${MASK_OVERFLOW}, recipe copy ${AGENT_V_RECIPE}"
 exec bash "${ROOT}/run-harbor-osb.sh" "${AGENT_V_ARGS[@]}" "$@"

@@ -303,6 +303,16 @@ AV = EXPECT in ("ov",)
 ENV = os.environ
 if AV:
     av_ctx, av_steps, av_prompts = int(ENV["CTX"]), int(ENV["STEPS"]), int(ENV["PROMPTS"])
+
+    def knob(name, default):
+        """A long-context knob of common.sh (long_ctx_defaults); empty = the task file's value, `default`."""
+        v = ENV.get(name, "")
+        return type(default)(v) if v != "" else default
+
+    # the task file's values (envs/harbor-verified-sft.yaml) where a knob is empty, as at the 24k defaults
+    av_cp, av_kcp = knob("CP", 1), knob("KCP", 0)
+    av_max_new, av_turns = knob("MAX_NEW", 6144), knob("MAX_TURNS", 30)
+    av_cap, av_ttl = knob("AGENT_CAP", 1800), knob("TTL", 3600)
 expect("cluster.num_nodes", cl["num_nodes"], (20 if av_ctx > 16384 else 12) if AV else 12)
 expect("vLLM nodes", gen_nodes, 4)
 expect("vLLM TP/EP", (vl["tensor_parallel_size"], vl["expert_parallel_size"]), (1, 4))
@@ -359,13 +369,27 @@ else:
             expect("VLLM_ALLOW_LONG_MAX_MODEL_LEN for the vLLM workers (as run-v-24k.sh)",
                    str((vl.get("env_vars") or {}).get("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "")).strip("'\""), "1")
         expect("vllm max_model_len follows CTX", vl.get("max_model_len"), av_ctx)
-        expect("max_new_tokens", gen["max_new_tokens"], 6144)
+        expect("max_new_tokens (MAX_NEW)", gen["max_new_tokens"], av_max_new)
         expect("output_format", gen.get("output_format"), "apertus2")
         expect("stop_token_ids", gen.get("stop_token_ids"), [12])
         expect("vllm_cfg.logprobs_mode (see run-s-sft.yaml)", vl.get("logprobs_mode"), "processed_logprobs")
-        expect("model is the SFT export staged by the launcher", p["model_name"].endswith("/models/chonk-lc-16k-v0.1-ep1-iter_0019374"), True)
-        expect("rollout_timeout_s (run-agent-v.yaml)", rf.nemo_gym.rollout_timeout_s, 6600)
-        expect("stall_timeout_s", a.stall_watchdog.stall_timeout_s, 6900)
+        # long context (common.sh long_ctx_defaults): thinking, context parallelism, trainer memory and NCCL limits
+        frame = "apertus2-system-high.json" if ENV.get("THINKING") == "high" else "apertus2-system.json"
+        expect(f"system frame (THINKING {ENV.get('THINKING')})", os.path.basename(str(gen.get("system_prompt_file"))), frame)
+        expect("thinking_token_budget (none)", gen.get("thinking_token_budget"), None)
+        expect("trainer context_parallel_size (CP)", cp, av_cp)
+        if av_cp > 1:
+            expect("make_sequence_length_divisible_by = 2 x CP", p.get("make_sequence_length_divisible_by"), 2 * av_cp)
+        expect("linear_attention_cp_impl (KCP)", (mg.get("model_overrides") or {}).get("linear_attention_cp_impl"),
+               "kcp" if av_kcp == 1 else None)
+        mev = mg.get("env_vars") or {}
+        expect("NRL_CUDA_MEMORY_FRACTION (CAP)", str(mev.get("NRL_CUDA_MEMORY_FRACTION", "")).strip("'\""), ENV.get("CAP", ""))
+        expect("NRL_NCCL_TIMEOUT_MINUTES (NCCL_MIN)", str(mev.get("NRL_NCCL_TIMEOUT_MINUTES", "")).strip("'\""), ENV.get("NCCL_MIN", ""))
+        expect("model is the SFT export staged by the launcher (SFT_CKPT)",
+               p["model_name"], os.path.join(ENV.get("SCRATCH", ""), "models", os.path.basename(ENV.get("SFT_MODEL_DIR", ""))))
+        # one prompt group, worst case: two pod creates (<= 1800 s each) + agent cap + verifier cap 1200 s
+        expect("rollout_timeout_s (run-agent-v.yaml; AGENT_CAP + 4800)", rf.nemo_gym.rollout_timeout_s, av_cap + 4800)
+        expect("stall_timeout_s (rollout_timeout_s + 300)", a.stall_watchdog.stall_timeout_s, av_cap + 5100)
         expect("training rows: the filtered verified rows", mc.data["train"]["data_path"], ENV.get("AGENT_V_TRAIN"))
         expect("dataset alias verified -> HARBOR_ROOT/tasks",
                (hcfg["harbor_datasets"].get("verified") or {}).get("local_dataset_path"), f"{ENV.get('HARBOR_ROOT')}/tasks")
@@ -381,24 +405,34 @@ else:
         expect("pod label run = NEMO_GYM_RUN_ID (the reaper's filter)", osb["attribution"].get("run"), ENV.get("NEMO_GYM_RUN_ID"))
         expect("pod label harbor-dataset", (hcfg["harbor_environment_kwargs"].get("sandbox_metadata") or {}).get("harbor-dataset"), "verified")
         expect("harbor concurrency = SANDBOXES", hcfg["concurrency"], int(ENV["SANDBOXES"]))
-        expect("harbor agent / verifier max timeout",
-               (hcfg.get("harbor_agent_max_timeout"), hcfg.get("harbor_verifier_max_timeout")), (1800, 1200))
+        expect("harbor agent / verifier max timeout (AGENT_CAP)",
+               (hcfg.get("harbor_agent_max_timeout"), hcfg.get("harbor_verifier_max_timeout")), (av_cap, 1200))
+        ttl = hcfg["harbor_environment_kwargs"].get("sandbox_ttl_s")
+        expect("sandbox_ttl_s (TTL)", ttl, av_ttl)
+        (ok if ttl >= av_cap + 1200 else fail)(f"sandbox_ttl_s {ttl} >= agent cap + verifier cap {av_cap + 1200}")
         expect("harbor_environment_build_timeout_multiplier", hcfg.get("harbor_environment_build_timeout_multiplier"), 5.0)
         expect("harbor_mask_infra (Gym 0041)", hcfg.get("harbor_mask_infra"), True)
+        expect("harbor_mask_agent_timeout (MASK_AGENT_TIMEOUT, rule ii)", bool(hcfg.get("harbor_mask_agent_timeout")),
+               ENV.get("MASK_AGENT_TIMEOUT") == "1")
+        expect("harbor_mask_context_overflow (MASK_OVERFLOW, rule i, Gym 0043)", bool(hcfg.get("harbor_mask_context_overflow")),
+               ENV.get("MASK_OVERFLOW") == "1")
         expect("harbor_jobs_dir", hcfg.get("harbor_jobs_dir"), ENV.get("AGENT_V_JOBS"))
         expect("model URL is the tunnel's pod end", (hcfg.get("harbor_model_base_url"), tun.get("pod_port")),
                ("http://127.0.0.1:8000", 8000))
         expect("chisel dir", tun.get("chisel_dir"), ENV.get("CHISEL_DIR"))
         expect("harbor_agent_name null", hcfg.get("harbor_agent_name"), None)
-        expect("max_turns (task file)", kw.get("max_turns"), 30)
+        expect("max_turns (MAX_TURNS)", kw.get("max_turns"), av_turns)
         expect("interleaved_thinking", kw.get("interleaved_thinking"), False)
         expect("model_info (context, per-turn output)",
-               (kw["model_info"]["max_input_tokens"], kw["model_info"]["max_output_tokens"]), (av_ctx, 6144))
+               (kw["model_info"]["max_input_tokens"], kw["model_info"]["max_output_tokens"]), (av_ctx, av_max_new))
         if EXPECT == "ov":
             expect("agent", hcfg.get("harbor_agent_import_path", "").rsplit(":", 1)[-1], "OpenCodeNemoGym")
             expect("OpenCode version / install", (kw.get("version"), kw.get("opencode_install")), ("1.17.11", "binary"))
             expect("opencode_workdir unset (the task's WORKDIR, run-ov.yaml)", kw.get("opencode_workdir"), None)
-            expect("OpenCode timeout below the agent timeout", kw.get("opencode_timeout_sec"), 1740)
+            expect("OpenCode timeout (OPENCODE_TIMEOUT_SEC, default agent cap - 60)", kw.get("opencode_timeout_sec"),
+                   int(ENV.get("OPENCODE_TIMEOUT_SEC") or av_cap - 60))
+            (ok if kw.get("opencode_timeout_sec") < av_cap else fail)(
+                f"OpenCode timeout {kw.get('opencode_timeout_sec')} < agent cap {av_cap}")
         expect("sampling_overrides = train profile",
                dict(vm.get("sampling_overrides") or {}),
                {"temperature": gen["temperature"], "top_p": gen["top_p"], "max_tokens": gen["max_new_tokens"]})

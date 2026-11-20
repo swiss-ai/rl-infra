@@ -27,16 +27,65 @@
 #   (policy.megatron_cfg.env_vars; vLLM keeps its own allocator), so freed blocks can be merged.
 #   bash experiments/chonk-sc/run-v-24k.sh [overrides...]     same env as run-v.sh; CTX, STEPS (20), JOB_TIME
 #   (08:00:00), RECIPE, ALLOC
+#
+# Long context (CTX > 24576; plan research/reports/2026-11-20-long-context-agent-runs-plan.md, user decisions
+# 2026-11-20): CTX=65536 selects common.sh's long-context profile (long_ctx_defaults, every knob overridable):
+# SFT v0.2 iter_0018315 (recipes/apertus2-chonk-sftv02-alps-vllm-adamw-tools-20n.yaml, 20 nodes), thinking high
+# (envs/apertus2-system-high.json, no budget), trainer CP8 with KCP (main's 64K layout; data-parallel size 4) and
+# make_sequence_length_divisible_by 16, NRL_CUDA_MEMORY_FRACTION 0.74, NRL_NCCL_TIMEOUT_MINUTES 60, 16384 tokens per
+# turn, 100 turns, agent cap 3000 s, TTL 4800 s, harbor_mask_agent_timeout, hang watchdog 3600/14400 s; STEPS 10,
+# JOB_TIME 12:00:00; SMOKE=1: 1 step, 4 x 8, JOB_TIME 03:00:00 (Daint's limit for normal: UNVERIFIED). KCP needs
+# experiments/long-context/setup-kcp.sh once (README.md, "Long context"). The job reads a copy of the recipe made now.
+#   SMOKE=1 CTX=65536 bash experiments/chonk-sc/run-v-24k.sh      then      CTX=65536 bash experiments/chonk-sc/run-v-24k.sh
+# Up to 24576 nothing of this applies unless a knob is set (e.g. THINKING=high, SFT_CKPT=v0.2).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-CTX="${CTX:-24576}"
+ROOT="$(cd "${HERE}/../.." && pwd)"
+APERTUS2_DIR="${ROOT}/backends/nemo-rl/apertus2"
+source "${ROOT}/sites/load.sh" && rl_infra_load "${APERTUS2_DIR}/env"
+source "${HERE}/common.sh"
+long_ctx_defaults || exit 1
+if [[ "${LONG_CTX}" == 1 && "${SMOKE:-0}" == 1 ]]; then
+    : "${STEPS:=1}" "${PROMPTS:=4}" "${JOB_TIME:=03:00:00}"
+elif [[ "${LONG_CTX}" == 1 ]]; then
+    : "${STEPS:=10}" "${JOB_TIME:=12:00:00}"
+fi
 STEPS="${STEPS:-20}"
-export RUN="${RUN:-sft19374-harbor-verified-ctx${CTX}-$(date +%Y%m%d-%H%M%S)}"
+# run-v.sh reads PROMPTS (default 8)
+[[ -z "${PROMPTS:-}" ]] || export PROMPTS
+if [[ "${SFT_CKPT}" == v0.1 ]]; then
+    export RUN="${RUN:-sft19374-harbor-verified-ctx${CTX}-$(date +%Y%m%d-%H%M%S)}"
+else
+    export RUN="${RUN:-sftv02-harbor-verified-ctx${CTX}-$(date +%Y%m%d-%H%M%S)}"
+fi
 export JOB_TIME="${JOB_TIME:-08:00:00}"
-export RECIPE="${RECIPE:-${HERE}/../../recipes/apertus2-chonk-sft19374-alps-vllm-adamw-tools-20n.yaml}"
+if [[ -z "${RECIPE:-}" ]]; then
+    # the 20-node recipes: 16 trainer nodes, PP2, so 32 ranks per pipeline stage, data-parallel size 32 / CP
+    (( 32 % CP == 0 )) || { echo "ERROR: CP ${CP} does not divide the 32 ranks of a pipeline stage" >&2; exit 1; }
+    (( (${PROMPTS:-8} * 8) % (32 / CP) == 0 )) || {
+        echo "ERROR: PROMPTS=${PROMPTS:-8} gives a batch of $(( ${PROMPTS:-8} * 8 )), not a multiple of the trainer's data-parallel size $(( 32 / CP ))" >&2
+        exit 1; }
+    if [[ "${SFT_CKPT}" == v0.1 ]]; then
+        RECIPE="${HERE}/../../recipes/apertus2-chonk-sft19374-alps-vllm-adamw-tools-20n.yaml"
+    else
+        RECIPE="${SFT_RECIPE_20N}"
+    fi
+fi
 EXTRA=()
 [[ "${ALLOC:-0}" == 1 ]] && EXTRA+=(++policy.megatron_cfg.env_vars.PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True)
+long_ctx_args
+EXTRA+=(${LONG_CTX_ARGS[@]+"${LONG_CTX_ARGS[@]}"})
+if [[ "${LONG_CTX}" == 1 ]]; then
+    RECIPE="$(recipe_copy "${RECIPE}" "${RUN}")" || exit 1
+fi
+export RECIPE
+# KCP: the Megatron checkout with the KCP path, fla 0.5.2 and an EDF of their own (run.sh -> setup.sh, launch.sh)
+if [[ "${KCP}" == 1 ]]; then kcp_setup "${EDF_NAME}" || exit 1; fi
+long_ctx_job_env
 echo "== run V at ${CTX} tokens, ${STEPS} steps, ALLOC=${ALLOC:-0}"
+[[ "${LONG_CTX}" != 1 ]] || echo "== long context: SFT ${SFT_CKPT}, thinking ${THINKING}, CP ${CP} KCP ${KCP}, cap ${CAP:-none}," \
+     "${MAX_NEW:-6144} tokens per turn, ${MAX_TURNS:-30} turns, agent cap ${AGENT_CAP:-1800} s, TTL ${TTL:-3600} s," \
+     "mask agent timeout ${MASK_AGENT_TIMEOUT}, mask overflow ${MASK_OVERFLOW}, JOB_TIME ${JOB_TIME}, recipe copy ${RECIPE}"
 exec bash "${HERE}/run-v.sh" \
     grpo.max_num_steps="${STEPS}" \
     policy.max_total_sequence_length="${CTX}" \

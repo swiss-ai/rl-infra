@@ -1,7 +1,8 @@
 # In-pod agent runs (run-agent-v.sh; run OV = OpenCode): an agent inside each pod on the verified tasks of run V
 # (../../envs/harbor-verified-sft.yaml without its defaults/script lines), on the Single Controller with token
 # capture. Merged by ../../run-harbor-osb.sh after
-#   recipe   apertus2-chonk-sft19374-alps-vllm-adamw-tools-20n.yaml (CTX 24576; 12-node recipe at 16384)
+#   recipe   apertus2-chonk-sft19374-alps-vllm-adamw-tools-20n.yaml (CTX 24576; 12-node recipe at 16384; above 24576
+#            apertus2-chonk-sftv02-alps-vllm-adamw-tools-20n.yaml, SFT v0.2, and the long-context overrides of common.sh)
 #   task     the verified task copy: tasks, alias `verified`, registry credentials by file, separate verifier
 #            pods, gateway (use_server_proxy false), create.deadline_s 1200, harbor_mask_infra, timeout caps
 #            1800/1200 s, build timeout x5, max_turns 30
@@ -26,7 +27,8 @@ async_rl:
     nemo_gym:
       # one prompt group, worst case: agent pod create (create.deadline_s 1200 + the attempt in flight, <= 600)
       # + agent (1800 cap) + verifier pod create (the same <= 1800) + verifier (1200 cap) = 6600 s. A step lasts
-      # as long as its slowest group (5359900, Terminus-2: longest trajectory per step 535-1060 s).
+      # as long as its slowest group (5359900, Terminus-2: longest trajectory per step 535-1060 s). At long context
+      # run-agent-v.sh overrides both with AGENT_CAP + 4800 / + 5100 (7800 / 8100 s at the 3000 s cap, common.sh).
       rollout_timeout_s: 6600
   stall_watchdog:
     # must exceed rollout_timeout_s

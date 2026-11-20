@@ -14,8 +14,9 @@
 #
 # Env: RUNS ("a b s", default; "o" = run S with AGENT=opencode, check it without the smoke overrides; "w" = o with TASKS=swe-lego, on its own;
 # "ov" = run-agent-v.sh AGENT=opencode on the verified tasks, on its own (RUNS=ov), with
-# run-agent-v.sh's env (SMOKE, STEPS, PROMPTS, SANDBOXES, CTX, GATEWAY_PROXY, MODEL_CALLS, HARBOR_ROOT, ...) and its
-# command-line overrides; credential files are only tested for presence), CHECK_PYTHON (a Python >= 3.12 with omegaconf, hydra-core, pydantic;
+# run-agent-v.sh's env (SMOKE, STEPS, PROMPTS, SANDBOXES, CTX, GATEWAY_PROXY, MODEL_CALLS, HARBOR_ROOT, the long-context
+# knobs of common.sh: CTX=65536 checks the 64K profile, ...) and its command-line overrides; credential files are only
+# tested for presence), CHECK_PYTHON (a Python >= 3.12 with omegaconf, hydra-core, pydantic;
 # default: a venv in $SCRATCH/chonk-sc-check/venv, created on first use with pip from PyPI),
 # HARBOR_ROOT (default $SCRATCH/osb/harbor_micro). Packages the config code imports but the venv
 # lacks (torch, ray, vllm, ...) are stubbed by check.py and listed; for a check without stubs run
@@ -40,6 +41,8 @@ AV_RUNS=0
 if [[ " ${RUNS} " == *" ov "* ]]; then
     AV_RUNS=1
     agent_v_defaults || exit 1    # HARBOR_ROOT ($SCRATCH/osb/harbor_verified), CTX, STEPS, PROMPTS, ... (exported)
+    # check.py reads the long-context knobs and the staged checkpoint's directory
+    export ${LONG_CTX_KNOBS} SFT_MODEL_DIR
     # the launcher's run name and paths (run-agent-v.sh): pod label, Harbor jobs dir, filtered rows
     export NEMO_GYM_RUN_ID="${NEMO_GYM_RUN_ID:-chonk-sc-check-av}" RL_USER_HOME="${HOME}"
     export AGENT_V_JOBS="${SCRATCH}/harbor-jobs/${NEMO_GYM_RUN_ID}"
@@ -154,6 +157,20 @@ if [[ "${AV_RUNS}" == 1 ]]; then
     done
     [[ -r "${RL_REGISTRY_CRED_FILE}" && -s "${RL_REGISTRY_CRED_FILE}" ]] && echo "  ok    registry credentials file ${RL_REGISTRY_CRED_FILE} (not read)" \
         || echo "  WARN  no registry credentials file ${RL_REGISTRY_CRED_FILE} (the verified images are private)"
+    # long context: the KCP inputs (common.sh kcp_setup; experiments/long-context/setup-kcp.sh) and how the launchers
+    # will stage the export (MODELING_SOURCE: linked whole, stage_model.sh checks its hfconverter commit)
+    if [[ "${KCP}" == 1 ]]; then
+        kdir="${KCP_MEGATRON_DIR:-${PROJECTS_DIR}/megatron-lm-moe-apertus2-kcp}" kfla="${KCP_FLA_DIR:-${PROJECTS_DIR}/fla-0.5.2}"
+        git -C "${kdir}" rev-parse --verify -q rl-kcp >/dev/null 2>&1 && echo "  ok    KCP Megatron ${kdir} (branch rl-kcp)" \
+            || echo "  WARN  KCP=1 but ${kdir} has no branch rl-kcp: run experiments/long-context/setup-kcp.sh (README.md)"
+        [[ -d "${kfla}/fla/ops/cp" ]] && echo "  ok    flash-linear-attention 0.5.2 ${kfla}" \
+            || echo "  WARN  KCP=1 but ${kfla} has no fla/ops/cp: run experiments/long-context/setup-kcp.sh (README.md)"
+    fi
+    if [[ -r "${SFT_MODEL_SRC}/config.json" ]]; then
+        [[ -f "${SFT_MODEL_SRC}/MODELING_SOURCE" ]] \
+            && echo "  note  ${SFT_MODEL_SRC} carries modeling code ($(head -c 80 "${SFT_MODEL_SRC}/MODELING_SOURCE")): staged as a link" \
+            || echo "  note  ${SFT_MODEL_SRC} has no MODELING_SOURCE: staged as a copy of its small files with linked shards"
+    fi
 fi
 if [[ " ${RUNS} " == *" s "* || " ${RUNS} " == *" o "* || " ${RUNS} " == *" w "* || "${AV_RUNS}" == 1 ]]; then
     [[ -r "${SFT_MODEL_SRC}/config.json" && -r "${SFT_MODEL_SRC}/model.safetensors.index.json" ]] \

@@ -8,7 +8,8 @@
 #   (Terminus-2's tmux is started the same way), so opencode_workdir stays unset; a task with WORKDIR / gets
 #   OpenCode's "failed to initialize fff" warning (job 5314432) and the whole file system as its project.
 # - Time: Harbor's agent cap is 1800 s (the tasks allow 3000 s); OpenCode is ended at 1740 s so its exit status
-#   and opencode.txt are recorded and the verifier runs (as run-s-swe-lego.yaml). OPENCODE_TIMEOUT_SEC overrides.
+#   and opencode.txt are recorded and the verifier runs (as run-s-swe-lego.yaml). OPENCODE_TIMEOUT_SEC overrides;
+#   at long context (CTX > 24576) run-agent-v.sh sets it to AGENT_CAP - 60 = 2940 s (common.sh agent_v_defaults).
 env:
   nemo_gym:
     harbor_agent:

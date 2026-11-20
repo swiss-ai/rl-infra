@@ -1,6 +1,6 @@
-# Shared by check.sh, run-a.sh, run-b.sh, run-s.sh and run-agent-v.sh (sourced, not run). Defines how runs A, B, S and OV compose
-# their configs (the same files, in the same order, as ../../run.sh and ../../run-harbor-osb.sh
-# write them) and the static checks of the NeMo-RL clone and the Gym checkout.
+# Shared by check.sh, run-a.sh, run-b.sh, run-s.sh, run-agent-v.sh and run-v-24k.sh (sourced, not run). Defines how runs
+# A, B, S and OV compose their configs (the same files, in the same order, as ../../run.sh and ../../run-harbor-osb.sh
+# write them), the long-context profile of runs V and OV, and the static checks of the NeMo-RL clone and the Gym checkout.
 # Needs HERE (this directory) and ROOT (the rl-infra checkout) set by the caller.
 
 APERTUS2_DIR="${ROOT}/backends/nemo-rl/apertus2"
@@ -12,11 +12,156 @@ SC_SCRIPT=examples/run_grpo_single_controller.py
 # (SFT_MODEL_SRC, staged to SFT_MODEL_DIR by run-s.sh; run-s-sft.yaml names the same directory).
 SFT_RECIPE="${ROOT}/recipes/apertus2-chonk-sft-vllm-adamw-tools.yaml"
 SFT_TASK="${ROOT}/envs/harbor-osb-sft.yaml"
-SFT_MODEL_SRC="${SFT_MODEL_SRC:-/capstor/store/cscs/swissai/infra01/hf-checkpoints/chonk-lc-16k-v0.1-ep1/iter_0019374}"
-SFT_MODEL_DIR="${SCRATCH}/models/chonk-lc-16k-v0.1-ep1-iter_0019374"
+# The SFT exports on /capstor and the names they are staged under in $SCRATCH/models (run.sh: sft_stage_as).
+# v0.1 iter_0019374 (Rob's export, no modeling code): runs S/O/W and the 24k runs V/OV. v0.2 iter_0018315: main's
+# long-context runs; path from origin/lean-kimina-verifier (UNVERIFIED from Daint: exists, readable, MODELING_SOURCE).
+SFT_V01_SRC=/capstor/store/cscs/swissai/infra01/hf-checkpoints/chonk-lc-16k-v0.1-ep1/iter_0019374
+SFT_V01_NAME=chonk-lc-16k-v0.1-ep1-iter_0019374
+SFT_V02_SRC=/capstor/store/cscs/swissai/infra01/apertus_checkpoints/v2/hf/chonk/posttraining/chonk-lc-16k-v0.2-iter_0018315
+SFT_V02_NAME=chonk-lc-16k-v0.2-iter_0018315
+SFT_MODEL_SRC_ENV="${SFT_MODEL_SRC:-}"   # a source given by the caller wins for either checkpoint
+SFT_MODEL_SRC="${SFT_MODEL_SRC:-${SFT_V01_SRC}}"
+SFT_MODEL_DIR="${SCRATCH}/models/${SFT_V01_NAME}"
 # Its own EDF: run S needs the apertus-common overlay in the container spec, which setup.sh bakes into
 # ~/.edf/<EDF_NAME>.toml; a shared EDF would change under jobs of the other runs waiting in the queue.
 SFT_EDF_NAME="${SFT_EDF_NAME:-nemo-rl-apertus2-sft}"
+# TODO(NeMo-RL 0057, valid_mask in the group baseline on the Gym entrypoint, rule (ii)): once the patch is in, set
+# this default to a string only 0057 adds to nemo_rl/algorithms/grpo.py; check_nemo_rl_clone then requires it.
+: "${NRL_0057_MARKER:=}"
+
+# --- Long context: runs V (run-v-24k.sh) and OV (run-agent-v.sh) above 24576 tokens --------------------------------
+# Plan research/reports/2026-11-20-long-context-agent-runs-plan.md (workspace), user decisions 2026-11-20. The profile
+# follows CTX. Up to 24576 nothing changes: SFT v0.1, the task file's frame (thinking medium), its 6144 tokens per turn,
+# 30 turns, agent cap 1800 s, TTL 3600 s, no context parallelism, no memory cap. Above 24576:
+#   SFT_CKPT   v0.2 (else v0.1): the checkpoint, its recipe (20 nodes) and staged directory
+#   THINKING   high (else medium): policy.generation.system_prompt_file=envs/apertus2-system-high.json, the frame
+#              NeMo-RL's vLLM HTTP server builds for every Gym call (Terminus-2 and OpenCode alike); no budget
+#   CP         CTX/8192 (8 at 64K, 16 at 128K): trainer context parallelism, 8192 tokens per GPU as main measured;
+#              policy.make_sequence_length_divisible_by = 2 x CP. The trainer's data-parallel size is 32/CP (20 nodes)
+#   KCP        1 when CP > 4 (else 0): the KCP scheme for the KDA layers (the pinned Megatron splits their 28 heads:
+#              CP 1, 2 or 4 only); needs experiments/long-context/setup-kcp.sh once (kcp_setup, README.md)
+#   CAP        0.74: NRL_CUDA_MEMORY_FRACTION of each trainer GPU (NeMo-RL 0033), room for NCCL/Triton outside PyTorch
+#   NCCL_MIN   60 from 65536 on: NRL_NCCL_TIMEOUT_MINUTES (NeMo-RL 0040)
+#   MAX_NEW    16384 tokens per turn (the task file: 6144); model_info.max_output_tokens and OpenCode's max_tokens follow
+#   MAX_TURNS  100 (Terminus-2 turns, OpenCode steps)
+#   AGENT_CAP  3000 s Harbor agent cap (the tasks' own); run OV: OpenCode ends at AGENT_CAP - 60, rollout timeout
+#              AGENT_CAP + 4800 (two pod creates <= 1800 each, verifier 1200), stall watchdog 300 s more
+#   TTL        4800 s sandbox_ttl_s (agent cap + create deadline 1200 + margin)
+#   MASK_AGENT_TIMEOUT  1: harbor_mask_agent_timeout (rule (ii)); on the Gym entrypoint (run V) masked rows still
+#              enter the group baseline until NeMo-RL 0057
+#   MASK_OVERFLOW  0: harbor_mask_context_overflow (rule (i)), a key of Gym 0043 (TODO(Gym 0043) below)
+#   HANG_DUMP_AFTER_S / HANG_KILL_AFTER_S  3600 / 14400 from 65536 on (backends/nemo-rl/hang_watch.sh: 900 / 2700)
+# Every knob can be set at any CTX; empty = the task file's value. JOB_TIME, STEPS, PROMPTS per launcher.
+LONG_CTX_KNOBS="CTX LONG_CTX SFT_CKPT THINKING CP KCP CAP NCCL_MIN MAX_NEW MAX_TURNS AGENT_CAP TTL MASK_AGENT_TIMEOUT MASK_OVERFLOW"
+
+# long_ctx_defaults: the knobs above from CTX (shell variables, not exported; check.sh exports LONG_CTX_KNOBS).
+long_ctx_defaults() {
+    : "${CTX:=24576}"
+    [[ "${CTX}" =~ ^[0-9]+$ ]] || { echo "long_ctx_defaults: CTX must be a number of tokens, not '${CTX}'" >&2; return 1; }
+    if (( CTX > 24576 )); then
+        LONG_CTX=1
+        : "${SFT_CKPT:=v0.2}" "${THINKING:=high}" "${CP:=$(( CTX / 8192 ))}" "${CAP:=0.74}" "${MAX_NEW:=16384}"
+        : "${MAX_TURNS:=100}" "${AGENT_CAP:=3000}" "${TTL:=4800}" "${MASK_AGENT_TIMEOUT:=1}"
+        # TODO(Gym 0043): 1 once Gym patch 0043 (harbor_mask_context_overflow) is applied; before it Gym's config
+        # (extra="allow") would take the key silently and mask nothing. check_gym_capture requires 0043 when 1.
+        : "${MASK_OVERFLOW:=0}"
+        if (( CTX >= 65536 )); then
+            : "${NCCL_MIN:=60}" "${HANG_DUMP_AFTER_S:=3600}" "${HANG_KILL_AFTER_S:=14400}"
+        fi
+    else
+        LONG_CTX=0
+        : "${SFT_CKPT:=v0.1}" "${THINKING:=medium}" "${CP:=1}" "${MASK_AGENT_TIMEOUT:=0}" "${MASK_OVERFLOW:=0}"
+    fi
+    : "${KCP:=$(( CP > 4 ? 1 : 0 ))}" "${CAP:=}" "${NCCL_MIN:=}" "${MAX_NEW:=}" "${MAX_TURNS:=}" "${AGENT_CAP:=}" "${TTL:=}"
+    local v
+    case "${SFT_CKPT}" in v0.1|v0.2) ;; *) echo "long_ctx_defaults: SFT_CKPT must be v0.1 or v0.2, not '${SFT_CKPT}'" >&2; return 1 ;; esac
+    case "${THINKING}" in high|medium) ;; *) echo "long_ctx_defaults: THINKING must be high or medium, not '${THINKING}'" >&2; return 1 ;; esac
+    for v in KCP MASK_AGENT_TIMEOUT MASK_OVERFLOW; do
+        [[ "${!v}" == [01] ]] || { echo "long_ctx_defaults: ${v} must be 0 or 1, not '${!v}'" >&2; return 1; }
+    done
+    for v in CP NCCL_MIN MAX_NEW MAX_TURNS AGENT_CAP TTL; do
+        [[ -z "${!v}" || "${!v}" =~ ^[1-9][0-9]*$ ]] || { echo "long_ctx_defaults: ${v} must be a positive number, not '${!v}'" >&2; return 1; }
+    done
+    (( CP == 1 || CTX % (2 * CP) == 0 )) || { echo "long_ctx_defaults: CTX ${CTX} is not a multiple of 2 x CP (${CP})" >&2; return 1; }
+    [[ "${KCP}" == 1 ]] || (( CP == 1 || CP == 2 || CP == 4 )) || {
+        echo "long_ctx_defaults: without KCP=1 the KDA layers split their 28 heads over the CP ranks: CP must be 1, 2 or 4, not ${CP}" >&2; return 1; }
+    [[ -z "${AGENT_CAP}" ]] || (( AGENT_CAP > 60 )) || { echo "long_ctx_defaults: AGENT_CAP ${AGENT_CAP} s is too short" >&2; return 1; }
+    # the checkpoint: source (SFT_MODEL_SRC from the caller wins), staged directory, 20-node recipe
+    case "${SFT_CKPT}" in
+        v0.1) SFT_MODEL_SRC="${SFT_MODEL_SRC_ENV:-${SFT_V01_SRC}}" SFT_MODEL_DIR="${SCRATCH}/models/${SFT_V01_NAME}"
+              SFT_RECIPE_20N="${ROOT}/recipes/apertus2-chonk-sft19374-alps-vllm-adamw-tools-20n.yaml" ;;
+        v0.2) SFT_MODEL_SRC="${SFT_MODEL_SRC_ENV:-${SFT_V02_SRC}}" SFT_MODEL_DIR="${SCRATCH}/models/${SFT_V02_NAME}"
+              SFT_RECIPE_20N="${ROOT}/recipes/apertus2-chonk-sftv02-alps-vllm-adamw-tools-20n.yaml" ;;
+    esac
+}
+
+# long_ctx_args: fills LONG_CTX_ARGS with the overrides of the knobs (after long_ctx_defaults), the same for the Gym
+# entrypoint (run V) and the Single Controller (run OV). Empty at the 24k defaults.
+long_ctx_args() {
+    local p="env.nemo_gym.harbor_agent.responses_api_agents.harbor_agent"
+    LONG_CTX_ARGS=()
+    (( CP == 1 )) || LONG_CTX_ARGS+=(policy.megatron_cfg.context_parallel_size="${CP}"
+                                     policy.make_sequence_length_divisible_by="$(( 2 * CP ))")
+    [[ "${KCP}" != 1 ]] || LONG_CTX_ARGS+=(++policy.megatron_cfg.model_overrides.linear_attention_cp_impl=kcp)
+    [[ -z "${CAP}" ]] || LONG_CTX_ARGS+=("++policy.megatron_cfg.env_vars.NRL_CUDA_MEMORY_FRACTION=\"'${CAP}'\"")
+    [[ -z "${NCCL_MIN}" ]] || LONG_CTX_ARGS+=("++policy.megatron_cfg.env_vars.NRL_NCCL_TIMEOUT_MINUTES=\"'${NCCL_MIN}'\"")
+    # medium: the task file's frame (envs/apertus2-system.json)
+    [[ "${THINKING}" != high ]] || LONG_CTX_ARGS+=(policy.generation.system_prompt_file="${ROOT}/envs/apertus2-system-high.json")
+    [[ -z "${MAX_NEW}" ]] || LONG_CTX_ARGS+=(policy.generation.max_new_tokens="${MAX_NEW}")
+    [[ -z "${MAX_TURNS}" ]] || LONG_CTX_ARGS+=("${p}.harbor_agent_kwargs.max_turns=${MAX_TURNS}")
+    [[ -z "${AGENT_CAP}" ]] || LONG_CTX_ARGS+=("${p}.harbor_agent_max_timeout=${AGENT_CAP}")
+    [[ -z "${TTL}" ]] || LONG_CTX_ARGS+=("${p}.harbor_environment_kwargs.sandbox_ttl_s=${TTL}")
+    [[ "${MASK_AGENT_TIMEOUT}" != 1 ]] || LONG_CTX_ARGS+=("++${p}.harbor_mask_agent_timeout=true")
+    [[ "${MASK_OVERFLOW}" != 1 ]] || LONG_CTX_ARGS+=("++${p}.harbor_mask_context_overflow=true")
+}
+
+# long_ctx_job_env: exports what the job itself reads (sbatch passes the environment on; that HANG_* reach
+# hang_watch.sh inside the job on Alps is UNVERIFIED, launch.sh passes NUMA_WATCH the same way).
+long_ctx_job_env() {
+    [[ -z "${HANG_DUMP_AFTER_S:-}" ]] || export HANG_DUMP_AFTER_S
+    [[ -z "${HANG_KILL_AFTER_S:-}" ]] || export HANG_KILL_AFTER_S
+}
+
+# kcp_setup <EDF name>: points setup.sh and launch.sh at the KCP stack, as main's launch-code-ctx.sh does: the Megatron
+# checkout with branch rl-kcp (KCP_MEGATRON_DIR, default $PROJECTS_DIR/megatron-lm-moe-apertus2-kcp) through a copy of
+# the pin with its commit (setup.sh checks out the pin's commit), flash-linear-attention 0.5.2 (KCP_FLA_DIR, default
+# $PROJECTS_DIR/fla-0.5.2) ahead of the image's on PYTHONPATH through a copy of the container spec, and an EDF of its
+# own (<EDF name>-kcp, KCP_EDF_NAME overrides): setup.sh writes the spec to ~/.edf/<EDF_NAME>.toml, and the shared
+# one would change under queued jobs. Both copies go to $SCRATCH/chonk-sc/kcp. Set up once with
+# experiments/long-context/setup-kcp.sh (README.md, "Long context").
+kcp_setup() {
+    local dir="${KCP_MEGATRON_DIR:-${PROJECTS_DIR}/megatron-lm-moe-apertus2-kcp}" fla="${KCP_FLA_DIR:-${PROJECTS_DIR}/fla-0.5.2}"
+    local out="${SCRATCH}/chonk-sc/kcp" commit
+    commit="$(git -C "${dir}" rev-parse --verify -q rl-kcp 2>/dev/null)" \
+        || { echo "kcp_setup: ${dir} has no branch rl-kcp; run experiments/long-context/setup-kcp.sh (README.md, long context)" >&2; return 1; }
+    # a missing directory would only show inside the job, as the image's older fla without fla.ops.cp
+    [[ -d "${fla}/fla/ops/cp" ]] \
+        || { echo "kcp_setup: ${fla} has no flash-linear-attention 0.5.2 (fla/ops/cp); run setup-kcp.sh or set KCP_FLA_DIR" >&2; return 1; }
+    mkdir -p "${out}"
+    sed "s/^MEGATRON_COMMIT=.*/MEGATRON_COMMIT=${commit}/" "${APERTUS2_DIR}/pin" > "${out}/pin-kcp.tmp"
+    grep -qx "MEGATRON_COMMIT=${commit}" "${out}/pin-kcp.tmp" || { echo "kcp_setup: no MEGATRON_COMMIT line in ${APERTUS2_DIR}/pin" >&2; return 1; }
+    mv -f "${out}/pin-kcp.tmp" "${out}/pin-kcp"
+    sed "s|:@@MEGATRON_DIR@@:|:@@MEGATRON_DIR@@:${fla}:|" "${APERTUS2_DIR}/edf.toml.template" > "${out}/edf-kcp.toml.template"
+    grep -qF ":@@MEGATRON_DIR@@:${fla}:" "${out}/edf-kcp.toml.template" \
+        || { echo "kcp_setup: could not put ${fla} on the container's PYTHONPATH (edf.toml.template changed?)" >&2; return 1; }
+    export MEGATRON_DIR="${dir}" PIN_FILE="${out}/pin-kcp" CONTAINER_SPEC="${out}/edf-kcp.toml.template"
+    export EDF_NAME="${KCP_EDF_NAME:-$1-kcp}"
+    echo "== KCP: Megatron ${dir} at ${commit:0:9} (rl-kcp), fla ${fla}, EDF ${EDF_NAME}"
+}
+
+# recipe_copy <recipe> <run>: prints the path of a copy of the recipe in $SCRATCH/chonk-sc/recipes with its one-line
+# defaults made absolute, which the job reads instead of the worktree's file (main's launch-code-ctx.sh: the driver
+# loads the config anew at its start, after any edit or pull made while the job waited). Its defaults stay files.
+recipe_copy() {
+    local src d out="${SCRATCH}/chonk-sc/recipes/$2.yaml"
+    src="$(realpath "$1")" || return 1
+    d="$(sed -n 's/^defaults: *//p' "${src}")"
+    [[ -n "${d}" ]] || { echo "recipe_copy: ${src} has no one-line defaults: entry" >&2; return 1; }
+    [[ "${d}" == /* ]] || d="$(realpath -m "$(dirname "${src}")/${d}")"
+    [[ -f "${d}" ]] || { echo "recipe_copy: ${d} (defaults of ${src}) does not exist" >&2; return 1; }
+    mkdir -p "$(dirname "${out}")"
+    sed "s|^defaults: .*|defaults: ${d}|" "${src}" > "${out}" && echo "${out}"
+}
 
 # sft_task_copy <out.yaml>: the SFT task file without its `defaults:` (it would merge the 8075 recipe
 # over the one the launcher puts first) and `script:` (not a config key) lines, as ../../run.sh does
@@ -59,23 +204,36 @@ agent_v_agent() {
 
 # agent_v_defaults: run-agent-v.sh's knobs with their defaults (check.sh RUNS=ov checks the same values).
 # CTX 24576 = run V's 24k layout (20 nodes: 16 trainer EP32 + 4 vLLM, trainer data-parallel size 32);
-# CTX 16384 = the 12-node layout (8 trainer EP16, data-parallel size 16). RECIPE overrides (then the batch is
-# not checked against the data-parallel size). SMOKE=1: one step, one sample per data-parallel rank.
+# CTX 16384 = the 12-node layout (8 trainer EP16, data-parallel size 16); CTX > 24576 = the long-context profile
+# (long_ctx_defaults: 20 nodes, SFT v0.2, CP8 KCP at 64K, data-parallel size 32/CP, ...). RECIPE overrides (then the
+# batch is not checked against the data-parallel size). SMOKE=1: one step, one sample per data-parallel rank (long
+# context: 4 x 8, JOB_TIME 03:00:00; 10 steps: 12:00:00, both UNVERIFIED against Daint's limit for normal).
 agent_v_defaults() {
-    : "${CTX:=24576}"
+    long_ctx_defaults || return 1
     if [[ -n "${RECIPE:-}" ]]; then
         AGENT_V_RECIPE="$(realpath "${RECIPE}")" AGENT_V_DP=""
     elif (( CTX > 16384 )); then
-        AGENT_V_RECIPE="${ROOT}/recipes/apertus2-chonk-sft19374-alps-vllm-adamw-tools-20n.yaml" AGENT_V_DP=32
+        (( 32 % CP == 0 )) || { echo "agent_v_defaults: CP ${CP} does not divide the 32 ranks of a pipeline stage" >&2; return 1; }
+        AGENT_V_RECIPE="${SFT_RECIPE_20N}" AGENT_V_DP=$(( 32 / CP ))
     else
-        AGENT_V_RECIPE="${ROOT}/recipes/apertus2-chonk-sft19374-alps-vllm-adamw-tools.yaml" AGENT_V_DP=16
+        [[ "${SFT_CKPT}" == v0.1 ]] || { echo "agent_v_defaults: no 12-node recipe for SFT ${SFT_CKPT}; set RECIPE" >&2; return 1; }
+        (( 16 % CP == 0 )) || { echo "agent_v_defaults: CP ${CP} does not divide the 16 ranks of a pipeline stage" >&2; return 1; }
+        AGENT_V_RECIPE="${ROOT}/recipes/apertus2-chonk-sft19374-alps-vllm-adamw-tools.yaml" AGENT_V_DP=$(( 16 / CP ))
     fi
-    if [[ "${SMOKE:-0}" == 1 ]]; then
+    if [[ "${SMOKE:-0}" == 1 && "${LONG_CTX}" == 1 ]]; then
+        : "${STEPS:=1}" "${PROMPTS:=4}" "${JOB_TIME:=03:00:00}"
+    elif [[ "${SMOKE:-0}" == 1 ]]; then
         : "${STEPS:=1}" "${PROMPTS:=$(( ${AGENT_V_DP:-32} / 8 ))}" "${JOB_TIME:=02:30:00}"
     fi
+    [[ "${LONG_CTX}" != 1 ]] || : "${JOB_TIME:=12:00:00}"
     : "${STEPS:=10}" "${PROMPTS:=8}" "${SANDBOXES:=64}" "${GATEWAY_PROXY:=0}" "${MODEL_CALLS:=1}"
     : "${HARBOR_ROOT:=${SCRATCH}/osb/harbor_verified}"
     [[ "${GATEWAY_PROXY}" == [01] ]] || { echo "agent_v_defaults: GATEWAY_PROXY must be 0 or 1, not ${GATEWAY_PROXY}" >&2; return 1; }
+    # OpenCode ends 60 s before Harbor's agent cap, so its exit status and opencode.txt are recorded (run-ov.yaml)
+    if [[ -n "${AGENT_CAP}" ]]; then
+        : "${OPENCODE_TIMEOUT_SEC:=$(( AGENT_CAP - 60 ))}"
+        export OPENCODE_TIMEOUT_SEC
+    fi
     export CTX STEPS PROMPTS SANDBOXES GATEWAY_PROXY MODEL_CALLS HARBOR_ROOT AGENT_V_RECIPE AGENT_V_DP
 }
 
@@ -106,9 +264,19 @@ agent_v_args() {
         registry_cred_file="$2"
         "${p}.harbor_jobs_dir=$3"
         "${p}.concurrency=${SANDBOXES}"
+        # the checkpoint the launcher staged (SFT_CKPT); run-s-sft.yaml, merged after the recipe, names v0.1
+        policy.model_name="${SFT_MODEL_DIR}"
     )
     # as run-v-24k.sh: vLLM refuses max_model_len > max_position_embeddings (16384) without it
     (( CTX <= 16384 )) || AGENT_V_ARGS+=("++policy.generation.vllm_cfg.env_vars.VLLM_ALLOW_LONG_MAX_MODEL_LEN=\"'1'\"")
+    # the long-context knobs (empty at the 24k defaults); with an agent cap, the SC limits that follow from it
+    # (run-agent-v.yaml: 6600 / 6900 s for the task file's 1800 s cap)
+    long_ctx_args
+    AGENT_V_ARGS+=(${LONG_CTX_ARGS[@]+"${LONG_CTX_ARGS[@]}"})
+    if [[ -n "${AGENT_CAP}" ]]; then
+        AGENT_V_ARGS+=(async_rl.rollout_failure.nemo_gym.rollout_timeout_s="$(( AGENT_CAP + 4800 ))"
+                       async_rl.stall_watchdog.stall_timeout_s="$(( AGENT_CAP + 5100 ))")
+    fi
     # GATEWAY_PROXY as in experiments/osb-reach: 0 = through the ingress gateway (use_server_proxy false, the task
     # file's value, as run V), 1 = through the OpenSandbox server proxy (runs S/O, the tunnel's tested path)
     case "${GATEWAY_PROXY}" in
@@ -207,6 +375,13 @@ check_nemo_rl_clone() {
     grep -q "def _invalid_apertus2_history" "${d}/nemo_rl/models/generation/vllm/vllm_worker_async.py" 2>/dev/null \
         && ok "NeMo-RL patch 0054: an unencodable Apertus 2 chat history gets HTTP 400" \
         || bad "NeMo-RL patch 0054 missing (_invalid_apertus2_history in vllm_worker_async.py); run backends/nemo-rl/apertus2/setup.sh"
+    # NeMo-RL patch 0057: masked rows leave the group baseline on the Gym entrypoint (rule (ii)); checked once
+    # NRL_0057_MARKER is set (top of this file, TODO(NeMo-RL 0057))
+    if [[ -n "${NRL_0057_MARKER}" ]]; then
+        grep -qF -- "${NRL_0057_MARKER}" "${d}/nemo_rl/algorithms/grpo.py" 2>/dev/null \
+            && ok "NeMo-RL patch 0057: masked rows leave the group baseline (${NRL_0057_MARKER})" \
+            || bad "NeMo-RL patch 0057 missing ('${NRL_0057_MARKER}' in nemo_rl/algorithms/grpo.py); run backends/nemo-rl/apertus2/setup.sh"
+    fi
     for f in "${SC_SCRIPT}" nemo_rl/algorithms/single_controller.py nemo_rl/algorithms/single_controller_utils/config.py; do
         [[ -f "${d}/${f}" ]] && ok "${f} present" || bad "${f} missing"
     done
@@ -312,6 +487,13 @@ check_gym_capture() {
     grep -q "def context_cut_margin" "${g}/responses_api_agents/harbor_agent/custom_agents/llms/nemo_gym_llm.py" 2>/dev/null \
         && ok "Gym patch 0042: context cut only near the context limit" \
         || bad "Gym patch 0042 missing (context_cut_margin in harbor_agent/custom_agents/llms/nemo_gym_llm.py)"
+    # 0043: harbor_mask_context_overflow (rule (i)); required when the launchers set it (MASK_OVERFLOW=1): without the
+    # patch Gym's config takes the key silently (extra="allow") and masks nothing
+    if [[ "${MASK_OVERFLOW:-0}" == 1 ]]; then
+        grep -q "harbor_mask_context_overflow" "${app}" 2>/dev/null \
+            && ok "Gym patch 0043: context_overflow rollouts masked (harbor_mask_context_overflow)" \
+            || bad "Gym patch 0043 missing (harbor_mask_context_overflow in harbor_agent/app.py), but MASK_OVERFLOW=1 sets it"
+    fi
     # 0031: image_auth (from image_auth_file, Kostas' 0013) only for one registry, not Docker Hub
     grep -q "def _image_registry" "${g}/nemo_gym/sandbox/providers/opensandbox/provider.py" 2>/dev/null \
         && ok "Gym patch 0031: image_auth_registry" \
