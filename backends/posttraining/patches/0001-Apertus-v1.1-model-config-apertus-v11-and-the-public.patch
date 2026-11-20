@@ -1,0 +1,68 @@
+From 70b20bc41127ef46f583535868160da74ad063c9 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Fri, 20 Nov 2026 06:47:38 +0900
+Subject: [PATCH 1/2] Apertus-v1.1: model config (apertus-v11) and the public
+ SFT mixture as an HF dataset config
+
+---
+ .../dataset/apertus-sft-mixture-hf.yaml       | 19 +++++++++++++++++
+ .../configs/model/apertus-v11.yaml            | 21 +++++++++++++++++++
+ 2 files changed, 40 insertions(+)
+ create mode 100644 src/post_training/configs/dataset/apertus-sft-mixture-hf.yaml
+ create mode 100644 src/post_training/configs/model/apertus-v11.yaml
+
+diff --git a/src/post_training/configs/dataset/apertus-sft-mixture-hf.yaml b/src/post_training/configs/dataset/apertus-sft-mixture-hf.yaml
+new file mode 100644
+index 0000000..fe27957
+--- /dev/null
++++ b/src/post_training/configs/dataset/apertus-sft-mixture-hf.yaml
+@@ -0,0 +1,19 @@
++# @package _global_
++
++# The public Apertus SFT mixture (https://huggingface.co/datasets/swiss-ai/apertus-sft-mixture, 3.94M
++# conversations), downloaded and saved with reproducibility-scripts/sft/apertus-v11/prepare_data.py.
++# Set the folder with dataset_args.dataset_name; dataset_args.debug_subsample.train=N trains on N
++# conversations drawn after a shuffle with the run's seed.
++
++dataset_name: apertus-sft-mixture-hf
++
++dataset_args:
++  dataset_name: ???
++  train_split:
++    name: train
++  eval_split:
++    name: null
++
++training_args:
++  eval_strategy: "no"
++  eval_steps: null
+diff --git a/src/post_training/configs/model/apertus-v11.yaml b/src/post_training/configs/model/apertus-v11.yaml
+new file mode 100644
+index 0000000..fe9382e
+--- /dev/null
++++ b/src/post_training/configs/model/apertus-v11.yaml
+@@ -0,0 +1,21 @@
++# @package _global_
++
++# Apertus-v1.1 base models (0.5B, 1.5B, 4B; https://huggingface.co/swiss-ai/Apertus-v1.1-4B). Set the
++# downloaded folder with model_args.model_name_or_path; the tokenizer is read from the same folder.
++# Transformers >= 4.56 has the architecture, so no remote code.
++
++model_args:
++  torch_dtype: bfloat16
++  model_name_or_path: ???
++  attn_implementation: flash_attention_2
++  trust_remote_code: false
++  use_peft: false
++
++tokenizer_args:
++  tokenizer_name_or_path: ${model_args.model_name_or_path}
++  chat_template_name: apertus
++  trust_remote_code: false
++  padding_side: left
++  add_bos_to_chat_template: true # 1: <s>
++  model_pad_token_id: 10  # <pad>
++  model_eos_token_id: 68  # <SPECIAL_68>, end of an assistant turn, as in the released Instruct models
+-- 
+2.43.0
+

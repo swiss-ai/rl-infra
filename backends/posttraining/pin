@@ -1,0 +1,4 @@
+# The SFT trainer: swiss-ai/posttraining (TRL, accelerate, DeepSpeed, Hydra), the code that trained the Apertus and
+# Apertus-v1.1 instruct models, at this commit. setup.sh clones it and applies patches/ on top.
+POSTTRAINING_URL=https://github.com/swiss-ai/posttraining.git
+POSTTRAINING_COMMIT=b19a31821a022d02c685b77bae6e2a8df2b1d7de

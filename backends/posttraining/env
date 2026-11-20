@@ -1,0 +1,15 @@
+# Defaults of the SFT backend. Like every stack env file it only sets defaults: the environment, site.env and the
+# cluster profile sites/<SITE>.env win (sites/load.sh). The container is the Apertus 2 NeMo-RL image (IMAGE_WORK of
+# backends/nemo-rl/apertus2/env) with build_env.sh's Python overlay on top.
+: "${PT_PIN_FILE:=${PT_DIR}/pin}"
+: "${POSTTRAINING_DIR:=${PROJECTS_DIR}/posttraining-apertus-v11}"
+# Scratch: the overlay, the converted mixture, job logs, checkpoints and the final models ($SFT_ROOT/models/<run name>).
+: "${SFT_ROOT:=${SCRATCH}/apertus-v11-sft}"
+: "${SFT_PYDEPS:=${SFT_ROOT}/pydeps}"
+# The downloads (docs/apertus-v11.md): the base models, and the mixture as `hf download` saves it.
+: "${MODELS_DIR:=${SCRATCH}/models/apertus-v1.1}"
+: "${HF_MIXTURE_DIR:=${SCRATCH}/data/apertus-sft-mixture}"
+: "${CPUS_PER_NODE:=288}"
+: "${WANDB_KEY_FILE:=${HOME}/.wandb_api_key}"
+# Container Engine (Alps): the image's own PATH, which the engine would otherwise take from the login shell.
+: "${SFT_CONTAINER_PATH:=/usr/local/lib/python3.12/dist-packages/torch_tensorrt/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/mpi/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/ucx/bin}"

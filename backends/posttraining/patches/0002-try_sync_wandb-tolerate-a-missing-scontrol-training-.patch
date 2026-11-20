@@ -1,0 +1,26 @@
+From 88fcf7ed20586e430416deeda5f758f271b62e85 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Fri, 20 Nov 2026 06:47:38 +0900
+Subject: [PATCH 2/2] try_sync_wandb: tolerate a missing scontrol (training
+ inside a container ended with FileNotFoundError)
+
+---
+ src/post_training/utils/config.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/post_training/utils/config.py b/src/post_training/utils/config.py
+index cced11f..dcc726d 100644
+--- a/src/post_training/utils/config.py
++++ b/src/post_training/utils/config.py
+@@ -250,7 +250,7 @@ def try_sync_wandb(logger=_logger):
+             ["scontrol", "show", "job", job_id],
+             text=True,
+         )
+-    except subprocess.SubprocessError as e:
++    except (subprocess.SubprocessError, OSError) as e:  # OSError: no scontrol (e.g. inside a container)
+         logger.error(f"Could not fetch SLURM info for job {job_id}: {e}")
+         return
+ 
+-- 
+2.43.0
+
