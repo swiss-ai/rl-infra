@@ -1,4 +1,4 @@
-# Pipeline debug of the Enigmata integration: the run-3 mix (envs/stem/archive/stem-mix-run3.yaml) with 64 of each 512-prompt
+# Pipeline debug of the Enigmata integration: the run-3 mix (experts/stem/archive/stem-mix-run3.yaml) with 64 of each 512-prompt
 # step from Enigmata puzzles of all 81 generated cells (provisional uniform file, select-uniform.json), graded by
 # the native enigmata environment. Per step: 128 DAPO-Math-17K, 192 cleaned NuminaMath-1.5, 128 science + CS
 # knowledge-mcqa, 64 Enigmata. Launch: STEPS=4 VAL=0 TASK=experiments/enigmata/task-debug-uniform.yaml launch.sh.
@@ -42,7 +42,7 @@ data:
       env_name: math_default
   default:
     prompt_file: null
-    system_prompt_file: ${oc.env:RL_INFRA_DIR}/envs/frames/apertus2-system.json
+    system_prompt_file: ${oc.env:RL_INFRA_DIR}/shared/frames/apertus2-system.json
     processor: apertus2_math_data_processor
     env_name: math
 

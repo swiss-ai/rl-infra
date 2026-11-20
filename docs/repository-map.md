@@ -8,7 +8,7 @@ Every file of the repository and its role (346 files, branch `restructure`, 2026
 ## How a run passes through the files
 
 ```
-bash run.sh envs/stem/main.yaml
+bash run.sh experts/stem/main.yaml
  └ run.sh ─ sites/load.sh (sites/hangang.env, site.env, backends/nemo-rl/apertus2/env, backends/nemo-rl/env)
    ├ backends/nemo-rl/config.sh       merges the task's defaults chain, copies every config file for the job
    ├ sizes/<tier>.yaml                node counts and batch scale
@@ -45,7 +45,7 @@ bash run.sh envs/stem/main.yaml
 | `sizes/expensive.yaml` | run | 16 + 32 (run 5), batch x1 |
 | `sizes/ultra.yaml` | run | 32 + 64, batch x2 (to be confirmed by the benchmark jobs 1315243/45/47) |
 
-## `envs/` (what to train on)
+## `experts/` (what to train on, one folder per RL expert)
 
 | File | Role | Purpose |
 |---|---|---|
@@ -69,13 +69,18 @@ bash run.sh envs/stem/main.yaml
 | `chat/prepare_ultrafeedback.py`, `chat/prepare_alpaca_eval.py`, `chat/ultrafeedback-few-shot.txt` | setup | Rows and few-shot prompt of the rubric tasks |
 | `lean/lean-sft.yaml` | run | Lean 4 proving with Gym math_formal_lean |
 | `medical/`, `safety/`, `knowledge/`, `translation/` (`base.yaml`, `main.yaml`) | template | Placeholders of the experts without tasks yet: medical multiple choice; safety, knowledge and translation graded by the shared judge; `template: true` until filled in |
+| `README.md` | doc | The RL experts and their folders; medical, safety, knowledge and translation are templates |
+
+## `shared/` (pieces the task files take in; not experts)
+
+| File | Role | Purpose |
+|---|---|---|
 | `frames/apertus2-system.json`, `-high.json` | run | System frame of the Apertus 2 format: thinking medium, high |
 | `frames/apertus2-system-sciworld-act.json`, `-high.json` | run | The same with ScienceWorld's `act` tool declared |
-| `common/llm-judge.yaml` | run | The LLM judge environment and its node (gemma-4-26B-A4B), shared by STEM and the judge-based templates |
-| `common/stage_judge_model.sh` | setup | Downloads a judge model to scratch |
-| `common/strip_few_shot.py` | setup | Removes the few-shot prompt from prepared Gym rows (for SFT checkpoints) |
-| `common/score-text.yaml` | check | Teacher-forced log-probabilities of plain text (not a training task) |
-| `README.md` | doc | The RL experts and their folders; medical, safety, knowledge and translation have none yet |
+| `judges/llm-judge.yaml` | run | The LLM judge environment and its node (gemma-4-26B-A4B), taken in by STEM and the judge-based templates |
+| `scripts/stage_judge_model.sh` | setup | Downloads a judge model to scratch |
+| `scripts/strip_few_shot.py` | setup | Removes the few-shot prompt from prepared Gym rows (for SFT checkpoints) |
+| `debug/score-text.yaml` | check | Teacher-forced log-probabilities of plain text (not a training task) |
 
 ## `recipes/` (model and algorithm, 34 files)
 
@@ -146,7 +151,7 @@ Most recipes are a chain of small files ending in `experiments/grpo-chonk/` and 
 
 - `experiments/grpo-chonk/stage_model.sh` is part of every run but lives in an experiment folder.
 - `experiments/long-context/launch-code-ctx.sh` duplicates `run.sh` for coding (sandbox job, KCP, node
-  layouts); the code domain needs `envs/code/base.yaml`/`main.yaml` and tiers like STEM.
+  layouts); the code domain needs `experts/code/base.yaml`/`main.yaml` and tiers like STEM.
 - `experiments/enigmata/launch.sh`, `scienceworld/launch.sh`, `debug16.sh`, `probe.sh`,
   `trainer-memory/launch.sh`: more launchers with their own variables.
 - `experiments/long-context/tools/` are general run-analysis tools, not long-context ones.

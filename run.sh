@@ -1,6 +1,6 @@
 #!/bin/bash
 # Train Apertus 2 Chonk with GRPO from a task file (on any cluster with a sites/ profile):
-#   bash run.sh <task.yaml> [overrides...]        e.g.  bash run.sh envs/stem/main.yaml
+#   bash run.sh <task.yaml> [overrides...]        e.g.  bash run.sh experts/stem/main.yaml
 # The task file says what to train on (datasets, environments, their shares of a step, steps,
 # validation) and, with the rl-infra keys below, which recipe, context and node tier the run uses.
 # Every launch first brings the setup up to date; the first one clones the sources and stages the
@@ -25,7 +25,7 @@
 #   template:  true in the placeholder files of a new expert; run.sh refuses to submit them
 # A task without `recipe:` names its recipe in `defaults` (the older layout).
 #
-# Environment: RUN names the run (default: the task's path under envs/ and the time, e.g.
+# Environment: RUN names the run (default: the task's path under experts/ and the time, e.g.
 # stem-main-20261120-081500). RECIPE, SIZE and JOB_TIME replace the task's recipe, size and job_time.
 # W&B: WANDB_PROJECT, WANDB_ENTITY and WANDB_KEY_FILE in site.env. PARTITION, ACCOUNT as usual.
 #
@@ -61,8 +61,8 @@ fi
 
 # --- run name and W&B
 if [[ -z "${RUN:-}" ]]; then
-    # envs/stem/dev/mix-a.yaml -> stem-dev-mix-a-<time>
-    if [[ "${TASK}" == "${ROOT}/envs/"* ]]; then name="${TASK#"${ROOT}"/envs/}"; else name="$(basename "${TASK}")"; fi
+    # experts/stem/dev/mix-a.yaml -> stem-dev-mix-a-<time>
+    if [[ "${TASK}" == "${ROOT}/experts/"* ]]; then name="${TASK#"${ROOT}"/experts/}"; else name="$(basename "${TASK}")"; fi
     name="${name%.yaml}"
     RUN="${name//\//-}-$(date +%Y%m%d-%H%M%S)"
 fi

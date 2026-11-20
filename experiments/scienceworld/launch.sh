@@ -1,6 +1,6 @@
 #!/bin/bash
 # bash launch.sh [extra hydra overrides...]
-# GRPO of SFT v0.2 on the run-3 STEM mix plus ScienceWorld (TASK, default envs/stem/archive/stem-mix-run3-sciworld.yaml) on
+# GRPO of SFT v0.2 on the run-3 STEM mix plus ScienceWorld (TASK, default experts/stem/archive/stem-mix-run3-sciworld.yaml) on
 # 16 trainer + 16 vLLM nodes with the 512-prompt variant B of handover/rl-throughput-and-512p-config.md (one optimizer
 # step, no log-prob pass, staleness 2, lr 2e-6, PyTorch cap 0.84, compile threads 1, max_num_seqs 256, no rollout
 # dump, no checkpoints), from the NeMo-RL copy with the scienceworld environment (branch apertus2-sciworld).

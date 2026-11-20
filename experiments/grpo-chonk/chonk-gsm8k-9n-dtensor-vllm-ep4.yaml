@@ -57,4 +57,4 @@ data:
     dataset_name: gsm8k
     split_validation_size: 0.0
   default:
-    prompt_file: ${oc.env:RL_INFRA_DIR}/envs/stem/gsm8k-five-shot.txt
+    prompt_file: ${oc.env:RL_INFRA_DIR}/experts/stem/gsm8k-five-shot.txt

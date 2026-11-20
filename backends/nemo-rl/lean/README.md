@@ -2,7 +2,7 @@
 
 GRPO on Lean 4 proofs with NeMo Gym `math_formal_lean` as it ships: the model gets a theorem statement and
 answers with a ```` ```lean4 ```` block; the reward is 1 if header + statement + proof compiles against
-Mathlib without `sorry`, else 0. The task file is `envs/lean/lean-sft.yaml`.
+Mathlib without `sorry`, else 0. The task file is `experts/lean/lean-sft.yaml`.
 
 Proofs compile in the NeMo-Skills sandbox image (`igitman/nemo-skills-sandbox:0.7.1-arm64`: Lean 4.12.0,
 Mathlib v4.12.0, its own Flask server under uWSGI, `POST /execute`), on one intTest node of its own. About
@@ -13,7 +13,7 @@ Mathlib v4.12.0, its own Flask server under uWSGI, `POST /execute`), on one intT
     bash backends/nemo-rl/lean/import_image.sh      # once: the image, as $SCRATCH/lean/images/*.sqsh
     bash backends/nemo-rl/lean/setup-data.sh        # once: $SCRATCH/lean/data/{train,validation}.jsonl
     bash backends/nemo-rl/lean/start.sh             # the sandbox job; its node lands in $SCRATCH/lean/sandbox-endpoint
-    bash run.sh envs/lean/lean-sft.yaml \
+    bash run.sh experts/lean/lean-sft.yaml \
         env.nemo_gym.math_formal_lean.resources_servers.math_formal_lean.sandbox_host=$(cat $SCRATCH/lean/sandbox-endpoint)
 
 Stop the sandbox with `scancel` after the run.

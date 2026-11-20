@@ -1,0 +1,59 @@
+# Knowledge, factuality and QA expert: every dataset, environment and validation set, defined once. TEMPLATE: the
+# datasets below are placeholders. Fill in the TODOs, then delete `template: true` (run.sh refuses to submit a
+# template; DRY_RUN=1 shows it). Layout as experts/stem/base.yaml; main.yaml is the official run, dev/*.yaml variants.
+# Starting point: open factual questions graded by the shared LLM judge (../../shared/judges/llm-judge.yaml) against a
+# reference answer, and multiple choice graded on the option letter in the claim (math_default), as the science
+# knowledge sets of the STEM mix (experts/stem/base.yaml: openqa, mcqa).
+defaults: ../../shared/judges/llm-judge.yaml
+template: true
+recipe: recipes/apertus2-chonk-sftv02-grpo.yaml
+context: 16384
+
+# Thinking level per dataset (the system frame its prompts start with); a run file overrides one key.
+frames:
+  default: ${oc.env:RL_INFRA_DIR}/shared/frames/apertus2-system-high.json
+
+grpo:
+  max_num_epochs: 1
+  val_period: 20
+  val_batch_size: 1000           # TODO: number of validation prompts
+  max_val_samples: 1000
+
+data:
+  _override_: true
+  max_input_seq_length: 4096
+  shuffle: true
+  num_workers: 1
+  use_multiple_dataloader: true
+  custom_dataloader: examples.custom_dataloader.custom_dataloader.example_custom_dataloader
+  # Prompts per step from each training set, named <folder>-<file> of its data_path; they add up to
+  # grpo.num_prompts_per_step (512 in the recipe).
+  num_prompts_per_dataloader:
+    knowledge-open_qa: 256       # TODO: one entry per training set
+    knowledge-multichoice: 256
+  train:
+    # TODO: rows {"input": <question>, "output": <reference answer or option letter>} under ${RL_DATA_DIR}/knowledge/
+    - dataset_name: ResponseDataset
+      data_path: ${oc.env:RL_DATA_DIR}/knowledge/open_qa.jsonl
+      env_name: llm_judge
+    - dataset_name: ResponseDataset
+      data_path: ${oc.env:RL_DATA_DIR}/knowledge/multichoice.jsonl
+      env_name: math_default
+  validation:
+    - dataset_name: ResponseDataset
+      data_path: ${oc.env:RL_DATA_DIR}/knowledge/validation.jsonl
+      env_name: llm_judge
+  default:
+    prompt_file: null
+    system_prompt_file: ${frames.default}
+    processor: apertus2_math_data_processor
+    env_name: llm_judge
+
+env:
+  # Multiple choice: the math environment grading the option letter in the claim. Environment names must be
+  # registered in NeMo-RL (nemo_rl/environments/utils.py): math and math_default are two configurations of the math
+  # environment, llm_judge the judge.
+  math_default:
+    num_workers: 8
+    verifier_type: claim_multichoice
+    reward_frame: claim

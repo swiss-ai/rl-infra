@@ -1,6 +1,6 @@
 #!/bin/bash
 # bash launch.sh [extra hydra overrides...]
-# GRPO of SFT v0.2 on the run-3 STEM mix plus Enigmata puzzles (envs/stem/archive/stem-mix-enigmata.yaml) on 16 trainer
+# GRPO of SFT v0.2 on the run-3 STEM mix plus Enigmata puzzles (experts/stem/archive/stem-mix-enigmata.yaml) on 16 trainer
 # + 16 vLLM nodes, with variant B of handover/rl-throughput-and-512p-config.md (512 prompts x 16 answers,
 # one optimizer step, no log-prob pass, staleness 2) and the NeMo-RL copy that has the enigmata environment.
 # The overrides are run 3's (job 1272134) apart from the task file and the NeMo-RL copy.

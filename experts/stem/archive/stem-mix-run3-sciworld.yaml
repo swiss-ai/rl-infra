@@ -1,0 +1,85 @@
+# STEM mix, run 3 plus ScienceWorld: math and science on SFT v0.2, 512 prompts per step, 100 steps. Per step:
+# 128 from DAPO-Math-17K, 224 from the cleaned NuminaMath-1.5 pool, 128 from the science + computer-science part of
+# Nemotron-RL-knowledge-mcqa (as run 3, with NuminaMath reduced from 256), and 32 ScienceWorld episodes.
+# ScienceWorld (AllenAI, Apache-2.0): multi-turn text simulator of 30 elementary-school science tasks, played by the
+# scienceworld environment (NeMo-RL branch apertus2-sciworld). Rows: train variations only, task-balanced (see
+# experiments/scienceworld/build_data.py); simplifications teleportAction, openDoors, openContainers,
+# selfWateringFlowerPots. The model acts through the act tool (system frame shared/frames/apertus2-system-sciworld-act.json,
+# copied next to the data).
+# Reward: the episode's last score / 100, negative (failed) scores as 0.
+# Validation every 20 steps: AIME 2024 mean@32 and GPQA-Diamond mean@8 (as run 3) plus the ScienceWorld dev set
+# (5 dev variations per kept task, played once).
+defaults: ../../../recipes/apertus2-chonk-sftv02-18315-vllm-adamw-dapo-32n.yaml
+
+grpo:
+  max_num_steps: 100
+  max_num_epochs: 1
+  val_period: 20
+  val_batch_size: 2689
+  max_val_samples: 2689
+  # ScienceWorld turns per episode; math environments end after the first turn.
+  max_rollout_turns: 60
+
+data:
+  _override_: true
+  max_input_seq_length: 2048
+  shuffle: true
+  num_workers: 1
+  use_multiple_dataloader: true
+  custom_dataloader: examples.custom_dataloader.custom_dataloader.example_custom_dataloader
+  num_prompts_per_dataloader:
+    DAPOMath17K: 128
+    run3-numina_clean: 224
+    run3-mcqa_science_cs: 128
+    scienceworld-sciworld_act_train: 32
+  train:
+    - dataset_name: DAPOMath17K
+      deduplicate: true
+    - dataset_name: ResponseDataset
+      data_path: /scratch/hanint06/data/stem-rl/run3/numina_clean.jsonl
+    - dataset_name: ResponseDataset
+      data_path: /scratch/hanint06/data/stem-rl/run3/mcqa_science_cs.jsonl
+      env_name: math_default
+    - dataset_name: ResponseDataset
+      data_path: /scratch/hanint06/data/stem-rl/scienceworld/sciworld_act_train.jsonl
+      processor: apertus2_sciworld_data_processor
+      system_prompt_file: /scratch/hanint06/data/stem-rl/scienceworld/apertus2-system-sciworld-act.json
+      env_name: scienceworld
+  validation:
+    - dataset_name: DAPOMathAIME2024
+      split: test
+    - dataset_name: ResponseDataset
+      data_path: /scratch/hanint06/data/stem-rl/gpqa_diamond_x8.jsonl
+      env_name: math_default
+    - dataset_name: ResponseDataset
+      data_path: /scratch/hanint06/data/stem-rl/scienceworld/sciworld_act_dev.jsonl
+      processor: apertus2_sciworld_data_processor
+      system_prompt_file: /scratch/hanint06/data/stem-rl/scienceworld/apertus2-system-sciworld-act.json
+      env_name: scienceworld
+  default:
+    prompt_file: null
+    system_prompt_file: ${oc.env:RL_INFRA_DIR}/shared/frames/apertus2-system.json
+    processor: apertus2_math_data_processor
+    env_name: math
+
+env:
+  # Multiple-choice questions: the same environment class, grading the option letter in the claim.
+  math_default:
+    num_workers: 8
+    verifier_type: claim_multichoice
+    reward_frame: claim
+  scienceworld:
+    # Simulator workers (one JVM each, ~15 MB per live episode), two per vLLM node.
+    num_workers: 32
+    placement_group_prefix: grpo_inference_cluster
+    java_path: /home01/hanint06/sciworld/jre/bin/java
+    package_path: /home01/hanint06/sciworld/pydeps
+    jvm_heap: 3g
+    tokenizer_path: ${policy.model_name}
+    simplifications: teleportAction,openDoors,openContainers,selfWateringFlowerPots
+    # Simulator commands per episode.
+    max_actions: 50
+    max_calls_per_turn: 1
+    idle_timeout_s: 1800
+    call_timeout_s: 300
+    max_observation_chars: null

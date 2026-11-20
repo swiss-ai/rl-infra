@@ -1,5 +1,5 @@
 # Competitive coding on an SFT checkpoint with AdamW. A rollout thinks for thousands of tokens, so this
-# recipe serves on twice the vLLM nodes of the tool-calling one; envs/code/code-gen-sft.yaml holds the task.
+# recipe serves on twice the vLLM nodes of the tool-calling one; experts/code/code-gen-sft.yaml holds the task.
 defaults: apertus2-chonk-sft-vllm-adamw-tools.yaml
 
 sft_export: chonk-sft/models/chonk-lc-16k-v0.1-ep1-iter_0008075

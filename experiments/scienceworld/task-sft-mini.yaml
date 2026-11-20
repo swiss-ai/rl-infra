@@ -15,11 +15,11 @@ data:
       data_path: /home01/hanint06/sciworld/data/sciworld_reply_mini.jsonl
     - dataset_name: ResponseDataset
       data_path: /home01/hanint06/sciworld/data/sciworld_tool_mini.jsonl
-      system_prompt_file: ${oc.env:RL_INFRA_DIR}/envs/frames/apertus2-system-sciworld-act.json
+      system_prompt_file: ${oc.env:RL_INFRA_DIR}/shared/frames/apertus2-system-sciworld-act.json
   validation: null
   default:
     prompt_file: null
-    system_prompt_file: ${oc.env:RL_INFRA_DIR}/envs/frames/apertus2-system.json
+    system_prompt_file: ${oc.env:RL_INFRA_DIR}/shared/frames/apertus2-system.json
     processor: apertus2_sciworld_data_processor
     env_name: scienceworld
 env:

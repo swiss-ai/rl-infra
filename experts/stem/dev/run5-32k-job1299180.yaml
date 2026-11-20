@@ -1,0 +1,11 @@
+# Run 5 at 32K as job 1299180 ran it (2026-11-18, sftv02-stem-mix-run5-32k-49n): main.yaml with thinking medium
+# except Reasoning Gym and chemistry (high), the setting of that time (at medium the model left the think frame empty
+# on those two). Everything else of that run is main.yaml: same mix, steps, checkpoints, dump, 32K, 16 trainer + 32
+# vLLM + 1 judge nodes. NeMo-RL patches newer than that run (0042, 0045-0051) are part of the code now.
+defaults: ../main.yaml
+
+frames:
+  default: ${oc.env:RL_INFRA_DIR}/shared/frames/apertus2-system.json
+  reasoning_gym: ${oc.env:RL_INFRA_DIR}/shared/frames/apertus2-system-high.json
+  chemistry: ${oc.env:RL_INFRA_DIR}/shared/frames/apertus2-system-high.json
+  scienceworld: ${oc.env:RL_INFRA_DIR}/shared/frames/apertus2-system-sciworld-act.json

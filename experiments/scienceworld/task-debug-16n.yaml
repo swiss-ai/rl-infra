@@ -1,6 +1,6 @@
 # Pipeline debug on 16 nodes (8 trainer + 8 vLLM): the run-3 mix plus ScienceWorld, 32 prompts from each of the four
 # sources per step (128), 3 steps, one small validation at step 2 (ScienceWorld dev set, then GPQA rows, 200 in all) to
-# check the mixed-environment metrics. Everything else as envs/stem/archive/stem-mix-run3-sciworld.yaml.
+# check the mixed-environment metrics. Everything else as experts/stem/archive/stem-mix-run3-sciworld.yaml.
 
 grpo:
   max_num_steps: 3
@@ -36,20 +36,20 @@ data:
     - dataset_name: ResponseDataset
       data_path: /scratch/hanint06/data/stem-rl/scienceworld/sciworld_tool_train.jsonl
       processor: apertus2_sciworld_data_processor
-      system_prompt_file: ${oc.env:RL_INFRA_DIR}/envs/frames/apertus2-system-sciworld-act.json
+      system_prompt_file: ${oc.env:RL_INFRA_DIR}/shared/frames/apertus2-system-sciworld-act.json
       env_name: scienceworld
   validation:
     - dataset_name: ResponseDataset
       data_path: /scratch/hanint06/data/stem-rl/scienceworld/sciworld_tool_dev.jsonl
       processor: apertus2_sciworld_data_processor
-      system_prompt_file: ${oc.env:RL_INFRA_DIR}/envs/frames/apertus2-system-sciworld-act.json
+      system_prompt_file: ${oc.env:RL_INFRA_DIR}/shared/frames/apertus2-system-sciworld-act.json
       env_name: scienceworld
     - dataset_name: ResponseDataset
       data_path: /scratch/hanint06/data/stem-rl/gpqa_diamond_x8.jsonl
       env_name: math_default
   default:
     prompt_file: null
-    system_prompt_file: ${oc.env:RL_INFRA_DIR}/envs/frames/apertus2-system.json
+    system_prompt_file: ${oc.env:RL_INFRA_DIR}/shared/frames/apertus2-system.json
     processor: apertus2_math_data_processor
     env_name: math
 
