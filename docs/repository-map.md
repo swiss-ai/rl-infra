@@ -1,6 +1,6 @@
 # Repository map
 
-Every file of the repository and its role (359 files, branch `restructure`, 2026-11-20). Roles:
+Every file of the repository and its role (365 files, branch `restructure`, 2026-11-20). Roles:
 **run** = used by every training run, **setup** = prepares sources, images, models or data,
 **check** = a test or probe before or after a run, **tool** = analysis of a finished run,
 **history** = kept as the record of past runs, not used by new ones.
