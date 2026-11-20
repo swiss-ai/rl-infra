@@ -148,9 +148,9 @@ nodes come from the task, on top:
 | `size` | Trainer | vLLM | Chonk |
 |---|---|---|---|
 | `lite` | base | half the base | 8 + 4 |
-| `cheap` | base | base | 8 + 8 |
+| `cheap` | base | base | 8 + 8 (the default in `experts/main.yaml`) |
 | `expensive` | 2 x base | 2 x base | 16 + 16 |
-| `ultra` | 2 x base | 4 x base | 16 + 32 (run 5; the default in `experts/main.yaml`) |
+| `ultra` | 2 x base | 4 x base | 16 + 32 (run 5) |
 | `<t>+<g>` | t | g | explicit counts, e.g. `16+64` |
 
 ```bash

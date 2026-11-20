@@ -13,9 +13,9 @@
 #   lite       base trainer, half the vLLM      Chonk  8 +  4
 #   cheap      the base                         Chonk  8 +  8
 #   expensive  twice the base                   Chonk 16 + 16
-#   ultra      expensive with twice the vLLM    Chonk 16 + 32 (run 5's layout)
+#   ultra      expensive with twice the vLLM    Chonk 16 + 32
 # or explicit counts, e.g. size: 16+64.
-size: ultra
+size: cheap
 job_time: 2-00:00:00
 context: 32768
 
