@@ -1,5 +1,5 @@
 #!/bin/bash
-# Train with GRPO on rl-infra: one RL expert, or any task file (on any cluster with a sites/ profile):
+# RL training on rl-infra: one RL expert, or any task file (on any cluster with a sites/ profile):
 #   bash run.sh <expert> [overrides...]           e.g.  bash run.sh stem     (experts/stem/base.yaml)
 #   bash run.sh <task.yaml> [overrides...]        e.g.  bash run.sh experts/stem/dev/<variant>.yaml
 # An expert's base.yaml says what to train on (datasets, environments, their shares of a step,
@@ -19,10 +19,10 @@
 #                                  setup (it may change the NeMo-RL clone), no job
 #
 # rl-infra keys (top level of a task file, inherited through `defaults` like any other key):
-#   recipe:    model and algorithm, a file under recipes/ (path relative to this repository); the recipe may
-#              name its own context table with contexts: (default backends/nemo-rl/apertus2/contexts.tsv)
-#   context:   longest prompt + answer in tokens; sets CP, packing and memory from the first row of
-#              backends/nemo-rl/apertus2/contexts.tsv that covers it (up to 131072)
+#   recipe:    model and algorithm, a file under recipes/ (path relative to this repository)
+#   context:   longest prompt + answer in tokens (up to 131072); with the recipe's context_parallel block it sets
+#              CP (context / tokens_per_gpu, rounded up to a power of 2), packing (= context), KCP above CP 4
+#              and the memory fraction
 #   size:      nodes: a tier of the recipe's base layout (`nodes:` in the recipe; Chonk 8 trainer x 8 vLLM):
 #              lite (base trainer, half the vLLM), cheap (the base), expensive (twice the base), ultra
 #              (expensive with twice the vLLM); or explicit counts, <trainer>+<vLLM> (e.g. 16+32)
@@ -161,11 +161,19 @@ else
     TRAIN=$(( NODES - GEN - JUDGE ))
 fi
 
-# --- context: CP, packing and memory from the recipe's table (contexts: in the recipe, Chonk's table by default)
+# --- context: CP, packing and memory from the recipe's context_parallel block
+#   tokens_per_gpu   most tokens of a packed micro-batch one trainer GPU holds: CP is context / tokens_per_gpu,
+#                    rounded up to a power of 2 (Chonk 8192: 16K -> CP 2, 32K -> CP 4, 128K -> CP 16)
+#   memory_fraction  NRL_CUDA_MEMORY_FRACTION, PyTorch's share of a trainer GPU (the rest: NCCL, Triton, CUDA);
+#                    not set when the recipe leaves it out
+# Packing budget = context. Above CP 4 the KDA layers need KCP (backends/nemo-rl/apertus2/kcp): the pinned Megatron
+# splits their 28 heads over at most 4 CP ranks.
 if [[ -n "${CONTEXT}" ]]; then
-    TABLE="${ROOT}/$(cfg contexts)"; [[ "${TABLE}" != "${ROOT}/" ]] || TABLE="${APERTUS2_DIR}/contexts.tsv"
-    read -r _ CP SCHEME PACK MEMFRAC < <(awk -v c="${CONTEXT}" '!/^#/ && NF == 5 && $1 >= c { print; exit }' "${TABLE}") || true
-    [[ -n "${CP:-}" ]] || { echo "ERROR: context ${CONTEXT} is above the longest one in ${TABLE#${ROOT}/}" >&2; exit 1; }
+    (( CONTEXT <= 131072 )) || { echo "ERROR: context ${CONTEXT} is above 131072" >&2; exit 1; }
+    TPG="$(cfg context_parallel.tokens_per_gpu)"
+    [[ -n "${TPG}" ]] || { echo "ERROR: context: needs context_parallel.tokens_per_gpu in the recipe" >&2; exit 1; }
+    CP=1; while (( CP * TPG < CONTEXT )); do CP=$(( CP * 2 )); done
+    PACK="${CONTEXT}"; MEMFRAC="$(cfg context_parallel.memory_fraction)"
     PP="$(cfg policy.megatron_cfg.pipeline_model_parallel_size)"; RANKS=$(( TRAIN * GPUS_PER_NODE / ${PP:-1} ))
     (( RANKS % CP == 0 )) || { echo "ERROR: CP ${CP} (context ${CONTEXT}) does not divide the ${RANKS} trainer ranks of a pipeline stage" >&2; exit 1; }
     # Every packed sequence is padded to a multiple of 2 x CP, times TP with sequence parallelism (NeMo-RL's check).
@@ -177,8 +185,8 @@ if [[ -n "${CONTEXT}" ]]; then
           # vLLM refuses a limit above the export's max_position_embeddings (16,384 for the SFT checkpoints)
           # unless this is set; the model has no position table, so the value is only that check.
           "++policy.generation.vllm_cfg.env_vars.VLLM_ALLOW_LONG_MAX_MODEL_LEN=\"'1'\"")
-    [[ "${MEMFRAC}" == - ]] || OVR+=("++policy.megatron_cfg.env_vars.NRL_CUDA_MEMORY_FRACTION=\"'${MEMFRAC}'\"")
-    if [[ "${SCHEME}" == kcp ]]; then
+    [[ -z "${MEMFRAC}" ]] || OVR+=("++policy.megatron_cfg.env_vars.NRL_CUDA_MEMORY_FRACTION=\"'${MEMFRAC}'\"")
+    if (( CP > 4 )); then
         source "${APERTUS2_DIR}/kcp/use.sh"
         OVR+=(++policy.megatron_cfg.model_overrides.linear_attention_cp_impl=kcp)
     fi
@@ -254,7 +262,7 @@ fi
 echo "Task:    ${TASK}"
 echo "Recipe:  ${R}"
 echo "Nodes:   ${NODES} = ${TRAIN} trainer + ${GEN} vLLM + ${JUDGE} judge${SIZE:+ (tier ${SIZE})}"
-[[ -n "${CONTEXT}" ]] && echo "Context: ${CONTEXT} tokens: CP ${CP} (${SCHEME}), packing ${PACK}, memory fraction ${MEMFRAC}"
+[[ -n "${CONTEXT}" ]] && echo "Context: ${CONTEXT} tokens: CP ${CP} ($( (( CP > 4 )) && echo kcp || echo head)), packing ${PACK}, memory fraction ${MEMFRAC:-not set}"
 echo "Run:     ${RUN} ($([[ "${DEBUG}" == 1 ]] && echo debug || echo full) run, time limit ${JOB_TIME})"
 echo "Config:  ${CFG}"
 echo "Overrides made here (the command line's come after them and win):"

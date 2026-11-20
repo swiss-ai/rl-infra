@@ -7,8 +7,8 @@
 # `defaults`) do not take this file and run as they ran.
 
 # Resources (rl-infra keys, read by run.sh): the node tier, the Slurm time limit (checkpoints are saved and the run
-# stops 30 minutes before it) and the longest prompt + answer, which selects CP, packing and the memory fraction from
-# the recipe's context table. Also replaceable per launch: SIZE=, JOB_TIME=.
+# stops 30 minutes before it) and the longest prompt + answer, which sets CP, packing and the memory fraction with
+# the recipe's context_parallel block. Also replaceable per launch: SIZE=, JOB_TIME=.
 # Tiers, from the recipe's base layout (`nodes:`; Chonk 8 trainer x 8 vLLM, MegaChonk 32 x 32), judge nodes on top:
 #   lite       base trainer, half the vLLM      Chonk  8 +  4
 #   cheap      the base                         Chonk  8 +  8

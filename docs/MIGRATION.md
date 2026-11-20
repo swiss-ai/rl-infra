@@ -14,7 +14,7 @@ to follow, and the steps to move one over. `docs/repository-map.md` describes th
 | Launch settings | launcher variables (`CP`, `CAP`, `GEN_NODES`, `STEPS`, `SAVE_BY`, ...) in a launcher per experiment | rl-infra keys read by `run.sh`: `size`, `job_time`, `context` in `experts/main.yaml` (a dev file may change them), `recipe` and `template` in the expert's `base.yaml`; Hydra overrides on the command line |
 | Recipes | 34 recipes, each a few keys on a chain of up to 14 files (`recipes/`, `experiments/grpo-chonk/`) | one flat file per active model, on NeMo-RL's defaults only: `recipes/chonk-sftv02.yaml`; the rest in `recipes/archive/` and `recipes/archive/chain/` (`recipes/README.md`) |
 | Node layouts | one recipe per node split | `size:` a tier of the recipe's base layout (`nodes:`; Chonk 8+8): lite 8+4, cheap 8+8, expensive 16+16, ultra 16+32, or explicit counts such as `16+64`; judge nodes come from the task |
-| Context length | `CP`, `KCP`, `CAP`, packing set by hand | `context:` in the task; `backends/nemo-rl/apertus2/contexts.tsv` gives CP, KCP, packing and memory fraction (the next row up: 50K gets the 64K settings) |
+| Context length | `CP`, `KCP`, `CAP`, packing set by hand | `context:` in the task; the recipe's `context_parallel` gives CP (context / tokens_per_gpu, rounded up to a power of 2), KCP above CP 4, packing = context and the memory fraction (the next power of 2 up: 50K gets the 64K settings) |
 | Run modes | `DRY_RUN=1` ran setup and printed the job; launchers had `DEBUG=1` by default | plain `run.sh` = full run (W&B required); `DEBUG=1` = debug run; `DRY_RUN=1` = everything shown, no setup, no job |
 | Config at job start | the job read the recipe and task chain from their original paths when it started | the job reads copies made at launch (`$OUT/configs/<run>-<time>/`, with the setup log) |
 | NeMo-RL code | experiment clones (`nemo-rl-apertus2-stem32k`, ...) carried commits that were not patches in rl-infra | every change is a patch in `backends/nemo-rl/apertus2/patches/nemo-rl/`; 0034 and 0052-0061 added (Reasoning Gym verifier, claim_multichoice, llm_judge, Enigmata, ScienceWorld); the next free number is 0062 |
@@ -48,8 +48,8 @@ them refer to the commit before the restructure (`965e15c` on main, `f1ec52e` on
   registered twice (`math`, `math_default`), so a task has two math configurations at most, plus `reasoning_gym`,
   `llm_judge`, `enigmata`, `scienceworld`, `nemo_gym` and the others listed there.
 - **`policy.model_name` follows `sft_export`.** For a recipe with `sft_export`, run.sh sets `policy.model_name` to the
-  staged export (`$SCRATCH/models/<name>`); `sft_export` may now be absolute. A recipe for another model names its
-  context table with `contexts:`; padding now includes TP with sequence parallelism (2 x CP x TP).
+  staged export (`$SCRATCH/models/<name>`); `sft_export` may now be absolute. A recipe sets its context parallelism with
+  `context_parallel: {tokens_per_gpu, memory_fraction}` (the context tables are gone); padding now includes TP with sequence parallelism (2 x CP x TP).
 - **`driver_retry.sh`** now reads the quoted deadline and shortens it for a retry, which it never did before.
 
 ## 3. Steps to move a branch

@@ -12,7 +12,7 @@ bash run.sh stem      (experts/main.yaml + experts/stem/base.yaml)
  └ run.sh ─ sites/load.sh (sites/hangang.env, site.env, backends/nemo-rl/apertus2/env, backends/nemo-rl/env)
    ├ backends/nemo-rl/config.sh       merges the task's defaults chain, copies every config file for the job
    ├ the recipe's nodes: + the size tier   node counts (tiers in run.sh)
-   ├ backends/nemo-rl/apertus2/contexts.tsv (+ kcp/use.sh above 32K)   CP, packing, memory fraction
+   ├ the recipe's context_parallel (+ kcp/use.sh above CP 4)   CP, packing, memory fraction
    ├ backends/nemo-rl/apertus2/setup.sh         NeMo-RL clone at the pin + patches, Megatron, Bridge, vLLM files, image
    ├ backends/nemo-rl/apertus2/stage_model.sh      model export staged on scratch
    └ backends/nemo-rl/apertus2/launch.sh → backends/nemo-rl/launch.sh
@@ -100,7 +100,7 @@ happened, as they ran) and `scripts/` (data builders and checks); empty folders 
 | File | Role | Purpose |
 |---|---|---|
 | `chonk-sftv02.yaml` | run | The active recipe, one file on NeMo-RL's defaults: Chonk SFT v0.2; Megatron trainer (TP1 PP2 EP16, Adam lr 2e-6 constant, optimizer on CPU); vLLM FP8 (EP4 per node); async GRPO (512 x 16, one optimizer step, staleness 4, TIS 2.0) |
-| `megachonk.yaml` | template | MegaChonk pretraining checkpoint: TP4 PP8 EP16, vLLM TP4 EP32 replicas of 8 nodes, its own context table; no expert yet |
+| `megachonk.yaml` | template | MegaChonk pretraining checkpoint: TP4 PP8 EP16, vLLM TP4 EP32 replicas of 8 nodes, 4,096 tokens per GPU; no expert yet |
 | `README.md` | doc | What a recipe is, the active ones, how to add a variant |
 | `archive/*.yaml` (34) | history | Recipes of earlier runs as they were (pretraining checkpoint, SFT v0.1 / 19374 / v0.2, MegaChonk, AdamW or Muon, judge-node layouts); archived task files and launchers use them |
 | `archive/chain/*.yaml` (27) | history | The experiment chain they build on (GSM8K -> DAPO -> FP8 -> Apertus 2 format), formerly `experiments/grpo-chonk/`; `README.md` there: the GSM8K -> DAPO comparison (vLLM against Megatron inference, AdamW against Muon) |
@@ -129,8 +129,6 @@ happened, as they ran) and `scripts/` (data builders and checks); empty folders 
 | `apertus2/driver.sh` | run | Driver entry in the container: overlay, W&B key, unbuffered Python |
 | `apertus2/pydeps.sh` | run | Python overlay the image lacks (nemo-lens, soundfile; Gym, Reasoning Gym, apertus-common when needed) |
 | `apertus2/edf.toml.template` | run | Container image, mounts and environment of the Apertus 2 stack |
-| `apertus2/contexts-megachonk.tsv` | run | MegaChonk's context table (16K at CP 4 only), named by recipes/megachonk.yaml |
-| `apertus2/contexts.tsv` | run | CP, scheme, packing, memory fraction per context length |
 | `apertus2/kcp/setup.sh`, `use.sh`, `0001-*.patch` | run | KCP context parallelism: Megatron copy with PR 112, flash-linear-attention 0.5.2 |
 | `apertus2/setup-gym.sh` | run | NeMo Gym checkout for Gym tasks (`script:`) |
 | `apertus2/patches/nemo-rl/0001-0061` (53 files) | run | Our NeMo-RL changes on top of the pin, applied in order |

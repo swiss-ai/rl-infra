@@ -1,5 +1,5 @@
 #!/bin/bash
-# One-time setup for KCP context parallelism (contexts.tsv rows with scheme kcp; run.sh calls it through use.sh): a
+# One-time setup for KCP context parallelism (CP above 4; run.sh calls it through use.sh): a
 # Megatron checkout at the pinned commit with the KCP path of Megatron-LM-MoE PR 112 on branch rl-kcp, and
 # flash-linear-attention 0.5.2 (fla.ops.cp), which use.sh puts ahead of the copy in the image. Plain copies only:
 # runs on the login node or the data mover. use.sh pins Megatron to the rl-kcp commit, so the stack's setup.sh leaves

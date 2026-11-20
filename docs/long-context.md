@@ -12,7 +12,7 @@ restructure, where that launcher still exists.
 |---|---|
 | NeMo-RL patches 0040-0046 | `backends/nemo-rl/apertus2/patches/nemo-rl/`, applied by `setup.sh` like the others |
 | Ray on Slingshot by default | `sites/hangang.env` (`RAY_NODE_NAME_SUFFIX=-hsn0`, read by patch 0041) |
-| KCP context parallelism, for more than 4 context-parallel ranks | `backends/nemo-rl/apertus2/kcp/`: run.sh sets it up and uses it for a context above 32K (`contexts.tsv`); `launch-code-ctx.sh` with `KCP=1` |
+| KCP context parallelism, for more than 4 context-parallel ranks | `backends/nemo-rl/apertus2/kcp/`: run.sh sets it up and uses it for a context above 32K (above CP 4: the recipe's `context_parallel`); `launch-code-ctx.sh` with `KCP=1` |
 | STEM task files | `experts/stem/` (`base.yaml`, `dev/`, `archive/`, `scripts/`) |
 | Code sandbox node, for coding | `backends/nemo-rl/sandbox/start.sh`, then `SANDBOX=<endpoint file>` |
 | W&B key | `WANDB_KEY_FILE` (default `~/.wandb_api_key`); a full run (`DEBUG=0`) refuses to start without it |
@@ -50,7 +50,7 @@ The pinned Megatron splits the 28 heads of the KDA layers over the CP ranks, so 
 (Megatron-LM-MoE PR 112, ported onto the pinned commit in `backends/nemo-rl/apertus2/kcp/`) keeps the tokens split
 instead and allows any CP that divides the ranks of a pipeline stage. It needs flash-linear-attention 0.5.2, newer than
 the image's; `kcp/setup.sh` installs it and `kcp/use.sh` (run.sh) or the coding launcher put it first on `PYTHONPATH`.
-`backends/nemo-rl/apertus2/contexts.tsv` holds the rows of this table that run.sh applies. A cap of 0.74 (70.3 GB) leaves room for NCCL and Triton
+The recipe's `context_parallel` block (8,192 tokens per GPU, memory fraction 0.74) reproduces the rows of this table that run.sh applies, apart from 16K, which now gets CP 2. A cap of 0.74 (70.3 GB) leaves room for NCCL and Triton
 outside PyTorch, which reached 16 to 24 GB per GPU at long context.
 
 vLLM refuses a limit above the export's `max_position_embeddings` (16,384) unless `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`;

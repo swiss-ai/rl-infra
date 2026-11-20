@@ -1,4 +1,4 @@
-# Sourced by run.sh when the task's context selects a KCP row of contexts.tsv: the job runs the Megatron copy with
+# Sourced by run.sh when the run's CP is above 4: the job runs the Megatron copy with
 # the KCP path for the KDA layers and flash-linear-attention 0.5.2. setup.sh (this directory) makes both, once.
 # Needs PROJECTS_DIR, OUT, PIN_FILE and CONTAINER_SPEC (sites/load.sh); exports MEGATRON_DIR, PIN_FILE and
 # CONTAINER_SPEC, which apertus2/launch.sh keeps (a variable already set wins).

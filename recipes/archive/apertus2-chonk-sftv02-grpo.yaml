@@ -2,8 +2,10 @@
 # per prompt, one optimizer step per GRPO step (global batch = prompts x 16), no log-prob pass (on-policy ratio),
 # lr 2e-6 constant, rollouts at most 4 weight versions old. These were command-line overrides of
 # experiments/long-context/launch-stem-ctx.sh before. Node counts come from the run's size, CP, packing and
-# memory from its `context:` (backends/nemo-rl/apertus2/contexts.tsv).
+# memory from its `context:` and context_parallel below.
 defaults: apertus2-chonk-sftv02-18315-vllm-adamw-dapo-32n.yaml
+# rl-infra key added with the restructure (run.sh derives CP from it): run 5's 8,192 tokens per GPU and 74%.
+context_parallel: {tokens_per_gpu: 8192, memory_fraction: 0.74}
 
 # run.sh reads sft_export from the merged config and stages the export to policy.model_name.
 sft_export: chonk-sft/models/chonk-lc-16k-v0.2-iter_0018315

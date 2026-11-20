@@ -14,8 +14,9 @@ expert's files. Each active recipe is one file that builds only on NeMo-RL's own
 
 `sft_export` names an SFT checkpoint (relative to $SCRATCH or absolute; a symlink works); run.sh stages it and sets
 `policy.model_name`, so the recipe names it once. `nodes: {trainer, inference}` is the recipe's base node layout,
-the `cheap` tier; run.sh derives `lite`, `expensive` and `ultra` from it (`experts/main.yaml`). A recipe for a model other than Chonk names its context table with
-`contexts:` (CP, packing and memory per context length; Chonk's `backends/nemo-rl/apertus2/contexts.tsv` otherwise).
+the `cheap` tier; run.sh derives `lite`, `expensive` and `ultra` from it (`experts/main.yaml`). `context_parallel: {tokens_per_gpu, memory_fraction}` sets context
+parallelism from the run's `context:`: CP = context / tokens_per_gpu, rounded up to a power of 2 (Chonk 8,192, MegaChonk
+4,096), packing = context, KCP above CP 4, and PyTorch's share of a trainer GPU.
 
 A variant (another optimizer, another checkpoint) is a small file with `defaults: <recipe>.yaml` and what it
 changes; a new model gets a flat file of its own when it is trained. Keep a recipe free of what other files set:

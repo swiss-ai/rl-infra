@@ -8,6 +8,10 @@ defaults: /opt/nemo-rl/examples/configs/grpo_math_1B.yaml
 # Base node layout, the "cheap" tier (run.sh derives lite, expensive and ultra from it; experts/main.yaml): the
 # trainer's smallest fit (PP2 x EP16 = 32 GPUs) and as many vLLM nodes (one engine per node).
 nodes: {trainer: 8, inference: 8}
+# Context parallelism from the run's `context:` (run.sh): CP = context / tokens_per_gpu, rounded up to a power of 2
+# (16K -> CP 2, 32K -> CP 4 as run 5, 64K -> 8, 128K -> 16, KCP above 4); packing = context. 8,192 tokens per GPU and
+# PyTorch at 74% of a GPU were measured at 32K on 16 trainer nodes (docs/long-context.md).
+context_parallel: {tokens_per_gpu: 8192, memory_fraction: 0.74}
 
 # ======================================================================== model: checkpoint and message format
 # The checkpoint: an HF export, relative to $SCRATCH or absolute (a symlink works). run.sh stages it as

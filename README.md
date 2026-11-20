@@ -129,7 +129,6 @@ shared/                 pieces task files take in: frames/ (system frames: think
                         judges/llm-judge.yaml, prompts/ (few-shot), scripts/ (judge download, few-shot removal), debug/
 recipes/                how to train: one flat file per model (chonk-sftv02.yaml: checkpoint, trainer, optimizer,
                         vLLM, GRPO); earlier recipes in recipes/archive/ (recipes/README.md)
-backends/nemo-rl/apertus2/contexts.tsv   CP, packing and memory per context length
 ```
 
 A run is `bash run.sh <expert> [overrides]` (the expert's `base.yaml`) or `bash run.sh <task file>
@@ -137,9 +136,9 @@ A run is `bash run.sh <expert> [overrides]` (the expert's `base.yaml`) or `bash 
 expert's files. Besides NeMo-RL settings, a task file holds rl-infra
 keys, inherited through `defaults` like any other key: `recipe` (a file under `recipes/`), `context`
 (longest prompt + answer), `size` (a node tier), `job_time`, `pydeps` and `script`. From them
-`run.sh` derives the node counts, CP, packing and the memory fraction (the first row
-of `contexts.tsv` at or above the context, so 50K gets the 64K settings; KCP above 32K, set up on first
-use), and the checkpoint deadline 30 minutes before `job_time`. `RECIPE`, `SIZE` and `JOB_TIME` in the
+`run.sh` derives the node counts, CP (context / the recipe's `context_parallel.tokens_per_gpu`, rounded up to a
+power of 2: 32K gets CP 4 on Chonk; KCP above CP 4, set up on first use), packing (= context), the memory
+fraction (`context_parallel.memory_fraction`), and the checkpoint deadline 30 minutes before `job_time`. `RECIPE`, `SIZE` and `JOB_TIME` in the
 environment replace the task's values, and overrides on the command line win over everything.
 
 Node tiers come from the recipe's base layout (`nodes:`, Chonk 8 trainer x 8 vLLM, MegaChonk 32 x 32); judge
