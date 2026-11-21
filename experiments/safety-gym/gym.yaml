@@ -99,3 +99,17 @@ jailbreak_val_wg_test_vanilla_environment_server:
         name: jailbreak_val_wg_test_vanilla
       resources_tool_transports:
       - direct_http
+
+# Judge output budget. The Gym default (1,024 tokens, reasoning included) cut off about 10% of
+# gpt-oss-safeguard-120b verdicts on the binary benign rubric (job 1332806 vs 1333044-46); those
+# rows were then rewarded as "unclear".
+over_refusal_detection:
+  resources_servers:
+    over_refusal_detection:
+      judge_responses_create_params:
+        max_output_tokens: 4096
+jailbreak_detection:
+  resources_servers:
+    jailbreak_detection:
+      judge_responses_create_params:
+        max_output_tokens: 4096
