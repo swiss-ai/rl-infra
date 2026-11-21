@@ -1,0 +1,255 @@
+# The verified Harbor tasks (envs/harbor-verified-sft.yaml) with a 128K-token context on 32 nodes
+# (experiments/long-context/recipes/code-sftv02-32n.yaml: 16 trainer + 16 vLLM nodes) and the trainer
+# layout of the long-context runs (experiments/long-context/README.md): context parallelism 16 with the
+# KCP scheme, a PyTorch cap of 0.74, a 60-minute collective timeout, the trainer off the driver's node.
+# Everything else is as in envs/harbor-verified-sft.yaml. One-time setup: backends/nemo-rl/apertus2/setup.sh
+# (NeMo-RL patches 0040-0042) and experiments/long-context/setup-kcp.sh. KCP needs its Megatron commit and
+# flash-linear-attention 0.5.2 at launch, as launch-code-ctx.sh sets them with KCP=1:
+#   KCP_DIR=$HOME/projects/megatron-lm-moe-apertus2-kcp; L=$SCRATCH/long-context/launch; mkdir -p $L
+#   sed "s/^MEGATRON_COMMIT=.*/MEGATRON_COMMIT=$(git -C $KCP_DIR rev-parse rl-kcp)/" \
+#       backends/nemo-rl/apertus2/pin > $L/pin-kcp-main
+#   sed "s|:@@MEGATRON_DIR@@:|:@@MEGATRON_DIR@@:$HOME/projects/fla-0.5.2:|" \
+#       backends/nemo-rl/apertus2/edf.toml.template > $L/edf-kcp-main.toml.template
+#   MEGATRON_DIR=$KCP_DIR PIN_FILE=$L/pin-kcp-main CONTAINER_SPEC=$L/edf-kcp-main.toml.template \
+#   HANG_DUMP_AFTER_S=3600 HANG_KILL_AFTER_S=14400 \
+#   RUN=<run> bash run.sh envs/harbor-verified-sft-128K-context.yaml \
+#       harbor_data_dir=$HOME/projects/task_datasets/harbor_verified
+# run.sh reads sft_export from the recipe: $SCRATCH/chonk-sft/models/chonk-lc-16k-v0.2-iter_0018315 must
+# exist (a link to the export).
+defaults: ../experiments/long-context/recipes/code-sftv02-32n.yaml
+script: examples/nemo_gym/run_grpo_nemo_gym.py
+
+# train.jsonl, validation.jsonl and tasks/, as envs/prepare_harbor_verified_tasks.sh writes them.
+harbor_data_dir: ???
+# username:password for the registry that holds the task images (rl-registry.swissai.svc.cscs.ch).
+# RL_USER_HOME is your HOME, from run.sh.
+registry_cred_file: ${oc.env:RL_USER_HOME}/.rl_registry_cred
+
+grpo:
+  # 64 trials, so 64 task pods (and up to 64 verifier pods), in flight.
+  num_prompts_per_step: 128
+  num_generations_per_prompt: 8
+  max_num_steps: 200
+  max_num_epochs: 100
+  # No validation by default. For a training run: val_period=10 val_at_start=true val_at_end=true.
+  val_period: 0
+  val_at_start: false
+  val_at_end: false
+  # The Gym entrypoint refuses any other value and validates on the whole validation file.
+  max_val_samples: null
+  val_batch_size: null
+  # 16 validation tasks, 4 trials each.
+  val_num_generations_per_prompt: 4
+  # A trajectory that runs out of context keeps its reward (usually 0) instead of being dropped.
+  overlong_filtering: false
+  # The DAPO layout's math settings: the Gym entrypoint refuses reward shaping, and the runs on Gym do
+  # not skip groups.
+  reward_shaping:
+    enabled: false
+  skip_zero_advantage_groups: false
+  async_grpo:
+    # Lets a step's rollouts start while the two previous steps' are still in flight.
+    max_trajectory_age_steps: 4
+
+loss_fn:
+  # One optimizer step per step (train_global_batch_size = 128 x 8), so the separate log-prob pass gives
+  # the training pass's own log-probs: ratio 1, and it is skipped, as in the long-context launchers.
+  force_on_policy_ratio: true
+
+checkpointing:
+  # The weights every 5 steps (a 128K step is long), without the optimizer state; only the latest is kept. A run resumed
+  # from one starts with a fresh optimizer.
+  enabled: true
+  save_period: 5
+  save_optimizer: false
+  # Ranks by recency: there is no validation metric to rank by.
+  metric_name: null
+  keep_top_k: 1
+  # No forced save-and-stop: the recipe stops at 11.5 h (apertus2-chonk-vllm-adamw-dapo.yaml). The run
+  # goes on until max_num_steps or the job time limit.
+  checkpoint_must_save_by: null
+
+policy:
+  # One optimizer step per step.
+  train_global_batch_size: 1024
+  # The whole trajectory: vLLM's limit, Terminus-2's max_input_tokens and the packed micro-batch.
+  max_total_sequence_length: 131072
+  # 2 x context_parallel_size.
+  make_sequence_length_divisible_by: 32
+  sequence_packing:
+    train_mb_tokens: 131072
+    logprob_mb_tokens: 131072
+  generation:
+    # Per agent turn. policy.max_total_sequence_length limits the whole trajectory.
+    max_new_tokens: 6144
+    # No thinking budget, as in envs/harbor-osb-sft.yaml (vLLM reports the forced think-close token with
+    # logprob 0, which blows up train/policy_kl_error, and a budget slows generation).
+    thinking_token_budget: null
+    output_format: apertus2
+    system_prompt_file: ${oc.env:RL_INFRA_DIR}/envs/apertus2-system.json
+    stop_token_ids: [12]
+    stop_strings: null
+    vllm_cfg:
+      max_model_len: ${policy.max_total_sequence_length}
+      async_engine: true
+      expose_http_server: true
+      # The checkpoint's tokenizer has no chat template, and the HTTP server does not use
+      # policy.tokenizer.chat_template on its own.
+      http_server_serving_chat_kwargs:
+        chat_template: ${policy.tokenizer.chat_template}
+      env_vars:
+        # vLLM refuses a limit above the export's max_position_embeddings (16,384) without it; the model
+        # has no position table, so the value is only that check.
+        VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+    vllm_kwargs:
+      # Chonk's hybrid Mamba layers need it.
+      enable_chunked_prefill: true
+      max_num_seqs: 256
+  megatron_cfg:
+    # 8,192 tokens per GPU; KCP allows any CP that divides the 32 ranks of a pipeline stage.
+    context_parallel_size: 16
+    model_overrides:
+      linear_attention_cp_impl: kcp
+    env_vars:
+      # Avoids training running out of GPU memory from allocator fragmentation.
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+      # Leaves room for NCCL and Triton outside PyTorch, 16 to 24 GB per GPU at long context.
+      NRL_CUDA_MEMORY_FRACTION: "0.74"
+      # The kernel-compile hang of job 1263111.
+      TORCHINDUCTOR_COMPILE_THREADS: "1"
+      # The trainer ranks get their shards of a 128K batch minutes apart (NeMo-RL patch 0040).
+      NRL_NCCL_TIMEOUT_MINUTES: "60"
+
+data:
+  max_input_seq_length: null
+  shuffle: true
+  num_workers: 0
+  # The data block below replaces the recipe's, and grpo.setup() indexes this key.
+  use_multiple_dataloader: false
+  train:
+    dataset_name: NemoGymDataset
+    data_path: ${harbor_data_dir}/train.jsonl
+  validation:
+    dataset_name: NemoGymDataset
+    data_path: ${harbor_data_dir}/validation.jsonl
+  default:
+    dataset_name: NemoGymDataset
+    env_name: nemo_gym
+    prompt_file: null
+    system_prompt_file: null
+    processor: nemo_gym_data_processor
+  _override_: true
+
+env:
+  should_use_nemo_gym: true
+  # The driver holds the whole 128K batch; with trainer ranks on its node, that node ran out of host
+  # memory (job 1299189). NeMo-RL patch 0042.
+  train_off_head: true
+  # False writes train_data_step*.jsonl, with the token IDs and the loss mask of each rollout.
+  should_log_nemo_gym_responses: false
+  # Zeroes the loss of a rollout Gym flags, such as one whose pod never came up.
+  should_mask_flagged_samples: true
+  # Full results of every rollout, next to the weights. Never in W&B.
+  rollout_dir: ${checkpointing.checkpoint_dir}/rollouts
+  nemo_gym:
+    skip_venv_if_present: true
+    port_range_low: 5000
+    port_range_high: 5999
+    is_trajectory_collection: false
+    # Gym's servers live on several Ray nodes and must advertise the node IP.
+    use_absolute_ip: true
+    # A rollout that produced no tokens becomes a zero-weight sample instead of aborting the step
+    # (NeMo-RL patch 0031).
+    mask_degenerate_rollouts: true
+    # The training config also starts an environment_servers/legacy_agent wrapper, which does not
+    # exist at our Gym pin; the data rows name harbor_agent directly.
+    harbor_agent_environment_server: null
+    config_paths:
+    - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+    # Defines `sandbox`, which the harbor_agent config references.
+    - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+    - responses_api_agents/harbor_agent/configs/harbor_agent_opensandbox_training.yaml
+    policy_model:
+      responses_api_models:
+        vllm_model:
+          # NeMo-RL clears its own stop settings for Gym, so they travel with each request.
+          extra_body:
+            stop: []
+            stop_token_ids: [12]
+    sandbox:
+      opensandbox:
+        connection:
+          domain: https://opensandbox-gvisor.breithorn.svc.cscs.ch
+          api_key: null
+          # RL_USER_HOME is your HOME, from run.sh.
+          api_key_file: ${oc.env:RL_USER_HOME}/.opensandbox_token
+          transport_backend: aiohttp
+          # No cap on the client connection pool, which also caps in-flight sandbox operations.
+          max_connections: null
+          # Reach sandboxes through the ingress gateway, not through the OpenSandbox server, which
+          # answered "no available server" at about 190 sandboxes. opensandbox.yaml sets true.
+          use_server_proxy: false
+        # Labels on every pod. The driver sees neither $USER nor Slurm's variables in the container, so
+        # the run name tells a run's pods apart.
+        attribution:
+          user: rl-infra
+          workload: harbor-verified
+          run: ${logger.wandb.name}
+    harbor_agent:
+      responses_api_agents:
+        harbor_agent:
+          # One trial, and one pod, per in-flight rollout.
+          # Was one pod per rollout in the batch:
+          # concurrency: ${mul:${grpo.num_prompts_per_step},${grpo.num_generations_per_prompt}}
+          # About the ~300 sandboxes the cluster runs at once (it starts about 1.2 pods per second); a
+          # higher cap only adds sandboxes waiting to start, which time out after 600 s and are recreated.
+          concurrency: 1024
+          harbor_datasets:
+            # The alias is the left half of every row's instance_id.
+            verified:
+              local_dataset_path: ${harbor_data_dir}/tasks
+          harbor_agent_kwargs:
+            # At 16K, half the trajectories used all 30 turns and ended at 9-16K tokens (job 1308337); 150
+            # turns reach roughly 40-100K at that growth rate.
+            max_turns: 150
+            # The history carries each reply without its thinking: Gym's schema refuses an assistant message
+            # with reasoning_content (HTTP 422, job 1209869).
+            interleaved_thinking: false
+            model_info:
+              # Terminus-2's context limit: the whole trajectory, as in policy.max_total_sequence_length.
+              max_input_tokens: ${policy.max_total_sequence_length}
+              max_output_tokens: ${policy.generation.max_new_tokens}
+          harbor_environment_kwargs:
+            sandbox_metadata:
+              harbor-dataset: verified
+            sandbox_provider_options:
+              # The cluster rejects every create without it.
+              secure_access: true
+              # The task images are in a private registry project and the OpenSandbox cluster has no
+              # pull secret for it (Gym patch 0013 reads username:password from this file).
+              image_auth_file: ${registry_cred_file}
+              # Scheduling requests; each task.toml gives the limits. Without disk_gib the storage request
+              # defaults to the limit (storage_mb, 10-32 GiB), and the sandbox nodes ran out of reservable
+              # ephemeral storage at about 300 pods. The full harbor_agent_opensandbox_training.yaml map,
+              # as this replaces it.
+              resource_requests:
+                cpu: 0.5
+                memory_mib: 512
+                disk_gib: 1
+            # A pod lives at most this long, also when a run dies; above the two caps below plus the start.
+            sandbox_ttl_s: 6000
+          # Caps, not overrides: these tasks declare 3000 s for both, and a step lasts as long as its
+          # slowest rollout.
+          # Twice the 16K runs' 1800 s, for the longer episodes; most tasks declare 7200 s.
+          harbor_agent_max_timeout: 3600
+          harbor_verifier_max_timeout: 1200
+          # The start timeout (task.toml's build_timeout_sec) also covers a pod's wait in the cluster's
+          # queue; Terminal-Lego-15k allows 120 s, which queueing alone exceeds (Gym patch 0015).
+          harbor_environment_build_timeout_multiplier: 5.0
+          # Harbor's trial directories (trajectories, test output) next to the weights. The harbor_agent
+          # server reads them back, so they must be on a shared filesystem.
+          harbor_jobs_dir: ${checkpointing.checkpoint_dir}/harbor-jobs
+  _override_: true
+
+logger:
+  tensorboard_enabled: true
