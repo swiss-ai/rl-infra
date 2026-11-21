@@ -15,7 +15,9 @@ export SAFETY_UV_BIN="${SAFETY_UV_BIN:-${SCRATCH}/safetygym/tools/uv-0.13.8/bin}
 export SAFETY_CHONK_MODEL="${SAFETY_CHONK_MODEL:-${SCRATCH}/models/chonk-lc-16k-v0.2-iter_0018315-ifgym}"
 export SAFETY_DATA_SOURCE="${SAFETY_DATA_SOURCE:-${SCRATCH}/datasets/msafetemp-safetygym}"
 export SAFETY_VALIDATION_SAMPLES="${VALIDATION_SAMPLES:-500}"
-export SAFETY_DATA_DIR="${OUT}/data/validation-${SAFETY_VALIDATION_SAMPLES}"
+# SAFETY_DATA_PREBUILT=1 uses a ready view from build_balanced_data.py (train.jsonl, validation.jsonl, manifest.json).
+export SAFETY_DATA_PREBUILT="${SAFETY_DATA_PREBUILT:-0}"
+if [[ "$SAFETY_DATA_PREBUILT" == 1 ]]; then export SAFETY_DATA_DIR="${SAFETY_DATA_SOURCE}"; else export SAFETY_DATA_DIR="${OUT}/data/validation-${SAFETY_VALIDATION_SAMPLES}"; fi
 export WANDB_PROJECT="${WANDB_PROJECT:-safety-gym}" WANDB_ENTITY="${WANDB_ENTITY:-nutemmax-epfl}"
 export WANDB_KEY_FILE="${WANDB_KEY_FILE:-${OUT}/private/wandb.key}"
 export SAFETY_ROLLOUT_SAVE_PERIOD=50 DRIVER_RETRIES=0

@@ -71,3 +71,35 @@ TensorBoard logging remain enabled. Hangang jobs use the dedicated `intTest`
 partition; its time limit is unlimited under the site policy. This launcher
 requests a 72-hour chunk as an operator choice and stops training early enough
 to save a checkpoint.
+
+## Balanced run (branch `or-benign-balance`)
+
+The first run (`msafetemp-chonk-16k`) cut attack success but raised over-refusal on short
+direct benign prompts. Cause: 87.5% harmful rows, no prompt shorter than about 290
+characters, a benign rubric that accepted "I cannot X, however I can Y", and a validation
+set with 64 benign rows. This branch changes the data, the benign rubric and validation.
+
+| Change | Where | Detail |
+|---|---|---|
+| Benign share 25% | `build_balanced_data.py` | exactly 25% benign in every prompt-length bin (0-99, 100-199, 200-399, 400-799, 800-1599, 1600+ characters), so length says nothing about the class |
+| Short direct prompts | `build_balanced_data.py` | WildGuardMix train, vanilla (non-adversarial), both classes, deduplicated; at least 30% of rows are below 400 characters |
+| Eval hygiene | `--exclude-hashes` | prompts matching HB, WG test, XSTest, OR-Bench, JBB, FORTRESS, CSE prompts are dropped (none matched) |
+| Benign rubric | `Gym/.../response_policies.yaml`, policy `refuse_then_redirect` | FULFILLED 1.0, FULFILLED_WITH_REFUSAL 0.5, REDIRECTED 0, REFUSED 0, NOT_ANSWERED 0; selected per row by `response_policy_mapped` |
+| Over-refusal validation | `gym.yaml` agent aliases | 800 rows: `or_val_wg_test_vanilla` (250 short English WildGuardTest benign), `or_val_wg_test_adversarial` (250 multilingual), `jailbreak_val_wg_test_vanilla` (100), `jailbreak_detection_simple_agent` (200). Over-refusal = 1 - `validation/or_val_*/reward` |
+| Launcher | `resume_balanced.sh` | `SAFETY_DATA_PREBUILT=1`, staged Gym copy with the new policy, 715 steps (one epoch) |
+
+Build the view (login node, streaming, about one minute):
+
+```bash
+python3 build_balanced_data.py \
+  --source /scratch/hanint14/datasets/msafetemp-safetygym \
+  --vanilla /scratch/hanint14/datasets/wildguardmix-vanilla/wildguardmix_vanilla.jsonl \
+  --exclude-hashes /scratch/hanint14/datasets/eval-exclusion/eval_prompt_sha1.txt \
+  --output /scratch/hanint14/datasets/msafetemp-safetygym-balanced-b25   # add --plan to preview
+```
+
+Result: 91,580 train rows (68,685 harmful, 22,895 benign), 16 languages. The short vanilla
+prompts are English only; short prompts in the other languages come from the msafetemp
+export (200-399 characters). Set `JUDGE_URL` in `resume_balanced.sh` to a live judge before
+launching. The validation agents have not yet been exercised in a training job: run a short
+smoke job first.
