@@ -12,13 +12,17 @@
 #     from the pipeline instead. On 32 trainer nodes (128 GPUs): 16K CP 4 x DP 2, 32K CP 8 (PP 4); 64K (CP 16) would
 #     leave PP 2 with 8.5B parameters per GPU, the TP1 load that ran out of host memory (docs/megachonk.md): 64K and
 #     128K need 64 trainer nodes (PP 4 resp. PP 2, EP 64).
-#   - nodes: vLLM runs in replicas of 8 nodes (TP4 x EP32). size lite = 32 + 16, the layout of the 48-node runs.
+#   - nodes: vLLM runs in replicas of 4 nodes (TP4 x EP16, one engine per node) with an FP8 KV cache. Measured without
+#     the trainer (shared/debug/genbench.py, 2026-11-23, 6K-token answers): 1,308 tokens/s per node at 128 answers per
+#     node, against 708 for the 8-node replicas (TP4 x EP32) the earlier MegaChonk runs used, whose every decode step
+#     gathers the tokens of 32 GPUs across 8 nodes in each MoE layer; TP4 x PP4 gave 1,221, PP8 539. The base layout
+#     is 32 trainer + 32 vLLM nodes (8 replicas); lite = 32 + 16.
 defaults: /opt/nemo-rl/examples/configs/grpo_math_1B.yaml
 # Context parallelism (run.sh): 4,096 tokens per GPU (16K -> CP 4, 32K -> CP 8, 128K -> CP 32), as the 48-node
 # MegaChonk STEM runs at 16K; no memory fraction (those runs did not set NRL_CUDA_MEMORY_FRACTION). The KDA layers
 # split their 64 heads over the CP ranks, 16 per TP rank, so CP up to 16 needs no KCP.
 context_parallel: {tokens_per_gpu: 4096, head_cp_max: 16}
-# Base node layout, the "cheap" tier: 32 trainer nodes and four vLLM replicas of 8 nodes.
+# Base node layout, the "cheap" tier: 32 trainer nodes and eight vLLM replicas of 4 nodes.
 nodes: {trainer: 32, inference: 32}
 
 # ======================================================================== model: checkpoint and message format
@@ -130,11 +134,16 @@ policy:
       quantization_ignored_layer_kws:
         - self_attn
       use_deep_gemm: false
-      kv_cache_dtype: auto
+      # FP8 KV cache: twice the sequences per engine (1.35M tokens per node instead of 0.67M); at 128 answers per node
+      # 1,308 against 966 tokens/s per node, as the BF16 cache must preempt (NeMo-RL patch 0045 sets its scales).
+      kv_cache_dtype: fp8
+      # Scale 1.0 for every K and V: calibrating scales needs synchronous rollouts and trainer PP1 (preflight.sh).
+      # Keys pass a QK norm, values are O(1); the generation KL error of the debug run checks the cost.
+      fp8_kv_unit_scales: true
       load_format: dummy
-      # One replica over 8 nodes: TP4 x EP32.
+      # One replica over 4 nodes: TP4 x EP16 (54 GiB of weights per GPU).
       tensor_parallel_size: 4
-      expert_parallel_size: 32
+      expert_parallel_size: 16
       async_engine: true
       enforce_eager: false
       gpu_memory_utilization: 0.88

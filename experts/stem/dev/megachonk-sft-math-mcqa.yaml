@@ -1,14 +1,15 @@
 # STEM on MegaChonk SFT (recipes/megachonk-sft.yaml): three of the STEM expert's single-turn datasets at 512 prompts
 # per step, the run-3 split of the earlier MegaChonk STEM run (128 DAPO-Math, 256 NuminaMath, 128 science + CS
-# multiple choice), thinking high, 32K context (at 16K, 66% of AIME answers were cut off, job 1345131), 48 nodes
-# (32 trainer + 16 vLLM). A short run to see training signal
+# multiple choice), thinking high, 32K context (at 16K, 66% of AIME answers were cut off, job 1345131), 64 nodes
+# (32 trainer + 32 vLLM). A short run to see training signal
 # on the new checkpoint (30 steps, validation every 10), without checkpoints (one is > 1 TiB).
 #   DEBUG=1 bash run.sh experts/stem/dev/megachonk-sft-math-mcqa.yaml    debug run (3 steps, no validation)
 #   bash run.sh experts/stem/dev/megachonk-sft-math-mcqa.yaml            the short full run (W&B)
 # Standalone, not on ../base.yaml: base.yaml takes in the judge environment and its node, and eight datasets whose
 # shares would all need replacing. Dataset entries, environments and frames are base.yaml's.
 recipe: recipes/megachonk-sft.yaml
-size: lite
+# 32 trainer + 32 vLLM nodes (8 replicas of 4 nodes).
+size: cheap
 context: 32768
 job_time: 1-00:00:00
 
