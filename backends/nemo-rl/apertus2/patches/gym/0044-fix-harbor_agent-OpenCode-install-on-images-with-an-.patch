@@ -1,0 +1,289 @@
+From dbcb922e2b94fe8b9e718f76afb04e97d7781b5e Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Sun, 22 Nov 2026 15:20:06 +0000
+Subject: [PATCH 44/44] fix(harbor_agent): OpenCode install on images with an
+ old python3; setup failures are infra
+
+In a 10-step OpenCode run on verified Harbor tasks, 72 of 640 trials (9 whole
+prompt groups) failed in agent setup:
+
+- 64 with "SyntaxError" on `while chunk := response.read(...)`: the binary
+  installer's Python downloader used an assignment expression (Python >= 3.8)
+  and f-strings (>= 3.6); the task images (R2E-Gym, SWE-Lego) have an older
+  python3.
+- 8 in an image with neither python3 nor curl.
+
+The downloader is now plain Python 3 (no walrus, no f-strings). The script
+tries python3, curl and wget in that order and falls back to the next tool
+when a download fails (an old python3 may also lack TLS support); curl and wget
+downloads are checked with sha256sum. Without any of the three it says so.
+
+"Agent setup failed" (raised by install_from_template, and by Harbor's own
+installed agents) is now classified as infra: the task image cannot run the
+agent, the policy has no part in it. These rollouts were masked before as
+well (no model calls, so no capture), but counted as "other".
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ .../install-opencode-binary.sh.j2             | 69 +++++++++++----
+ .../custom_agents/test_opencode_nemo_gym.py   | 87 +++++++++++++++++++
+ .../harbor_agent/failure_classes.py           |  7 +-
+ .../tests/test_failure_classes.py             | 14 +++
+ 4 files changed, 159 insertions(+), 18 deletions(-)
+
+diff --git a/responses_api_agents/harbor_agent/custom_agents/opencode_pod/install-opencode-binary.sh.j2 b/responses_api_agents/harbor_agent/custom_agents/opencode_pod/install-opencode-binary.sh.j2
+index 1b7b02e72..34c6283e3 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/opencode_pod/install-opencode-binary.sh.j2
++++ b/responses_api_agents/harbor_agent/custom_agents/opencode_pod/install-opencode-binary.sh.j2
+@@ -1,7 +1,8 @@
+ #!/bin/bash
+ # Installs the standalone OpenCode binary (Bun-compiled, no Node/npm) from its GitHub release.
+ # Rendered by OpenCodeNemoGym (opencode_install: binary); url, sha256 and install_dir arrive
+-# shell-quoted. Needs python3 (task images such as python:3.12-slim have no curl) or curl, and tar.
++# shell-quoted. Downloads with the first of python3, curl, wget that works (task images such as
++# python:3.12-slim have no curl, old ones have a python3 < 3.8); needs tar, and sha256sum after curl/wget.
+ set -euo pipefail
+ 
+ version={{ version }}
+@@ -19,39 +20,75 @@ work=$(mktemp -d)
+ trap 'rm -rf "$work"' EXIT
+ archive="$work/opencode.tar.gz"
+ 
+-if command -v python3 >/dev/null 2>&1; then
++# Any Python 3 (task images ship 3.5 and later): no f-strings, no assignment expressions.
++download_python3() {
+   python3 - "$url" "$archive" "$sha256" <<'PY'
+ import hashlib
+ import sys
+ import time
+-import urllib.request
++from urllib.request import urlopen
+ 
+ url, out, want = sys.argv[1:4]
++digest = None
+ for attempt in range(1, 4):
+     try:
+         digest = hashlib.sha256()
+-        with urllib.request.urlopen(url, timeout=120) as response, open(out, "wb") as f:
+-            while chunk := response.read(1 << 20):
+-                f.write(chunk)
+-                digest.update(chunk)
++        response = urlopen(url, timeout=120)
++        try:
++            with open(out, "wb") as f:
++                while True:
++                    chunk = response.read(1 << 20)
++                    if not chunk:
++                        break
++                    f.write(chunk)
++                    digest.update(chunk)
++        finally:
++            response.close()
+         break
+-    except Exception as e:  # network errors: retry, then fail the setup
++    except Exception as e:  # network errors: retry, then fail this download
+         if attempt == 3:
+-            sys.exit(f"download of {url} failed: {e}")
+-        print(f"download attempt {attempt} failed: {e}", file=sys.stderr)
++            sys.exit("download of %s failed: %s" % (url, e))
++        sys.stderr.write("download attempt %d failed: %s\n" % (attempt, e))
+         time.sleep(5 * attempt)
+ got = digest.hexdigest()
+-print(f"downloaded {url} sha256 {got}")
++print("downloaded %s sha256 %s" % (url, got))
+ if want and got != want:
+-    sys.exit(f"sha256 mismatch for {url}: expected {want}, got {got}")
++    sys.exit("sha256 mismatch for %s: expected %s, got %s" % (url, want, got))
+ PY
+-elif command -v curl >/dev/null 2>&1; then
+-  curl -fsSL --retry 3 -o "$archive" "$url"
++}
++
++check_sha256() {
+   if [ -n "$sha256" ]; then
+     echo "$sha256  $archive" | sha256sum -c -
+   fi
+-else
+-  echo "installing opencode needs python3 or curl in the task image" >&2
++}
++
++download_curl() {
++  curl -fsSL --retry 3 -o "$archive" "$url" && check_sha256
++}
++
++download_wget() {
++  wget -q --tries=3 -O "$archive" "$url" && check_sha256
++}
++
++tried=""
++downloaded=""
++for tool in python3 curl wget; do
++  command -v "$tool" >/dev/null 2>&1 || continue
++  tried="$tried $tool"
++  rm -f "$archive"
++  if "download_$tool"; then
++    downloaded="$tool"
++    break
++  fi
++  echo "download with $tool failed" >&2
++done
++if [ -z "$downloaded" ]; then
++  if [ -z "$tried" ]; then
++    echo "installing opencode needs python3, curl or wget in the task image" >&2
++  else
++    echo "download of $url failed with:$tried" >&2
++  fi
+   exit 1
+ fi
+ 
+diff --git a/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
+index 1784742e6..6eed78f9b 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
+@@ -441,6 +441,93 @@ def test_install_script_rejects_a_wrong_version(tmp_path: Path) -> None:
+     assert "version mismatch" in result.stderr
+ 
+ 
++def _python_downloader() -> str:
++    """The Python program the install script feeds to python3 (its <<'PY' here-document)."""
++    template = mod.BINARY_INSTALL_TEMPLATE.read_text()
++    return template.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
++
++
++# Job 5425513: task images with a python3 older than 3.8 (R2E-Gym, SWE-Lego) failed the install with
++# "SyntaxError" on `while chunk := ...`, 64 of 640 trials. The downloader must run on any Python 3.
++def test_python_downloader_parses_on_old_python3() -> None:
++    import ast
++
++    tree = ast.parse(_python_downloader(), feature_version=(3, 7))  # the oldest ast can check: no walrus
++    f_strings = [node.lineno for node in ast.walk(tree) if isinstance(node, ast.JoinedStr)]
++    assert not f_strings, f"f-strings need Python 3.6, lines {f_strings}"
++
++
++# what the install script runs besides the download tools
++BASIC_TOOLS = ("bash", "tar", "gzip", "mktemp", "rm", "mkdir", "install", "sha256sum", "cp")
++
++
++def _tool_dir(tmp_path: Path, tools: dict[str, str]) -> Path:
++    """A PATH directory with the basic tools the script needs plus fake download tools (name -> script)."""
++    bin_dir = tmp_path / "path"
++    bin_dir.mkdir()
++    for tool in BASIC_TOOLS:
++        (bin_dir / tool).symlink_to(shutil.which(tool))
++    for name, body in tools.items():
++        (bin_dir / name).write_text(body)
++        (bin_dir / name).chmod(0o755)
++    return bin_dir
++
++
++# copies a file:// URL to -O <file>, as `wget -q -O <file> <url>` downloads it
++FAKE_WGET = """#!/bin/bash
++out=""; url=""
++while [ $# -gt 0 ]; do
++  case "$1" in -O) out="$2"; shift 2 ;; -*) shift ;; *) url="$1"; shift ;; esac
++done
++cp "${url#file://}" "$out"
++"""
++FAILING_PYTHON = "#!/bin/sh\necho 'python3: cannot download' >&2\nexit 1\n"
++
++needs_path_tools = pytest.mark.skipif(
++    any(shutil.which(tool) is None for tool in BASIC_TOOLS), reason="needs " + ", ".join(BASIC_TOOLS)
++)
++
++
++def _run_install_with_path(tmp_path: Path, bin_dir: Path, url: str, sha256: str):
++    variables = {
++        **_agent(tmp_path).install_variables(),
++        "url": shlex.quote(url),
++        "sha256": shlex.quote(sha256),
++        "install_dir": shlex.quote(str(tmp_path / "bin")),
++    }
++    script = tmp_path / "install.sh"
++    script.write_text(Environment().from_string(mod.BINARY_INSTALL_TEMPLATE.read_text()).render(**variables))
++    return subprocess.run(
++        [str(bin_dir / "bash"), str(script)], capture_output=True, text=True, timeout=60, env={"PATH": str(bin_dir)}
++    )
++
++
++@needs_path_tools
++def test_install_script_falls_back_to_wget_when_python3_fails_and_curl_is_missing(tmp_path: Path) -> None:
++    url, digest = _release(tmp_path, "1.17.11")
++    bin_dir = _tool_dir(tmp_path, {"python3": FAILING_PYTHON, "wget": FAKE_WGET})
++    result = _run_install_with_path(tmp_path, bin_dir, url, digest)
++    assert result.returncode == 0, result.stderr
++    assert "download with python3 failed" in result.stderr
++    assert "installed opencode 1.17.11" in result.stdout
++
++
++@needs_path_tools
++def test_install_script_checks_the_digest_of_a_wget_download(tmp_path: Path) -> None:
++    url, _ = _release(tmp_path, "1.17.11")
++    result = _run_install_with_path(tmp_path, _tool_dir(tmp_path, {"wget": FAKE_WGET}), url, "0" * 64)
++    assert result.returncode != 0
++    assert not (tmp_path / "bin" / "opencode").exists()
++
++
++@needs_path_tools
++def test_install_script_without_any_download_tool_says_what_it_needs(tmp_path: Path) -> None:
++    url, digest = _release(tmp_path, "1.17.11")
++    result = _run_install_with_path(tmp_path, _tool_dir(tmp_path, {}), url, digest)
++    assert result.returncode != 0
++    assert "needs python3, curl or wget" in result.stderr
++
++
+ def test_unknown_kwargs_still_fail(tmp_path: Path) -> None:
+     with pytest.raises(ValueError, match="Unknown option 'bogus'"):
+         _agent(tmp_path, bogus=1)
+diff --git a/responses_api_agents/harbor_agent/failure_classes.py b/responses_api_agents/harbor_agent/failure_classes.py
+index 98bafa53d..511726817 100644
+--- a/responses_api_agents/harbor_agent/failure_classes.py
++++ b/responses_api_agents/harbor_agent/failure_classes.py
+@@ -21,7 +21,8 @@ itself. OpenCode writes no such file; ``opencode_end_flags`` derives the same fi
+ ``run --format=json`` log (``agent/opencode.txt``). Classes, first matching rule wins:
+ 
+ - ``infra``: the sandbox, the model server or Harbor failed, not the policy (the exception types Harbor's own
+-  error_policy.py files under SANDBOX_FAILED, plus the Gym/OpenSandbox ones): sandbox start/setup timeouts, sandbox
++  error_policy.py files under SANDBOX_FAILED, plus the Gym/OpenSandbox ones): sandbox start/setup timeouts, an agent
++  install that failed in the task image ("Agent setup failed": no download tool, too old a python3), sandbox
+   API errors (HTTP 502 backend unreachable, OOM-killed sandbox, memory limit), OpenSandbox command-status timeouts, also when
+   Harbor's ``_verify_with_timeout`` reports one as VerifierTimeoutError (it catches every TimeoutError), a
+   VerifierTimeoutError that ended well before its cap, connection errors to the model server, a Harbor job that
+@@ -122,7 +123,9 @@ _INFRA_TEXT = re.compile(
+     r"OpenSandbox|SandboxApiException|SandboxBackendUnreachable|BACKEND_CONNECTION_FAILED|"
+     r"\bHTTP 50[234]\b|\b50[234] (?:Bad Gateway|Service Unavailable|Gateway Timeout)|"
+     r"Could not connect to the backend|all connection attempts failed|connection refused|"
+-    r"model_tunnel|chisel",
++    r"model_tunnel|chisel|"
++    # an agent install script that failed in the task image (installed_compat.install_from_template, Harbor's own)
++    r"Agent setup failed",
+     re.IGNORECASE,
+ )
+ # "Type: message" lines at column 0 of a formatted traceback, one per exception of the chain.
+diff --git a/responses_api_agents/harbor_agent/tests/test_failure_classes.py b/responses_api_agents/harbor_agent/tests/test_failure_classes.py
+index 58645f02d..3363915c1 100644
+--- a/responses_api_agents/harbor_agent/tests/test_failure_classes.py
++++ b/responses_api_agents/harbor_agent/tests/test_failure_classes.py
+@@ -158,6 +158,20 @@ REAL_VERIFIER_TIMEOUT = _traceback(
+             "AgentSetupTimeoutError",
+             id="agent-setup-timeout",
+         ),
++        pytest.param(
++            # 5425513: the OpenCode install script failed in the task image (old python3, no curl): not the policy
++            _trial(
++                "RuntimeError",
++                "Agent setup failed with exit code 1. See logs in /jobs/t/agent/setup",
++                "",
++                None,
++                None,
++            ),
++            {},
++            "infra",
++            "Agent setup failed",
++            id="agent-setup-failed",
++        ),
+         pytest.param(
+             _trial(
+                 "SandboxApiException",
+-- 
+2.56.0
+
