@@ -1,0 +1,48 @@
+From 737d56feaf60fdb924f24f35f480163ec58f98a9 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Mon, 23 Nov 2026 08:38:51 +0900
+Subject: [PATCH] FP8 KV refit: no KV scales for linear-attention layers of
+ hybrid models
+
+---
+ .../policy/workers/megatron_policy_worker.py       | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/nemo_rl/models/policy/workers/megatron_policy_worker.py b/nemo_rl/models/policy/workers/megatron_policy_worker.py
+index d42c14f0c..9638075c6 100644
+--- a/nemo_rl/models/policy/workers/megatron_policy_worker.py
++++ b/nemo_rl/models/policy/workers/megatron_policy_worker.py
+@@ -14,6 +14,7 @@
+ # limitations under the License.
+ import copy
+ import gc
++import json
+ import logging
+ import os
+ import re
+@@ -3325,10 +3326,21 @@ class MegatronPolicyWorkerImpl(
+         if not use_fp8_kv_cache:
+             return
+ 
+-        # Append KV (and potentially Q) scale entries to match metadata.
++        # Append KV (and potentially Q) scale entries to match metadata, for the layers that have
++        # a KV cache. Hybrid models (Apertus 2 KDA: "linear_attention" in the HF config's
++        # layer_types) have no attention module, hence no scales, in their linear layers; vLLM
++        # rejects a scale sent for one ("no module or parameter named ...self_attn.attn").
+         num_layers = self.megatron_bridge.transformer_config.num_layers
++        layer_types = None
++        try:
++            with open(os.path.join(self.cfg["model_name"], "config.json")) as f:
++                layer_types = json.load(f).get("layer_types")
++        except (OSError, ValueError, TypeError):
++            layer_types = None
+         keys: list[str] = []
+         for layer_idx in range(num_layers):
++            if layer_types is not None and layer_idx < len(layer_types) and layer_types[layer_idx] == "linear_attention":
++                continue
+             scale_names = get_vllm_qkv_scale_names(layer_idx)
+             keys.extend(scale_names.values())
+ 
+-- 
+2.51.0
+
