@@ -26,11 +26,12 @@ from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 from nemo_rl.distributed.virtual_cluster import RayVirtualCluster, init_ray
 from nemo_rl.models.generation import configure_generation_config
 from nemo_rl.models.generation.vllm import VllmGeneration
-from nemo_rl.utils.config import load_config, parse_hydra_overrides
+from nemo_rl.utils.config import load_config, parse_hydra_overrides, register_omegaconf_resolvers
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--config", required=True)
 args, overrides = parser.parse_known_args()
+register_omegaconf_resolvers()
 config = load_config(args.config)
 if overrides:
     config = parse_hydra_overrides(config, overrides)
@@ -67,12 +68,18 @@ cluster = RayVirtualCluster(name="genbench", bundle_ct_per_node_list=[gpn] * nod
 t = time.time()
 vllm = VllmGeneration(cluster=cluster, config=gen)
 setup["engine_up_s"] = round(time.time() - t)
-t = time.time()
-ok = ray.get([w.update_weights_from_hf_checkpoint_async.remote(model_path=gen["model_name"])
-              for w in vllm._refit_leader_workers()])
-setup["load_s"] = round(time.time() - t)
-print("LOADED", json.dumps(setup, default=str), ok, flush=True)
-assert all(ok), "loading the checkpoint through the refit path failed"
+# BENCH_LOAD=dummy (default) keeps the dummy weights: same speed per token, but random routing spreads the tokens
+# over the experts more evenly than the real router. BENCH_LOAD=refit loads the export through the refit path from
+# disk; it reads whole shards (16 GB for MegaChonk) into an engine whose memory is already taken by weights and KV
+# cache, and ran out of memory on MegaChonk (job 1346543).
+setup["load"] = os.environ.get("BENCH_LOAD", "dummy")
+if setup["load"] == "refit":
+    t = time.time()
+    ok = ray.get([w.update_weights_from_hf_checkpoint_async.remote(model_path=gen["model_name"])
+                  for w in vllm._refit_leader_workers()])
+    setup["load_s"] = round(time.time() - t)
+    assert all(ok), "loading the checkpoint through the refit path failed"
+print("LOADED", json.dumps(setup, default=str), flush=True)
 
 
 def prompt(salt, i, length):
