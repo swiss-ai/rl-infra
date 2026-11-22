@@ -24,7 +24,11 @@ HFCONV_COMMIT="${HFCONV_COMMIT:-c2ab4910948b}"
 HFCONV_API="https://api.github.com/repos/swiss-ai/hfconverter/contents"
 
 if [[ "${CHONK_MODEL_STAGE}" == link ]]; then
-    [[ "$(cat "${SRC}/MODELING_SOURCE" 2>/dev/null)" == "hfconverter ${HFCONV_COMMIT}" ]] \
+    # The MegaChonk exports with the embedding norm carry that commit's code plus the norm
+    # ("hfconverter c2ab4910948b + embedding_norm (...)"); they are only ever linked, never copied,
+    # because copy mode would fetch the code without the norm.
+    ms="$(cat "${SRC}/MODELING_SOURCE" 2>/dev/null || true)"
+    [[ "${ms}" == "hfconverter ${HFCONV_COMMIT}" || "${ms}" == "hfconverter ${HFCONV_COMMIT} + embedding_norm"* ]] \
         || { echo "ERROR: ${SRC} lacks the hfconverter ${HFCONV_COMMIT} modeling code; stage a copy instead (CHONK_MODEL_STAGE=copy)" >&2; exit 1; }
     grep -q '"AutoModelForCausalLM": "modeling_apertus2.Apertus2ForCausalLM"' "${SRC}/config.json" \
         || { echo "ERROR: ${SRC}/config.json has no auto_map for the modeling code" >&2; exit 1; }
@@ -43,6 +47,8 @@ if [[ "${CHONK_MODEL_STAGE}" == link ]]; then
     exit
 fi
 
+grep -q '"embedding_norm": true' "${SRC}/config.json" \
+    && { echo "ERROR: ${SRC} has the embedding norm; copy mode would add modeling code without it. Give the export its norm-aware code and MODELING_SOURCE (link mode)" >&2; exit 1; }
 mkdir -p "${DST}"
 lfs setstripe -c 8 -S 4M "${DST}" 2>/dev/null || true
 

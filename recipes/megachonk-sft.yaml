@@ -1,0 +1,170 @@
+# MegaChonk SFT v1 (16K, SFT iteration 880 on pretraining iteration 96,000) trained with async GRPO. The layout is
+# recipes/megachonk.yaml's (the MegaChonk pretraining runs, docs/megachonk.md); the message format and the
+# generation settings are recipes/chonk-sftv02.yaml's (Apertus 2 format through apertus-common, stop at <|wait|>).
+# Set elsewhere, so not here: datasets and environments (the expert's files), context and packing (run.sh, from
+# `context`), node tier, checkpoints, validation schedule and logging (experts/main.yaml).
+#   - The checkpoint has the embedding norm (an RMSNorm with a learnable gain on the embedding output): vLLM, Bridge
+#     and Megatron need patches/vllm/0002, patches/bridge/0001 and patches/megatron/0007 (setup.sh applies them).
+#   - SFT ran at 16,384 tokens (max_position_embeddings 16,384); longer contexts are untested.
+#   - nodes: the trainer needs 32 nodes or more (TP4 x PP8 x EP16 at CP 4; 16 do not fit, job 1291990); vLLM runs
+#     in replicas of 8 nodes (TP4 x EP32). size lite = 32 + 16, the layout of the 48-node MegaChonk runs.
+defaults: /opt/nemo-rl/examples/configs/grpo_math_1B.yaml
+# Context parallelism (run.sh): 4,096 tokens per GPU, 16K -> CP 4, as the 48-node MegaChonk STEM runs; no memory
+# fraction (those runs did not set NRL_CUDA_MEMORY_FRACTION).
+context_parallel: {tokens_per_gpu: 4096}
+# Base node layout, the "cheap" tier: 32 trainer nodes and four vLLM replicas of 8 nodes.
+nodes: {trainer: 32, inference: 32}
+
+# ======================================================================== model: checkpoint and message format
+# The HF export (relative to $SCRATCH) with its norm-aware modeling code (MODELING_SOURCE), linked by run.sh as
+# $SCRATCH/models/megachonk-sft-v1-16k-iter_0000880.
+sft_export: megachonk-sft/hf-exports/megachonk-sft-v1-16k-iter_0000880
+
+policy:
+  # Apertus 2 message format: apertus-common encodes the prompt to token IDs (no chat template), generation stops at
+  # <|wait|> (token 12, policy.generation below); the environments grade one frame of the output (reward_frame).
+  tokenizer:
+    chat_template: null
+
+  # ====================================================================== trainer: Megatron (DTensor trainer off)
+  # Global batch = prompts per step x 16 answers: one optimizer step per GRPO step.
+  train_global_batch_size: 8192
+  train_micro_batch_size: 1
+  logprob_batch_size: 1
+  logprob_chunk_size: 512
+  sequence_packing:
+    enabled: true
+  optimizer: null
+  scheduler: null
+  dtensor_cfg:
+    enabled: false
+  megatron_cfg:
+    enabled: true
+    # Parallelism: TP4, PP8 (first stage 8 layers, last stage 5), EP16, sequence parallel; CP from the context.
+    tensor_model_parallel_size: 4
+    pipeline_model_parallel_size: 8
+    num_layers_in_first_pipeline_stage: 8
+    num_layers_in_last_pipeline_stage: 5
+    expert_model_parallel_size: 16
+    sequence_parallel: true
+    activation_checkpointing: true
+    gradient_accumulation_fusion: true
+    apply_rope_fusion: false
+    defer_fp32_logits: true
+    # The first step compiles kernels stage by stage, so ranks of different stages meet more than 10 minutes apart.
+    distributed_timeout_minutes: 60
+    # MoE router and dispatch: quantile balancing (histogram method, 10,000 bins) with the router frozen, fp32
+    # router, flex dispatcher with DeepEP kernels (UCCL over Slingshot). As recipes/megachonk.yaml: the export's
+    # config says "legacy", like the 42,000 export those runs used.
+    moe_router_load_balancing_type: quantile_balancing
+    moe_router_dtype: fp32
+    moe_token_dispatcher_type: flex
+    moe_flex_dispatcher_backend: deepep
+    moe_enable_deepep: true
+    model_overrides:
+      moe_router_quantile_balancing_freeze: true
+      moe_router_quantile_balancing_method: marin_histogram
+      moe_router_quantile_balancing_marin_num_bins: 10000
+    # Optimizer: Adam (NeMo-RL default: weight decay 0.01, betas 0.9/0.999), lr 2e-6 constant, 70% of the optimizer
+    # state on the CPU (the whole state on the CPU does not fit the host, docs/megachonk.md).
+    optimizer:
+      lr: 2.0e-6
+      optimizer_cpu_offload: true
+      optimizer_offload_fraction: 0.7
+    scheduler:
+      lr_warmup_iters: 0
+      lr_warmup_init: 0.0
+    distributed_data_parallel_config:
+      grad_reduce_in_fp32: true
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+    checkpoint:
+      async_save: false
+    env_vars:
+      CUDA_DEVICE_MAX_CONNECTIONS: "1"
+      UCCL_EP_TRANSPORT: cxi
+      UCCL_EP_DISPATCH_CONFIG: "24,40,512,32,512"
+      UCCL_EP_COMBINE_CONFIG: "24,7,512,32,512"
+      UCCL_EP_CPU_TIMEOUT_SECS: "480"
+      NRL_REFIT_BUFFER_MEMORY_RATIO: "0.005"
+      NRL_REFIT_NUM_BUFFERS: "1"
+      NRL_NCCL_TIMEOUT_MINUTES: "60"
+      # Debugging and forensics, as in chonk-sftv02.yaml.
+      NRL_LOG_LEVEL: DEBUG
+      NRL_FORENSICS_DIR: ${logger.log_dir}/forensics
+      NRL_MEM_HISTORY: "1"
+      NRL_NCCL_WARMUP: "1"
+      NCCL_DEBUG: INFO
+      NCCL_DEBUG_SUBSYS: INIT,ALLOC
+      NCCL_DEBUG_FILE: ${logger.log_dir}/forensics/nccl-%h-%p.log
+      TORCH_SHOW_CPP_STACKTRACES: "1"
+      TORCH_NCCL_TRACE_BUFFER_SIZE: "2000"
+      TORCH_NCCL_DUMP_ON_TIMEOUT: "1"
+      TORCH_FR_DUMP_TEMP_FILE: ${logger.log_dir}/fr-rank
+      TORCH_NCCL_DEBUG_INFO_TEMP_FILE: ${logger.log_dir}/fr-rank
+      CUDA_ENABLE_COREDUMP_ON_EXCEPTION: "1"
+      CUDA_COREDUMP_GENERATION_FLAGS: skip_nonrelocated_elf_images,skip_global_memory,skip_shared_memory,skip_local_memory,skip_abort
+      CUDA_COREDUMP_FILE: ${logger.log_dir}/core_%h_%p
+
+  # ====================================================================== inference: vLLM on nodes of its own
+  generation:
+    output_format: apertus2
+    stop_token_ids: [12]
+    colocated:
+      enabled: false
+      resources:
+        gpus_per_node: 4
+    vllm_cfg:
+      # Block FP8 weights, attention in BF16, no DeepGEMM; starts on dummy weights, the first refit loads the
+      # trainer's.
+      precision: fp8
+      quantization_ignored_layer_kws:
+        - self_attn
+      use_deep_gemm: false
+      kv_cache_dtype: auto
+      load_format: dummy
+      # One replica over 8 nodes: TP4 x EP32.
+      tensor_parallel_size: 4
+      expert_parallel_size: 32
+      async_engine: true
+      enforce_eager: false
+      gpu_memory_utilization: 0.88
+      env_vars:
+        NRL_REFIT_BUFFER_MEMORY_RATIO: "0.005"
+        NRL_REFIT_NUM_BUFFERS: "1"
+        NCCL_DEBUG: WARN
+        CUDA_ENABLE_COREDUMP_ON_EXCEPTION: "1"
+        CUDA_COREDUMP_GENERATION_FLAGS: skip_nonrelocated_elf_images,skip_global_memory,skip_shared_memory,skip_local_memory,skip_abort
+        CUDA_COREDUMP_FILE: ${logger.log_dir}/core_vllm_%h_%p
+    vllm_kwargs:
+      # allgather_reducescatter gathers every rank's tokens into one MoE workspace: 4,096 tokens per step keep it
+      # at a few GiB on EP32 (16,384 ran out of memory, docs/megachonk.md).
+      all2all_backend: allgather_reducescatter
+      max_num_batched_tokens: 4096
+      max_num_seqs: 256
+
+# ======================================================================== algorithm: async GRPO
+grpo:
+  num_prompts_per_step: 512
+  use_leave_one_out_baseline: false
+  skip_zero_advantage_groups: true
+  # A truncated answer gets reward 0 (no other length penalty).
+  reward_shaping:
+    enabled: true
+    stop_properly_penalty_coef: 0.0
+    overlong_buffer_length: null
+    overlong_buffer_penalty: null
+    max_response_length: null
+  # Rollouts at most 2 weight versions old (4 for Chonk).
+  async_grpo:
+    enabled: true
+    max_trajectory_age_steps: 2
+    in_flight_weight_updates: true
+
+loss_fn:
+  ratio_clip_c: 3.0
+  reference_policy_kl_penalty: 0
+  force_on_policy_ratio: true
+  use_importance_sampling_correction: true
+  truncated_importance_sampling_type: tis
+  truncated_importance_sampling_ratio: 2.0

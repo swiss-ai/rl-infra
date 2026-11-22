@@ -1,0 +1,85 @@
+From 1eedb4ced4f2c2644e4f37e4631f54070b52dada Mon Sep 17 00:00:00 2001
+From: dtamayo-nlp <danitamayo.adhoc@gmail.com>
+Date: Wed, 11 Nov 2026 22:40:51 +0100
+Subject: [PATCH] Add --embedding-norm: norm with a learnable gain on the
+ embedding output
+
+---
+ .../embeddings/language_model_embedding.py       | 16 ++++++++++++++++
+ megatron/core/transformer/transformer_config.py  |  4 ++++
+ tests/unit_tests/test_embedding_norm.py          | 14 ++++++++++++++
+ 3 files changed, 34 insertions(+)
+ create mode 100644 tests/unit_tests/test_embedding_norm.py
+
+diff --git a/megatron/core/models/common/embeddings/language_model_embedding.py b/megatron/core/models/common/embeddings/language_model_embedding.py
+index 0f5cc9fa4..c55c6a3ac 100644
+--- a/megatron/core/models/common/embeddings/language_model_embedding.py
++++ b/megatron/core/models/common/embeddings/language_model_embedding.py
+@@ -86,6 +86,18 @@ class LanguageModelEmbedding(MegatronModule):
+         # Embeddings dropout
+         self.embedding_dropout = torch.nn.Dropout(self.config.hidden_dropout)
+ 
++        # --embedding-norm: a norm with a learnable per-channel gain on the embedding output.
++        self.embedding_norm = None
++        if getattr(self.config, "embedding_norm", False):
++            if self.config.transformer_impl == "transformer_engine":
++                from megatron.core.extensions.transformer_engine import TENorm as _Norm
++            else:
++                from megatron.core.transformer.torch_norm import WrappedTorchNorm as _Norm
++            self.embedding_norm = _Norm(
++                config=self.config, hidden_size=self.config.hidden_size,
++                eps=self.config.layernorm_epsilon,
++            )
++
+     def zero_parameters(self):
+         """Zero out all parameters in embedding."""
+         self.word_embeddings.weight.data.fill_(0)
+@@ -138,6 +150,10 @@ class LanguageModelEmbedding(MegatronModule):
+         if self.config.scale_embeddings_by_sqrt_hidden:
+             embeddings = embeddings * math.sqrt(self.config.hidden_size)
+ 
++        # Optional norm on the embedding output, before the residual stream (--embedding-norm).
++        if self.embedding_norm is not None:
++            embeddings = self.embedding_norm(embeddings)
++
+         # If the input flag for fp32 residual connection is set, convert for float.
+         if self.config.fp32_residual_connection:
+             embeddings = embeddings.float()
+diff --git a/megatron/core/transformer/transformer_config.py b/megatron/core/transformer/transformer_config.py
+index ca7c10377..5a72c964f 100644
+--- a/megatron/core/transformer/transformer_config.py
++++ b/megatron/core/transformer/transformer_config.py
+@@ -178,6 +178,10 @@ class TransformerConfig(ModelParallelConfig):
+     hidden_dropout: float = 0.1
+     """Dropout probability for transformer hidden state."""
+ 
++    embedding_norm: bool = False
++    """Apply a norm (config.normalization, with a learnable per-channel gain) to the embedding
++    output, after the sqrt(hidden) scale and before it enters the residual stream."""
++
+     attention_dropout: float = 0.1
+     """Post attention dropout probability."""
+ 
+diff --git a/tests/unit_tests/test_embedding_norm.py b/tests/unit_tests/test_embedding_norm.py
+new file mode 100644
+index 000000000..e8cf0409e
+--- /dev/null
++++ b/tests/unit_tests/test_embedding_norm.py
+@@ -0,0 +1,14 @@
++"""Tests for --embedding-norm (a norm with a learnable gain on the embedding output)."""
++
++import argparse
++
++from megatron.core.transformer.transformer_config import TransformerConfig
++
++
++def test_argument_and_default():
++    from megatron.training.arguments import add_megatron_arguments
++
++    parser = add_megatron_arguments(argparse.ArgumentParser(allow_abbrev=False))
++    assert parser.parse_args([]).embedding_norm is False
++    assert parser.parse_args(["--embedding-norm"]).embedding_norm is True
++    assert TransformerConfig.__dataclass_fields__["embedding_norm"].default is False
+-- 
+2.43.0
+

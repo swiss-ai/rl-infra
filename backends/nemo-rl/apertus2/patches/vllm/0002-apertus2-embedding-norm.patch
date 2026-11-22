@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Mon, 23 Nov 2026 02:30:00 +0900
+Subject: [PATCH] apertus2: RMSNorm on the embedding output (embedding_norm)
+
+MegaChonk from pretraining iteration 90,000 on (and its SFT checkpoints) has
+an RMSNorm with a learnable per-channel gain on the embedding output, after
+the sqrt(hidden) multiplier (Megatron --embedding-norm). config.json switches
+it on with "embedding_norm": true; the weight is model.embedding_norm.weight,
+on the first pipeline rank. Models without the key are unchanged. Without the
+norm such a checkpoint loads and emits one repeated token.
+
+---
+ vllm/model_executor/models/apertus2.py | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/vllm/model_executor/models/apertus2.py b/vllm/model_executor/models/apertus2.py
+--- a/vllm/model_executor/models/apertus2.py
++++ b/vllm/model_executor/models/apertus2.py
+@@ -854,6 +854,15 @@
+             )
+         else:
+             self.embed_tokens = PPMissingLayer()
++        # RMSNorm with a learnable gain on the scaled embeddings (Megatron --embedding-norm; megachonk from
++        # iteration 90,000 on). Loaded from model.embedding_norm.weight.
++        self.embedding_norm = None
++        if getattr(config, "embedding_norm", False):
++            self.embedding_norm = (
++                RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
++                if get_pp_group().is_first_rank
++                else PPMissingLayer()
++            )
+
+         self.start_layer, self.end_layer, self.layers = make_layers(
+             config.num_hidden_layers,
+@@ -893,6 +902,8 @@
+             else:
+                 hidden_states = self.embed_input_ids(input_ids)
+             hidden_states = hidden_states * self.embedding_multiplier
++            if self.embedding_norm is not None:
++                hidden_states = self.embedding_norm(hidden_states)
+         else:
+             assert intermediate_tensors is not None
+             hidden_states = intermediate_tensors["hidden_states"]

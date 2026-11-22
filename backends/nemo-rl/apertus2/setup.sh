@@ -95,6 +95,13 @@ for p in "${APERTUS2_DIR}"/patches/megatron/*.patch; do
     git -C "${MEGATRON_DIR}" apply "${p}"
     echo "== Megatron-LM: applied $(basename "${p}")"
 done
+# Our Bridge patches, on the working tree in the same way (HEAD stays at the pin).
+for p in "${APERTUS2_DIR}"/patches/bridge/*.patch; do
+    [[ -e "${p}" ]] || continue
+    if git -C "${BRIDGE_DIR}" apply --reverse --check "${p}" 2>/dev/null; then continue; fi
+    git -C "${BRIDGE_DIR}" apply "${p}"
+    echo "== Megatron-Bridge: applied $(basename "${p}")"
+done
 # vLLM runner with swiss-ai/vllm#24, mounted over the image's copy (see the pin).
 if [[ "$(git hash-object "${VLLM_RUNNER}" 2>/dev/null)" != "${VLLM_RUNNER_BLOB}" ]]; then
     echo "== vLLM runner with swiss-ai/vllm#24: ${VLLM_RUNNER}"

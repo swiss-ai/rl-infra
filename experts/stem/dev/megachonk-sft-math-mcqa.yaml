@@ -1,0 +1,68 @@
+# STEM on MegaChonk SFT (recipes/megachonk-sft.yaml): three of the STEM expert's single-turn datasets at 512 prompts
+# per step, the run-3 split of the earlier MegaChonk STEM run (128 DAPO-Math, 256 NuminaMath, 128 science + CS
+# multiple choice), thinking high, 16K context, 48 nodes (32 trainer + 16 vLLM). A short run to see training signal
+# on the new checkpoint (30 steps, validation every 10), without checkpoints (one is > 1 TiB).
+#   DEBUG=1 bash run.sh experts/stem/dev/megachonk-sft-math-mcqa.yaml    debug run (3 steps, no validation)
+#   bash run.sh experts/stem/dev/megachonk-sft-math-mcqa.yaml            the short full run (W&B)
+# Standalone, not on ../base.yaml: base.yaml takes in the judge environment and its node, and eight datasets whose
+# shares would all need replacing. Dataset entries, environments and frames are base.yaml's.
+recipe: recipes/megachonk-sft.yaml
+size: lite
+context: 16384
+job_time: 1-00:00:00
+
+frames:
+  default: ${oc.env:RL_INFRA_DIR}/shared/frames/apertus2-system-high.json
+
+grpo:
+  max_num_steps: 30
+  max_num_epochs: 1
+  val_period: 10
+  # 960 AIME 2024 (x32) + 1,584 GPQA-Diamond (x8).
+  val_batch_size: 2544
+  max_val_samples: 2544
+
+checkpointing:
+  enabled: false
+
+data:
+  # Replaces the recipe's data block (NeMo-RL's example sets train and validation as single datasets).
+  _override_: true
+  max_input_seq_length: 4096
+  shuffle: true
+  num_workers: 1
+  use_multiple_dataloader: true
+  custom_dataloader: examples.custom_dataloader.custom_dataloader.example_custom_dataloader
+  num_prompts_per_dataloader:
+    DAPOMath17K: 128
+    run3-numina_clean: 256
+    run3-mcqa_science_cs: 128
+  train:
+    - dataset_name: DAPOMath17K
+      deduplicate: true
+    - dataset_name: ResponseDataset
+      data_path: ${oc.env:RL_DATA_DIR}/stem-rl/run3/numina_clean.jsonl
+    - dataset_name: ResponseDataset
+      data_path: ${oc.env:RL_DATA_DIR}/stem-rl/run3/mcqa_science_cs.jsonl
+      env_name: math_default
+  validation:
+    - dataset_name: DAPOMathAIME2024
+      split: test
+    - dataset_name: ResponseDataset
+      data_path: ${oc.env:RL_DATA_DIR}/stem-rl/gpqa_diamond_x8.jsonl
+      env_name: math_default
+  default:
+    prompt_file: null
+    system_prompt_file: ${frames.default}
+    processor: apertus2_math_data_processor
+    env_name: math
+
+env:
+  # Math answers (DAPO, NuminaMath): the math environment on the claim frame.
+  math:
+    reward_frame: claim
+  # Multiple choice: the same environment class, grading the option letter in the claim.
+  math_default:
+    num_workers: 8
+    verifier_type: claim_multichoice
+    reward_frame: claim
