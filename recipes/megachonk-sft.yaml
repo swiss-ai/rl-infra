@@ -5,13 +5,19 @@
 # `context`), node tier, checkpoints, validation schedule and logging (experts/main.yaml).
 #   - The checkpoint has the embedding norm (an RMSNorm with a learnable gain on the embedding output): vLLM, Bridge
 #     and Megatron need patches/vllm/0002, patches/bridge/0001 and patches/megatron/0007 (setup.sh applies them).
-#   - SFT ran at 16,384 tokens (max_position_embeddings 16,384); longer contexts are untested.
-#   - nodes: the trainer needs 32 nodes or more (TP4 x PP8 x EP16 at CP 4; 16 do not fit, job 1291990); vLLM runs
-#     in replicas of 8 nodes (TP4 x EP32). size lite = 32 + 16, the layout of the 48-node MegaChonk runs.
+#   - SFT ran at 16,384 tokens (max_position_embeddings 16,384); answers at thinking high run past it (66% of AIME
+#     answers cut off at 16K, job 1345131).
+#   - Layout: a pipeline stage holds TP x CP x DP GPUs and the experts spread over all of them (EP = GPUs per stage
+#     at DP 1), so expert weights per GPU stay at 560B / 128 GPUs whatever the context; longer contexts take GPUs
+#     from the pipeline instead. On 32 trainer nodes (128 GPUs): 16K CP 4 x DP 2, 32K CP 8 (PP 4); 64K (CP 16) would
+#     leave PP 2 with 8.5B parameters per GPU, the TP1 load that ran out of host memory (docs/megachonk.md): 64K and
+#     128K need 64 trainer nodes (PP 4 resp. PP 2, EP 64).
+#   - nodes: vLLM runs in replicas of 8 nodes (TP4 x EP32). size lite = 32 + 16, the layout of the 48-node runs.
 defaults: /opt/nemo-rl/examples/configs/grpo_math_1B.yaml
-# Context parallelism (run.sh): 4,096 tokens per GPU, 16K -> CP 4, as the 48-node MegaChonk STEM runs; no memory
-# fraction (those runs did not set NRL_CUDA_MEMORY_FRACTION).
-context_parallel: {tokens_per_gpu: 4096}
+# Context parallelism (run.sh): 4,096 tokens per GPU (16K -> CP 4, 32K -> CP 8, 128K -> CP 32), as the 48-node
+# MegaChonk STEM runs at 16K; no memory fraction (those runs did not set NRL_CUDA_MEMORY_FRACTION). The KDA layers
+# split their 64 heads over the CP ranks, 16 per TP rank, so CP up to 16 needs no KCP.
+context_parallel: {tokens_per_gpu: 4096, head_cp_max: 16}
 # Base node layout, the "cheap" tier: 32 trainer nodes and four vLLM replicas of 8 nodes.
 nodes: {trainer: 32, inference: 32}
 
@@ -40,12 +46,14 @@ policy:
     enabled: false
   megatron_cfg:
     enabled: true
-    # Parallelism: TP4, PP8 (first stage 8 layers, last stage 5), EP16, sequence parallel; CP from the context.
+    # Parallelism: TP4, PP4 (16, 16, 16 and 13 layers: the last stage also holds the 200K-vocabulary output layer,
+    # as the 8/8/.../5 split of the PP8 runs), EP32 = the 32 GPUs of a stage, sequence parallel; CP from the context.
+    # Per GPU: 4.4B expert + 2.1B other parameters (PP8 x EP16 had 4.4B + 1.0B).
     tensor_model_parallel_size: 4
-    pipeline_model_parallel_size: 8
-    num_layers_in_first_pipeline_stage: 8
-    num_layers_in_last_pipeline_stage: 5
-    expert_model_parallel_size: 16
+    pipeline_model_parallel_size: 4
+    num_layers_in_first_pipeline_stage: 16
+    num_layers_in_last_pipeline_stage: 13
+    expert_model_parallel_size: 32
     sequence_parallel: true
     activation_checkpointing: true
     gradient_accumulation_fusion: true
@@ -65,12 +73,13 @@ policy:
       moe_router_quantile_balancing_freeze: true
       moe_router_quantile_balancing_method: marin_histogram
       moe_router_quantile_balancing_marin_num_bins: 10000
-    # Optimizer: Adam (NeMo-RL default: weight decay 0.01, betas 0.9/0.999), lr 2e-6 constant, 70% of the optimizer
-    # state on the CPU (the whole state on the CPU does not fit the host, docs/megachonk.md).
+    # Optimizer: Adam (NeMo-RL default: weight decay 0.01, betas 0.9/0.999), lr 2e-6 constant, 60% of the optimizer
+    # state on the CPU. PP8 ran with 70% at 41 GB host memory free per node at least; PP4's 20% more parameters per
+    # GPU would take about 37 GB more of the host at 70%, so a larger share stays on the GPU.
     optimizer:
       lr: 2.0e-6
       optimizer_cpu_offload: true
-      optimizer_offload_fraction: 0.7
+      optimizer_offload_fraction: 0.6
     scheduler:
       lr_warmup_iters: 0
       lr_warmup_init: 0.0

@@ -21,7 +21,7 @@
 # rl-infra keys (top level of a task file, inherited through `defaults` like any other key):
 #   recipe:    model and algorithm, a file under recipes/ (path relative to this repository)
 #   context:   longest prompt + answer in tokens (up to 131072); with the recipe's context_parallel block it sets
-#              CP (context / tokens_per_gpu, rounded up to a power of 2), packing (= context), KCP above CP 4
+#              CP (context / tokens_per_gpu, rounded up to a power of 2), packing (= context), KCP above the recipe's head_cp_max
 #              and the memory fraction
 #   size:      nodes: a tier of the recipe's base layout (`nodes:` in the recipe; Chonk 8 trainer x 8 vLLM):
 #              lite (base trainer, half the vLLM), cheap (the base), expensive (twice the base), ultra
@@ -166,8 +166,10 @@ fi
 #                    rounded up to a power of 2 (Chonk 8192: 16K -> CP 2, 32K -> CP 4, 128K -> CP 16)
 #   memory_fraction  NRL_CUDA_MEMORY_FRACTION, PyTorch's share of a trainer GPU (the rest: NCCL, Triton, CUDA);
 #                    not set when the recipe leaves it out
-# Packing budget = context. Above CP 4 the KDA layers need KCP (backends/nemo-rl/apertus2/kcp): the pinned Megatron
-# splits their 28 heads over at most 4 CP ranks.
+#   head_cp_max      the largest CP at which the pinned Megatron splits the KDA layers' heads over the CP ranks: the
+#                    KDA heads per TP rank (Chonk 28 heads at TP1: 4; MegaChonk 64 at TP4: 16); default 4. Above it
+#                    the KDA layers need KCP (backends/nemo-rl/apertus2/kcp).
+# Packing budget = context.
 if [[ -n "${CONTEXT}" ]]; then
     (( CONTEXT <= 131072 )) || { echo "ERROR: context ${CONTEXT} is above 131072" >&2; exit 1; }
     TPG="$(cfg context_parallel.tokens_per_gpu)"
@@ -175,9 +177,11 @@ if [[ -n "${CONTEXT}" ]]; then
     CP=1; while (( CP * TPG < CONTEXT )); do CP=$(( CP * 2 )); done
     PACK="${CONTEXT}"; MEMFRAC="$(cfg context_parallel.memory_fraction)"
     PP="$(cfg policy.megatron_cfg.pipeline_model_parallel_size)"; RANKS=$(( TRAIN * GPUS_PER_NODE / ${PP:-1} ))
-    (( RANKS % CP == 0 )) || { echo "ERROR: CP ${CP} (context ${CONTEXT}) does not divide the ${RANKS} trainer ranks of a pipeline stage" >&2; exit 1; }
+    TP="$(cfg policy.megatron_cfg.tensor_model_parallel_size)"
+    (( RANKS % (CP * ${TP:-1}) == 0 )) || { echo "ERROR: TP ${TP:-1} x CP ${CP} (context ${CONTEXT}) does not divide the ${RANKS} trainer ranks of a pipeline stage: fewer pipeline stages or more trainer nodes" >&2; exit 1; }
+    HEADCP="$(cfg context_parallel.head_cp_max)"; HEADCP="${HEADCP:-4}"
     # Every packed sequence is padded to a multiple of 2 x CP, times TP with sequence parallelism (NeMo-RL's check).
-    PAD=$(( CP > 1 ? 2 * CP : 2 )); TP="$(cfg policy.megatron_cfg.tensor_model_parallel_size)"
+    PAD=$(( CP > 1 ? 2 * CP : 2 ))
     [[ "$(cfg policy.megatron_cfg.sequence_parallel)" == true && "${TP:-1}" -gt 1 ]] && PAD=$(( PAD * TP ))
     OVR+=(policy.max_total_sequence_length="${CONTEXT}" policy.generation.max_new_tokens="${CONTEXT}"
           policy.sequence_packing.train_mb_tokens="${PACK}" policy.sequence_packing.logprob_mb_tokens="${PACK}"
@@ -186,7 +190,7 @@ if [[ -n "${CONTEXT}" ]]; then
           # unless this is set; the model has no position table, so the value is only that check.
           "++policy.generation.vllm_cfg.env_vars.VLLM_ALLOW_LONG_MAX_MODEL_LEN=\"'1'\"")
     [[ -z "${MEMFRAC}" ]] || OVR+=("++policy.megatron_cfg.env_vars.NRL_CUDA_MEMORY_FRACTION=\"'${MEMFRAC}'\"")
-    if (( CP > 4 )); then
+    if (( CP > HEADCP )); then
         source "${APERTUS2_DIR}/kcp/use.sh"
         OVR+=(++policy.megatron_cfg.model_overrides.linear_attention_cp_impl=kcp)
     fi
@@ -262,7 +266,7 @@ fi
 echo "Task:    ${TASK}"
 echo "Recipe:  ${R}"
 echo "Nodes:   ${NODES} = ${TRAIN} trainer + ${GEN} vLLM + ${JUDGE} judge${SIZE:+ (tier ${SIZE})}"
-[[ -n "${CONTEXT}" ]] && echo "Context: ${CONTEXT} tokens: CP ${CP} ($( (( CP > 4 )) && echo kcp || echo head)), packing ${PACK}, memory fraction ${MEMFRAC:-not set}"
+[[ -n "${CONTEXT}" ]] && echo "Context: ${CONTEXT} tokens: CP ${CP} ($( (( CP > HEADCP )) && echo kcp || echo head)), packing ${PACK}, memory fraction ${MEMFRAC:-not set}"
 echo "Run:     ${RUN} ($([[ "${DEBUG}" == 1 ]] && echo debug || echo full) run, time limit ${JOB_TIME})"
 echo "Config:  ${CFG}"
 echo "Overrides made here (the command line's come after them and win):"
