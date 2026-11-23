@@ -12,11 +12,13 @@
 #     from the pipeline instead. On 32 trainer nodes (128 GPUs): 16K CP 4 x DP 2, 32K CP 8 (PP 4); 64K (CP 16) would
 #     leave PP 2 with 8.5B parameters per GPU, the TP1 load that ran out of host memory (docs/megachonk.md): 64K and
 #     128K need 64 trainer nodes (PP 4 resp. PP 2, EP 64).
-#   - nodes: vLLM runs in replicas of 4 nodes (TP4 x EP16, one engine per node) with an FP8 KV cache. Measured without
-#     the trainer (shared/debug/genbench.py, 2026-11-23, 6K-token answers): 1,308 tokens/s per node at 128 answers per
-#     node, against 708 for the 8-node replicas (TP4 x EP32) the earlier MegaChonk runs used, whose every decode step
-#     gathers the tokens of 32 GPUs across 8 nodes in each MoE layer; TP4 x PP4 gave 1,221, PP8 539. The base layout
-#     is 32 trainer + 32 vLLM nodes (8 replicas); lite = 32 + 16.
+#   - nodes: vLLM runs in replicas of 4 nodes, TP4 x PP4 (one engine over the 16 GPUs, EP4 inside each node), with an
+#     FP8 KV cache. Measured without the trainer (shared/debug/genbench.py, 2026-11-23, 6K-token answers, tokens/s
+#     per node at 64 / 128 answers per node): TP4 x PP4 1,136 / 1,221; TP4 x EP16 (one engine per node) 777 / 1,308;
+#     the 8-node TP4 x EP32 replicas of the earlier MegaChonk runs 451 / 717 (every decode step gathers the tokens of 32
+#     GPUs across 8 nodes in each MoE layer); PP8 539. EP16 holds 54 GiB of weights per GPU, PP4 31 GiB: with EP16 the
+#     refit's whole 3.05 GiB vocabulary tensors did not fit next to the KV cache at gpu_memory_utilization 0.88 (job
+#     1346988). The base layout is 32 trainer + 32 vLLM nodes (8 replicas); lite = 32 + 16.
 defaults: /opt/nemo-rl/examples/configs/grpo_math_1B.yaml
 # Context parallelism (run.sh): 4,096 tokens per GPU (16K -> CP 4, 32K -> CP 8, 128K -> CP 32), as the 48-node
 # MegaChonk STEM runs at 16K; no memory fraction (those runs did not set NRL_CUDA_MEMORY_FRACTION). The KDA layers
@@ -77,13 +79,14 @@ policy:
       moe_router_quantile_balancing_freeze: true
       moe_router_quantile_balancing_method: marin_histogram
       moe_router_quantile_balancing_marin_num_bins: 10000
-    # Optimizer: Adam (NeMo-RL default: weight decay 0.01, betas 0.9/0.999), lr 2e-6 constant, 60% of the optimizer
-    # state on the CPU. PP8 ran with 70% at 41 GB host memory free per node at least; PP4's 20% more parameters per
-    # GPU would take about 37 GB more of the host at 70%, so a larger share stays on the GPU.
+    # Optimizer: Adam (NeMo-RL default: weight decay 0.01, betas 0.9/0.999), lr 2e-6 constant, 70% of the optimizer
+    # state on the CPU. At 60% a trainer GPU held 70.3 GiB of tensors (weights, fp32 grads, Adam share) plus 21.5 GiB
+    # outside PyTorch (NCCL, UCCL) after a step, and the refit could not gather a 3.05 GiB vocabulary tensor (job
+    # 1347152); the host then had 85 GB free per node (34/20/16/15 per socket), about 54 GB at 70%.
     optimizer:
       lr: 2.0e-6
       optimizer_cpu_offload: true
-      optimizer_offload_fraction: 0.6
+      optimizer_offload_fraction: 0.7
     scheduler:
       lr_warmup_iters: 0
       lr_warmup_init: 0.0
@@ -141,9 +144,11 @@ policy:
       # Keys pass a QK norm, values are O(1); the generation KL error of the debug run checks the cost.
       fp8_kv_unit_scales: true
       load_format: dummy
-      # One replica over 4 nodes: TP4 x EP16 (54 GiB of weights per GPU).
+      # One replica over 4 nodes: TP4 inside a node, PP4 across the nodes, the experts of a stage over its 4 GPUs (EP4 =
+      # TP, so no vLLM data parallelism): 31 GiB of weights per GPU. The refit into it works (job 1347152).
       tensor_parallel_size: 4
-      expert_parallel_size: 16
+      pipeline_parallel_size: 4
+      expert_parallel_size: 4
       async_engine: true
       enforce_eager: false
       gpu_memory_utilization: 0.88
@@ -159,7 +164,9 @@ policy:
       # at a few GiB on EP32 (16,384 ran out of memory, docs/megachonk.md).
       all2all_backend: allgather_reducescatter
       max_num_batched_tokens: 4096
-      max_num_seqs: 256
+      # Answers in flight per replica: 128 per node, where TP4 x PP4 peaked in the benchmark (256 per node gave about
+      # 400 tokens/s per node in job 1347152).
+      max_num_seqs: 512
 
 # ======================================================================== algorithm: async GRPO
 grpo:
