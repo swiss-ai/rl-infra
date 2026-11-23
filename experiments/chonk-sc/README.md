@@ -1,5 +1,8 @@
 # Apertus 2 Chonk on NeMo-RL's Single-Controller path (step 0, run A, run B, run S, run OV)
 
+**New here? Start with `TESTING.md`**: prerequisites, commands and expected results of runs V and OV at 64K.
+This README is the full reference and the history of the runs.
+
 Implements the run sequence of the feasibility analysis
 `research/reports/2026-11-04-chonk-single-controller-feasibility.md` (workspace, section 6):
 Chonk (12 nodes: 8 trainer nodes Megatron EP32 with CPU-offloaded AdamW + 4 vLLM nodes TP1 EP4,
@@ -16,7 +19,7 @@ i.e. vLLM DP4 per node through NVIDIA-NeMo/RL#2517) trained through
 | `run-agent-v.sh`, `run-agent-v.yaml`, `run-ov.yaml` | run OV: OpenCode in the pod on run V's verified tasks, SC + token capture, 24k on 20 nodes; `CTX=65536`: long context |
 | `common.sh` | config composition, the long-context profile of runs V and OV, and the clone / Gym checks, shared by the scripts |
 
-Both runs: 3 steps, `async_rl` sampler `in_order` with lookahead 0 (synchronous), one chunk per
+Runs A and B: 3 steps, `async_rl` sampler `in_order` with lookahead 0 (synchronous), one chunk per
 step (`min_groups_for_streaming_train` = `max_inflight_prompts` = `max_buffered_rollouts` =
 prompts per step), TransferQueue data plane with 24 storage units (`${mul:2, num_nodes}` from
 `grpo_math_1B.yaml`), generation fleet health off (its rebuild path ignores vLLM DP,
@@ -26,7 +29,7 @@ prompts per step), TransferQueue data plane with 24 storage units (`${mul:2, num
 ## Daint
 
 ```bash
-cd ~/rl-infra                                  # this branch: chonk-sc
+cd ~/rl-infra                                  # this branch: chonk-sc-harbor025
 export SCRATCH=/iopsstor/scratch/cscs/$USER    # Daint: $SCRATCH is /ritom/..., which the EDF does not mount
 export ACCOUNT=csstaff                         # run.sh / run-harbor-osb.sh default to infra01
 ```
@@ -271,7 +274,9 @@ has no counterpart here). Config: task copy + `run-b-harbor-sc.yaml` `run-s-sft.
 `../harbor-capture-sc/opencode-sc.yaml` `tunnel-sc.yaml` `run-agent-v.yaml` `run-ov.yaml` (`common.sh`
 `agent_v_overlays`), plus the launcher's overrides (`agent_v_args`). OpenCode runs in the task image's WORKDIR
 (`opencode_workdir` unset: the repository lives in `/testbed`, `/workspace/<repo>`, `/app/<repo>`, `/home/<repo>`, ...
-depending on the task), ended at 1740 s under Harbor's 1800 s cap. Harbor trial dirs and the model-call capture:
+depending on the task), ended at 1740 s under Harbor's 1800 s cap. OpenCode is installed from the release archive that
+`fetch-opencode.sh` fetches once into `$OPENCODE_DIR` (`$SCRATCH/opencode`) and the adapter uploads into each sandbox
+(Gym 0045, `opencode_install: upload`), so the task image needs only `tar`. Harbor trial dirs and the model-call capture:
 `$SCRATCH/harbor-jobs/<run>/` (`model-calls/`). Another in-pod agent is one more `AGENT` value (`common.sh`
 `agent_v_tag`, `agent_v_overlays`, `check_gym_agents`; its `run-<tag>.yaml`; `check.py`).
 
@@ -331,7 +336,7 @@ SMOKE=1 CTX=32768 NCCL_MIN=60 HANG_DUMP_AFTER_S=3600 HANG_KILL_AFTER_S=14400 bas
 SMOKE=1 CTX=65536 DRY_RUN=1 bash experiments/chonk-sc/run-v-24k.sh        # run V smoke: setup + job script only
 SMOKE=1 CTX=65536 bash experiments/chonk-sc/run-v-24k.sh                  # run V smoke: 1 step, 4 x 8, 03:00:00
 CTX=65536 bash experiments/chonk-sc/run-v-24k.sh                          # run V: 10 steps, 8 x 8, 12:00:00
-SMOKE=1 CTX=65536 AGENT=opencode bash experiments/chonk-sc/run-agent-v.sh # run OV smoke (CP on SC: never run before)
+SMOKE=1 CTX=65536 AGENT=opencode bash experiments/chonk-sc/run-agent-v.sh # run OV smoke
 ```
 
 ### KCP on Alps (`experiments/long-context/setup-kcp.sh`, once)
