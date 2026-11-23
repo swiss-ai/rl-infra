@@ -1,0 +1,133 @@
+From f6cce371f8b2933fd9c7b6c375dc21645fb8651f Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Mon, 23 Nov 2026 12:49:22 +0000
+Subject: [PATCH 46/46] docs(harbor_agent): agents inside the sandbox: adapter,
+ model tunnel, token capture
+
+How to run OpenCode or mini-swe-agent inside the task sandbox for training: the adapter, a model
+server the sandbox can reach (harbor_model_base_url, the per-sandbox chisel tunnel), token capture at
+the model endpoint, sampling_overrides; tables of the OpenCodeNemoGym options and the model_tunnel
+keys. TOC entries for it and for Failure classes.
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ responses_api_agents/harbor_agent/README.md | 94 +++++++++++++++++++++
+ 1 file changed, 94 insertions(+)
+
+diff --git a/responses_api_agents/harbor_agent/README.md b/responses_api_agents/harbor_agent/README.md
+index 6fcce232a..5d4a1ff5d 100644
+--- a/responses_api_agents/harbor_agent/README.md
++++ b/responses_api_agents/harbor_agent/README.md
+@@ -14,8 +14,10 @@ It runs Harbor agents (e.g., `terminus-2`) in Harbor-managed environments and re
+ - [NeMo RL Training](#nemo-rl-training)
+   - [Required patches to Gym](#required-patches-to-gym)
+   - [Recommended settings](#recommended-settings)
++  - [Agents inside the sandbox (OpenCode, mini-swe-agent)](#agents-inside-the-sandbox-opencode-mini-swe-agent)
+   - [Finding failed rollouts](#finding-failed-rollouts)
+   - [Known failure cases during RL training](#known-failure-cases-during-rl-training)
++  - [Failure classes](#failure-classes)
+   - [On-policy corrections for multi-turn training](#on-policy-corrections-for-multi-turn-training)
+ 
+ ## Overview
+@@ -472,6 +474,98 @@ policy:
+       enable_chunked_prefill: false     # Disable chunked prefill for stability
+ ```
+ 
++### Agents inside the sandbox (OpenCode, mini-swe-agent)
++
++Terminus-2 runs in the Harbor process and returns its tokens itself (`collect_rollout_details`). An agent that
++runs *inside* the task sandbox, such as OpenCode or mini-swe-agent, needs three things instead:
++
++1. **An adapter** that points the agent at the Gym model server: `harbor_agent_import_path`
++   `responses_api_agents.harbor_agent.custom_agents.opencode_nemo_gym:OpenCodeNemoGym` or
++   `...mini_swe_agent_nemo_gym:MiniSweAgentNemoGym`. harbor_agent passes the rollout's model URL as `api_base`.
++2. **A model server the sandbox can reach.** `harbor_model_base_url` sets the root of that URL as seen from the
++   sandbox (harbor_agent appends the rollout prefix and `/v1`). If sandboxes cannot open connections to the
++   training nodes, use the per-sandbox model tunnel below and set `harbor_model_base_url: http://127.0.0.1:8000`.
++3. **Token capture at the model endpoint.** OpenCode writes no trajectory with token IDs, so the training tokens
++   can only come from Gym's capture: the run-level `token_id_capture.enabled` plus the agent's `token_id_capture`
++   (or `token_id_capture.all_agents`). NeMo RL's single-controller entrypoint turns both on with
++   `token_capture.enabled: true`. Without capture, a rollout without output items is masked, which for OpenCode
++   is every rollout.
++
++Under capture, a rollout whose calls form more than one conversation is masked (no single chain to rebuild it
++from). The OpenCode adapter therefore turns off every call besides the main loop (session title, sub-agents,
++compaction) and OpenCode's provider timeouts (a retried request is one more captured call). OpenCode does not
++send the rollout's sampling parameters (mini-swe-agent's adapter does), so set them on the model server:
++
++```yaml
++policy_model:
++  responses_api_models:
++    vllm_model:
++      sampling_overrides:
++        temperature: ${policy.generation.temperature}
++        top_p: ${policy.generation.top_p}
++        max_tokens: ${policy.generation.max_new_tokens}
++```
++
++A complete OpenCode setup on top of the training config (the `harbor_agent` block):
++
++```yaml
++harbor_agent_name: null
++harbor_agent_import_path: "responses_api_agents.harbor_agent.custom_agents.opencode_nemo_gym:OpenCodeNemoGym"
++harbor_model_base_url: http://127.0.0.1:8000        # the tunnel's sandbox end
++harbor_agent_kwargs:
++  version: 1.17.11
++  opencode_install: upload                          # or binary / npm, see below
++  opencode_archive_dir: /path/to/opencode           # <dir>/<version>/<asset>
++  opencode_timeout_sec: 1740                        # below harbor_agent_max_timeout, so the verifier still runs
++  model_info:
++    max_input_tokens: ${policy.max_total_sequence_length}
++    max_output_tokens: ${policy.generation.max_new_tokens}
++harbor_environment_kwargs:
++  model_tunnel:
++    chisel_dir: /path/to/chisel
++harbor_mask_context_overflow: true                  # optional, see "Failure classes"
++```
++
++`OpenCodeNemoGym` options (`harbor_agent_kwargs`):
++
++| Option | Default | Meaning |
++|---|---|---|
++| `version` | `1.17.11` | OpenCode release. The adapter's config keys and flags were checked against this release; another one needs `opencode_sha256` and a re-check. |
++| `opencode_install` | `binary` | `binary`: the sandbox downloads the release archive from GitHub (needs internet and python3, curl or wget). `upload`: the adapter uploads the archive from `opencode_archive_dir` (no internet, only `tar` in the image). `npm`: Harbor's own install (Node via nvm). |
++| `opencode_archive_dir` | none | For `upload`: directory with `<version>/<asset>`. The archive's sha256 is checked once per process, and again in the sandbox if `sha256sum` is there. |
++| `opencode_asset` | `opencode-linux-x64-baseline.tar.gz` | Release asset (standalone binary for glibc x86_64, no AVX2 needed). |
++| `opencode_sha256` | built in for 1.17.11 | sha256 of the archive. |
++| `opencode_timeout_sec` | none | OpenCode is ended with exit 124 after this, so its log and exit status are recorded before Harbor's agent timeout. |
++| `opencode_workdir` | none | Absolute path OpenCode runs in (created if missing); unset = the image's working directory. |
++| `opencode_config` | `{}` | Deep-merged last into OpenCode's config; unknown top-level keys make OpenCode reject the whole config. |
++| `opencode_debug` | `false` | Debug logs into `agent/opencode.txt`. |
++| `model_info` | `{}` | `max_input_tokens` / `max_output_tokens`: OpenCode's context and per-turn output limit, and the context limit for failure classes. |
++
++**Per-sandbox model tunnel** (`harbor_environment_kwargs.model_tunnel`, `NemoGymSandboxEnvironment`): for clusters
++where sandboxes cannot reach the training nodes but the node reaches the sandbox through the provider's endpoint
++(e.g. OpenSandbox's proxy or gateway, WebSockets included). At every start the environment uploads
++[chisel](https://github.com/jpillora/chisel) into the sandbox, starts `chisel server --reverse` there and
++`chisel client` in the Harbor process, so `127.0.0.1:<pod_port>` in the sandbox forwards to the model server.
++Before the trial starts it checks `GET <health_path>` through the tunnel; a tunnel that fails fails the trial in
++environment setup (failure class `infra`). The separate verifier environment gets no tunnel.
++
++| Key | Default | Meaning |
++|---|---|---|
++| `chisel_dir` | required | Directory with `chisel_<chisel_version>_linux_{amd64,arm64}` (released binaries, gunzipped; not shipped). |
++| `chisel_version` | `1.12.0` | |
++| `target` | the model server | `host:port` the node-side client dials; harbor_agent fills it per run. |
++| `pod_port` / `server_port` | `8000` / `8765` | Loopback port in the sandbox / port of the chisel server in the sandbox. |
++| `health_path` | `/health` | Checked from inside the sandbox; `null` skips it. |
++| `connect_timeout_s` | `60` | Bound on the client's first connection. |
++| `tls_skip_verify` | `false` | Skip certificate checks on the endpoint's TLS. |
++| `max_retry_count` | `10` | Client reconnects after a drop. |
++
++The image needs only `uname`, `setsid` or `nohup`, and `bash` for the health check.
++
++For debugging, Gym's model-call capture (`model_call_capture_dir` in the global config) writes every request and
++response at the model endpoint per rollout; it shows per-turn lengths, context overflows and 4xx bodies, which
++an in-sandbox agent's own logs often do not.
++
+ ### Finding failed rollouts
+ 
+ Harbor writes each rollout to a subdirectory under `harbor_jobs_dir`. A practical
+-- 
+2.56.0
+
