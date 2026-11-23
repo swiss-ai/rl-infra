@@ -189,6 +189,11 @@ filesystems, `SITE=<name>`.
 
 ## Status
 
+Agent-harness GRPO on Apertus 2 Chonk (Terminus-2 and OpenCode on Harbor tasks, sandboxes on OpenSandbox):
+[experiments/chonk-sc/TESTING.md](experiments/chonk-sc/TESTING.md) runs it,
+[experiments/chonk-sc/PORTING.md](experiments/chonk-sc/PORTING.md) says which pieces to take for another
+model, task set, cluster or harness.
+
 Dense models train with the PyTorch (DTensor) backend and colocated vLLM: Qwen3-8B-Base
 on one node and Qwen3-32B on four (about 10 minutes per GRPO step with 64 prompts × 32
 generations). Qwen3-32B needs the older v1 DTensor worker (`dtensor_cfg._v2: false`),

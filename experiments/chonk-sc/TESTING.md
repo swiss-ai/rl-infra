@@ -1,8 +1,8 @@
 # Testing agent-harness GRPO on Chonk: runs V and OV at 64K
 
 A guide for trying this branch (`chonk-sc-harbor025`) on Daint. `README.md` in this directory is the full
-reference (every knob, every past problem); this page is the short path. Feedback is welcome as comments on the
-PR against `main`.
+reference (every knob, every past problem); this page is the short path. `PORTING.md` says which pieces to take
+for another model, task set, cluster or harness. Feedback is welcome as comments on the PR against `main`.
 
 ## What it does
 
@@ -128,5 +128,5 @@ label) before starting the next run.
 - **OpenCode install**: the release archive is fetched once on the login node and uploaded into each sandbox (52 MB
   per sandbox through the OpenSandbox gateway; 32 at a time tested); the 167 MB binary lives in node memory per
   sandbox. A shared read-only volume would avoid both (requested from the Breithorn admins).
-- Gym runs at a pinned commit plus 45 patches (`backends/nemo-rl/apertus2/patches/gym/`); the ones of ours are on
+- Gym runs at a pinned commit plus 46 patches (`backends/nemo-rl/apertus2/patches/gym/`); the ones of ours are on
   their way upstream into swiss-ai/nemo-gym.

@@ -1,6 +1,7 @@
 # Apertus 2 Chonk on NeMo-RL's Single-Controller path (step 0, run A, run B, run S, run OV)
 
 **New here? Start with `TESTING.md`**: prerequisites, commands and expected results of runs V and OV at 64K.
+**`PORTING.md`**: which pieces to take for another model, task set, cluster or harness.
 This README is the full reference and the history of the runs.
 
 Implements the run sequence of the feasibility analysis
