@@ -35,6 +35,25 @@ the chat template of the released Instruct model and runs one optimizer step:
 bash backends/posttraining/submit.sh v11-check check.sh
 ```
 
+### A note for students in the LSAIE course account (CSCS Alps)
+
+Students of the LSAIE course (project `lsaiews26`) run SFT and GRPO with their course account.
+Before the first run, copy the course settings into the repository root:
+
+```bash
+cp sites/lsaiews26.site.env.example site.env
+```
+
+Jobs go to the `normal` partition. To use `debug` instead, which allows at most 1.5 hours per job, add
+`PARTITION=debug JOB_TIME=01:00:00` in front of the command.
+
+Two more things:
+
+1. The login nodes have no `hf`. Replace `hf download` in the commands above with
+   `uvx --python 3.12 --from huggingface_hub hf download`.
+2. A full run needs a W&B account: put your API key in `~/.wandb_api_key` (`chmod 600`), and in `site.env` set
+   `WANDB_ENTITY` to your W&B user or team and `WANDB_PROJECT` (e.g. `apertus-v11`). Debug runs (`DEBUG=1`) need no W&B account.
+
 ## SFT
 
 ```bash
