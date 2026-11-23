@@ -7,6 +7,9 @@
 #          CONTAINER, MOUNTS and PYXIS_EXTRA_ARGS for ray.sub, and its [env] (plus the profile's
 #          SITE_ENV) is exported for the job, as pyxis passes the host environment in.
 
+# A value for the right-hand side of the sed commands below: package lists hold "|" (the separator) and may hold "&".
+_sed_escape() { printf '%s' "$1" | sed -e 's/[\\|&]/\\&/g'; }
+
 # Renders CONTAINER_SPEC to stdout: @@VAR@@ placeholders from the environment, and the
 # @@SITE_MOUNTS@@ line as one mount per line (the profile's SITE_MOUNTS).
 container_render() {
@@ -24,9 +27,8 @@ container_render() {
         -e "s|@@GYM_VENV_DIR@@|${GYM_VENV_DIR:-${SCRATCH}/nemo-rl-apertus2/gym-venvs}|g" \
         -e "s|@@UV_CACHE_DIR@@|${JOB_UV_CACHE_DIR:-${SCRATCH}/.cache/uv}|g" \
         -e "s|@@PYDEPS@@|${PYDEPS:-}|g" \
-        -e "s|@@PYDEPS_APERTUS2@@|${PYDEPS_APERTUS2:-}|g" \
-        -e "s|@@PYDEPS_GYM@@|${PYDEPS_GYM:-}|g" \
-        -e "s|@@PYDEPS_RG@@|${PYDEPS_RG:-}|g" \
+        -e "s|@@PYDEPS_PKGS@@|$(_sed_escape "${PYDEPS_PKGS:-}")|g" \
+        -e "s|@@PYDEPS_PKGS_PY313@@|$(_sed_escape "${PYDEPS_PKGS_PY313:-}")|g" \
         -e "s|@@MEGATRON_DIR@@|${MEGATRON_DIR:-}|g" \
         -e "s|@@BRIDGE_DIR@@|${BRIDGE_DIR:-}|g" \
         -e "s|@@VLLM_RUNNER@@|${VLLM_RUNNER:-}|g" \

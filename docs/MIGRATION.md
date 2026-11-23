@@ -128,7 +128,7 @@ The NeMo-RL clones of these branches may also hold commits that are not patches 
 | `envs/apertus2-system.json`, `-high.json`, `-sciworld-act.json`, `-sciworld-act-high.json` | `shared/frames/` |
 | `envs/stage_judge_model.sh`, `envs/strip_few_shot.py` | `shared/scripts/` |
 | `envs/score-text.yaml` | `shared/debug/` |
-| the judge blocks of `envs/stem-mix-run4.yaml` / `run5.yaml` (`env.llm_judge`, `env.judge_pool`) | `shared/judges/llm-judge.yaml` (taken in with `defaults:`) |
+| the judge blocks of `envs/stem-mix-run4.yaml` / `run5.yaml` (`env.llm_judge`, `env.judge_pool`) | `shared/judges/llm-judge.yaml` (the grader) and `shared/judges/servers/gemma-4-26B-A4B-it.yaml` (the server), both in the expert's `defaults:`; the server's nodes (`env.extra_judge_pools.<model>.num_nodes`) and the grader's server (`env.llm_judge.judge_pool`) in its base.yaml |
 | `experiments/long-context/setup-kcp.sh`, `experiments/long-context/kcp/` | `backends/nemo-rl/apertus2/kcp/setup.sh`, `kcp/` |
 | `experiments/long-context/recipes/sftv02-stem-*.yaml` | `size:` tiers (`experts/main.yaml`) |
 | `recipes/apertus2-*.yaml` (all 34) | `recipes/archive/`; the STEM recipe written out as `recipes/chonk-sftv02.yaml` |

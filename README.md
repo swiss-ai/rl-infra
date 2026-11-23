@@ -63,11 +63,11 @@ references and judge prompt with the same judge model, reported as
 The few-shot prompt is written into the data rows by the two `prepare_*` scripts, so changing
 `experts/chat/scripts/ultrafeedback-few-shot.txt` means running them again.
 
-To see how loaded the judge is, each replica writes its state to `<checkpoint_dir>/judge_stats.jsonl`
+To see how loaded the judge is, each replica writes its state to the server's `stats_path` (e.g. `<log_dir>/judge_stats-<model>.jsonl`)
 every few seconds. `python3.12 backends/nemo-rl/apertus2/judge_stats.py <file> [start] [end]` sums it
 up per replica, for a window in seconds from the start of the run. Requests waiting and `queue_s`
 well above 0 mean the judge's GPUs are full: check `max_num_batched_tokens` in its `vllm_kwargs`, then
-add judge nodes with `env.judge_pool.num_nodes` and a recipe of the matching size, as in
+add judge nodes (`num_nodes` of the server in the expert's base.yaml; older task files: `env.judge_pool.num_nodes`), as in
 `recipes/archive/apertus2-chonk-vllm-adamw-rubric-2judge.yaml`. Replicas with room while batches still take much longer than their generation mean the
 limit is in front of them, in Gym's servers, so try `num_workers`. Replicas with very different load
 mean Gym is not spreading the calls evenly.
@@ -99,7 +99,8 @@ into scratch, which `check_judge.sh` does in about 13 minutes on 64 CPUs, after 
 ```bash
 JOB_TIME=01:00:00 JUDGE_MODEL=$SCRATCH/models/NVIDIA-Nemotron-3-Super-120B-A12B-FP8 JUDGE_GPUS=0,1 \
     JUDGE_VLLM_ARGS="--tensor-parallel-size 2 --dtype auto --kv-cache-dtype fp8 --enable-chunked-prefill --mamba-ssm-cache-dtype float32 --enable-prefix-caching --trust-remote-code" \
-    PYDEPS_GYM=1 PYDEPS=$SCRATCH/nemo-rl-apertus2/pydeps-gym CHECK_SCRIPT=check_judge.sh \
+    PYDEPS_PKGS="openai==2.44.0|devtools==0.13.0|yappi==1.7.6|pydot==4.0.1|asttokens==3.0.2|executing==2.3.0" \
+    PYDEPS=$SCRATCH/nemo-rl-apertus2/pydeps-check-gym CHECK_SCRIPT=check_judge.sh \
     bash backends/nemo-rl/apertus2/check_env_job.sh
 ```
 
@@ -126,7 +127,7 @@ experts/                what to train on (experts/README.md)
     archive/            task files of runs that happened, as they ran (to reproduce them)
     scripts/            data builders and checks of the expert
 shared/                 pieces task files take in: frames/ (system frames: thinking level, tools),
-                        judges/llm-judge.yaml, prompts/ (few-shot), scripts/ (judge download, few-shot removal), debug/
+                        judges/ (llm-judge.yaml: the grader; servers/: one file per judge model), prompts/ (few-shot), scripts/ (judge download, few-shot removal), debug/
 recipes/                how to train: one flat file per model (chonk-sftv02.yaml: checkpoint, trainer, optimizer,
                         vLLM, GRPO); earlier recipes in recipes/archive/ (recipes/README.md)
 ```

@@ -18,7 +18,10 @@
 #                                  made here, the config copies, preflight and the sbatch command; no
 #                                  setup (it may change the NeMo-RL clone), no job
 #
-# rl-infra keys (top level of a task file, inherited through `defaults` like any other key):
+# Keys run.sh reads from the yaml files, not command-line arguments. They are written at the top level of
+# experts/main.yaml, an expert's base.yaml or a dev file (a later file wins, as for any key) and are rl-infra's own:
+# NeMo-RL does not know them, so run.sh turns them into NeMo-RL settings and leaves them out of the job's copies.
+# Defaults: size, job_time and context in experts/main.yaml; recipe (and pydeps, script) in the expert's base.yaml.
 #   recipe:    model and algorithm, a file under recipes/ (path relative to this repository)
 #   context:   longest prompt + answer in tokens (up to 131072); with the recipe's context_parallel block it sets
 #              CP (context / tokens_per_gpu, rounded up to a power of 2), packing (= context), KCP above CP 4
@@ -27,14 +30,15 @@
 #              lite (base trainer, half the vLLM), cheap (the base), expensive (twice the base), ultra
 #              (expensive with twice the vLLM); or explicit counts, <trainer>+<vLLM> (e.g. 16+32)
 #   job_time:  Slurm time limit; a checkpointing run saves and stops 30 minutes before it
-#   pydeps:    reasoning_gym, for Reasoning Gym's scorers in the math environment
+#   pydeps:    a list of extra Python packages for the job (pip requirement strings), installed in an overlay
+#              of their own (backends/nemo-rl/apertus2/pydeps.sh)
 #   script:    entry point instead of examples/run_grpo.py (NeMo Gym tasks)
 #   template:  true in the placeholder files of a new expert; run.sh refuses to submit them
 # A task without `recipe:` names its recipe in `defaults` (the older layout).
 #
 # Environment: RUN names the run (default: the task's path under experts/ and the time, e.g.
 # stem-20261120-081500, stem-dev-<variant>-20261120-081500). RECIPE, SIZE and JOB_TIME replace the
-# task's recipe, size and job_time.
+# value of recipe, size and job_time from the yaml files for one launch (context has no such variable).
 # W&B: WANDB_PROJECT, WANDB_ENTITY and WANDB_KEY_FILE in site.env. PARTITION, ACCOUNT as usual.
 #
 # The job reads a copy of every config file made at launch (${OUT}/configs/<run>-<time>/), so an edit
@@ -74,7 +78,6 @@ DEBUG="${DEBUG:-0}"; DRY_RUN="${DRY_RUN:-0}"
 # A debug run gets 2 hours unless JOB_TIME is given; the task's job_time is for its full run.
 if [[ "${DEBUG}" == 1 ]]; then JOB_TIME="${JOB_TIME:-02:00:00}"; else JOB_TIME="${JOB_TIME:-$(task_key job_time)}"; fi
 TASK_SCRIPT="$(task_key script)"
-TASK_PYDEPS="$(task_key pydeps)"
 # The placeholder files of a new expert carry `template: true` until their datasets are filled in.
 if [[ "$(task_key template)" == true && "${DRY_RUN}" != 1 ]]; then
     echo "ERROR: ${TASK} is a template (template: true): fill in its datasets, then remove that key (DRY_RUN=1 works)" >&2; exit 1
@@ -134,8 +137,28 @@ cfg() { local v; v="$(yq r "${TMP}/merged.yaml" "$1")"; [[ "${v}" == null ]] && 
 OVR=()   # overrides made here; the command line's come after them and win
 
 # --- nodes: a tier of the recipe's base layout (nodes: in the recipe), explicit counts, or the task's own
-JUDGE=$(( $(cfg env.judge_pool.num_nodes || true) + 0 ))
-for n in $(yq r "${TMP}/merged.yaml" 'env.extra_judge_pools.*.num_nodes' 2>/dev/null); do JUDGE=$(( JUDGE + n )); done
+# Judge servers: env.judge_pool (server "judge") and env.extra_judge_pools.<model> (server "judge_<model>", one file
+# per model in shared/judges/servers/). A server file lays out one vLLM replica (vllm_cfg TP x PP GPUs); the expert
+# gives the server's nodes, which must hold whole replicas. They come on top of the tier's nodes.
+JUDGE=0; SERVERS=()
+pools=(); [[ -n "$(yq r "${TMP}/merged.yaml" env.judge_pool 2>/dev/null)" ]] && pools+=("judge_pool=judge")
+for k in $(yq r "${TMP}/merged.yaml" --printMode p 'env.extra_judge_pools.*' 2>/dev/null); do
+    k="${k#env.extra_judge_pools.}"; pools+=("extra_judge_pools.${k}=judge_${k}")
+done
+for p in "${pools[@]+"${pools[@]}"}"; do
+    key="env.${p%%=*}"; name="${p#*=}"; n="$(cfg "${key}.num_nodes")"
+    [[ "${n}" =~ ^[0-9]+$ ]] || { echo "ERROR: judge server ${name} has no node count: set ${key}.num_nodes in the expert's base.yaml" >&2; exit 1; }
+    g=$(( $(cfg "${key}.generation.vllm_cfg.tensor_parallel_size" || true) + 0 )); (( g > 0 )) || g=1
+    pp=$(( $(cfg "${key}.generation.vllm_cfg.pipeline_parallel_size" || true) + 0 )); (( pp > 0 )) && g=$(( g * pp ))
+    (( n * GPUS_PER_NODE >= g && n * GPUS_PER_NODE % g == 0 )) \
+        || { echo "ERROR: judge server ${name}: ${n} node(s) do not hold whole replicas of ${g} GPUs" >&2; exit 1; }
+    JUDGE=$(( JUDGE + n )); SERVERS+=("${name}")
+done
+if [[ -n "$(yq r "${TMP}/merged.yaml" env.llm_judge 2>/dev/null)" ]]; then
+    want="$(cfg env.llm_judge.judge_pool)"
+    [[ " ${SERVERS[*]-} " == *" ${want} "* ]] \
+        || { echo "ERROR: env.llm_judge.judge_pool is '${want}', not one of the run's judge servers (${SERVERS[*]-none})" >&2; exit 1; }
+fi
 if [[ -n "${SIZE}" ]]; then
     if [[ "${SIZE}" =~ ^([0-9]+)\+([0-9]+)$ ]]; then
         TRAIN="${BASH_REMATCH[1]}"; GEN="${BASH_REMATCH[2]}"
@@ -217,13 +240,16 @@ if [[ -z "${RL_DATA_DIR}" ]] && grep -q 'RL_DATA_DIR' "${DIR}"/*.yaml; then
 fi
 mkdir -p "${OUT}/configs"
 
-# --- runtime overlays
-# pydeps.sh replaces an overlay when its list changes, and running jobs import from it, so a task
-# with a script gets an overlay of its own. The task alone sets the overlay flags: one left exported
-# in the shell would put its packages into the overlay of a task that does not ask for them.
-unset PYDEPS_GYM PYDEPS_RG
+# --- runtime overlays (pydeps.sh)
+# The extra Python packages of a job: the task's `pydeps:` list, what NeMo Gym needs for a task with `script:`
+# (PYDEPS_GYM_PKGS, apertus2/env) and apertus-common for the Apertus 2 message format. Each package list gets a
+# directory of its own, named after it: overlays live on scratch, shared by all of your jobs, and pydeps.sh
+# replaces one whose list changed, so a job never sees packages it did not ask for or an overlay another
+# launch is rebuilding.
+mapfile -t PKGS < <(yq r "${TMP}/task.yaml" 'pydeps[*]' 2>/dev/null | sed '/^null$/d;/^$/d')
 if [[ -n "${TASK_SCRIPT}" ]]; then
-    export SCRIPT="${TASK_SCRIPT}" PYDEPS_GYM=1 PYDEPS="${SCRATCH}/nemo-rl-apertus2/pydeps-gym"
+    PKGS+=("${PYDEPS_GYM_PKGS[@]}")
+    export SCRIPT="${TASK_SCRIPT}"
     # Gym builds its server venvs with uv and keeps uv's cache (about 70k files per build) in the
     # directory NeMo-RL gives it: the container's `uv cache dir`, unless the config names one. NeMo-RL's
     # ray.sub unsets UV_CACHE_DIR before srun, so under pyxis (HANGANG) the container spec's value never
@@ -231,22 +257,28 @@ if [[ -n "${TASK_SCRIPT}" ]]; then
     # Naming it in the config works on every site; it goes first, so a command-line override still wins.
     OVR=("++env.nemo_gym.uv_cache_dir=${JOB_UV_CACHE_DIR:-${SCRATCH}/.cache/uv}" "${OVR[@]}")
 fi
-# Reasoning Gym scored in NeMo-RL's math environment gets reasoning-gym in an overlay of its own.
-if [[ "${TASK_PYDEPS}" == reasoning_gym ]]; then
-    export PYDEPS_RG=1 PYDEPS="${PYDEPS}-rg"
-elif [[ -n "${TASK_PYDEPS}" ]]; then
-    echo "ERROR: unknown pydeps '${TASK_PYDEPS}' in ${TASK} (known: reasoning_gym)" >&2; exit 1
+PYDEPS_PKGS="$(IFS='|'; echo "${PKGS[*]}")" PYDEPS_PKGS_PY313=""
+# The Apertus 2 message format (policy.generation.output_format: apertus2) encodes prompts and parses the
+# frames with apertus-common, from the checkout setup.sh makes at the pin's commit.
+unset PYDEPS_APERTUS2
+if [[ "$(cfg policy.generation.output_format)" == apertus2 ]]; then
+    source "${PIN_FILE}"
+    export PYDEPS_APERTUS2="${SCRATCH}/nemo-rl-apertus2/apertus-common-${APERTUS_COMMON_COMMIT:0:9}"
+    PYDEPS_PKGS_PY313="${PYDEPS_APERTUS2}"
 fi
+if [[ -n "${PYDEPS_PKGS}${PYDEPS_PKGS_PY313}" ]]; then
+    PYDEPS="${SCRATCH}/nemo-rl-apertus2/pydeps-$(printf '%s %s' "${PYDEPS_PKGS}" "${PYDEPS_PKGS_PY313}" | sha1sum | cut -c1-10)"
+fi
+export PYDEPS PYDEPS_PKGS PYDEPS_PKGS_PY313
+
 # A recipe on an SFT checkpoint names its export (absolute, or relative to $SCRATCH; a symlink to an
-# export elsewhere works). apertus-common goes in an overlay of its own, for the same reason. The export
+# export elsewhere works). The export
 # is staged as $SCRATCH/models/<name>: its shards are linked, not copied; only the small files are copied
 # when the modeling code has to be added to them. policy.model_name is set to that path here, so a recipe
 # names the model once.
 SFT_EXPORT="$(cfg sft_export)"
 if [[ -n "${SFT_EXPORT}" ]]; then
     source "${PIN_FILE}"
-    export PYDEPS_APERTUS2="${SCRATCH}/nemo-rl-apertus2/apertus-common-${APERTUS_COMMON_COMMIT:0:9}"
-    export PYDEPS="${PYDEPS}-apertus2"
     if [[ "${SFT_EXPORT}" == /* ]]; then SRC="${SFT_EXPORT}"; else SRC="${SCRATCH}/${SFT_EXPORT}"; fi
     export SRC DST="${SCRATCH}/models/$(basename "${SFT_EXPORT}")"
     OVR+=(policy.model_name="${DST}")

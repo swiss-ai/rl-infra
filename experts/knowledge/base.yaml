@@ -4,7 +4,10 @@
 # Starting point: open factual questions graded by the shared LLM judge (../../shared/judges/llm-judge.yaml) against a
 # reference answer, and multiple choice graded on the option letter in the claim (math_default), as the science
 # knowledge sets of the STEM mix (experts/stem/base.yaml: openqa, mcqa).
-defaults: ../../shared/judges/llm-judge.yaml
+# The LLM judge: the grader and the judge model's server (its nodes are under env.extra_judge_pools below).
+defaults:
+  - ../../shared/judges/llm-judge.yaml
+  - ../../shared/judges/servers/gemma-4-26B-A4B-it.yaml
 template: true
 recipe: recipes/chonk-sftv02.yaml
 
@@ -49,6 +52,13 @@ data:
     env_name: llm_judge
 
 env:
+  # The judge model's nodes (its replicas are laid out in shared/judges/servers/gemma-4-26B-A4B-it.yaml: 4 per node),
+  # and the grader asks that server.
+  extra_judge_pools:
+    gemma-4-26B-A4B-it:
+      num_nodes: 1
+  llm_judge:
+    judge_pool: judge_gemma-4-26B-A4B-it
   # Multiple choice: the math environment grading the option letter in the claim. Environment names must be
   # registered in NeMo-RL (nemo_rl/environments/utils.py): math and math_default are two configurations of the math
   # environment, llm_judge the judge.

@@ -3,8 +3,10 @@
 # Apertus 2 container, without NeMo-RL or a Gym server. It loads the judge model, asks it to score a
 # good and a bad answer with the real rubrics, and fails unless the good one scores higher. Runs
 # as a one-node job, after setup-gym.sh on the login node (it reads the rubrics from the Gym checkout):
-#   PYDEPS_GYM=1 PYDEPS=$SCRATCH/nemo-rl-apertus2/pydeps-gym CHECK_SCRIPT=check_judge.sh \
+#   PYDEPS_PKGS="openai==2.44.0|devtools==0.13.0|yappi==1.7.6|pydot==4.0.1|asttokens==3.0.2|executing==2.3.0" \
+#       PYDEPS=$SCRATCH/nemo-rl-apertus2/pydeps-check-gym CHECK_SCRIPT=check_judge.sh \
 #       bash backends/nemo-rl/apertus2/check_env_job.sh
+# (PYDEPS_PKGS = PYDEPS_GYM_PKGS of apertus2/env, joined by "|")
 # JUDGE_MODEL picks the model, JUDGE_VLLM_ARGS adds the flags it needs, and JUDGE_GPUS=0,1 with
 # --tensor-parallel-size 2 serves one that is too big for a GPU.
 set -euo pipefail

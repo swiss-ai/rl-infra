@@ -21,10 +21,25 @@
 # no Bemis-Murcko scaffold shared with train).
 # Each user needs: the judge model in ${SCRATCH}/models (shared/scripts/stage_judge_model.sh) and ScienceWorld's JRE and
 # package in ~/sciworld (handover/scienceworld-integration.md).
-defaults: ../../shared/judges/llm-judge.yaml
+# The LLM judge: the grader and the judge model's server (its nodes are under env.extra_judge_pools below).
+defaults:
+  - ../../shared/judges/llm-judge.yaml
+  - ../../shared/judges/servers/gemma-4-26B-A4B-it.yaml
 recipe: recipes/chonk-sftv02.yaml
-# Reasoning Gym's scorers in the pydeps overlay (run.sh).
-pydeps: reasoning_gym
+# Extra Python packages for the job (run.sh installs them in an overlay of their own): reasoning-gym, which scores
+# Reasoning Gym in the math environment (0.1.25, as Gym's reasoning_gym server resolves; 0.1.19 lacks coin_flip,
+# kakurasu and survo), and its dependencies the image lacks (it has numpy, sympy, matplotlib, pyyaml, pytz, rich
+# and tabulate). pycosat has no wheels and compiles in the job (gcc-13 and the Python 3.12 headers are in the image).
+pydeps:
+  - reasoning-gym==0.1.25
+  - arckit==0.1.0
+  - drawsvg==2.4.2
+  - bfi==1.0.4
+  - cellpylib==2.4.0
+  - magiccube==0.3.0
+  - pycosat==0.6.6
+  - pyfiglet==1.0.2
+  - zss==1.2.0
 
 # Thinking level per dataset: the system frame its prompts start with. The data entries below refer to these keys,
 # so a run file changes a level by overriding one key here. ScienceWorld's frame also declares the act tool.
@@ -109,6 +124,13 @@ data:
     env_name: math
 
 env:
+  # The judge model's nodes (its replicas are laid out in shared/judges/servers/gemma-4-26B-A4B-it.yaml: 4 per node),
+  # and the grader asks that server.
+  extra_judge_pools:
+    gemma-4-26B-A4B-it:
+      num_nodes: 1
+  llm_judge:
+    judge_pool: judge_gemma-4-26B-A4B-it
   # Math answers (DAPO, NuminaMath, chemistry): NeMo-RL's math environment, grading the claim frame of the output.
   math:
     reward_frame: claim

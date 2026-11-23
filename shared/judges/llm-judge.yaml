@@ -1,11 +1,20 @@
-# The LLM judge, shared by the experts that grade open answers (STEM openqa; templates of safety, knowledge,
-# translation): the llm_judge environment (NeMo-RL patches 0053-0056; handover/openqa-judge-integration.md) and
-# the judge model on a node of its own (env.judge_pool; run.sh adds its nodes to the tier). A task takes it with
-# `defaults: ../../shared/judges/llm-judge.yaml` and points a dataset at it with `env_name: llm_judge`; the judge model is
-# downloaded once per user with shared/scripts/stage_judge_model.sh.
+# The LLM judge grader, shared by the experts that grade open answers (STEM openqa; templates of safety, knowledge,
+# translation): the llm_judge environment (NeMo-RL patches 0053-0056; handover/openqa-judge-integration.md). It asks
+# a judge server (env.extra_judge_pools.<model>, named judge_<model>) whether an answer agrees with the reference and turns the reply into a reward.
+# Which judge model serves it, and on how many nodes, is the expert's choice: its base.yaml takes this file, a server
+# file from shared/judges/servers/, gives that server its nodes and points env.llm_judge.judge_pool at it:
+#   defaults:
+#     - ../../shared/judges/llm-judge.yaml
+#     - ../../shared/judges/servers/gemma-4-26B-A4B-it.yaml
+#   env:
+#     extra_judge_pools: {gemma-4-26B-A4B-it: {num_nodes: 1}}
+#     llm_judge: {judge_pool: judge_gemma-4-26B-A4B-it}
+# and points a dataset at it with `env_name: llm_judge`. temperature and top_p must equal the server's
+# (generation.temperature/top_p); NeMo-RL's server rejects other sampling settings.
 env:
   llm_judge:
-    judge_pool: judge
+    # The server it asks: judge_<model> for env.extra_judge_pools.<model> (set by the expert, with the server file).
+    judge_pool: ???
     mode: verdict
     score: hard
     min_verdict_mass: 0.0
@@ -28,44 +37,3 @@ env:
     log_every: 512
     chat_template_kwargs:
       enable_thinking: false
-  # The judge's own node (run.sh adds it to the tier's nodes).
-  judge_pool:
-    num_nodes: 1
-    stats_path: ${logger.log_dir}/judge_stats.jsonl
-    stats_interval_s: 5.0
-    generation:
-      backend: vllm
-      model_name: ${oc.env:SCRATCH}/models/gemma-4-26B-A4B-it
-      max_new_tokens: 1024
-      temperature: 1.0
-      top_p: 1.0
-      top_k: null
-      val_temperature: 0.0
-      val_top_p: 1.0
-      val_top_k: null
-      stop_token_ids: null
-      stop_strings: null
-      colocated:
-        enabled: false
-      vllm_cfg:
-        async_engine: true
-        expose_http_server: true
-        precision: bfloat16
-        kv_cache_dtype: auto
-        logprobs_mode: processed_logprobs
-        tensor_parallel_size: 1
-        pipeline_parallel_size: 1
-        expert_parallel_size: 1
-        gpu_memory_utilization: 0.88
-        max_model_len: 8192
-        enforce_eager: false
-        use_deep_gemm: false
-        num_last_layers_in_bf16: 0
-        num_first_layers_in_bf16: 0
-        enable_vllm_metrics_logger: true
-        vllm_metrics_logger_interval: 2.0
-        refit_with_reload_api: false
-        enable_prefix_caching: true
-      vllm_kwargs:
-        max_num_seqs: 256
-        max_num_batched_tokens: 16384

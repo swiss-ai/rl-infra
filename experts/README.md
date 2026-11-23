@@ -44,8 +44,8 @@ What several experts take in lives in `shared/` at the top of the repository:
 - `shared/frames/`: the system frame every prompt of the Apertus 2 message format starts with, as small JSON files:
   the thinking level (`{"thinking":"high","tools":[]}`) and the tools the model may call (ScienceWorld's `act`). A
   dataset picks one with `system_prompt_file`; in `base.yaml` through `frames.<key>`.
-- `shared/judges/llm-judge.yaml`: the judge environment and its node, taken in with
-  `defaults: ../../shared/judges/llm-judge.yaml`.
+- `shared/judges/llm-judge.yaml` (the grader) and `shared/judges/servers/<model>.yaml` (the judge model's server):
+  an expert takes both in `defaults:`, gives the server its nodes (`env.extra_judge_pools.<model>.num_nodes`) and points the grader at it (`env.llm_judge.judge_pool: judge_<model>`) in its own base.yaml. The server file lays out one vLLM replica (TP x PP GPUs); run.sh checks that the nodes hold whole replicas.
 - `shared/prompts/`: few-shot prompts read at run time (GSM8K five-shot, STEM four-shot).
 - `shared/scripts/`: `stage_judge_model.sh` (downloads the judge model), `strip_few_shot.py` (removes the few-shot
   prompt from prepared Gym rows); `shared/debug/score-text.yaml`, a log-probability debug task.

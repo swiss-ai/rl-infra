@@ -90,8 +90,13 @@ config_freeze() {
         awk -v keys="^(${RL_INFRA_KEYS}):" '
             /^defaults:/ { in_defaults = 1; next }
             in_defaults && /^[[:space:]]+-/ { next }
+            # A comment or blank line inside the list does not end it.
+            in_defaults && /^[[:space:]]*(#.*)?$/ { next }
             { in_defaults = 0 }
-            $0 ~ keys { next }
+            # An rl-infra key goes with its continuation lines (a list or block below it).
+            in_key && /^([[:space:]]|-)/ { next }
+            { in_key = 0 }
+            $0 ~ keys { in_key = 1; next }
             { print }
         ' "${file}"
     } > "${copy}"

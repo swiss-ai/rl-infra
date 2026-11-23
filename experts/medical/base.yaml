@@ -2,7 +2,7 @@
 # placeholders. Fill in the TODOs, then delete `template: true` (run.sh refuses to submit a template; DRY_RUN=1
 # shows it). Layout as experts/stem/base.yaml; this file is the official run (bash run.sh medical).
 # Starting point: medical multiple choice (e.g. MedQA, MedMCQA) graded on the option letter in the claim frame. For
-# open answers graded by a judge, add `defaults: ../../shared/judges/llm-judge.yaml` and a dataset with env_name llm_judge.
+# open answers graded by a judge, add the judge to `defaults:` as stem/base.yaml does (shared/judges/llm-judge.yaml and a server file), env.extra_judge_pools.<model>.num_nodes and env.llm_judge.judge_pool, and a dataset with env_name llm_judge.
 template: true
 recipe: recipes/chonk-sftv02.yaml
 

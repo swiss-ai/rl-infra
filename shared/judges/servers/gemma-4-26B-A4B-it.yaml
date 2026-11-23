@@ -1,0 +1,46 @@
+# Judge server for google/gemma-4-26B-A4B-it, named after the model: env.extra_judge_pools.gemma-4-26B-A4B-it, which
+# graders address as judge_gemma-4-26B-A4B-it. This file describes one vLLM replica (vllm_cfg below: TP1 x PP1, one
+# GPU, so 4 replicas per node; the smallest server is 1 node). How many nodes it gets is the expert's choice:
+# env.extra_judge_pools.gemma-4-26B-A4B-it.num_nodes in its base.yaml (run.sh adds them to the tier's nodes).
+# Download the model once per user: bash shared/scripts/stage_judge_model.sh google/gemma-4-26B-A4B-it
+env:
+  extra_judge_pools:
+    gemma-4-26B-A4B-it:
+      stats_path: ${logger.log_dir}/judge_stats-gemma-4-26B-A4B-it.jsonl
+      stats_interval_s: 5.0
+      generation:
+        backend: vllm
+        model_name: ${oc.env:SCRATCH}/models/gemma-4-26B-A4B-it
+        max_new_tokens: 1024
+        temperature: 1.0
+        top_p: 1.0
+        top_k: null
+        val_temperature: 0.0
+        val_top_p: 1.0
+        val_top_k: null
+        stop_token_ids: null
+        stop_strings: null
+        colocated:
+          enabled: false
+        vllm_cfg:
+          async_engine: true
+          expose_http_server: true
+          precision: bfloat16
+          kv_cache_dtype: auto
+          logprobs_mode: processed_logprobs
+          tensor_parallel_size: 1
+          pipeline_parallel_size: 1
+          expert_parallel_size: 1
+          gpu_memory_utilization: 0.88
+          max_model_len: 8192
+          enforce_eager: false
+          use_deep_gemm: false
+          num_last_layers_in_bf16: 0
+          num_first_layers_in_bf16: 0
+          enable_vllm_metrics_logger: true
+          vllm_metrics_logger_interval: 2.0
+          refit_with_reload_api: false
+          enable_prefix_caching: true
+        vllm_kwargs:
+          max_num_seqs: 256
+          max_num_batched_tokens: 16384

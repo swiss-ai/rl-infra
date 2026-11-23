@@ -14,8 +14,8 @@
 # chemistry prompts (2 per RDKit property; molecules share no Bemis-Murcko scaffold with train).
 defaults: ../../../recipes/archive/apertus2-chonk-sftv02-18315-vllm-adamw-dapo-32n-judge1.yaml
 
-# Reasoning Gym's scorers in the pydeps overlay (run.sh).
-pydeps: reasoning_gym
+# Reasoning Gym's scorers in an overlay of their own (run.sh; the list of experts/stem/base.yaml).
+pydeps: [reasoning-gym==0.1.25, arckit==0.1.0, drawsvg==2.4.2, bfi==1.0.4, cellpylib==2.4.0, magiccube==0.3.0, pycosat==0.6.6, pyfiglet==1.0.2, zss==1.2.0]
 
 grpo:
   max_num_steps: 135

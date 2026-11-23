@@ -1,6 +1,6 @@
 #!/bin/bash
 # Test of the math environment's reasoning_gym verifier (NeMo-RL patch 0034) before a training job:
-# installs the PYDEPS_RG overlay, starts the real Ray worker and scores, for every row of a native
+# installs the STEM task's pydeps overlay, starts the real Ray worker and scores, for every row of a native
 # Reasoning Gym file, the gold answer (plain, in <answer> tags, in \boxed{}), an empty answer and the
 # gold answer of another row of the same task, plus known reward hacks (NaN on complex_arithmetic and
 # number_sorting, "0" on coin_flip, an unsafe task) and answers that some scorers pay a little for (any
@@ -8,7 +8,8 @@
 # rows (default 0), or if any other case scores above 0, except another row's answer when it is also right.
 # Rows from experts/stem/scripts/prepare_reasoning_gym.py. Runs as a one-node job, after setup.sh has applied patch 0034 to
 # the clone (run.sh, or a DRY_RUN=1 of it, does):
-#   PYDEPS_RG=1 PYDEPS=$SCRATCH/nemo-rl-apertus2/pydeps-rg CHECK_SCRIPT=check_rg_verifier.sh \
+#   PYDEPS_PKGS="$(yq r experts/stem/base.yaml 'pydeps[*]' | paste -sd'|')" PYDEPS=$SCRATCH/nemo-rl-apertus2/pydeps-check-rg \
+#       CHECK_SCRIPT=check_rg_verifier.sh \
 #       RG_FILE=$SCRATCH/reasoning-gym/native/train.jsonl bash backends/nemo-rl/apertus2/check_env_job.sh
 set -euo pipefail
 

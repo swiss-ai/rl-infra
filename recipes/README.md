@@ -29,3 +29,12 @@ datasets and environments (`experts/<expert>/base.yaml`), sequence lengths, pack
 coding and experiment launchers and the commands in `docs/runs.md` use them. `chonk-sftv02.yaml` was written
 out from `archive/apertus2-chonk-sftv02-grpo.yaml` (14 files deep); the STEM run gives the same config with either,
 apart from five settings of the DTensor trainer, which this recipe switches off.
+
+## To consider
+
+- **Weight decay with Adam on a Muon-trained model** (2026-11-22): `chonk-sftv02.yaml` inherits Adam's
+  `weight_decay: 0.01` from NeMo-RL's defaults, while Chonk was pretrained and SFT-trained with Muon. Advice from a
+  colleague: either train RL with Muon, or with Adam and no weight decay. At lr 2e-6 the decay shrinks the weights by
+  2e-8 per step (about 3e-6 over 135 steps), so its effect is small; setting
+  `policy.megatron_cfg.optimizer.weight_decay: 0.0` costs nothing. The larger open question is Adam's update geometry
+  on a Muon-trained model (an RL run with Muon: `recipes/archive/*muon*` have the settings of earlier trials).

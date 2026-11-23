@@ -4,6 +4,15 @@
 # archived runs). Set elsewhere, so not here: datasets and environments (experts/<expert>/base.yaml), sequence lengths,
 # packing and context parallelism (run.sh, from `context`), node tier (experts/main.yaml), checkpoints, validation schedule
 # and logging (experts/main.yaml).
+#
+# defaults: the file this one builds on. NeMo-RL loads it first and puts this file's keys on top (a key set here
+# wins; one left out keeps the parent's value). The parent is not an rl-infra file: it is NeMo-RL's own example
+# config for GRPO on math, one of the examples shipped in the NeMo-RL clone (examples/configs/), which the container
+# mounts at /opt/nemo-rl. "1B" is that example's own model size (Qwen/Qwen2.5-1.5B on OpenMathInstruct-2); neither
+# is used here, since this recipe replaces the model and trainer and the expert's base.yaml the data and
+# environments. It gives every NeMo-RL key a value, so this file lists only what differs; inherited and used are
+# mostly algorithm defaults (16 answers per prompt, PPO clip 0.2, temperature 1.0, Adam betas and weight decay,
+# gradient clipping 1.0, seed 42).
 defaults: /opt/nemo-rl/examples/configs/grpo_math_1B.yaml
 # Base node layout, the "cheap" tier (run.sh derives lite, expensive and ultra from it; experts/main.yaml): the
 # trainer's smallest fit (PP2 x EP16 = 32 GPUs) and as many vLLM nodes (one engine per node).

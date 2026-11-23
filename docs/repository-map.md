@@ -84,7 +84,8 @@ happened, as they ran) and `scripts/` (data builders and checks); empty folders 
 |---|---|---|
 | `frames/apertus2-system.json`, `-high.json` | run | System frame of the Apertus 2 format: thinking medium, high |
 | `frames/apertus2-system-sciworld-act.json`, `-high.json` | run | The same with ScienceWorld's `act` tool declared |
-| `judges/llm-judge.yaml` | run | The LLM judge environment and its node (gemma-4-26B-A4B), taken in by STEM and the judge-based templates |
+| `judges/llm-judge.yaml` | run | The LLM judge grader (`env.llm_judge`: verdict, scoring, frames), taken in by STEM and the judge-based templates |
+| `judges/servers/gemma-4-26B-A4B-it.yaml` | run | The judge server with gemma-4-26B-A4B-it (`env.extra_judge_pools.gemma-4-26B-A4B-it`, server `judge_gemma-4-26B-A4B-it`: one replica per GPU; the expert sets its `num_nodes`) |
 | `prompts/gsm8k-five-shot.txt`, `stem-mix-four-shot.txt` | run / history | Few-shot prompts read at run time (GSM8K on the pretraining checkpoint; STEM runs 1-2) |
 | `scripts/stage_judge_model.sh` | setup | Downloads a judge model to scratch |
 | `scripts/strip_few_shot.py` | setup | Removes the few-shot prompt from prepared Gym rows (for SFT checkpoints) |

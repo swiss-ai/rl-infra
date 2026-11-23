@@ -11,13 +11,13 @@
 # As a set in a native mix, add to the mix's task file (same keys as a multiple-choice set on math_default).
 # A ResponseDataset is named after its path, "<parent dir>-<file stem>", and num_prompts_per_dataloader is keyed
 # by that name: $SCRATCH/reasoning-gym/native/train.jsonl is "native-train".
-#   pydeps: reasoning_gym
+#   pydeps: the list of experts/stem/base.yaml
 #   data.num_prompts_per_dataloader: {..., native-train: <prompts per step>}
 #   data.train: [..., {dataset_name: ResponseDataset, data_path: <train.jsonl>, env_name: reasoning_gym}]
 #   env.reasoning_gym: {num_workers: 8, verifier_type: reasoning_gym, reward_frame: claim}
 defaults: ../../../recipes/archive/apertus2-chonk-sftv02-18315-vllm-adamw-rg.yaml
-# reasoning-gym in an overlay of its own (run.sh, backends/nemo-rl/apertus2/pydeps.sh).
-pydeps: reasoning_gym
+# reasoning-gym in an overlay of its own (run.sh, backends/nemo-rl/apertus2/pydeps.sh; list as in experts/stem/base.yaml).
+pydeps: [reasoning-gym==0.1.25, arckit==0.1.0, drawsvg==2.4.2, bfi==1.0.4, cellpylib==2.4.0, magiccube==0.3.0, pycosat==0.6.6, pyfiglet==1.0.2, zss==1.2.0]
 
 grpo:
   num_prompts_per_step: 32
