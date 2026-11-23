@@ -428,7 +428,9 @@ else:
                (kw["model_info"]["max_input_tokens"], kw["model_info"]["max_output_tokens"]), (av_ctx, av_max_new))
         if EXPECT == "ov":
             expect("agent", hcfg.get("harbor_agent_import_path", "").rsplit(":", 1)[-1], "OpenCodeNemoGym")
-            expect("OpenCode version / install", (kw.get("version"), kw.get("opencode_install")), ("1.17.11", "binary"))
+            expect("OpenCode version / install (Gym 0045: uploaded archive)",
+                   (kw.get("version"), kw.get("opencode_install")), ("1.17.11", "upload"))
+            expect("OpenCode archive dir (OPENCODE_DIR)", kw.get("opencode_archive_dir"), ENV.get("OPENCODE_DIR"))
             expect("opencode_workdir unset (the task's WORKDIR, run-ov.yaml)", kw.get("opencode_workdir"), None)
             expect("OpenCode timeout (OPENCODE_TIMEOUT_SEC, default agent cap - 60)", kw.get("opencode_timeout_sec"),
                    int(ENV.get("OPENCODE_TIMEOUT_SEC") or av_cap - 60))

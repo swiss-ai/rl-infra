@@ -551,7 +551,11 @@ check_gym_agents() {
             # 0044 (job 5425513: 64 of 640 trials failed the install on images with python3 < 3.8)
             grep -q download_wget "${ca}/opencode_pod/install-opencode-binary.sh.j2" 2>/dev/null \
                 && ok "Gym patch 0044: OpenCode install with any python3, curl or wget; setup failures are infra" \
-                || bad "Gym patch 0044 missing (download_wget in opencode_pod/install-opencode-binary.sh.j2)" ;;
+                || bad "Gym patch 0044 missing (download_wget in opencode_pod/install-opencode-binary.sh.j2)"
+            # 0045: run-ov.yaml sets opencode_install: upload (the archive from OPENCODE_DIR, fetch-opencode.sh)
+            grep -q POD_ARCHIVE "${ca}/opencode_nemo_gym.py" 2>/dev/null \
+                && ok "Gym patch 0045: OpenCode archive uploaded by the adapter (opencode_install: upload)" \
+                || bad "Gym patch 0045 missing (POD_ARCHIVE in custom_agents/opencode_nemo_gym.py)" ;;
         *) bad "check_gym_agents: no checks for agent '$1'" ;;
     esac
     return "${fails}"

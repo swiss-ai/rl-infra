@@ -2,7 +2,8 @@
 # In-pod agent runs on run V's verified Harbor tasks (../../envs/harbor-verified-sft.yaml, Kostas' tasks from
 # several campaigns, separate verifier pods, images from rl-registry) with an agent inside each pod instead of
 # Terminus-2:
-#   AGENT=opencode  run OV: OpenCode 1.17.11 (as runs O / R2), binary downloaded by each pod from GitHub
+#   AGENT=opencode  run OV: OpenCode 1.17.11 (as runs O / R2), release archive fetched once (fetch-opencode.sh) and
+#                   uploaded into each pod (Gym 0045)
 # (another agent = a new AGENT value: common.sh agent_v_tag / agent_v_agent / agent_v_overlays / check_gym_agents,
 # its overlay run-<tag>.yaml, check.py)
 # The agent calls the model through the per-pod chisel tunnel (pod 127.0.0.1:8000 -> policy_model), and the token
@@ -28,7 +29,8 @@
 # the tunnel's WebSocket through the ingress gateway, use_server_proxy false as run V; 1 = through the
 # OpenSandbox server proxy, the path the tunnel was tested on in runs S/O: use it if the gymtunnel gateway test
 # fails), MODEL_CALLS (1: Gym model-call capture under $SCRATCH/harbor-jobs/<run>/model-calls; 0 off),
-# OPENCODE_TIMEOUT_SEC (1740; AGENT_CAP - 60 when AGENT_CAP is set), OPENCODE_VERSION, OPENCODE_DEBUG, CHISEL_DIR
+# OPENCODE_TIMEOUT_SEC (1740; AGENT_CAP - 60 when AGENT_CAP is set), OPENCODE_VERSION, OPENCODE_DEBUG, CHISEL_DIR,
+# OPENCODE_DIR ($SCRATCH/opencode)
 # ($SCRATCH/chisel), the long-context knobs (common.sh: SFT_CKPT, THINKING, CP, KCP, CAP, NCCL_MIN, MAX_NEW, MAX_TURNS,
 # AGENT_CAP, TTL, MASK_AGENT_TIMEOUT, MASK_OVERFLOW, KCP_MEGATRON_DIR, KCP_FLA_DIR, KCP_EDF_NAME, HANG_*),
 # and as run-v.sh: VERIFIED_STORE, HARBOR_ROOT ($SCRATCH/osb/harbor_verified), COLLECT_ARGS, EXCLUDE_CAMPAIGNS,
@@ -145,6 +147,10 @@ for v in OPENCODE_VERSION OPENCODE_TIMEOUT_SEC OPENCODE_DEBUG; do
 done
 export CHISEL_VERSION="${CHISEL_VERSION:-1.12.0}" CHISEL_DIR="${CHISEL_DIR:-${SCRATCH}/chisel}"
 bash "${APERTUS2_DIR}/fetch-chisel.sh"
+if [[ "${AGENT}" == opencode ]]; then
+    export OPENCODE_DIR="${OPENCODE_DIR:-${SCRATCH}/opencode}"
+    bash "${APERTUS2_DIR}/fetch-opencode.sh"
+fi
 
 TASK_COPY="${OUT}/configs/${RUN}-task.yaml"
 verified_task_copy "${TASK_COPY}"

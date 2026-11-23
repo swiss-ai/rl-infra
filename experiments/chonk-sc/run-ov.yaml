@@ -10,6 +10,9 @@
 # - Time: Harbor's agent cap is 1800 s (the tasks allow 3000 s); OpenCode is ended at 1740 s so its exit status
 #   and opencode.txt are recorded and the verifier runs (as run-s-swe-lego.yaml). OPENCODE_TIMEOUT_SEC overrides;
 #   at long context (CTX > 24576) run-agent-v.sh sets it to AGENT_CAP - 60 = 2940 s (common.sh agent_v_defaults).
+# - Install (Gym 0045): the adapter uploads the release archive (52 MB; fetch-opencode.sh puts it into OPENCODE_DIR
+#   on the login node) into every sandbox instead of each pod downloading it from GitHub: no internet, no
+#   python3/curl/wget needed in the image (job 5427428: 8 of 640 trials had none), only tar.
 env:
   nemo_gym:
     harbor_agent:
@@ -17,4 +20,6 @@ env:
         harbor_agent:
           harbor_agent_kwargs:
             opencode_workdir: null
+            opencode_install: upload
+            opencode_archive_dir: ${oc.env:OPENCODE_DIR}
             opencode_timeout_sec: ${oc.decode:${oc.env:OPENCODE_TIMEOUT_SEC,1740}}

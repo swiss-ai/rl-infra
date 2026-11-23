@@ -60,6 +60,8 @@ export NEMO_GYM_USER="${NEMO_GYM_USER:-${USER}}" NEMO_GYM_WORKLOAD="${NEMO_GYM_W
 export NEMO_GYM_RUN_ID="${NEMO_GYM_RUN_ID:-chonk-sc-check-s}"
 # run O (run S with AGENT=opencode): what run-s.sh exports for tunnel-sc.yaml
 export CHISEL_DIR="${CHISEL_DIR:-${SCRATCH}/chisel}"
+# run OV: where run-agent-v.sh fetches the OpenCode archive (run-ov.yaml opencode_archive_dir)
+export OPENCODE_DIR="${OPENCODE_DIR:-${SCRATCH}/opencode}"
 total=0
 
 echo "== (b) NeMo-RL clone"
@@ -158,6 +160,10 @@ if [[ "${AV_RUNS}" == 1 ]]; then
         f="${CHISEL_DIR}/chisel_${CHISEL_VERSION:-1.12.0}_linux_${a}"
         [[ -x "${f}" ]] && echo "  ok    chisel ${f}" || echo "  note  ${f} missing (run-agent-v.sh fetches it)"
     done
+    if [[ " ${RUNS} " == *" ov "* ]]; then
+        f="${OPENCODE_DIR}/${OPENCODE_VERSION:-1.17.11}/opencode-linux-x64-baseline.tar.gz"
+        [[ -s "${f}" ]] && echo "  ok    OpenCode archive ${f}" || echo "  note  ${f} missing (run-agent-v.sh fetches it)"
+    fi
     [[ -r "${RL_REGISTRY_CRED_FILE}" && -s "${RL_REGISTRY_CRED_FILE}" ]] && echo "  ok    registry credentials file ${RL_REGISTRY_CRED_FILE} (not read)" \
         || echo "  WARN  no registry credentials file ${RL_REGISTRY_CRED_FILE} (the verified images are private)"
     # long context: the KCP inputs (common.sh kcp_setup; experiments/long-context/setup-kcp.sh) and how the launchers
