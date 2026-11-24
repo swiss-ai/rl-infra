@@ -99,6 +99,12 @@ else
     say "could not read the job's end time (squeue: '${end}'); the save deadline set at submission stays"
 fi
 
+# No core files from the job's processes (NRL_CORE_LIMIT, default 0; srun passes the limit on). Clariden's
+# core_pattern is core_%h_%p, relative, and the processes run in the NeMo-RL clone in the home directory: J1 4008441's
+# preemption on 2026-11-24 left 10 cores there (up to 14.7 GB each), and the home went over its 50 GB quota, which
+# makes setup.sh fail. CUDA's GPU core dumps (CUDA_COREDUMP_FILE, in the log folder) are set separately.
+ulimit -c "${NRL_CORE_LIMIT:-0}" 2> /dev/null || say "could not set the core file limit to ${NRL_CORE_LIMIT:-0}"
+
 bash "${RAY_SUB}" &
 RAY_PID=$!
 wait "${RAY_PID}"; rc=$?
