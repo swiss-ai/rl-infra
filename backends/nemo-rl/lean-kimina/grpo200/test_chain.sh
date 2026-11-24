@@ -5,7 +5,7 @@ set -uo pipefail
 SRC="$(cd "$(dirname "$0")" && pwd)"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 S="$T/scratch"; C="$S/lean/grpo200"; B="$T/bin"
-mkdir -p "$C" "$B" "$S/rl-infra-245e760/backends/nemo-rl/lean-kimina"
+mkdir -p "$C" "$B" "$S/rl-infra-grpo200/backends/nemo-rl/lean-kimina"
 cp "$SRC"/{settings.sh,start.sh,guard.sh,stop.sh,status.sh} "$C/"
 echo 100 > "$T/id"
 next_id='n=$(cat "$T/id"); echo $((n+1)) > "$T/id"; echo $n'
@@ -31,7 +31,7 @@ cat > "$B/scancel" <<EOF
 #!/bin/bash
 echo "\$*" >> "$T/scancel.log"
 EOF
-R200="$S/rl-infra-245e760/backends/nemo-rl/lean-kimina/run-200.sh"
+R200="$S/rl-infra-grpo200/backends/nemo-rl/lean-kimina/run-200.sh"
 cat > "$R200" <<EOF
 #!/bin/bash
 T="$T"
@@ -52,16 +52,24 @@ row() { awk -F'\t' -v k="$1" -v c="$2" '$1==k {print $c}' "$C/chain.tsv"; }
 reset; out=$(cd "$C" && DRY_RUN=1 bash start.sh 2>&1); rc=$?; [[ -n "${DEBUG:-}" ]] && echo "$out"
 check '[[ $rc == 0 && ! -e $T/sbatch.log && ! -e $C/chain.tsv ]] && grep -q "dry run: nothing submitted" <<< "$out"' "dry run submits nothing"
 check '[[ $(wc -l < $T/run200.log) -eq 1 ]] && grep -q "DRY_RUN=1" $T/run200.log && grep -q "PARTITION=preemptable JOB_TIME=24:00:00" $T/run200.log' "dry run: one run-200.sh dry run, preemptable 24 h"
-check 'grep -q "G4: sbatch" <<< "$out" && ! grep -q "G5" <<< "$out"' "dry run plans 4 jobs on preemptable"
+check 'grep -q "G10: sbatch" <<< "$out" && ! grep -q "G11" <<< "$out"' "dry run plans 10 jobs on preemptable"
+check 'grep -q "SBATCH_EXTRA=--kill-on-invalid-dep=yes --time-min=06:00:00 " $T/run200.log && grep -q "at least 06:00:00" <<< "$out"' "dry run: --time-min=06:00:00 by default"
+reset; out=$(cd "$C" && TIME_MIN= DRY_RUN=1 bash start.sh 2>&1)
+check 'grep -q "SBATCH_EXTRA=--kill-on-invalid-dep=yes OUT=" $T/run200.log && ! grep -q "at least" <<< "$out"' "TIME_MIN= turns --time-min off"
+reset; out=$(cd "$C" && TIME_MIN=04:00:00 JOB_TIME=12:00:00 DRY_RUN=1 bash start.sh 2>&1)
+check 'grep -q "JOB_TIME=12:00:00 .*--time-min=04:00:00 " $T/run200.log' "TIME_MIN and JOB_TIME reach run-200.sh"
 reset; soon=$(python3 -c 'import datetime as d; print((d.datetime.now()+d.timedelta(minutes=20)).strftime("%H:%M:%S"))')
 out=$(cd "$C" && STUB_EST=$soon DRY_RUN=1 bash start.sh 2>&1)
-check 'grep -q "PARTITION=normal JOB_TIME=12:00:00" $T/run200.log && grep -q "G5: sbatch" <<< "$out"' "normal (12 h, 5 jobs) when it starts within the hour (time-of-day estimate)"
+check 'grep -q "PARTITION=normal JOB_TIME=12:00:00" $T/run200.log && grep -q "G8: sbatch" <<< "$out" && ! grep -q "G9" <<< "$out"' "normal (12 h, 8 jobs) when it starts within the hour (time-of-day estimate)"
+# The tests below use 4-job chains.
+export N_JOBS=4
 
 # Real start: the chain's dependencies, settings and records.
 reset; out=$(cd "$C" && bash start.sh 2>&1); rc=$?
 check '[[ $rc == 0 && $(grep -vc "^#" $C/chain.tsv) == 4 ]]' "4 training jobs + 4 guards submitted"
 J1=$(row 1 2) G1=$(row 1 3) J2=$(row 2 2) G2=$(row 2 3) J3=$(row 3 2) G3=$(row 3 3) J4=$(row 4 2) G4=$(row 4 3)
-check 'sed -n 1p $T/run200.log | grep -q "DEPENDENCY= SBATCH_EXTRA=--kill-on-invalid-dep=yes"' "J1 has no dependency, kill-on-invalid-dep"
+check 'sed -n 1p $T/run200.log | grep -q "DEPENDENCY= SBATCH_EXTRA=--kill-on-invalid-dep=yes --time-min=06:00:00 "' "J1 has no dependency, kill-on-invalid-dep, time-min"
+check 'grep -q "^# chain started .*time-min 06:00:00, from step 0$" $C/chain.tsv' "chain header records time-min and ends with the start step"
 check 'sed -n 2p $T/run200.log | grep -q "DEPENDENCY=afterok:${G1},singleton"' "J2 waits for G1 (afterok, singleton)"
 check 'grep -q "dependency=afterany:${J1} " $T/sbatch.log && grep -q "partition=xfer" $T/sbatch.log && grep -q "CHAIN_K=4,TRAIN_JOB=${J4}" $T/sbatch.log' "guards wait for their training job (afterany) on xfer"
 check 'grep -q "OUT=$S/nemo-rl-grpo200 LEAN_PROJECT=/capstor/store/cscs/swissai/infra01/lean_apertus_v2/lean-v4.34.0 LEAN_TOOLCHAIN=/capstor/store/cscs/swissai/infra01/lean_apertus_v2/lean-v4.34.0/elan/toolchains/leanprover--lean4---v4.34.0" $T/run200.log' "separate OUT and capstor Lean reach run-200.sh"

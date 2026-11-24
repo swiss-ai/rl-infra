@@ -10,6 +10,14 @@
 #   PARTITION        default preemptable (requeued after a preemption; at most 1 day per job)
 #   JOB_TIME         default 24:00:00; train.sh saves a checkpoint and stops 30 min before it
 #   ROWS             default $LEAN_DATA/goedel-full-5c99dce/goedel-clean.v434.jsonl (37,953 rows, checked below)
+#   FT_SAVE_PERIOD   default 1: a recovery checkpoint after every step, of which only the newest is kept, so a
+#                    preemption or crash loses at most the step in progress. A save takes 39-55 s (1.4 TB) and runs
+#                    while vLLM generates the next batch, which the trainers wait for anyway (job 4008441: about 520 s
+#                    per step). 10 was the setting until 2026-11-24.
+#   TRITON_CACHE     default $SCRATCH/lean/jit-cache/triton: Triton's kernel cache, with autotuning results
+#                    (TRITON_CACHE_AUTOTUNING=1), for the trainers and vLLM, kept across jobs. In node-local /tmp (the
+#                    EDF's default) every job compiles and tunes again: step 1 took 282 s of training and 180 s of
+#                    log-probs, later steps about 140 and 40 s (job 4008441). Empty: the EDF's /tmp.
 #   EXTRA_OVERRIDES  more overrides, space-separated, appended last (they win)
 set -euo pipefail
 LEAN_KIMINA_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -63,12 +71,21 @@ overrides=(
     grpo.val_period=20
     grpo.val_at_start=false
     # Checkpoints (1.4 TB each): every 20 steps, all kept (one per validation, for picking a checkpoint on valid);
-    # plus a recovery checkpoint every 10 steps of which only the newest is kept
+    # plus a recovery checkpoint every FT_SAVE_PERIOD steps of which only the newest is kept
     checkpointing.save_period=20
     checkpointing.keep_top_k=null
-    ++checkpointing.ft_save_period=10
+    ++checkpointing.ft_save_period="${FT_SAVE_PERIOD:-1}"
     ++checkpointing.ft_keep_latest_k=1
 )
+TRITON_CACHE="${TRITON_CACHE-${LEAN_DATA}/jit-cache/triton}"
+if [[ -n "${TRITON_CACHE}" ]]; then
+    mkdir -p "${TRITON_CACHE}"
+    # '"1"': the driver command is parsed by a shell once more at job start, and Hydra must get "1" quoted, a
+    # string: Ray takes only strings as environment values, and the Megatron workers' env_vars reach it unconverted.
+    for w in policy.megatron_cfg.env_vars policy.generation.vllm_cfg.env_vars; do
+        overrides+=("++${w}.TRITON_CACHE_DIR=${TRITON_CACHE}" "++${w}.TRITON_CACHE_AUTOTUNING='\"1\"'")
+    done
+fi
 read -r -a more <<< "${EXTRA_OVERRIDES:-}"
 
 cd "${ROOT}"

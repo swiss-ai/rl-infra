@@ -88,6 +88,17 @@ stop() {
 RAY_PID=""
 trap 'say "signal: stopping"; [[ -n "${RAY_PID}" ]] && kill -TERM "${RAY_PID}" 2> /dev/null; stop; wait 2> /dev/null; exit 143' TERM INT
 
+# The job's real end: with --time-min Slurm sets the time limit only when the job starts, and a requeued job
+# gets a new one. driver_retry.sh saves the last checkpoint NRL_SAVE_MARGIN_S before it (ray.sub passes the
+# environment into the container).
+end=$(SLURM_TIME_FORMAT=%s squeue -h -j "${SLURM_JOB_ID}" -o %e 2> /dev/null | head -n 1)
+if [[ "${end}" =~ ^[0-9]+$ ]]; then
+    export NRL_JOB_END_EPOCH="${end}"
+    say "the job ends $(date -d "@${end}" '+%F %T') ($(( (end - $(date +%s)) / 60 )) min from now)"
+else
+    say "could not read the job's end time (squeue: '${end}'); the save deadline set at submission stays"
+fi
+
 bash "${RAY_SUB}" &
 RAY_PID=$!
 wait "${RAY_PID}"; rc=$?

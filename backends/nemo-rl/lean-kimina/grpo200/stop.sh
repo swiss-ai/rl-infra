@@ -1,6 +1,7 @@
 #!/bin/bash
 # Stop the chain: writes STOP (so no guard lets another job start) and cancels the newest chain's jobs that are still
-# in the queue. A running training job is cancelled too: it loses the steps since its newest checkpoint (at most 10).
+# in the queue. A running training job is cancelled too: it loses the steps since its newest checkpoint (with
+# run-200.sh's FT_SAVE_PERIOD=1, the step in progress).
 #   bash stop.sh          lists what it would cancel
 #   bash stop.sh --yes    stops
 set -euo pipefail

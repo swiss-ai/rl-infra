@@ -14,8 +14,14 @@
 # shortened to the time that is left (and no retry when less than DRIVER_RETRY_MIN_S is
 # left). After a failed attempt it writes failure_report.sh's summary next to the driver log.
 # launch.sh puts this in front of the driver.
+# NRL_JOB_END_EPOCH (set by a batch script from Slurm's EndTime, e.g. lean-kimina/in_job.sbatch) is the job's
+# real end in seconds since the epoch. A job submitted with --time-min learns its time limit only when it
+# starts, and a requeued job gets a new end, so then every attempt, the first included, gets
+# checkpoint_must_save_by = the time left before that end minus NRL_SAVE_MARGIN_S (default 1800 s), in place
+# of the value computed at submission (or added, when there was none).
 #
-# Usage: driver_retry.sh <driver command...>   (env: DRIVER_RETRIES, default 2; DRIVER_RETRY_MIN_S)
+# Usage: driver_retry.sh <driver command...>
+#   env: DRIVER_RETRIES (default 2), DRIVER_RETRY_MIN_S, NRL_JOB_END_EPOCH, NRL_SAVE_MARGIN_S
 set -uo pipefail
 RETRIES="${DRIVER_RETRIES:-2}"
 MIN_S="${DRIVER_RETRY_MIN_S:-1800}"
@@ -31,6 +37,26 @@ for a in "$@"; do
   [[ "${a}" == logger.log_dir=* ]] && log_dir="${a#*=}"
   [[ "${a}" == checkpointing.checkpoint_dir=* ]] && ckpt_dir="${a#*=}"
 done
+# Sets KEY in the driver's arguments ($@ of the caller, via args) to the time left before deadline_s.
+with_deadline() {
+  local left=$(( deadline_s - SECONDS )) new a found=0
+  (( left < 300 )) && left=300
+  new="$(printf '%02d:%02d:%02d:%02d' $(( left / 86400 )) $(( left % 86400 / 3600 )) $(( left % 3600 / 60 )) $(( left % 60 )))"
+  args=()
+  for a in "$@"; do
+    [[ "${a}" == "${KEY}="* ]] && { a="${KEY}=${new}"; found=1; }
+    args+=("${a}")
+  done
+  (( found )) || args+=("${KEY}=${new}")
+  echo "[driver_retry] ${KEY}=${new} for this attempt"
+}
+if [[ "${NRL_JOB_END_EPOCH:-}" =~ ^[0-9]+$ ]]; then
+  margin="${NRL_SAVE_MARGIN_S:-1800}"
+  deadline_s=$(( NRL_JOB_END_EPOCH - $(date +%s) - margin ))
+  echo "[driver_retry] job ends $(date -d "@${NRL_JOB_END_EPOCH}" +%FT%T 2>/dev/null || echo "${NRL_JOB_END_EPOCH}"); saving ${margin}s before it"
+  with_deadline "$@"
+  set -- "${args[@]}"
+fi
 total_steps=0
 marker="$(mktemp)"
 trap 'rm -f "${marker}"' EXIT
@@ -68,13 +94,7 @@ while true; do
   if [[ -n "${deadline_s}" ]]; then
     left=$(( deadline_s - SECONDS ))
     if (( left < MIN_S )); then echo "[driver_retry] ${left}s left before ${KEY}, not retrying"; exit "${rc}"; fi
-    new="$(printf '%02d:%02d:%02d:%02d' $(( left / 86400 )) $(( left % 86400 / 3600 )) $(( left % 3600 / 60 )) $(( left % 60 )))"
-    args=()
-    for a in "$@"; do
-      [[ "${a}" == "${KEY}="* ]] && a="${KEY}=${new}"
-      args+=("${a}")
-    done
+    with_deadline "$@"
     set -- "${args[@]}"
-    echo "[driver_retry] ${KEY}=${new} for this attempt"
   fi
 done

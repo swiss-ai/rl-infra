@@ -10,8 +10,13 @@
 #   DRY_RUN=1 bash start.sh   run-200.sh's dry run and the planned guard commands; submits nothing
 #   bash start.sh             submits the chain
 # Settings: PARTITION (default: normal if Slurm expects 12 nodes to start there within NORMAL_WAIT_MAX seconds,
-# default 3600, else preemptable), JOB_TIME (24:00:00 on preemptable, 12:00:00 on normal), N_JOBS (4 on
-# preemptable, 5 on normal: the run needs about 36 h).
+# default 3600, else preemptable), JOB_TIME (24:00:00 on preemptable, 12:00:00 on normal), TIME_MIN (default
+# 06:00:00; empty: off), N_JOBS (10 on preemptable, 8 on normal).
+# TIME_MIN is sbatch's --time-min: Slurm may start a job early in a gap of the schedule that is shorter than
+# JOB_TIME but at least TIME_MIN, and cuts its time limit to the gap. In the 14 days to 2026-11-24, 9-16-node
+# preemptable jobs with limits up to 8 h started after a median of 0.0-0.5 h, those with 24 h after 1.8 h (p75 17 h).
+# in_job.sbatch reads the real end at every start, and the driver saves its last checkpoint 30 min before it.
+# Shorter jobs mean more jobs per run, hence the larger N_JOBS.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 source "${HERE}/settings.sh"
@@ -48,11 +53,13 @@ print(max(0, int((t - now).total_seconds())))' "${est:-none}")
     echo "normal: expected start ${est:-unknown} (in ${wait_s} s) -> ${PARTITION}"
 fi
 case "${PARTITION}" in
-    preemptable) JOB_TIME=${JOB_TIME:-24:00:00}; N_JOBS=${N_JOBS:-4} ;;
-    normal)      JOB_TIME=${JOB_TIME:-12:00:00}; N_JOBS=${N_JOBS:-5} ;;
+    preemptable) JOB_TIME=${JOB_TIME:-24:00:00}; N_JOBS=${N_JOBS:-10} ;;
+    normal)      JOB_TIME=${JOB_TIME:-12:00:00}; N_JOBS=${N_JOBS:-8} ;;
     *) echo "ERROR: PARTITION is preemptable or normal" >&2; exit 1 ;;
 esac
-echo "chain: ${N_JOBS} x (${PARTITION}, ${JOB_TIME}), RUN ${RUN}, OUT ${OUT}, Lean ${LEAN_ROOT}, newest step ${step}"
+TIME_MIN=${TIME_MIN-06:00:00}
+EXTRA="--kill-on-invalid-dep=yes${TIME_MIN:+ --time-min=${TIME_MIN}}"
+echo "chain: ${N_JOBS} x (${PARTITION}, ${JOB_TIME}${TIME_MIN:+, at least ${TIME_MIN}}), RUN ${RUN}, OUT ${OUT}, Lean ${LEAN_ROOT}, newest step ${step}"
 
 guard_args() {  # guard_args <k> <training job>: sets G_ARGS, the guard's sbatch arguments
     G_ARGS=(--parsable --account=infra01 --partition=xfer --nodes=1 --ntasks=1 --cpus-per-task=1 --mem=2G
@@ -63,7 +70,7 @@ guard_cmd() { guard_args "$@"; echo "sbatch ${G_ARGS[*]}"; }
 train() {  # train <dependency or empty>: run-200.sh; prints the training job's ID
     local out
     out=$(cd "${RL_INFRA}" && env RUN="${RUN}" PARTITION="${PARTITION}" JOB_TIME="${JOB_TIME}" DEPENDENCY="$1" \
-          SBATCH_EXTRA="--kill-on-invalid-dep=yes" DRY_RUN="${DRY}" bash "${RUN200}" 2>&1 | tee -a "${CHAIN}/logs/submit.log") \
+          SBATCH_EXTRA="${EXTRA}" DRY_RUN="${DRY}" bash "${RUN200}" 2>&1 | tee -a "${CHAIN}/logs/submit.log") \
         || { echo "ERROR: run-200.sh failed (${CHAIN}/logs/submit.log)" >&2; return 1; }
     if [[ "${DRY}" == 1 ]]; then echo "${out}" | tail -n 25 >&2; echo "<J>"; return 0; fi
     grep -oE "^Run .* is job [0-9]+\.$" <<< "${out}" | grep -oE '[0-9]+\.$' | tr -d . \
@@ -72,7 +79,7 @@ train() {  # train <dependency or empty>: run-200.sh; prints the training job's 
 
 mkdir -p "${CHAIN}/logs"
 if [[ "${DRY}" != 1 ]]; then
-    header=$(printf '# chain started %s: %s jobs, %s, %s, from step %s' "$(date '+%F %T')" "${N_JOBS}" "${PARTITION}" "${JOB_TIME}" "${step}")
+    header=$(printf '# chain started %s: %s jobs, %s, %s, time-min %s, from step %s' "$(date '+%F %T')" "${N_JOBS}" "${PARTITION}" "${JOB_TIME}" "${TIME_MIN:-none}" "${step}")
     echo "${header}" >> "${CHAIN}/chain.tsv"
     echo "${header}" >> "${CHAIN}/guard.tsv"
 fi
@@ -81,7 +88,7 @@ for k in $(seq 1 "${N_JOBS}"); do
     if [[ "${DRY}" == 1 ]]; then
         # run-200.sh's dry run once; the other jobs differ only in DEPENDENCY.
         if [[ $k -eq 1 ]]; then train "" > /dev/null; fi
-        echo "J${k}: run-200.sh with PARTITION=${PARTITION} JOB_TIME=${JOB_TIME} DEPENDENCY='${dep}' SBATCH_EXTRA=--kill-on-invalid-dep=yes"
+        echo "J${k}: run-200.sh with PARTITION=${PARTITION} JOB_TIME=${JOB_TIME} DEPENDENCY='${dep}' SBATCH_EXTRA='${EXTRA}'"
         echo "G${k}: $(guard_cmd "${k}" "<J${k}>")"
         dep="afterok:<G${k}>,singleton"
         continue

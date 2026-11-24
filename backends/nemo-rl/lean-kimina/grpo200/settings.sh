@@ -6,7 +6,9 @@ if [[ -z "${SCRATCH:-}" || "$(readlink -f "${SCRATCH}")" != "$(readlink -f "${SC
 fi
 RUN=lean-kimina-v02-grpo200-128x8
 MAX_STEPS=200
-RL_INFRA=${RL_INFRA:-${SCRATCH}/rl-infra-245e760}
+# The rl-infra clone the chain's jobs run from, this run's own: update it (git pull/checkout) only while none of
+# the chain's jobs is in the queue, or a queued job starts with the new code.
+RL_INFRA=${RL_INFRA:-${SCRATCH}/rl-infra-grpo200}
 RUN200=${RUN200:-${RL_INFRA}/backends/nemo-rl/lean-kimina/run-200.sh}
 # The run's own output root, instead of $SCRATCH/nemo-rl (which other runs and the store copy use): configs/,
 # slurm/, results/<RUN>/, logs/<RUN>/ and setup.log go here. Move them into $SCRATCH/nemo-rl after the run.

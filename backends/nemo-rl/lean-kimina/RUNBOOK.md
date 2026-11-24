@@ -518,7 +518,7 @@ second job with the same `RUN` resumes. Run name `lean-kimina-v02-grpo200-128x8`
 | Outlier mask | `grpo.seq_logprob_error_threshold=1.5` | masks sequences like ε's step-40 outlier (error 310); all normal sequences stayed at or below 1.18 |
 | Trainer GPU allocator | `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` | without it 128 × 8 failed (job 3984550) and ε got to 0.28 GB free; with it at least 11 GB free, weight sync unchanged |
 | Validation | corrected miniF2F, 972 rows, every 20 steps, none at the start | 10 points to pick a checkpoint on valid and report on test; each takes 15–26 min at this load; the pooled baseline is known |
-| Checkpoints | every 20 steps, all kept; a recovery checkpoint every 10 steps, only the newest kept | one per validation for picking; at most 10 steps lost after a preemption; about 16 TB at most (1.4 TB each) |
+| Checkpoints | every 20 steps, all kept; a recovery checkpoint every step since 2026-11-24 (every 10 before), only the newest kept | one per validation for picking; at most the step in progress lost after a preemption; about 16 TB at most (1.4 TB each) |
 | Seed | 42 (recipe) | as all runs |
 
 Check after it starts: step 1 trains without memory errors; `train/lr` at step 2 about 9.9995e-6 (the decay counts
@@ -526,6 +526,32 @@ optimizer steps, per NeMo-RL's `scheduler.step(increment=gbs)`; 1e-6 there would
 every validation, `train/token_mult_prob_error` (stop and look if above about 1.05 for several steps),
 `train/gen_kl_error` (above about 3e-3), `train/approx_entropy` (below 0.15 or above 0.45),
 `train/num_masked_seqs_by_logprob_error` rising, and the trainers' least free GPU memory (forensics `mem-rank*.tsv`).
+
+### Shorter waits and cheaper restarts (2026-11-24)
+
+The run started 2026-11-23 as a chain of 24 h `preemptable` jobs (`grpo200/`). J1 waited 2.8 h, trained steps 1-50
+in 12 h, was preempted, waited 0.5 h, was preempted during setup, and was queued again. The queue history of the 14
+days to 2026-11-24 (`sacct -a`, Kaplan-Meier, jobs still waiting counted) shows that for 9-16 nodes the time limit
+matters more than the node count: on `preemptable`, limits up to 8 h started after a median of 0.0-0.5 h (p90 about
+2 h), 24 h after 1.8 h (p75 17 h, p90 33 h); our twenty 12-node jobs of 8 h or less started after a median of 0.0 h. The
+backfill scheduler starts a job early only when it ends before the nodes it holds for higher-priority jobs are needed
+(a 768-node highprio job was waiting); a 24 h job almost never fits. A simulation of the remaining 150 steps from
+these waits (15 min per step, 0.5 h start-up, preemptions about once per 20 h) gave about 64 h for 8 h jobs against
+97 h for 24 h jobs (p90 88 h against 206 h).
+
+| Change | Where | What it does |
+|---|---|---|
+| Flexible time limit | `grpo200/start.sh` (`TIME_MIN`, default `06:00:00`; `N_JOBS` 10), `in_job.sbatch`, `../driver_retry.sh` | jobs are submitted with `--time=24:00:00 --time-min=06:00:00`, so Slurm may start one in any gap of 6 h or more and cut its limit to the gap. At every start `in_job.sbatch` reads the real end (`SLURM_TIME_FORMAT=%s squeue -o %e`) into `NRL_JOB_END_EPOCH`, and `driver_retry.sh` sets `checkpoint_must_save_by` to 30 min (`NRL_SAVE_MARGIN_S`) before it, for every attempt, in place of the value computed at submission |
+| A recovery checkpoint every step | `run-200.sh` (`FT_SAVE_PERIOD`, default 1; was 10) | a preemption loses at most the step in progress instead of up to 10 steps (on average about 1.25 h). A save takes 39-55 s (1.4 TB) and runs while vLLM generates the next batch, which the trainers wait for anyway (about 520 s of each step in J1); only the newest recovery checkpoint is kept, the step-20 ones all |
+| Triton cache on scratch | `run-200.sh` (`TRITON_CACHE`, default `$LEAN_DATA/jit-cache/triton`) | trainers and vLLM keep compiled kernels and autotuning results (`TRITON_CACHE_AUTOTUNING=1`, Triton 3.6) across jobs instead of in node-local `/tmp`; J1's step 1 took 282 s of training and 180 s of log-probs, later steps about 140 s and 40 s. Inductor's cache stays node-local (it uses file locks) |
+
+Start-up of J1's 12 h attempt, for reference: Ray up after 48 s, driver set up (vLLM and Megatron workers, weights,
+first refit) after 7.3 min, the first batch of 1,024 rollouts ready after another 20.7 min (no rollouts in flight to
+start from; a resumed job restores the finished ones saved with the checkpoint), then step 1. A save on SIGTERM was
+considered and left out: Slurm (`proctrack/cgroup`) sends a preemption's SIGTERM to every process of the job step,
+the Ray daemons and the Megatron workers included, which then shut down; with a checkpoint every step it would save
+at most the step in progress. Preemptable's `GraceTime` is 240 s; `PreemptParameters` is empty, so a `--signal` is
+not sent on preemption.
 
 ## Expert handover (Apertus 2 experts, round 1)
 
