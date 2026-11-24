@@ -13,7 +13,7 @@
 # Exits non-zero on any failure.
 #
 # Env: RUNS ("a b s", default; "o" = run S with AGENT=opencode, check it without the smoke overrides; "w" = o with TASKS=swe-lego, on its own;
-# "ov" = run-agent-v.sh AGENT=opencode on the verified tasks, on its own (RUNS=ov), with
+# "ov" = run-agent-v.sh AGENT=opencode on the verified tasks, on its own (RUNS=ov), "pv" the same with AGENT=pi (RUNS=pv), with
 # run-agent-v.sh's env (SMOKE, STEPS, PROMPTS, SANDBOXES, CTX, GATEWAY_PROXY, MODEL_CALLS, HARBOR_ROOT, the long-context
 # knobs of common.sh: CTX=65536 checks the 64K profile, ...) and its command-line overrides; credential files are only
 # tested for presence), CHECK_PYTHON (a Python >= 3.12 with omegaconf, hydra-core, pydantic;
@@ -36,9 +36,9 @@ mkdir -p "${WORK}"
 export SCRATCH RL_INFRA_DIR="${ROOT}"
 # run W reads the SWE-Lego tasks (run-s.sh TASKS=swe-lego); check it on its own (RUNS=w)
 if [[ " ${RUNS} " == *" w "* ]]; then export HARBOR_ROOT="${HARBOR_ROOT:-${SCRATCH}/osb/swe_lego_v05}"; fi
-# run OV reads the verified tasks (run-agent-v.sh); check it on its own (RUNS=ov)
+# runs OV / PV read the verified tasks (run-agent-v.sh); check one on its own (RUNS=ov, RUNS=pv)
 AV_RUNS=0
-if [[ " ${RUNS} " == *" ov "* ]]; then
+if [[ " ${RUNS} " == *" ov "* || " ${RUNS} " == *" pv "* ]]; then
     AV_RUNS=1
     agent_v_defaults || exit 1    # HARBOR_ROOT ($SCRATCH/osb/harbor_verified), CTX, STEPS, PROMPTS, ... (exported)
     long_ctx_summary
@@ -60,8 +60,8 @@ export NEMO_GYM_USER="${NEMO_GYM_USER:-${USER}}" NEMO_GYM_WORKLOAD="${NEMO_GYM_W
 export NEMO_GYM_RUN_ID="${NEMO_GYM_RUN_ID:-chonk-sc-check-s}"
 # run O (run S with AGENT=opencode): what run-s.sh exports for tunnel-sc.yaml
 export CHISEL_DIR="${CHISEL_DIR:-${SCRATCH}/chisel}"
-# run OV: where run-agent-v.sh fetches the OpenCode archive (run-ov.yaml opencode_archive_dir)
-export OPENCODE_DIR="${OPENCODE_DIR:-${SCRATCH}/opencode}"
+# run OV: where run-agent-v.sh fetches the OpenCode archive (run-ov.yaml opencode_archive_dir); run PV: pi's (pi-sc.yaml)
+export OPENCODE_DIR="${OPENCODE_DIR:-${SCRATCH}/opencode}" PI_DIR="${PI_DIR:-${SCRATCH}/pi}"
 total=0
 
 echo "== (b) NeMo-RL clone"
@@ -73,7 +73,7 @@ if [[ " ${RUNS} " == *" b "* || " ${RUNS} " == *" s "* || " ${RUNS} " == *" o "*
 fi
 for run in ${RUNS}; do
     case "${run}" in
-        ov) echo "== (c) Gym checkout for run ${run^^} (the agent in the pod, tunnel)"
+        ov|pv) echo "== (c) Gym checkout for run ${run^^} (the agent in the pod, tunnel)"
             check_gym_agents "$(agent_v_agent "${run}")"; total=$((total + $?)) ;;
     esac
 done
@@ -112,7 +112,7 @@ else
         # OV: the recipe's own node count (20 at 24k) and run-agent-v.sh's overrides before the user's
         RUN_ARGS=()
         nodes="${NODES}"
-        if [[ "${run}" == ov ]]; then
+        if [[ "${run}" == ov || "${run}" == pv ]]; then
             nodes="$(awk '/^cluster:/{c=1; next} c && /^[^ ]/{c=0} c && $1 == "num_nodes:" {print $2}' "${AGENT_V_RECIPE}")"
             agent_v_args "${AGENT_V_TRAIN}" "${RL_REGISTRY_CRED_FILE}" "${AGENT_V_JOBS}" || { total=$((total + 1)); continue; }
             RUN_ARGS=("${AGENT_V_ARGS[@]}")
@@ -128,7 +128,7 @@ else
         if command -v yq >/dev/null; then
             echo "   preflight.sh (as launch.sh runs it before sbatch):"
             # as launch.sh: the driver's cluster.* overrides first, the run launcher's JOB_TIME default
-            case "${run}" in a) jt=01:30:00 ;; b) jt=02:30:00 ;; w) jt=04:00:00 ;; ov) jt=08:00:00 ;; *) jt=03:00:00 ;; esac
+            case "${run}" in a) jt=01:30:00 ;; b) jt=02:30:00 ;; w) jt=04:00:00 ;; ov|pv) jt=08:00:00 ;; *) jt=03:00:00 ;; esac
             NEMO_RL_DIR="${NEMO_RL_DIR}" JOB_TIME="${JOB_TIME:-${jt}}" \
                 bash "${ROOT}/backends/nemo-rl/preflight.sh" "${cfg}" "${nodes}" \
                 cluster.num_nodes="${nodes}" cluster.gpus_per_node=4 ${RUN_ARGS[@]+"${RUN_ARGS[@]}"} "$@" | sed 's/^/   | /'
@@ -163,6 +163,10 @@ if [[ "${AV_RUNS}" == 1 ]]; then
     if [[ " ${RUNS} " == *" ov "* ]]; then
         f="${OPENCODE_DIR}/${OPENCODE_VERSION:-1.17.11}/opencode-linux-x64-baseline.tar.gz"
         [[ -s "${f}" ]] && echo "  ok    OpenCode archive ${f}" || echo "  note  ${f} missing (run-agent-v.sh fetches it)"
+    fi
+    if [[ " ${RUNS} " == *" pv "* ]]; then
+        f="${PI_DIR}/${PI_VERSION:-1.5.2}/pi-linux-x64.tar.gz"
+        [[ -s "${f}" ]] && echo "  ok    pi archive ${f}" || echo "  note  ${f} missing (run-agent-v.sh fetches it)"
     fi
     [[ -r "${RL_REGISTRY_CRED_FILE}" && -s "${RL_REGISTRY_CRED_FILE}" ]] && echo "  ok    registry credentials file ${RL_REGISTRY_CRED_FILE} (not read)" \
         || echo "  WARN  no registry credentials file ${RL_REGISTRY_CRED_FILE} (the verified images are private)"

@@ -88,6 +88,10 @@ SMOKE=1 CTX=65536 AGENT=opencode DRY_RUN=1 bash experiments/chonk-sc/run-agent-v
 SMOKE=1 CTX=65536 AGENT=opencode bash experiments/chonk-sc/run-agent-v.sh             # 1 step, 4 x 8, ~30 min
 CTX=65536 AGENT=opencode bash experiments/chonk-sc/run-agent-v.sh                     # 10 steps (STEPS=...), 12 h limit
 
+# run PV (the pi coding agent instead of OpenCode; not run on the cluster yet, README.md "Run PV")
+CTX=65536 RUNS=pv bash experiments/chonk-sc/check.sh
+SMOKE=1 CTX=65536 AGENT=pi bash experiments/chonk-sc/run-agent-v.sh
+
 # run V (Terminus-2)
 SMOKE=1 CTX=65536 DRY_RUN=1 bash experiments/chonk-sc/run-v-24k.sh
 SMOKE=1 CTX=65536 bash experiments/chonk-sc/run-v-24k.sh
@@ -128,5 +132,5 @@ label) before starting the next run.
 - **OpenCode install**: the release archive is fetched once on the login node and uploaded into each sandbox (52 MB
   per sandbox through the OpenSandbox gateway; 32 at a time tested); the 167 MB binary lives in node memory per
   sandbox. A shared read-only volume would avoid both (requested from the Breithorn admins).
-- Gym runs at a pinned commit plus 46 patches (`backends/nemo-rl/apertus2/patches/gym/`); the ones of ours are on
+- Gym runs at a pinned commit plus 47 patches (`backends/nemo-rl/apertus2/patches/gym/`); the ones of ours are on
   their way upstream into swiss-ai/nemo-gym.

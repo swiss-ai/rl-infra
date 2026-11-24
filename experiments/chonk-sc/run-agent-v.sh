@@ -4,6 +4,8 @@
 # Terminus-2:
 #   AGENT=opencode  run OV: OpenCode 1.17.11 (as runs O / R2), release archive fetched once (fetch-opencode.sh) and
 #                   uploaded into each pod (Gym 0045)
+#   AGENT=pi        run PV: the pi coding agent 1.5.2 (Gym 0047), release archive fetched once (fetch-pi.sh) and
+#                   uploaded into each pod; untested on the cluster
 # (another agent = a new AGENT value: common.sh agent_v_tag / agent_v_agent / agent_v_overlays / check_gym_agents,
 # its overlay run-<tag>.yaml, check.py)
 # The agent calls the model through the per-pod chisel tunnel (pod 127.0.0.1:8000 -> policy_model), and the token
@@ -21,7 +23,7 @@
 #   SMOKE=1 AGENT=opencode bash experiments/chonk-sc/run-agent-v.sh
 #   = STEPS=1 PROMPTS=4 JOB_TIME=02:30:00
 # 10 steps (the defaults): AGENT=opencode bash experiments/chonk-sc/run-agent-v.sh
-# Check first: RUNS=ov bash experiments/chonk-sc/check.sh (same env as here).
+# Check first: RUNS=ov (AGENT=opencode) or RUNS=pv (AGENT=pi) bash experiments/chonk-sc/check.sh (same env as here).
 # Env: AGENT (required), STEPS (10), PROMPTS (8; x 8 rollouts, train_global_batch_size PROMPTS x 8, a multiple
 # of the data-parallel size), SANDBOXES (64: harbor_agent concurrency = at most 64 pods on Breithorn; one pod per
 # trial, the agent pod is stopped before the verifier pod starts), CTX (24576; 16384 = the 12-node recipe),
@@ -30,7 +32,8 @@
 # OpenSandbox server proxy, the path the tunnel was tested on in runs S/O: use it if the gymtunnel gateway test
 # fails), MODEL_CALLS (1: Gym model-call capture under $SCRATCH/harbor-jobs/<run>/model-calls; 0 off),
 # OPENCODE_TIMEOUT_SEC (1740; AGENT_CAP - 60 when AGENT_CAP is set), OPENCODE_VERSION, OPENCODE_DEBUG, CHISEL_DIR,
-# OPENCODE_DIR ($SCRATCH/opencode)
+# OPENCODE_DIR ($SCRATCH/opencode); for AGENT=pi: PI_TIMEOUT_SEC (as OPENCODE_TIMEOUT_SEC), PI_VERSION, PI_DIR
+# ($SCRATCH/pi)
 # ($SCRATCH/chisel), the long-context knobs (common.sh: SFT_CKPT, THINKING, CP, KCP, CAP, NCCL_MIN, MAX_NEW, MAX_TURNS,
 # AGENT_CAP, TTL, MASK_AGENT_TIMEOUT, MASK_OVERFLOW, KCP_MEGATRON_DIR, KCP_FLA_DIR, KCP_EDF_NAME, HANG_*),
 # and as run-v.sh: VERIFIED_STORE, HARBOR_ROOT ($SCRATCH/osb/harbor_verified), COLLECT_ARGS, EXCLUDE_CAMPAIGNS,
@@ -142,7 +145,7 @@ for chk in check_gym_capture "check_gym_agents ${AGENT}" check_nemo_rl_clone; do
         exit 1
     fi
 done
-for v in OPENCODE_VERSION OPENCODE_TIMEOUT_SEC OPENCODE_DEBUG; do
+for v in OPENCODE_VERSION OPENCODE_TIMEOUT_SEC OPENCODE_DEBUG PI_VERSION PI_TIMEOUT_SEC; do
     [[ -z "${!v:-}" ]] || export "${v}"
 done
 export CHISEL_VERSION="${CHISEL_VERSION:-1.12.0}" CHISEL_DIR="${CHISEL_DIR:-${SCRATCH}/chisel}"
@@ -150,6 +153,9 @@ bash "${APERTUS2_DIR}/fetch-chisel.sh"
 if [[ "${AGENT}" == opencode ]]; then
     export OPENCODE_DIR="${OPENCODE_DIR:-${SCRATCH}/opencode}"
     bash "${APERTUS2_DIR}/fetch-opencode.sh"
+elif [[ "${AGENT}" == pi ]]; then
+    export PI_DIR="${PI_DIR:-${SCRATCH}/pi}"
+    bash "${APERTUS2_DIR}/fetch-pi.sh"
 fi
 
 TASK_COPY="${OUT}/configs/${RUN}-task.yaml"
@@ -163,7 +169,9 @@ export NEMO_GYM_WORKLOAD="${NEMO_GYM_WORKLOAD:-chonk-${AGENT}-verified-sc}"
 agent_v_args "${TRAIN}" "${CRED}" "${JOBS}"
 echo "== run ${RUN} (${AGENT}): ${STEPS} steps, ${PROMPTS} x 8 rollouts, at most ${SANDBOXES} sandboxes, ${CTX} tokens," \
      "recipe $(basename "${AGENT_V_RECIPE}"), GATEWAY_PROXY=${GATEWAY_PROXY}, model calls ${MODEL_CALLS}; Harbor trial dirs in ${JOBS}"
+AGENT_END="${OPENCODE_TIMEOUT_SEC:-1740}"
+[[ "${AGENT}" != pi ]] || AGENT_END="${PI_TIMEOUT_SEC:-1740}"
 [[ "${LONG_CTX}" != 1 ]] || echo "== long context: SFT ${SFT_CKPT}, thinking ${THINKING}, CP ${CP} KCP ${KCP}, cap ${CAP:-none}," \
-     "${MAX_NEW:-6144} tokens per turn, ${MAX_TURNS:-30} turns, agent cap ${AGENT_CAP:-1800} s, OpenCode ${OPENCODE_TIMEOUT_SEC:-1740} s," \
+     "${MAX_NEW:-6144} tokens per turn, ${MAX_TURNS:-30} turns, agent cap ${AGENT_CAP:-1800} s, ${AGENT} ends at ${AGENT_END} s," \
      "TTL ${TTL:-3600} s, mask agent timeout ${MASK_AGENT_TIMEOUT}, mask overflow ${MASK_OVERFLOW}, recipe copy ${AGENT_V_RECIPE}"
 exec bash "${ROOT}/run-harbor-osb.sh" "${AGENT_V_ARGS[@]}" "$@"

@@ -1,0 +1,1589 @@
+From 924e0eea2640a38bfe9374ec47f33946872ceb6b Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Tue, 24 Nov 2026 14:36:48 +0000
+Subject: [PATCH 47/47] feat(harbor_agent): pi adapter, the standalone release
+ uploaded into the sandbox
+
+PiNemoGym (custom_agents/pi_nemo_gym.py) runs the pi coding agent
+(github.com/earendil-works/pi, v1.5.2) inside the task sandbox against the
+Gym model server, like OpenCodeNemoGym:
+
+- install: the release archive (Bun-compiled binary, no Node) is uploaded
+  from pi_archive_dir, sha256-checked on the node and in the sandbox; only
+  the binary, package.json and README.md are unpacked to /opt/pi-nemo-gym.
+- run: one recorded command (installed_compat) that writes models.json,
+  settings.json and the turn-budget extension into /logs/agent/pi-agent and
+  runs `pi --print --mode json` with stdin from /dev/null; events go to
+  agent/pi.txt, the session to agent/pi/sessions.
+- capture: compaction, auto-retry, cache warming, HTTP timeouts, extensions,
+  MCP, skills, prompt templates and project .pi/ files are off; provider
+  compat keeps the request to model/messages/tools/stream/max_tokens (no
+  store, reasoning_effort, developer role, session headers, cache key).
+- max_turns: an extension that blocks the tool calls of the last allowed
+  turn with terminate, so pi stops without another model call.
+- no ATIF trajectory (the model server's capture holds the rollout).
+
+failure_classes.pi_end_flags reads agent/pi.txt with the rules of
+opencode_end_flags (shared as _context_end_flags; OpenCode's messages are
+unchanged); app.py uses it when the trial has pi.txt and no flags file.
+deep_merge, verified_archive and the pipefail/kill constants move to
+installed_compat (OpenCode imports them from there). README: pi in
+"Agents inside the sandbox" and "Failure classes".
+
+Checked against the pi v1.5.2 source (commit b4afdddf); not yet run
+against a real pi binary or model.
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ responses_api_agents/harbor_agent/README.md   |  58 +-
+ responses_api_agents/harbor_agent/app.py      |   8 +-
+ .../custom_agents/installed_compat.py         |  48 ++
+ .../custom_agents/opencode_nemo_gym.py        |  48 +-
+ .../harbor_agent/custom_agents/pi_nemo_gym.py | 368 ++++++++++++
+ .../custom_agents/pi_pod/install-pi.sh.j2     |  50 ++
+ .../custom_agents/test_pi_nemo_gym.py         | 547 ++++++++++++++++++
+ .../harbor_agent/failure_classes.py           |  56 +-
+ .../harbor_agent/tests/test_app.py            |  23 +
+ .../tests/test_failure_classes.py             | 114 ++++
+ 10 files changed, 1262 insertions(+), 58 deletions(-)
+ create mode 100644 responses_api_agents/harbor_agent/custom_agents/pi_nemo_gym.py
+ create mode 100644 responses_api_agents/harbor_agent/custom_agents/pi_pod/install-pi.sh.j2
+ create mode 100644 responses_api_agents/harbor_agent/custom_agents/test_pi_nemo_gym.py
+
+diff --git a/responses_api_agents/harbor_agent/README.md b/responses_api_agents/harbor_agent/README.md
+index 5d4a1ff5d..27b30f115 100644
+--- a/responses_api_agents/harbor_agent/README.md
++++ b/responses_api_agents/harbor_agent/README.md
+@@ -14,7 +14,7 @@ It runs Harbor agents (e.g., `terminus-2`) in Harbor-managed environments and re
+ - [NeMo RL Training](#nemo-rl-training)
+   - [Required patches to Gym](#required-patches-to-gym)
+   - [Recommended settings](#recommended-settings)
+-  - [Agents inside the sandbox (OpenCode, mini-swe-agent)](#agents-inside-the-sandbox-opencode-mini-swe-agent)
++  - [Agents inside the sandbox (OpenCode, pi, mini-swe-agent)](#agents-inside-the-sandbox-opencode-pi-mini-swe-agent)
+   - [Finding failed rollouts](#finding-failed-rollouts)
+   - [Known failure cases during RL training](#known-failure-cases-during-rl-training)
+   - [Failure classes](#failure-classes)
+@@ -474,22 +474,22 @@ policy:
+       enable_chunked_prefill: false     # Disable chunked prefill for stability
+ ```
+ 
+-### Agents inside the sandbox (OpenCode, mini-swe-agent)
++### Agents inside the sandbox (OpenCode, pi, mini-swe-agent)
+ 
+ Terminus-2 runs in the Harbor process and returns its tokens itself (`collect_rollout_details`). An agent that
+-runs *inside* the task sandbox, such as OpenCode or mini-swe-agent, needs three things instead:
++runs *inside* the task sandbox, such as OpenCode, pi or mini-swe-agent, needs three things instead:
+ 
+ 1. **An adapter** that points the agent at the Gym model server: `harbor_agent_import_path`
+-   `responses_api_agents.harbor_agent.custom_agents.opencode_nemo_gym:OpenCodeNemoGym` or
+-   `...mini_swe_agent_nemo_gym:MiniSweAgentNemoGym`. harbor_agent passes the rollout's model URL as `api_base`.
++   `responses_api_agents.harbor_agent.custom_agents.opencode_nemo_gym:OpenCodeNemoGym`,
++   `...pi_nemo_gym:PiNemoGym` or `...mini_swe_agent_nemo_gym:MiniSweAgentNemoGym`. harbor_agent passes the rollout's model URL as `api_base`.
+ 2. **A model server the sandbox can reach.** `harbor_model_base_url` sets the root of that URL as seen from the
+    sandbox (harbor_agent appends the rollout prefix and `/v1`). If sandboxes cannot open connections to the
+    training nodes, use the per-sandbox model tunnel below and set `harbor_model_base_url: http://127.0.0.1:8000`.
+-3. **Token capture at the model endpoint.** OpenCode writes no trajectory with token IDs, so the training tokens
++3. **Token capture at the model endpoint.** OpenCode and pi write no trajectory with token IDs, so the training tokens
+    can only come from Gym's capture: the run-level `token_id_capture.enabled` plus the agent's `token_id_capture`
+    (or `token_id_capture.all_agents`). NeMo RL's single-controller entrypoint turns both on with
+    `token_capture.enabled: true`. Without capture, a rollout without output items is masked, which for OpenCode
+-   is every rollout.
++   and pi is every rollout.
+ 
+ Under capture, a rollout whose calls form more than one conversation is masked (no single chain to rebuild it
+ from). The OpenCode adapter therefore turns off every call besides the main loop (session title, sub-agents,
+@@ -541,6 +541,46 @@ harbor_mask_context_overflow: true                  # optional, see "Failure cla
+ | `opencode_debug` | `false` | Debug logs into `agent/opencode.txt`. |
+ | `model_info` | `{}` | `max_input_tokens` / `max_output_tokens`: OpenCode's context and per-turn output limit, and the context limit for failure classes. |
+ 
++**pi** ([github.com/earendil-works/pi](https://github.com/earendil-works/pi), `PiNemoGym`): the standalone release
++(a Bun-compiled binary, no Node) is uploaded from `pi_archive_dir` into each sandbox and only the binary and its
++`package.json` are unpacked (the image needs `tar`). The run writes pi's `models.json` (one OpenAI-compatible
++provider at `api_base`), `settings.json` and the optional turn-budget extension into `/logs/agent/pi-agent` and
++runs `pi --print --mode json` with the tools `read`, `bash`, `edit`, `write`; the events go to `agent/pi.txt`, the
++session to `agent/pi/sessions`. For capture the adapter turns off compaction (summary calls, compact-and-retry),
++pi's auto-retry (it re-sends a prompt and drops the failed attempt), cache warming, the HTTP timeouts,
++extensions, MCP, skills, prompt templates and project-local `.pi/` files, and keeps the request to `model`,
++`messages`, `tools`, `stream`, `stream_options` and `max_tokens` (provider `compat`; pi would otherwise send
++`store`, `reasoning_effort` and the system prompt as role `developer` to an unknown endpoint). pi sends no
++sampling parameters: use `sampling_overrides` as for OpenCode. `max_turns` becomes an extension that blocks the
++tool calls of the last allowed turn, so pi stops without one more model call. In `--mode json` pi exits 0 also
++when its last call failed; the failure classes read `agent/pi.txt` instead.
++
++```yaml
++harbor_agent_name: null
++harbor_agent_import_path: "responses_api_agents.harbor_agent.custom_agents.pi_nemo_gym:PiNemoGym"
++harbor_model_base_url: http://127.0.0.1:8000        # the tunnel's sandbox end
++harbor_agent_kwargs:
++  version: 1.5.2
++  pi_archive_dir: /path/to/pi                       # <dir>/<version>/pi-linux-x64.tar.gz
++  pi_timeout_sec: 1740                              # below harbor_agent_max_timeout, so the verifier still runs
++  max_turns: 100
++  model_info:
++    max_input_tokens: ${policy.max_total_sequence_length}
++    max_output_tokens: ${policy.generation.max_new_tokens}
++```
++
++| Option | Default | Meaning |
++|---|---|---|
++| `version` | `1.5.2` | pi release. Settings, flags and the extension API were checked against this release; another one needs `pi_sha256` and a re-check. |
++| `pi_archive_dir` | required | Directory with `<version>/<asset>`. The archive's sha256 is checked once per process, and again in the sandbox if `sha256sum` is there. |
++| `pi_asset` | `pi-linux-x64.tar.gz` | Release asset (glibc x86_64, built for `bun-linux-x64-baseline`: no AVX2 needed). |
++| `pi_sha256` | built in for 1.5.2 | sha256 of the archive. |
++| `pi_timeout_sec` | none | pi is ended with exit 124 after this, so its log and exit status are recorded before Harbor's agent timeout. |
++| `pi_workdir` | none | Absolute path pi runs in (created if missing); unset = the image's working directory. |
++| `pi_settings` | `{}` | Deep-merged last into pi's `settings.json`; `null` deletes a key. |
++| `max_turns` | none | Model calls per episode. |
++| `model_info` | `{}` | `max_input_tokens` / `max_output_tokens`: pi's `contextWindow` / `maxTokens`, and the context limit for failure classes. |
++
+ **Per-sandbox model tunnel** (`harbor_environment_kwargs.model_tunnel`, `NemoGymSandboxEnvironment`): for clusters
+ where sandboxes cannot reach the training nodes but the node reaches the sandbox through the provider's endpoint
+ (e.g. OpenSandbox's proxy or gateway, WebSockets included). At every start the environment uploads
+@@ -646,7 +686,9 @@ vLLM's HTTP 400 "maximum context length" with an empty `length` completion witho
+ `propagate_context_overflow_errors`; OpenCode requests usage, so every answered call reports prompt tokens), when
+ OpenCode reports a `ContextOverflowError` or a context-length error message (the 400 propagated), or when the last
+ reply hit `length` within max(256, 1%) tokens of `harbor_agent_kwargs.model_info.max_input_tokens`. A `length`
+-reply with room left stays `ok`.
++reply with room left stays `ok`. For pi the same rules read its `--mode json` events `agent/pi.txt`
++(`pi_end_flags`: the `stopReason` and `usage` of each assistant `message_end`; a propagated 400 is a `stopReason`
++of `error` with a context-length `errorMessage`).
+ 
+ `Terminus2NemoGym` option `context_limit_truncation` (`overflow` by default, or `resample`): a reply with
+ `finish_reason: length` whose prompt + reply (from the model server's `usage`) come within max(256, 1%) tokens of
+diff --git a/responses_api_agents/harbor_agent/app.py b/responses_api_agents/harbor_agent/app.py
+index a068abe61..f2aaa470e 100644
+--- a/responses_api_agents/harbor_agent/app.py
++++ b/responses_api_agents/harbor_agent/app.py
+@@ -46,7 +46,7 @@ from nemo_gym.openai_utils import (
+     NeMoGymResponse,
+     NeMoGymResponseCreateParamsNonStreaming,
+ )
+-from responses_api_agents.harbor_agent.failure_classes import classify_rollout, opencode_end_flags
++from responses_api_agents.harbor_agent.failure_classes import classify_rollout, opencode_end_flags, pi_end_flags
+ from responses_api_agents.harbor_agent.utils import HarborAgentUtils
+ 
+ 
+@@ -155,6 +155,8 @@ class HarborVerifyResponse(BaseVerifyResponse):
+ 
+ # OpenCode's `run --format=json` log in the trial's agent dir (Harbor's OpenCode agent and OpenCodeNemoGym).
+ _OPENCODE_LOG = "opencode.txt"
++# pi's `--mode json` event stream in the trial's agent dir (PiNemoGym).
++_PI_LOG = "pi.txt"
+ 
+ 
+ def _exception_type(trial_result: Optional[dict]) -> Optional[str]:
+@@ -358,6 +360,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
+                     traj_path = trial_dir / "agent" / "trajectory.json"
+                     flags_path = trial_dir / "agent" / "agent_error_flags.json"
+                     opencode_log = trial_dir / "agent" / _OPENCODE_LOG
++                    pi_log = trial_dir / "agent" / _PI_LOG
+                     if flags_path.exists():
+                         flags = json.loads(flags_path.read_text())
+                     elif opencode_log.exists():
+@@ -365,6 +368,9 @@ class HarborAgent(SimpleResponsesAPIAgent):
+                         flags = opencode_end_flags(
+                             opencode_log.read_text(errors="replace"), self._agent_context_limit()
+                         )
++                    elif pi_log.exists():
++                        # nor does pi (and in --mode json it exits 0 after an error too)
++                        flags = pi_end_flags(pi_log.read_text(errors="replace"), self._agent_context_limit())
+                     else:
+                         flags = {}
+                     return (
+diff --git a/responses_api_agents/harbor_agent/custom_agents/installed_compat.py b/responses_api_agents/harbor_agent/custom_agents/installed_compat.py
+index cfaf3511a..be3cb231e 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/installed_compat.py
++++ b/responses_api_agents/harbor_agent/custom_agents/installed_compat.py
+@@ -30,6 +30,9 @@ Harbor 0.1.x ignored them. harbor_agent passes the same kwargs to every agent (a
+ ``harbor_agent_kwargs`` carry options other agents do not have; see ``drop_shared_kwargs``.
+ """
+ 
++import copy
++import functools
++import hashlib
+ import inspect
+ from pathlib import Path
+ from typing import Any, Iterable, Mapping
+@@ -40,6 +43,51 @@ from jinja2 import Environment
+ from pydantic import BaseModel
+ 
+ 
++# The sandbox exec may run the command with /bin/sh (OpenSandbox runs `su -s /bin/sh -c` for a
++# named user). A plain `set -o pipefail` is a special-builtin error in a shell without it (older
++# dash), which ends a non-interactive shell before the agent starts. Probe in a subshell first.
++PIPEFAIL_IF_SUPPORTED = "(set -o pipefail) 2>/dev/null && set -o pipefail; "
++# `timeout -k`: seconds between the agent's SIGTERM at its own time limit and the SIGKILL
++TIMEOUT_KILL_AFTER_SEC = 10
++
++
++def deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
++    """`base` updated by `overlay`, recursing into dicts; a None value in `overlay` deletes the key."""
++    merged = copy.deepcopy(base)
++    for key, value in overlay.items():
++        if value is None:
++            merged.pop(key, None)
++        elif isinstance(value, dict) and isinstance(merged.get(key), dict):
++            merged[key] = deep_merge(merged[key], value)
++        else:
++            merged[key] = copy.deepcopy(value)
++    return merged
++
++
++@functools.lru_cache(maxsize=8)
++def _file_sha256(path: str, size: int, mtime_ns: int) -> str:
++    digest = hashlib.sha256()
++    with open(path, "rb") as f:
++        for chunk in iter(lambda: f.read(1 << 20), b""):
++            digest.update(chunk)
++    return digest.hexdigest()
++
++
++def verified_archive(
++    path: Path, sha256: str, what: str = "OpenCode", dir_option: str = "opencode_archive_dir"
++) -> Path:
++    """`path` if it is a file with that sha256. Hashed once per process (and size and mtime): every trial
++    builds an adapter, and the archive does not change during a run. `what` and `dir_option` name the agent
++    and its archive-dir kwarg in the errors."""
++    if not path.is_file():
++        raise FileNotFoundError(f"{what} archive {path} not found ({dir_option}/<version>/<asset>)")
++    stat = path.stat()
++    actual = _file_sha256(str(path), stat.st_size, stat.st_mtime_ns)
++    if actual != sha256:
++        raise ValueError(f"{what} archive {path}: sha256 {actual}, expected {sha256}")
++    return path
++
++
+ # kwargs that harbor_agent or the shared Terminus-2 harbor_agent_kwargs give to whichever agent runs. The last six
+ # are Terminus-2 options from Gym's configs/harbor_agent_opensandbox_training.yaml, which every run loads, or from an
+ # env yaml under it; an agent overlay merged on top cannot delete them (OmegaConf), so OpenCode and mini get them too
+diff --git a/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py
+index b8ad4e5fa..83a0b9a76 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py
+@@ -39,9 +39,6 @@ On Harbor 0.25 the run goes through `installed_compat` (one recorded command, no
+ non-zero exit, as on Harbor 0.1.x) and Harbor's ATIF conversion of `opencode.txt` stays off.
+ """
+ 
+-import copy
+-import functools
+-import hashlib
+ import json
+ import re
+ import shlex
+@@ -54,11 +51,15 @@ from harbor.environments.base import BaseEnvironment
+ from harbor.models.agent.context import AgentContext
+ 
+ from responses_api_agents.harbor_agent.custom_agents.installed_compat import (
++    PIPEFAIL_IF_SUPPORTED,
++    TIMEOUT_KILL_AFTER_SEC,
+     ExecInput,
++    deep_merge,
+     drop_shared_kwargs,
+     install_from_template,
+     kwargs_for_harbor_options,
+     run_commands,
++    verified_archive,
+ )
+ 
+ 
+@@ -92,52 +93,11 @@ LOG_FILE = "/logs/agent/opencode.txt"
+ # OpenCode's data dir (sqlite DB with sessions/messages, its log files) under the trial's agent
+ # logs, so Harbor downloads it with /logs/agent (core/src/global.ts:11,23 via xdg-basedir).
+ DATA_HOME = "/logs/agent/opencode-data"
+-TIMEOUT_KILL_AFTER_SEC = 10
+ 
+ _VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+-]*$")
+ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+ 
+ 
+-# The sandbox exec may run the command with /bin/sh (OpenSandbox runs `su -s /bin/sh -c` for a
+-# named user). A plain `set -o pipefail` is a special-builtin error in a shell without it (older
+-# dash), which ends a non-interactive shell before OpenCode starts. Probe in a subshell first.
+-PIPEFAIL_IF_SUPPORTED = "(set -o pipefail) 2>/dev/null && set -o pipefail; "
+-
+-
+-def deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+-    """`base` updated by `overlay`, recursing into dicts; a None value in `overlay` deletes the key."""
+-    merged = copy.deepcopy(base)
+-    for key, value in overlay.items():
+-        if value is None:
+-            merged.pop(key, None)
+-        elif isinstance(value, dict) and isinstance(merged.get(key), dict):
+-            merged[key] = deep_merge(merged[key], value)
+-        else:
+-            merged[key] = copy.deepcopy(value)
+-    return merged
+-
+-
+-@functools.lru_cache(maxsize=8)
+-def _file_sha256(path: str, size: int, mtime_ns: int) -> str:
+-    digest = hashlib.sha256()
+-    with open(path, "rb") as f:
+-        for chunk in iter(lambda: f.read(1 << 20), b""):
+-            digest.update(chunk)
+-    return digest.hexdigest()
+-
+-
+-def verified_archive(path: Path, sha256: str) -> Path:
+-    """`path` if it is a file with that sha256. Hashed once per process (and size and mtime): every trial
+-    builds an adapter, and the archive does not change during a run."""
+-    if not path.is_file():
+-        raise FileNotFoundError(f"OpenCode archive {path} not found (opencode_archive_dir/<version>/<asset>)")
+-    stat = path.stat()
+-    actual = _file_sha256(str(path), stat.st_size, stat.st_mtime_ns)
+-    if actual != sha256:
+-        raise ValueError(f"OpenCode archive {path}: sha256 {actual}, expected {sha256}")
+-    return path
+-
+-
+ class OpenCodeNemoGym(OpenCode):
+     @classmethod
+     def preflight(cls, kwargs: dict[str, Any] | None = None, env: Mapping[str, str] | None = None) -> None:
+diff --git a/responses_api_agents/harbor_agent/custom_agents/pi_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/pi_nemo_gym.py
+new file mode 100644
+index 000000000..c5b6134cf
+--- /dev/null
++++ b/responses_api_agents/harbor_agent/custom_agents/pi_nemo_gym.py
+@@ -0,0 +1,368 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++# http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""Harbor's installed pi agent (github.com/earendil-works/pi, MIT), pointed at a NeMo Gym model server.
++
++Harbor's own Pi agent installs pi with npm under nvm in the sandbox and raises when pi exits non-zero.
++This subclass installs the standalone release (a Bun-compiled binary, no Node/npm) from an archive the
++adapter uploads into the sandbox, and runs it through `installed_compat` like OpenCodeNemoGym: one
++recorded command, the exit status written down instead of raised.
++
++pi talks to one OpenAI-compatible provider declared in its `models.json`, whose base URL is the
++`api_base` harbor_agent passes (the model server, with the rollout's capture prefix when token capture
++is on). Under token capture a rollout is usable only if all its model calls form one chain, so the
++configuration switches off every call that is not the main loop and every rewrite of the history:
++compaction (summary calls; compact-and-retry after an overflow), auto-retry (re-sends a prompt and drops
++the failed attempt), cache warming; the HTTP idle and request timeouts are off, because under stream
++replay the model server sends no byte before generation ends. `compat` keeps the request to
++`model, messages, tools, stream, stream_options, max_tokens`: on an unknown base URL pi would also send
++`store`, `reasoning_effort`, session headers and a prompt-cache key, and the system prompt as role
++`developer`. Sampling parameters are not set here (pi sends none); set them with the Gym model server's
++`sampling_overrides`. Gym's model server returns the reasoning as a `<think>` block in `content`, so pi
++echoes it back as text, as OpenCode does.
++
++A turn budget (`max_turns`) is a pi extension: in the turn after the last allowed one it blocks every
++tool call with `terminate`, and pi's loop then ends without another model call. (`ctx.abort()` from
++`turn_end`, which Harbor's agent uses, lets the loop start one more, aborted call after a tool turn.)
++
++Keys, flags and file:line references below were checked against the pi source at tag v1.5.2 (commit
++b4afdddf); notes in the alpernates workspace, research/reports/2026-11-24-pi-v1.5.2-source-notes.md.
++Another version may differ, so `version` defaults to that release.
++
++pi runs inside the task sandbox, so `api_base` must be reachable from there (see harbor_agent's
++`harbor_model_base_url`, e.g. the per-sandbox model tunnel). The adapter writes no ATIF trajectory: for
++training the tokens come from model-server capture. pi's `--mode json` event stream goes to
++`/logs/agent/pi.txt` (failure_classes.pi_end_flags reads it), its session to `/logs/agent/pi/sessions`.
++"""
++
++import json
++import re
++import shlex
++from pathlib import Path
++from typing import Any, Mapping
++
++from harbor.agents.installed.base import with_prompt_template
++from harbor.agents.installed.pi import Pi
++from harbor.environments.base import BaseEnvironment
++from harbor.models.agent.context import AgentContext
++
++from responses_api_agents.harbor_agent.custom_agents.installed_compat import (
++    PIPEFAIL_IF_SUPPORTED,
++    TIMEOUT_KILL_AFTER_SEC,
++    ExecInput,
++    deep_merge,
++    drop_shared_kwargs,
++    install_from_template,
++    kwargs_for_harbor_options,
++    run_commands,
++    verified_archive,
++)
++
++
++PROVIDER_ID = "nemogym"
++# Gym's model server replaces the request's model with its own (vllm_model/app.py), so pi gets a fixed
++# id: the policy's name may be a path, and pi resolves --model fuzzily (core/model-resolver.ts:476-533).
++MODEL_ID = "policy"
++API_KEY_ENV = "NEMO_GYM_API_KEY"
++
++# Release whose settings, models.json schema, flags and extension API this adapter was checked against.
++DEFAULT_VERSION = "1.5.2"
++# Bun-compiled for bun-linux-x64-baseline (glibc, no AVX2 needed; scripts/build-binaries.sh:117-122).
++DEFAULT_ASSET = "pi-linux-x64.tar.gz"
++RELEASE_URL = "https://github.com/earendil-works/pi/releases/download/v{version}/{asset}"
++# sha256 of release archives as listed by the GitHub release API ("digest" of the asset).
++KNOWN_ARCHIVE_SHA256 = {
++    ("1.5.2", "pi-linux-x64.tar.gz"): "811c6f2c9e7aaee252b5404252e556fb713aa209c1f7f924226aa77d4ef70cb5",
++}
++INSTALL_TEMPLATE = Path(__file__).parent / "pi_pod" / "install-pi.sh.j2"
++# The binary and the package.json it reads its version from (dirname of the executable, config.ts:418-430).
++INSTALL_DIR = "/opt/pi-nemo-gym"
++PI_BIN = f"{INSTALL_DIR}/pi"
++# where the adapter uploads the release archive (the install script removes it)
++POD_ARCHIVE = "/installed-agent/pi.tar.gz"
++
++LOG_FILE = "/logs/agent/pi.txt"
++# PI_CODING_AGENT_DIR (config.ts:610-636): models.json, settings.json, the turn-budget extension. Under the
++# trial's agent logs, so Harbor downloads it, and written by the run command as the agent's user.
++AGENT_DIR = "/logs/agent/pi-agent"
++SESSION_DIR = "/logs/agent/pi/sessions"  # Harbor's Pi layout (agents/installed/pi.py:122)
++MAX_TURNS_FILE = "max-turns.ts"
++# pi's default tools (settings-manager.ts:85); grep/find/ls would download fd/rg, which --offline forbids
++TOOLS = ("read", "bash", "edit", "write")
++
++# The provider's compat block: only model, messages, tools, stream, stream_options and max_tokens in the request
++# (packages/ai/src/api/openai-completions.ts:761-835, 960-963, 1226; schema providers/compat-schema.ts).
++COMPAT = {
++    "supportsStore": False,
++    "supportsDeveloperRole": False,
++    "supportsReasoningEffort": False,
++    "supportsUsageInStreaming": True,
++    "supportsStrictMode": False,
++    "supportsMidConvoSystemMessages": False,
++    "sendSessionAffinityHeaders": False,
++    "promptCacheKeyMode": "disabled",
++    "maxTokensField": "max_tokens",
++}
++
++_VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+-]*$")
++_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
++
++
++class PiNemoGym(Pi):
++    @classmethod
++    def preflight(cls, kwargs: dict[str, Any] | None = None, env: Mapping[str, str] | None = None) -> None:
++        # Harbor 0.25 checks the config's kwargs before any trial (Job.create); ours are taken by __init__
++        super().preflight(kwargs=kwargs_for_harbor_options(cls, kwargs), env=env)
++
++    def __init__(
++        self,
++        *args: Any,
++        api_base: str | None = None,
++        api_key: str = "EMPTY",
++        responses_create_params: dict[str, Any] | None = None,
++        max_turns: int | None = None,
++        model_info: dict[str, Any] | None = None,
++        pi_archive_dir: str | None = None,
++        pi_sha256: str | None = None,
++        pi_asset: str = DEFAULT_ASSET,
++        pi_timeout_sec: int | None = None,
++        pi_workdir: str | None = None,
++        pi_settings: dict[str, Any] | None = None,
++        **kwargs: Any,
++    ) -> None:
++        # Harbor's base keeps `version` (the pi release).
++        super().__init__(*args, **drop_shared_kwargs(kwargs))
++        if not api_base:
++            raise ValueError("PiNemoGym needs api_base (harbor_agent passes the model server URL)")
++        if pi_timeout_sec is not None and int(pi_timeout_sec) <= 0:
++            raise ValueError(f"pi_timeout_sec must be positive, got {pi_timeout_sec!r}")
++        if self._version is None:
++            self._version = DEFAULT_VERSION
++        if not _VERSION_RE.match(self._version):
++            raise ValueError(f"invalid pi version {self._version!r}")
++        if pi_sha256 is not None and not _SHA256_RE.match(pi_sha256):
++            raise ValueError("pi_sha256 must be 64 lowercase hex digits")
++        if pi_workdir is not None and not str(pi_workdir).startswith("/"):
++            raise ValueError(f"pi_workdir must be an absolute path, got {pi_workdir!r}")
++        if not pi_archive_dir:
++            raise ValueError("PiNemoGym needs pi_archive_dir (with <version>/<asset>, e.g. from fetch-pi.sh)")
++        sha256 = pi_sha256 or KNOWN_ARCHIVE_SHA256.get((self._version, pi_asset))
++        if not sha256:
++            raise ValueError(f"pi {self._version} ({pi_asset}) has no known digest: set pi_sha256")
++        self._api_base = api_base
++        self._api_key = api_key
++        self._responses_create_params = responses_create_params or {}
++        self._max_turns = int(max_turns) if max_turns else None
++        self._model_info = model_info or {}
++        self._sha256 = sha256
++        self._timeout_sec = int(pi_timeout_sec) if pi_timeout_sec is not None else None
++        self._workdir = pi_workdir
++        self._settings_overlay = pi_settings or {}
++        self._archive = verified_archive(
++            Path(pi_archive_dir) / self._version / pi_asset, sha256, what="pi", dir_option="pi_archive_dir"
++        )
++
++    @staticmethod
++    def name() -> str:
++        return "pi-nemo-gym"
++
++    # --- install -------------------------------------------------------------------------------
++
++    def install_variables(self) -> dict[str, str]:
++        """Variables of the install script (INSTALL_TEMPLATE)."""
++        return {
++            "version": shlex.quote(self._version),
++            "sha256": shlex.quote(self._sha256),
++            "install_dir": shlex.quote(INSTALL_DIR),
++            "archive": shlex.quote(POD_ARCHIVE),
++        }
++
++    async def install(self, environment: BaseEnvironment) -> None:
++        await environment.upload_file(source_path=self._archive, target_path=POD_ARCHIVE)
++        # as root: it writes to INSTALL_DIR
++        await install_from_template(self, environment, INSTALL_TEMPLATE, self.install_variables())
++
++    # --- configuration -------------------------------------------------------------------------
++
++    def model_limits(self) -> dict[str, int]:
++        """pi's contextWindow / maxTokens from Terminus-2-style `model_info` (empty when unknown).
++
++        `max_input_tokens` is the whole context window in our overlays (max_total_sequence_length), as for
++        Terminus-2; the output limit is additionally capped by the request's max_output_tokens. pi sends
++        min(maxTokens, contextWindow - estimated input) as max_tokens (packages/ai/src/api/simple-options.ts:26-35).
++        """
++        context = self._model_info.get("max_input_tokens") or self._model_info.get("max_tokens")
++        if not context:
++            return {}
++        output = self._model_info.get("max_output_tokens") or context
++        request_cap = self._responses_create_params.get("max_output_tokens")
++        if request_cap:
++            output = min(int(output), int(request_cap))
++        return {"contextWindow": int(context), "maxTokens": int(output)}
++
++    def models_json(self) -> dict[str, Any]:
++        model: dict[str, Any] = {
++            "id": MODEL_ID,
++            "name": self.model_name or MODEL_ID,
++            # no thinking levels: the server puts the reasoning into content, and reasoning_effort is off
++            "reasoning": False,
++            "input": ["text"],
++            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
++            **self.model_limits(),
++        }
++        return {
++            "providers": {
++                PROVIDER_ID: {
++                    "name": "NeMo Gym model server",
++                    "baseUrl": self._api_base,
++                    # "$NAME" is read from the environment (core/model-config.ts); a literal "!..." would run
++                    "apiKey": f"${API_KEY_ENV}",
++                    "api": "openai-completions",
++                    "compat": dict(COMPAT),
++                    "models": [model],
++                }
++            }
++        }
++
++    def settings_json(self) -> dict[str, Any]:
++        settings: dict[str, Any] = {
++            # threshold and overflow compaction, and the compact-and-retry after a clamped "length" stop
++            # (core/agent-session.ts:3106-3201)
++            "compaction": {"enabled": False},
++            # agent-level retry re-sends the prompt and hides the failed attempt (agent-session.ts:3924-3961);
++            # provider.maxRetries: the SDK's own retries
++            "retry": {"enabled": False, "provider": {"maxRetries": 0}},
++            # 0 = no HTTP idle timeout, and the SDK request timeout becomes 2^31-1 ms (settings-schema.ts:406-413,
++            # sdk.ts:340-345). retry.provider.timeoutMs stays unset: it would replace that timeout as given.
++            "httpIdleTimeoutMs": 0,
++            # would replay the last request with max_tokens 1 (settings-manager.ts:941-946)
++            "cacheWarming": "off",
++            "enableInstallTelemetry": False,
++            "enableAnalytics": False,
++            "enableSkillCommands": False,
++            # project-local .pi/ files of the task's repository stay untrusted (core/trust-manager.ts)
++            "defaultProjectTrust": "never",
++            "quietStartup": True,
++        }
++        return deep_merge(settings, self._settings_overlay)
++
++    def max_turns_extension(self) -> str | None:
++        """A pi extension that ends the episode after `max_turns` model calls, or None without a budget.
++
++        A turn is one model call plus its tool calls; turn_end fires after the tool results
++        (packages/agent/src/agent-loop.ts:289-296). In turn max_turns every tool call is blocked with
++        terminate, and when every result of a batch terminates the loop stops without another model call
++        (agent-loop.ts:281, 700-765; ToolCallEventResult in core/extensions/types.ts:1475-1484). The
++        counter is our own: turnIndex restarts at 0 after a retry (agent-session.ts:1369-1385).
++        """
++        if not self._max_turns:
++            return None
++        return f"""export default function (pi: any) {{
++  const maxTurns = {self._max_turns};
++  let completedTurns = 0;
++
++  pi.on("turn_end", () => {{
++    completedTurns += 1;
++  }});
++
++  pi.on("tool_call", () => {{
++    if (completedTurns + 1 >= maxTurns) {{
++      return {{ block: true, terminate: true, reason: `Turn limit reached (${{maxTurns}} model turns).` }};
++    }}
++    return undefined;
++  }});
++}}
++"""
++
++    def pi_env(self) -> dict[str, str]:
++        return {
++            "PI_CODING_AGENT_DIR": AGENT_DIR,
++            # --offline as an env var; also sets PI_SKIP_VERSION_CHECK (main.ts:616-620)
++            "PI_OFFLINE": "1",
++            "PI_SKIP_VERSION_CHECK": "1",
++            # anything but 1/true/yes is off (core/telemetry.ts:8-13)
++            "PI_TELEMETRY": "0",
++            API_KEY_ENV: self._api_key,
++        }
++
++    # --- run -----------------------------------------------------------------------------------
++
++    def create_run_agent_commands(self, instruction: str) -> list[ExecInput]:
++        if instruction.startswith("@"):
++            # pi reads a positional argument starting with "@" as a file to attach, also after "--"
++            # (cli/args.ts:83-91); the instruction would be lost
++            raise ValueError("pi cannot take an instruction that starts with '@' as its message")
++        files = {"models.json": json.dumps(self.models_json()), "settings.json": json.dumps(self.settings_json())}
++        extension = self.max_turns_extension()
++        if extension is not None:
++            files[MAX_TURNS_FILE] = extension
++        # Written by the run itself, so they belong to the agent's user (pi writes to its agent dir too);
++        # printf is a shell builtin, the image needs nothing for it.
++        steps = [f"mkdir -p {shlex.quote(AGENT_DIR)} {shlex.quote(SESSION_DIR)}"]
++        for name, content in files.items():
++            steps.append(f"printf '%s' {shlex.quote(content)} > {shlex.quote(f'{AGENT_DIR}/{name}')}")
++
++        argv: list[str] = []
++        if self._timeout_sec is not None:
++            # Ends pi before Harbor's agent timeout so the command's return code is recorded.
++            argv += ["timeout", "-k", str(TIMEOUT_KILL_AFTER_SEC), str(self._timeout_sec)]
++        argv += [
++            PI_BIN,
++            "--print",
++            "--mode",
++            "json",
++            "--offline",
++            # only our extension: --no-extensions also drops the built-in ones (llama.cpp provider, codemode,
++            # tool_search, mcp); an explicit --extension still loads (core/resource-loader.ts:609-615)
++            "--no-extensions",
++            "--no-mcp",
++            "--no-skills",
++            "--no-prompt-templates",
++            "--no-themes",
++            # project-local .pi/ resources of the task's repository are ignored (cli/args.ts:243-244)
++            "--no-approve",
++            "--session-dir",
++            SESSION_DIR,
++            "--provider",
++            PROVIDER_ID,
++            "--model",
++            MODEL_ID,
++            "--tools",
++            ",".join(TOOLS),
++        ]
++        if extension is not None:
++            argv += ["--extension", f"{AGENT_DIR}/{MAX_TURNS_FILE}"]
++        # "--": an instruction starting with "-" stays the message (cli/args.ts:83-91)
++        argv += ["--", instruction]
++        # stdin from /dev/null: with a non-TTY stdin pi reads it to EOF and prepends it to the message
++        # (main.ts:83-100), and the sandbox exec leaves it open. pipefail keeps pi's exit status (e.g. 124
++        # from timeout) instead of tee's. In --mode json pi exits 0 also after an error; pi_end_flags reads
++        # the events.
++        run = f"{shlex.join(argv)} 2>&1 </dev/null | tee {shlex.quote(LOG_FILE)}"
++        command = PIPEFAIL_IF_SUPPORTED + " && ".join([*steps, run])
++        if self._workdir:
++            # pi's cwd is its project (and in its system prompt); tasks may expect the agent to create it.
++            # If that fails, pi still runs in the exec's cwd.
++            workdir = shlex.quote(self._workdir)
++            command = f"mkdir -p {workdir} && cd {workdir}; {command}"
++        return [ExecInput(command=command, env=self.pi_env())]
++
++    @with_prompt_template
++    async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
++        await run_commands(self, environment, self.create_run_agent_commands(instruction))
++
++    def populate_context_post_run(self, context: AgentContext) -> None:
++        # Harbor's Pi converts its session into an ATIF trajectory.json, which harbor_agent would turn into
++        # output items; as for OpenCodeNemoGym, the model server's capture holds the rollout instead.
++        pass
+diff --git a/responses_api_agents/harbor_agent/custom_agents/pi_pod/install-pi.sh.j2 b/responses_api_agents/harbor_agent/custom_agents/pi_pod/install-pi.sh.j2
+new file mode 100644
+index 000000000..70ed5866e
+--- /dev/null
++++ b/responses_api_agents/harbor_agent/custom_agents/pi_pod/install-pi.sh.j2
+@@ -0,0 +1,50 @@
++#!/bin/bash
++# Installs the standalone pi release (Bun-compiled, no Node/npm) from the archive PiNemoGym uploaded.
++# Rendered by PiNemoGym; version, sha256, install_dir and archive arrive shell-quoted.
++# The archive was checked against sha256 on the node; it is checked again here when the image has
++# sha256sum. Needs tar (and gzip). Only the binary, its package.json (pi reads its version from the
++# package.json next to the executable) and README.md are extracted: themes, docs, the image wasm and the
++# clipboard helper are for the interactive UI, and the sandbox's files live in node memory. The archive is
++# removed at exit for the same reason.
++set -euo pipefail
++
++version={{ version }}
++sha256={{ sha256 }}
++install_dir={{ install_dir }}
++archive={{ archive }}
++dest="$install_dir/pi"
++work=""
++
++cleanup() {
++  if [ -n "$work" ]; then rm -rf "$work"; fi
++  rm -f "$archive"
++}
++trap cleanup EXIT
++
++if [ -x "$dest" ] && [ "$("$dest" --version 2>/dev/null || true)" = "$version" ]; then
++  echo "pi $version already installed at $dest"
++  exit 0
++fi
++
++if [ -n "$sha256" ] && command -v sha256sum >/dev/null 2>&1; then
++  actual=$(sha256sum "$archive")
++  if [ "${actual%% *}" != "$sha256" ]; then
++    echo "sha256 mismatch for the uploaded $archive: expected $sha256" >&2
++    exit 1
++  fi
++fi
++
++work=$(mktemp -d)
++# the release wraps everything in a pi/ directory (scripts/build-binaries.sh:166-172)
++tar -xzf "$archive" -C "$work" pi/pi pi/package.json pi/README.md
++rm -rf "$install_dir"
++mkdir -p "$install_dir"
++install -m 755 "$work/pi/pi" "$dest"
++install -m 644 "$work/pi/package.json" "$install_dir/package.json"
++install -m 644 "$work/pi/README.md" "$install_dir/README.md"
++actual=$("$dest" --version)
++if [ "$actual" != "$version" ]; then
++  echo "pi version mismatch: wanted $version, $dest --version printed $actual" >&2
++  exit 1
++fi
++echo "installed pi $actual at $dest"
+diff --git a/responses_api_agents/harbor_agent/custom_agents/test_pi_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/test_pi_nemo_gym.py
+new file mode 100644
+index 000000000..41c1d1ff4
+--- /dev/null
++++ b/responses_api_agents/harbor_agent/custom_agents/test_pi_nemo_gym.py
+@@ -0,0 +1,547 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++# http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++import hashlib
++import io
++import json
++import os
++import shlex
++import shutil
++import subprocess
++import tarfile
++from pathlib import Path
++
++import pytest
++
++
++pytest.importorskip("harbor")
++
++from jinja2 import Environment  # noqa: E402
++
++from responses_api_agents.harbor_agent.custom_agents import pi_nemo_gym as mod  # noqa: E402
++from responses_api_agents.harbor_agent.custom_agents.pi_nemo_gym import PiNemoGym  # noqa: E402
++
++
++API_BASE = "http://127.0.0.1:8000/ng-rollout/3-1/training-token-capture/v1"
++# a policy model name as NeMo-RL passes it: a path (vllm_model replaces the request's model with its own)
++MODEL = "/scratch/models/chonk-sft-v0.2"
++MODEL_INFO = {"max_input_tokens": 65536, "max_output_tokens": 16384}
++needs_bash = pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
++
++
++def _release(tmp_path: Path, printed_version: str = "1.5.2") -> tuple[bytes, str]:
++    """A fake pi release archive (the real layout: a `pi/` directory) and its sha256."""
++    files = {
++        "pi/pi": (f"#!/bin/sh\necho {printed_version}\n".encode(), 0o755),
++        "pi/package.json": (b'{"name": "@earendil-works/pi-coding-agent", "version": "1.5.2"}\n', 0o644),
++        "pi/README.md": (b"# pi\n", 0o644),
++        "pi/docs/models.md": (b"docs\n", 0o644),
++        "pi/theme/dark.json": (b"{}\n", 0o644),
++    }
++    buf = io.BytesIO()
++    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
++        for name, (data, mode) in files.items():
++            info = tarfile.TarInfo(name)
++            info.size, info.mode = len(data), mode
++            tar.addfile(info, io.BytesIO(data))
++    return buf.getvalue(), hashlib.sha256(buf.getvalue()).hexdigest()
++
++
++def _archive_dir(tmp_path: Path, version: str = "1.5.2", printed_version: str = "1.5.2") -> tuple[Path, bytes, str]:
++    """A pi_archive_dir with a fake release at <dir>/<version>/<asset>: (dir, bytes, sha256)."""
++    data, digest = _release(tmp_path, printed_version)
++    archive_dir = tmp_path / "pi-archives"
++    (archive_dir / version).mkdir(parents=True, exist_ok=True)
++    (archive_dir / version / mod.DEFAULT_ASSET).write_bytes(data)
++    return archive_dir, data, digest
++
++
++def _agent(tmp_path: Path, **kwargs) -> PiNemoGym:
++    if "pi_archive_dir" not in kwargs:
++        archive_dir, _, digest = _archive_dir(tmp_path / "default")
++        kwargs = {"pi_archive_dir": str(archive_dir), "pi_sha256": digest, **kwargs}
++    return PiNemoGym(logs_dir=tmp_path, model_name=MODEL, api_base=API_BASE, **kwargs)
++
++
++def _command(agent: PiNemoGym, instruction: str = "x"):
++    (cmd,) = agent.create_run_agent_commands(instruction)
++    return cmd
++
++
++def test_requires_api_base(tmp_path: Path) -> None:
++    with pytest.raises(ValueError, match="api_base"):
++        PiNemoGym(logs_dir=tmp_path, model_name=MODEL)
++
++
++# --- models.json -------------------------------------------------------------------------------------
++
++
++def test_models_json_points_pi_at_the_model_server(tmp_path: Path) -> None:
++    models = _agent(tmp_path, model_info=MODEL_INFO).models_json()
++    (provider_id,) = models["providers"]
++    provider = models["providers"][provider_id]
++    assert provider_id == mod.PROVIDER_ID
++    assert provider["baseUrl"] == API_BASE
++    assert provider["api"] == "openai-completions"
++    # "$NAME" is read from the environment; a literal key starting with "!" would be run as a command
++    assert provider["apiKey"] == f"${mod.API_KEY_ENV}"
++    (model,) = provider["models"]
++    assert model["id"] == mod.MODEL_ID
++    # no thinking level logic: Gym's model server returns the reasoning inside content (<think>...)
++    assert model["reasoning"] is False
++    assert model["input"] == ["text"]
++    assert (model["contextWindow"], model["maxTokens"]) == (65536, 16384)
++    assert "promptCache" not in model
++
++
++def test_models_json_compat_keeps_the_request_to_the_plain_fields(tmp_path: Path) -> None:
++    """pi's defaults for an unknown base URL send store, reasoning_effort, session headers and a
++    prompt-cache key (pi v1.5.2 packages/ai/src/api/openai-completions.ts:761-835, 960-963)."""
++    compat = _agent(tmp_path).models_json()["providers"][mod.PROVIDER_ID]["compat"]
++    assert compat == {
++        "supportsStore": False,
++        "supportsDeveloperRole": False,
++        "supportsReasoningEffort": False,
++        "supportsUsageInStreaming": True,
++        "supportsStrictMode": False,
++        "supportsMidConvoSystemMessages": False,
++        "sendSessionAffinityHeaders": False,
++        "promptCacheKeyMode": "disabled",
++        "maxTokensField": "max_tokens",
++    }
++
++
++def test_models_json_without_model_info_leaves_the_limits_to_pi(tmp_path: Path) -> None:
++    (model,) = _agent(tmp_path).models_json()["providers"][mod.PROVIDER_ID]["models"]
++    assert "contextWindow" not in model and "maxTokens" not in model
++
++
++def test_output_limit_capped_by_request_max_output_tokens(tmp_path: Path) -> None:
++    agent = _agent(tmp_path, model_info=MODEL_INFO, responses_create_params={"max_output_tokens": 4096})
++    (model,) = agent.models_json()["providers"][mod.PROVIDER_ID]["models"]
++    assert model["maxTokens"] == 4096
++
++
++# --- settings.json -----------------------------------------------------------------------------------
++
++
++def test_settings_switch_off_every_call_outside_the_main_loop(tmp_path: Path) -> None:
++    settings = _agent(tmp_path).settings_json()
++    # compaction: summary calls, and compact-and-retry after an overflow or a clamped length stop
++    assert settings["compaction"] == {"enabled": False}
++    # retry re-sends the same prompt and hides the failed attempt from the history
++    assert settings["retry"]["enabled"] is False
++    assert settings["retry"]["provider"]["maxRetries"] == 0
++    # under stream replay no byte arrives before generation ends: no idle or request timeout
++    assert settings["httpIdleTimeoutMs"] == 0
++    # set, it would be the SDK timeout as given (0 = none at all); unset, it follows httpIdleTimeoutMs
++    assert "timeoutMs" not in settings["retry"]["provider"]
++    assert settings["cacheWarming"] == "off"
++    assert settings["enableInstallTelemetry"] is False and settings["enableAnalytics"] is False
++    assert settings["defaultProjectTrust"] == "never"
++
++
++def test_settings_overlay_is_deep_merged_last(tmp_path: Path) -> None:
++    settings = _agent(tmp_path, pi_settings={"retry": {"enabled": True}, "quietStartup": None}).settings_json()
++    assert settings["retry"]["enabled"] is True
++    assert settings["retry"]["provider"]["maxRetries"] == 0
++    assert "quietStartup" not in settings
++
++
++# --- turn budget ------------------------------------------------------------------------------------
++
++
++def test_no_turn_budget_extension_without_max_turns(tmp_path: Path) -> None:
++    agent = _agent(tmp_path)
++    assert agent.max_turns_extension() is None
++    assert "--extension" not in _command(agent).command
++
++
++def test_turn_budget_blocks_the_tool_calls_of_the_last_turn(tmp_path: Path) -> None:
++    """ctx.abort() in turn_end starts one more (aborted) call after a tool turn; a blocked tool call with
++    terminate ends the loop without one (pi v1.5.2 packages/agent/src/agent-loop.ts:281, 700-765)."""
++    source = _agent(tmp_path, max_turns=100).max_turns_extension()
++    assert "const maxTurns = 100;" in source
++    assert 'pi.on("turn_end"' in source and 'pi.on("tool_call"' in source
++    assert "terminate: true" in source and "block: true" in source
++    assert "abort" not in source
++
++
++@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
++def test_turn_budget_extension_ends_after_max_turns_model_calls(tmp_path: Path) -> None:
++    """Drives the extension's handlers as pi's loop does: per turn, tool_call for each call, then turn_end."""
++    source = _agent(tmp_path, max_turns=3).max_turns_extension()
++    script = tmp_path / "drive.mjs"
++    (tmp_path / "ext.mjs").write_text(source.replace("(pi: any)", "(pi)"))
++    script.write_text(
++        """import ext from "./ext.mjs";
++const handlers = {};
++ext({ on: (name, fn) => { handlers[name] = fn; } });
++const results = [];
++for (let turn = 1; turn <= 5; turn++) {
++  const calls = [handlers.tool_call({ toolName: "bash" }), handlers.tool_call({ toolName: "read" })];
++  results.push(calls.map((r) => (r && r.block && r.terminate ? "stop" : "run")).join(","));
++  if (calls.every((r) => r && r.terminate)) break;
++  handlers.turn_end({});
++}
++console.log(results.join(" "));
++"""
++    )
++    proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=30)
++    assert proc.returncode == 0, proc.stderr
++    assert proc.stdout.split() == ["run,run", "run,run", "stop,stop"]
++
++
++# --- run command -------------------------------------------------------------------------------------
++
++
++def test_run_command(tmp_path: Path) -> None:
++    cmd = _command(_agent(tmp_path, max_turns=50), "fix 'it'")
++    assert cmd.command.startswith(mod.PIPEFAIL_IF_SUPPORTED)
++    argv_part = cmd.command.split(" && ")[-1]
++    assert argv_part == (
++        f"{mod.PI_BIN} --print --mode json --offline --no-extensions --no-mcp --no-skills --no-prompt-templates "
++        f"--no-themes --no-approve --session-dir {mod.SESSION_DIR} --provider {mod.PROVIDER_ID} "
++        f"--model {mod.MODEL_ID} --tools read,bash,edit,write --extension {mod.AGENT_DIR}/{mod.MAX_TURNS_FILE} "
++        "-- 'fix '\"'\"'it'\"'\"'' 2>&1 </dev/null | tee /logs/agent/pi.txt"
++    )
++
++
++def test_env(tmp_path: Path) -> None:
++    env = _command(_agent(tmp_path, api_key="secret")).env
++    assert env == {
++        "PI_CODING_AGENT_DIR": mod.AGENT_DIR,
++        "PI_OFFLINE": "1",
++        "PI_SKIP_VERSION_CHECK": "1",
++        "PI_TELEMETRY": "0",
++        mod.API_KEY_ENV: "secret",
++    }
++
++
++def test_rejects_an_instruction_that_pi_would_read_as_a_file(tmp_path: Path) -> None:
++    # pi turns every positional argument starting with "@" into a file attachment, also after "--"
++    # (pi v1.5.2 packages/coding-agent/src/cli/args.ts:83-91)
++    with pytest.raises(ValueError, match="@"):
++        _command(_agent(tmp_path), "@README.md fix it")
++
++
++@pytest.mark.parametrize("bad", [0, -5])
++def test_rejects_non_positive_timeout(tmp_path: Path, bad: int) -> None:
++    with pytest.raises(ValueError, match="pi_timeout_sec"):
++        _agent(tmp_path, pi_timeout_sec=bad)
++
++
++def _fake_pi(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str) -> Path:
++    """Points the adapter's pod paths into tmp_path and installs a fake pi there; returns the log path."""
++    pod = tmp_path / "pod"
++    monkeypatch.setattr(mod, "PI_BIN", str(pod / "opt" / "pi"))
++    monkeypatch.setattr(mod, "AGENT_DIR", str(pod / "logs" / "pi-agent"))
++    monkeypatch.setattr(mod, "SESSION_DIR", str(pod / "logs" / "pi" / "sessions"))
++    monkeypatch.setattr(mod, "LOG_FILE", str(pod / "logs" / "pi.txt"))
++    (pod / "opt").mkdir(parents=True)
++    fake = pod / "opt" / "pi"
++    fake.write_text(body)
++    fake.chmod(0o755)
++    return pod / "logs" / "pi.txt"
++
++
++@needs_bash
++@pytest.mark.parametrize("timeout_sec", [None, 30])
++def test_run_command_in_bash_writes_the_config_closes_stdin_and_keeps_the_exit_status(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, timeout_sec: int | None
++) -> None:
++    if timeout_sec and shutil.which("timeout") is None:
++        pytest.skip("needs coreutils timeout")
++    # Stands in for pi: reads stdin to EOF as pi does for a non-TTY stdin (cli/initial-message.ts:27-40),
++    # prints its argv and the config it finds, exits 3.
++    log = _fake_pi(
++        tmp_path,
++        monkeypatch,
++        '#!/bin/bash\nstdin=$(cat)\nprintf "%s\\n" "$@"\necho "stdin=[$stdin]"\n'
++        'ls "$PI_CODING_AGENT_DIR"\necho "key=$NEMO_GYM_API_KEY"\nexit 3\n',
++    )
++    agent = _agent(tmp_path, max_turns=7, model_info=MODEL_INFO, pi_timeout_sec=timeout_sec)
++    cmd = _command(agent, "-fix it")
++    read_end, write_end = os.pipe()  # stdin left open, like the sandbox exec's
++    try:
++        proc = subprocess.run(
++            ["bash", "-c", cmd.command],
++            stdin=read_end,
++            capture_output=True,
++            text=True,
++            env={**os.environ, **cmd.env},
++            timeout=20,
++        )
++    finally:
++        os.close(read_end)
++        os.close(write_end)
++    assert proc.returncode == 3  # pi's status, not tee's 0
++    lines = log.read_text().splitlines()
++    assert lines == proc.stdout.splitlines()
++    assert lines[-7:] == ["--", "-fix it", "stdin=[]", "max-turns.ts", "models.json", "settings.json", "key=EMPTY"]
++    agent_dir = Path(mod.AGENT_DIR)
++    assert json.loads((agent_dir / "models.json").read_text()) == agent.models_json()
++    assert json.loads((agent_dir / "settings.json").read_text()) == agent.settings_json()
++    assert (agent_dir / "max-turns.ts").read_text() == agent.max_turns_extension()
++    assert Path(mod.SESSION_DIR).is_dir()
++
++
++@pytest.mark.parametrize("shell", ["sh", "dash"])
++def test_run_command_starts_pi_in_a_posix_sh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shell: str) -> None:
++    """The sandbox exec may use /bin/sh; a shell without pipefail must still run pi."""
++    if shutil.which(shell) is None:
++        pytest.skip(f"needs {shell}")
++    log = _fake_pi(tmp_path, monkeypatch, "#!/bin/sh\necho started\nexit 3\n")
++    cmd = _command(_agent(tmp_path))
++    proc = subprocess.run(
++        [shell, "-c", cmd.command], capture_output=True, text=True, env={**os.environ, **cmd.env}, timeout=20
++    )
++    supports_pipefail = subprocess.run([shell, "-c", "set -o pipefail"], capture_output=True).returncode == 0
++    assert log.read_text().splitlines() == ["started"]
++    assert proc.returncode == (3 if supports_pipefail else 0)
++
++
++@needs_bash
++def test_run_command_starts_pi_in_the_created_workdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
++    log = _fake_pi(tmp_path, monkeypatch, "#!/bin/sh\npwd\n")
++    workdir = tmp_path / "does" / "not" / "exist yet"
++    cmd = _command(_agent(tmp_path, pi_workdir=str(workdir)))
++    proc = subprocess.run(
++        ["bash", "-c", cmd.command], cwd="/", capture_output=True, text=True, env={**os.environ, **cmd.env}, timeout=20
++    )
++    assert proc.returncode == 0
++    assert log.read_text().splitlines() == [str(workdir)]
++    with pytest.raises(ValueError, match="absolute"):
++        _agent(tmp_path, pi_workdir="app")
++
++
++@pytest.mark.asyncio
++async def test_run_records_the_command_and_a_failed_exit_without_raising(tmp_path: Path) -> None:
++    from harbor.models.agent.context import AgentContext
++
++    agent = _agent(tmp_path, pi_timeout_sec=870)
++    env = _Env(return_code=124)
++    await agent.run("do it", env, AgentContext())
++    (call,) = env.calls
++    expected = _command(agent, "do it")
++    assert call["command"] == expected.command and call["env"] == expected.env
++    assert call["user"] is None  # the environment's default user, as for OpenCode
++    assert (tmp_path / "command-0" / "return-code.txt").read_text() == "124"
++    assert expected.command.split(" && ")[-1].startswith(f"timeout -k 10 870 {mod.PI_BIN} ")
++
++
++# --- install -----------------------------------------------------------------------------------------
++
++
++class _Env:
++    """Records exec/upload calls; every command exits with return_code."""
++
++    def __init__(self, return_code: int = 0) -> None:
++        self.calls: list[dict] = []
++        self.uploads: list[tuple[bytes, str]] = []
++        self.return_code = return_code
++        self.default_user = None
++
++    async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
++        from harbor.environments.base import ExecResult
++
++        self.calls.append({"command": command, "cwd": cwd, "env": env, "timeout_sec": timeout_sec, "user": user})
++        return ExecResult(stdout="out", stderr=None, return_code=self.return_code)
++
++    async def upload_file(self, source_path, target_path):
++        self.uploads.append((Path(source_path).read_bytes(), target_path))
++
++
++@pytest.mark.asyncio
++async def test_install_uploads_the_archive_then_runs_the_script_as_root(tmp_path: Path) -> None:
++    archive_dir, data, digest = _archive_dir(tmp_path)
++    agent = _agent(tmp_path, pi_archive_dir=str(archive_dir), pi_sha256=digest)
++    env = _Env()
++    await agent.install(env)
++    script = Environment().from_string(mod.INSTALL_TEMPLATE.read_text()).render(**agent.install_variables())
++    assert env.uploads == [(data, mod.POD_ARCHIVE), (script.encode(), "/installed-agent/install.sh")]
++    assert env.calls[-1]["command"] == "bash /installed-agent/install.sh"
++    assert env.calls[-1]["user"] == "root"
++
++
++def test_default_version_and_pinned_digest(tmp_path: Path) -> None:
++    assert mod.DEFAULT_VERSION == "1.5.2"
++    # "digest" of pi-linux-x64.tar.gz in the v1.5.2 release (GitHub release API)
++    assert mod.KNOWN_ARCHIVE_SHA256[("1.5.2", "pi-linux-x64.tar.gz")] == (
++        "811c6f2c9e7aaee252b5404252e556fb713aa209c1f7f924226aa77d4ef70cb5"
++    )
++    archive_dir, _, _ = _archive_dir(tmp_path)  # a fake archive is not the pinned release
++    with pytest.raises(ValueError, match="pi archive .* sha256"):
++        PiNemoGym(logs_dir=tmp_path, model_name=MODEL, api_base=API_BASE, pi_archive_dir=str(archive_dir))
++
++
++@pytest.mark.parametrize(
++    "kwargs, match",
++    [
++        ({"pi_archive_dir": None}, "pi_archive_dir"),
++        ({"pi_sha256": "ABC"}, "pi_sha256"),
++        ({"version": "1.5.2; rm -rf /"}, "version"),
++    ],
++)
++def test_rejects_bad_install_kwargs(tmp_path: Path, kwargs: dict, match: str) -> None:
++    with pytest.raises(ValueError, match=match):
++        _agent(tmp_path, **kwargs)
++
++
++def test_another_version_needs_its_digest(tmp_path: Path) -> None:
++    archive_dir, _, _ = _archive_dir(tmp_path, version="1.6.0")
++    with pytest.raises(ValueError, match="pi_sha256"):
++        _agent(tmp_path, pi_archive_dir=str(archive_dir), version="1.6.0", pi_sha256=None)
++
++
++def test_missing_archive(tmp_path: Path) -> None:
++    with pytest.raises(FileNotFoundError, match=mod.DEFAULT_ASSET):
++        _agent(tmp_path, pi_archive_dir=str(tmp_path / "nothing"), pi_sha256="0" * 64)
++
++
++BASIC_TOOLS = ("bash", "tar", "gzip", "mkdir", "rm", "mktemp", "install", "cat", "sha256sum")
++needs_path_tools = pytest.mark.skipif(
++    any(shutil.which(tool) is None for tool in BASIC_TOOLS), reason="needs " + ", ".join(BASIC_TOOLS)
++)
++
++
++def _run_install(tmp_path: Path, printed_version: str = "1.5.2", sha256: str | None = None, tools=BASIC_TOOLS):
++    """Renders the install script for a fake uploaded archive and runs it with only `tools` on PATH."""
++    data, digest = _release(tmp_path, printed_version)
++    pod_archive = tmp_path / "installed-agent" / "pi.tar.gz"
++    pod_archive.parent.mkdir(parents=True, exist_ok=True)
++    pod_archive.write_bytes(data)
++    bin_dir = tmp_path / "path"
++    bin_dir.mkdir(exist_ok=True)
++    for tool in tools:
++        if not (bin_dir / tool).exists():
++            (bin_dir / tool).symlink_to(shutil.which(tool))
++    variables = {
++        **_agent(tmp_path).install_variables(),
++        "sha256": shlex.quote(digest if sha256 is None else sha256),
++        "install_dir": shlex.quote(str(tmp_path / "opt" / "pi")),
++        "archive": shlex.quote(str(pod_archive)),
++    }
++    script = tmp_path / "install.sh"
++    script.write_text(Environment().from_string(mod.INSTALL_TEMPLATE.read_text()).render(**variables))
++    result = subprocess.run(
++        [str(bin_dir / "bash"), str(script)], capture_output=True, text=True, timeout=60, env={"PATH": str(bin_dir)}
++    )
++    return result, pod_archive
++
++
++@needs_path_tools
++def test_install_script_installs_the_binary_and_its_package_json(tmp_path: Path) -> None:
++    result, pod_archive = _run_install(tmp_path)
++    assert result.returncode == 0, result.stderr
++    assert "installed pi 1.5.2" in result.stdout
++    installed = tmp_path / "opt" / "pi"
++    # pi reads its version from the package.json next to the binary (config.ts:418-430); the themes, docs
++    # and the image wasm are for the interactive UI and would only take node memory
++    assert sorted(p.name for p in installed.iterdir()) == ["README.md", "package.json", "pi"]
++    assert os.access(installed / "pi", os.X_OK)
++    # the sandbox's files live in node memory: the archive goes once pi is installed
++    assert not pod_archive.exists()
++
++
++@needs_path_tools
++def test_install_script_works_without_sha256sum(tmp_path: Path) -> None:
++    result, _ = _run_install(tmp_path, tools=tuple(t for t in BASIC_TOOLS if t != "sha256sum"))
++    assert result.returncode == 0, result.stderr
++
++
++@needs_path_tools
++def test_install_script_rejects_a_wrong_digest(tmp_path: Path) -> None:
++    result, _ = _run_install(tmp_path, sha256="0" * 64)
++    assert result.returncode != 0
++    assert "sha256 mismatch" in result.stderr
++    assert not (tmp_path / "opt" / "pi" / "pi").exists()
++
++
++@needs_path_tools
++def test_install_script_rejects_a_wrong_version(tmp_path: Path) -> None:
++    result, _ = _run_install(tmp_path, printed_version="0.0.0")
++    assert result.returncode != 0
++    assert "version mismatch" in result.stderr
++
++
++# --- Harbor 0.25 kwargs and trajectory -------------------------------------------------------------
++
++
++def test_unknown_kwargs_still_fail(tmp_path: Path) -> None:
++    with pytest.raises(ValueError, match="Unknown option 'bogus'"):
++        _agent(tmp_path, bogus=1)
++
++
++def test_writes_no_atif_trajectory(tmp_path: Path) -> None:
++    """Harbor's Pi converts its session files into trajectory.json, which harbor_agent would turn into
++    output items; under token capture the model server rebuilds the rollout, as for OpenCode."""
++    from harbor.models.agent.context import AgentContext
++
++    sessions = tmp_path / "pi" / "sessions"
++    sessions.mkdir(parents=True)
++    (sessions / "s.jsonl").write_text(
++        '{"type": "session", "id": "s"}\n'
++        '{"type": "message", "id": "1", "message": {"role": "user", "content": "hi"}}\n'
++    )
++    context = AgentContext()
++    _agent(tmp_path).populate_context_post_run(context)
++    assert not (tmp_path / "trajectory.json").exists()
++    assert context.is_empty()
++
++
++def test_preflight_accepts_the_kwargs_harbor_agent_passes() -> None:
++    kwargs = {
++        "api_base": API_BASE,
++        "responses_create_params": {"temperature": 1.0},
++        "temperature": 1.0,
++        "max_turns": 50,
++        "interleaved_thinking": False,
++        "model_info": MODEL_INFO,
++        "pi_archive_dir": "/scratch/pi",
++        "pi_timeout_sec": 870,
++        "pi_workdir": "/app",
++        "pi_settings": {"quietStartup": True},
++        "version": "1.5.2",
++    }
++    PiNemoGym.preflight(kwargs=kwargs, env={})
++
++
++def test_preflight_still_rejects_an_unknown_option() -> None:
++    with pytest.raises(ValueError, match="Unknown option 'not_an_option'"):
++        PiNemoGym.preflight(kwargs={"api_base": API_BASE, "not_an_option": 1}, env={})
++
++
++def _training_yaml_kwargs() -> dict:
++    from omegaconf import OmegaConf
++
++    path = Path(__file__).parents[1] / "configs" / "harbor_agent_opensandbox_training.yaml"
++    cfg = OmegaConf.to_container(OmegaConf.load(path), resolve=False)
++    return cfg["harbor_agent"]["responses_api_agents"]["harbor_agent"]["harbor_agent_kwargs"]
++
++
++def test_init_and_preflight_accept_the_training_yaml_kwargs(tmp_path: Path) -> None:
++    """The Terminus-2 kwargs of Gym's training yaml reach every agent (job 5330618)."""
++    kwargs = {
++        **_training_yaml_kwargs(),
++        "max_consecutive_truncations": 8,
++        "truncation_retry": "resample",
++        "context_limit_truncation": "overflow",
++        "api_base": API_BASE,
++        "responses_create_params": {"temperature": 1.0},
++        "temperature": 1.0,
++    }
++    PiNemoGym.preflight(kwargs=kwargs, env={})
++    archive_dir, _, digest = _archive_dir(tmp_path)
++    PiNemoGym(logs_dir=tmp_path, model_name=MODEL, pi_archive_dir=str(archive_dir), pi_sha256=digest, **kwargs)
+diff --git a/responses_api_agents/harbor_agent/failure_classes.py b/responses_api_agents/harbor_agent/failure_classes.py
+index 511726817..df5119faa 100644
+--- a/responses_api_agents/harbor_agent/failure_classes.py
++++ b/responses_api_agents/harbor_agent/failure_classes.py
+@@ -18,7 +18,8 @@ Inputs are the trial's result.json (Harbor's ``exception_info`` with the formatt
+ timing, ``verifier_result``), the agent's ``agent_error_flags.json`` (Terminus2NemoGym writes the exception that
+ ended its episode there, since it catches it so the verifier still runs) and an error raised by the Harbor job
+ itself. OpenCode writes no such file; ``opencode_end_flags`` derives the same fields from its
+-``run --format=json`` log (``agent/opencode.txt``). Classes, first matching rule wins:
++``run --format=json`` log (``agent/opencode.txt``), ``pi_end_flags`` from pi's ``--mode json`` events
++(``agent/pi.txt``). Classes, first matching rule wins:
+ 
+ - ``infra``: the sandbox, the model server or Harbor failed, not the policy (the exception types Harbor's own
+   error_policy.py files under SANDBOX_FAILED, plus the Gym/OpenSandbox ones): sandbox start/setup timeouts, an agent
+@@ -265,11 +266,20 @@ def opencode_end_flags(log_text: str, context_limit: Optional[int] = None) -> di
+             if name == "ContextOverflowError" or _CONTEXT_TEXT.search(message):
+                 overflow_error = f"{name}: {message}" if name and message else (name or message)
+ 
++    return _context_end_flags("OpenCode", steps, overflow_error, context_limit)
++
++
++def _context_end_flags(
++    agent: str, steps: list[tuple[str, int, int]], overflow_error: Optional[str], context_limit: Optional[int]
++) -> dict[str, Any]:
++    """The rules of ``opencode_end_flags`` (and ``pi_end_flags``) on the agent's model calls in order:
++    ``steps`` = (reason, prompt tokens, completion tokens), reason "length" for a reply cut by the output limit;
++    ``overflow_error`` = the first error that was a context-length error."""
+     answered = sum(1 for _, prompt, _ in steps if prompt > 0)
+     if overflow_error is not None:
+         return {
+             "end_reason": "ContextLengthExceededError",
+-            "end_message": "OpenCode: " + overflow_error,
++            "end_message": f"{agent}: " + overflow_error,
+             "context_length_exceeded": True,
+             "answered_model_calls": answered,
+             "prompt_over_context_limit": True,
+@@ -282,7 +292,7 @@ def opencode_end_flags(log_text: str, context_limit: Optional[int] = None) -> di
+             return {}  # earlier steps without tokens too: no usage reported, zero tokens tell nothing
+         return {
+             "end_reason": "ContextLengthExceededError",
+-            "end_message": f"OpenCode: model call {len(steps)} got the model server's context-overflow placeholder "
++            "end_message": f"{agent}: model call {len(steps)} got the model server's context-overflow placeholder "
+             "(finish_reason length, no tokens): the prompt exceeds the context limit",
+             "context_length_exceeded": True,
+             "answered_model_calls": answered,
+@@ -291,8 +301,8 @@ def opencode_end_flags(log_text: str, context_limit: Optional[int] = None) -> di
+     if context_limit and prompt + completion >= context_limit - opencode_context_cut_margin(context_limit):
+         return {
+             "end_reason": "ContextLengthExceededError",
+-            "end_message": f"OpenCode: reply cut by the context limit (prompt {prompt} + completion {completion} "
+-            f"of {context_limit}); OpenCode ended the episode",
++            "end_message": f"{agent}: reply cut by the context limit (prompt {prompt} + completion {completion} "
++            f"of {context_limit}); {agent} ended the episode",
+             "context_length_exceeded": True,
+             "answered_model_calls": answered,
+             "prompt_over_context_limit": False,
+@@ -301,6 +311,42 @@ def opencode_end_flags(log_text: str, context_limit: Optional[int] = None) -> di
+     return {}
+ 
+ 
++def pi_end_flags(log_text: str, context_limit: Optional[int] = None) -> dict[str, Any]:
++    """``agent_error_flags.json`` fields for a pi episode that ended at the context limit, else ``{}``.
++
++    ``log_text`` is pi's ``--mode json`` output (one JSON event per line); each assistant message ends with a
++    ``message_end`` event whose message has ``stopReason`` (stop, length, toolUse, error, aborted), ``usage``
++    (input, output, cacheRead, cacheWrite) and, on an error, ``errorMessage`` (pi v1.5.2 packages/ai/src/types.ts).
++    In ``--mode json`` pi exits 0 also when its last message is an error. It ends its loop on a reply without tool
++    calls, also on ``length``; a ``length`` reply with tool calls gets error results and one more call. The same
++    rules as ``opencode_end_flags`` apply: the model server's placeholder (a last ``length`` call without tokens), a
++    context-length error (``stopReason`` error with such a message, when the 400 is propagated), a last ``length``
++    reply cut by the context ceiling.
++    """
++    steps: list[tuple[str, int, int]] = []
++    overflow_error: Optional[str] = None
++    for line in str(log_text or "").splitlines():
++        line = line.strip()
++        if not line.startswith("{"):
++            continue
++        try:
++            event = json.loads(line)
++        except ValueError:
++            continue
++        if not isinstance(event, dict) or event.get("type") != "message_end":
++            continue
++        message = event.get("message")
++        if not isinstance(message, dict) or message.get("role") != "assistant":
++            continue
++        usage = message.get("usage") if isinstance(message.get("usage"), dict) else {}
++        prompt = _int(usage.get("input")) + _int(usage.get("cacheRead")) + _int(usage.get("cacheWrite"))
++        steps.append((str(message.get("stopReason") or ""), prompt, _int(usage.get("output"))))
++        error = str(message.get("errorMessage") or "")
++        if message.get("stopReason") == "error" and overflow_error is None and _CONTEXT_TEXT.search(error):
++            overflow_error = error
++    return _context_end_flags("pi", steps, overflow_error, context_limit)
++
++
+ def classify_rollout(
+     trial_result: Optional[dict],
+     agent_error_flags: Optional[dict] = None,
+diff --git a/responses_api_agents/harbor_agent/tests/test_app.py b/responses_api_agents/harbor_agent/tests/test_app.py
+index 3f4171186..ecaa860bd 100644
+--- a/responses_api_agents/harbor_agent/tests/test_app.py
++++ b/responses_api_agents/harbor_agent/tests/test_app.py
+@@ -627,6 +627,29 @@ class TestApp:
+                 response = await server.run(self._capture_request())
+             assert response.model_dump()["failure_class"] == expected
+ 
++    @pytest.mark.parametrize("mask_context_overflow", [True, False])
++    async def test_run_classifies_a_pi_context_overflow_and_masks_it_under_capture(self, mask_context_overflow: bool):
++        # pi writes no ATIF (PiNemoGym) and no agent_error_flags.json; its `--mode json` events are agent/pi.txt
++        def end(stop_reason: str, prompt: int, completion: int) -> str:
++            usage = {"input": prompt, "output": completion, "cacheRead": 0, "cacheWrite": 0}
++            message = {"role": "assistant", "content": [], "usage": usage, "stopReason": stop_reason}
++            return json.dumps({"type": "message_end", "message": message})
++
++        server = self._capture_server(
++            harbor_agent_name=None,
++            harbor_agent_import_path="responses_api_agents.harbor_agent.custom_agents.pi_nemo_gym:PiNemoGym",
++            harbor_mask_context_overflow=mask_context_overflow,
++        )
++        trial_result = {**DEFAULT_TRIAL_RESULT, "verifier_result": {"rewards": {"reward": 0.0}}}
++        log = "\n".join([end("toolUse", 5406, 80), end("length", 0, 0)])
++        with _harbor_run_mocks(trial_result=trial_result, agent_files={"pi.txt": log}):
++            response = await server.run(self._capture_request())
++
++        dumped = response.model_dump()
++        assert (dumped["failure_class"], dumped["failure_context_overflow"]) == ("context_overflow", 1)
++        assert dumped["failure_detail"].startswith("ContextLengthExceededError: pi: model call 2 ")
++        assert response.instance_config == {"mask_sample": mask_context_overflow}
++
+     async def test_run_opencode_log_without_overflow_stays_ok(self):
+         log = json.dumps({"type": "step_finish", "part": {"reason": "stop", "tokens": {"input": 5600, "output": 40}}})
+         server = self._capture_server(harbor_mask_context_overflow=True)
+diff --git a/responses_api_agents/harbor_agent/tests/test_failure_classes.py b/responses_api_agents/harbor_agent/tests/test_failure_classes.py
+index 3363915c1..d9f48de31 100644
+--- a/responses_api_agents/harbor_agent/tests/test_failure_classes.py
++++ b/responses_api_agents/harbor_agent/tests/test_failure_classes.py
+@@ -25,6 +25,7 @@ from responses_api_agents.harbor_agent.failure_classes import (
+     mask_secrets,
+     opencode_context_cut_margin,
+     opencode_end_flags,
++    pi_end_flags,
+ )
+ 
+ 
+@@ -459,3 +460,116 @@ def test_opencode_logs_without_a_context_overflow_give_no_flags(log, context_lim
+ def test_opencode_cut_margin_is_terminus2s() -> None:
+     for limit in (1, 4096, 16384, 24576, 25600, 25601, 65536, 131072):
+         assert opencode_context_cut_margin(limit) == context_cut_margin(limit)
++
++
++# --- pi: its `--mode json` event stream (agent/pi.txt) ---------------------------------------------------------------
++# Event shapes of pi v1.5.2: one JSON object per line (modes/print-mode.ts, modes/json-event.ts); an assistant
++# message's message_end carries stopReason and usage (packages/ai/src/types.ts:467-497, 607-609).
++
++
++def _pi_end(stop_reason: str, prompt: int, completion: int, cache_read: int = 0, error: str | None = None) -> str:
++    message = {
++        "role": "assistant",
++        "content": [{"type": "text", "text": "..."}],
++        "api": "openai-completions",
++        "provider": "nemogym",
++        "model": "policy",
++        "usage": {"input": prompt - cache_read, "output": completion, "cacheRead": cache_read, "cacheWrite": 0},
++        "stopReason": stop_reason,
++        "timestamp": 1763000000000,
++    }
++    if error is not None:
++        message["errorMessage"] = error
++    return "\n".join(
++        [
++            json.dumps({"type": "message_start", "message": {**message, "stopReason": "pending"}}),
++            json.dumps(
++                {
++                    "type": "message_update",
++                    "usage": message["usage"],
++                    "assistantMessageEvent": {"type": "text_delta", "delta": "..."},
++                }
++            ),
++            json.dumps({"type": "message_end", "message": message}),
++        ]
++    )
++
++
++def _pi_tool_result() -> str:
++    message = {
++        "role": "toolResult",
++        "toolCallId": "c1",
++        "toolName": "bash",
++        "content": [{"type": "text", "text": "ok"}],
++    }
++    return json.dumps({"type": "message_end", "message": message})
++
++
++def _pi_log(*chunks: str) -> str:
++    return (
++        "\n".join([json.dumps({"type": "session", "id": "s1"}), json.dumps({"type": "agent_start"}), *chunks]) + "\n"
++    )
++
++
++_PI_PLACEHOLDER = _pi_end("length", 0, 0)
++_PI_TOOL_TURN = _pi_end("toolUse", 5406, 80) + "\n" + _pi_tool_result()
++
++
++def test_pi_placeholder_on_the_first_call_is_a_prompt_that_does_not_fit() -> None:
++    flags = pi_end_flags(_pi_log(_PI_PLACEHOLDER), context_limit=65536)
++
++    assert (flags["answered_model_calls"], flags["prompt_over_context_limit"]) == (0, True)
++    failure = classify_rollout(_trial(), flags)
++    assert failure.failure_class == "context_overflow"
++    assert failure.detail.startswith("prompt does not fit: ContextLengthExceededError: pi: model call 1 ")
++
++
++def test_pi_placeholder_mid_episode_is_a_context_overflow() -> None:
++    log = _pi_log(_PI_TOOL_TURN, _pi_end("toolUse", 9000, 200, cache_read=5000), _pi_tool_result(), _PI_PLACEHOLDER)
++    flags = pi_end_flags(log, context_limit=65536)
++
++    assert (flags["answered_model_calls"], flags["prompt_over_context_limit"]) == (2, True)
++    failure = classify_rollout(_trial(), flags)
++    assert failure.failure_class == "context_overflow"
++    assert failure.detail.startswith("ContextLengthExceededError: pi: model call 3 ")
++
++
++def test_pi_context_length_error_is_a_context_overflow() -> None:
++    # with propagate_context_overflow_errors the 400 reaches pi, which ends the run with stopReason "error"
++    message = "400 This model's maximum context length is 65536 tokens. However, you requested 65601 tokens"
++    flags = pi_end_flags(_pi_log(_PI_TOOL_TURN, _pi_end("error", 0, 0, error=message)), context_limit=None)
++
++    failure = classify_rollout(_trial(), flags)
++    assert failure.failure_class == "context_overflow"
++    assert failure.detail == "ContextLengthExceededError: pi: " + message
++
++
++def test_pi_reply_cut_by_the_context_ceiling() -> None:
++    flags = pi_end_flags(_pi_log(_PI_TOOL_TURN, _pi_end("length", 60000, 5536)), context_limit=65536)
++
++    assert (flags["prompt_over_context_limit"], flags["last_truncation_at_context_limit"]) == (False, True)
++    failure = classify_rollout(_trial(), flags)
++    assert failure.failure_class == "context_overflow"
++    assert "reply cut by the context limit (prompt 60000 + completion 5536 of 65536); pi ended the episode" in (
++        failure.detail
++    )
++
++
++@pytest.mark.parametrize(
++    "log, context_limit",
++    [
++        pytest.param(_pi_log(_PI_TOOL_TURN, _pi_end("stop", 5600, 40)), 65536, id="stopped"),
++        # the turn budget blocks the last turn's tool calls: the run ends after a toolUse message
++        pytest.param(_pi_log(_PI_TOOL_TURN, _PI_TOOL_TURN), 65536, id="turn-budget"),
++        pytest.param(_pi_log(_PI_TOOL_TURN, _pi_end("length", 6000, 764)), 65536, id="length-room-left"),
++        pytest.param(_pi_log(_pi_end("length", 60000, 5536)), None, id="cut-but-no-limit-known"),
++        pytest.param(_pi_log(_PI_PLACEHOLDER, _PI_TOOL_TURN), 65536, id="placeholder-not-last"),
++        pytest.param(_pi_log(_pi_end("error", 0, 0, error="Connection error.")), None, id="other-error"),
++        pytest.param("", 65536, id="empty-log"),
++        pytest.param(
++            "{not json\n[1, 2]\n" + json.dumps({"type": "message_end", "message": "x"}) + "\n", 65536, id="junk"
++        ),
++    ],
++)
++def test_pi_logs_without_a_context_overflow_give_no_flags(log, context_limit) -> None:
++    assert pi_end_flags(log, context_limit=context_limit) == {}
+-- 
+2.56.0
+

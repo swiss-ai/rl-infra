@@ -190,7 +190,7 @@ sft_task_copy() {
 }
 
 # Run OV (run-agent-v.sh AGENT=opencode): OpenCode inside each pod on Kostas' verified tasks (the task file of
-# run V), on the SC path: an in-pod agent only makes OpenAI-compatible HTTP calls, so its token IDs come from Gym's
+# run V), on the SC path; run PV (AGENT=pi) the same with the pi coding agent: an in-pod agent only makes OpenAI-compatible HTTP calls, so its token IDs come from Gym's
 # token capture at the model endpoint, which only the SC entrypoint turns on (NeMo-RL
 # single_controller_utils/setup.py token_capture; the Gym entrypoint of run V has none). Another in-pod agent is
 # one more AGENT value: a case in agent_v_tag, agent_v_overlays and check_gym_agents (and check.py).
@@ -204,18 +204,20 @@ verified_task_copy() {
     grep -q '^env:' "$1" && ! grep -qE '^(defaults|script):' "$1" || { echo "verified_task_copy: unexpected ${VERIFIED_TASK}" >&2; return 1; }
 }
 
-# agent_v_tag <agent>: the run's short name (run OV = opencode); unknown agents fail here first.
+# agent_v_tag <agent>: the run's short name (run OV = opencode, run PV = pi); unknown agents fail here first.
 agent_v_tag() {
     case "$1" in
         opencode) echo ov ;;
-        *) echo "agent_v_tag: AGENT must be opencode (run OV), not '$1'" >&2; return 1 ;;
+        pi) echo pv ;;
+        *) echo "agent_v_tag: AGENT must be opencode (run OV) or pi (run PV), not '$1'" >&2; return 1 ;;
     esac
 }
 
-# agent_v_agent <tag>: the inverse (check.sh RUNS=ov).
+# agent_v_agent <tag>: the inverse (check.sh RUNS=ov / RUNS=pv).
 agent_v_agent() {
     case "$1" in
         ov) echo opencode ;;
+        pv) echo pi ;;
         *) echo "agent_v_agent: no in-pod agent run '$1'" >&2; return 1 ;;
     esac
 }
@@ -247,10 +249,11 @@ agent_v_defaults() {
     : "${STEPS:=10}" "${PROMPTS:=8}" "${SANDBOXES:=64}" "${GATEWAY_PROXY:=0}" "${MODEL_CALLS:=1}"
     : "${HARBOR_ROOT:=${SCRATCH}/osb/harbor_verified}"
     [[ "${GATEWAY_PROXY}" == [01] ]] || { echo "agent_v_defaults: GATEWAY_PROXY must be 0 or 1, not ${GATEWAY_PROXY}" >&2; return 1; }
-    # OpenCode ends 60 s before Harbor's agent cap, so its exit status and opencode.txt are recorded (run-ov.yaml)
+    # OpenCode / pi end 60 s before Harbor's agent cap, so their exit status and log are recorded (run-ov.yaml,
+    # run-pv.yaml)
     if [[ -n "${AGENT_CAP}" ]]; then
-        : "${OPENCODE_TIMEOUT_SEC:=$(( AGENT_CAP - 60 ))}"
-        export OPENCODE_TIMEOUT_SEC
+        : "${OPENCODE_TIMEOUT_SEC:=$(( AGENT_CAP - 60 ))}" "${PI_TIMEOUT_SEC:=$(( AGENT_CAP - 60 ))}"
+        export OPENCODE_TIMEOUT_SEC PI_TIMEOUT_SEC
     fi
     export CTX STEPS PROMPTS SANDBOXES GATEWAY_PROXY MODEL_CALLS HARBOR_ROOT AGENT_V_RECIPE AGENT_V_DP
 }
@@ -259,13 +262,15 @@ agent_v_defaults() {
 #   run-b-harbor-sc.yaml run-s-sft.yaml     SC, token capture, the SFT model, pod labels, credentials by file
 #   <agent overlay>, tunnel-sc.yaml          the agent in the pod (model URL = the tunnel's pod end), the tunnel
 #   run-agent-v.yaml                        what the verified tasks need on SC for any in-pod agent
-#   run-<tag>.yaml                          the agent's settings for these tasks (run-ov.yaml: WORKDIR, 1740 s)
+#   run-<tag>.yaml                          the agent's settings for these tasks (run-ov.yaml, run-pv.yaml: WORKDIR, 1740 s)
 agent_v_overlays() {
     printf '%s\n' "${HERE}/run-b-harbor-sc.yaml" "${HERE}/run-s-sft.yaml"
     case "$1" in
         opencode) printf '%s\n' "${CAPTURE_SC}/opencode-sc.yaml" "${CAPTURE_SC}/tunnel-sc.yaml" \
                       "${HERE}/run-agent-v.yaml" "${HERE}/run-ov.yaml" ;;
-        *) echo "agent_v_overlays: AGENT must be opencode, not $1" >&2; return 1 ;;
+        pi) printf '%s\n' "${CAPTURE_SC}/pi-sc.yaml" "${CAPTURE_SC}/tunnel-sc.yaml" \
+                "${HERE}/run-agent-v.yaml" "${HERE}/run-pv.yaml" ;;
+        *) echo "agent_v_overlays: AGENT must be opencode or pi, not $1" >&2; return 1 ;;
     esac
 }
 
@@ -329,14 +334,14 @@ compose_cfg() {
         # W: run O on SWE-Lego (run-s.sh AGENT=opencode TASKS=swe-lego): + run-s-swe-lego.yaml
         w) compose_cfg o "$2" || return 1
            printf '  - %s\n' "$(realpath "${HERE}/run-s-swe-lego.yaml")" >> "$2" ;;
-        # OV: run-agent-v.sh AGENT=opencode (run-harbor-osb.sh writes RECIPE, TASK, OVERLAY...); needs
+        # OV / PV: run-agent-v.sh AGENT=opencode / pi (run-harbor-osb.sh writes RECIPE, TASK, OVERLAY...); needs
         # agent_v_defaults first (the recipe follows CTX)
-        ov) local o agent
+        ov|pv) local o agent
            agent="$(agent_v_agent "$1")" || return 1
            verified_task_copy "${2%.yaml}-task.yaml" || return 1
            printf 'defaults:\n  - %s\n  - %s\n' "${AGENT_V_RECIPE}" "$(realpath "${2%.yaml}-task.yaml")" > "$2"
            while read -r o; do printf '  - %s\n' "$(realpath "${o}")" >> "$2"; done < <(agent_v_overlays "${agent}") ;;
-        *) echo "compose_cfg: run must be a, b, s, o, w or ov" >&2; return 1 ;;
+        *) echo "compose_cfg: run must be a, b, s, o, w, ov or pv" >&2; return 1 ;;
     esac
 }
 
@@ -530,7 +535,7 @@ check_gym_capture() {
     return "${fails}"
 }
 
-# check_gym_agents <agent>: the in-pod agent (opencode: runs O/OV) and the per-pod model tunnel are in the Gym
+# check_gym_agents <agent>: the in-pod agent (opencode: runs O/OV; pi: run PV) and the per-pod model tunnel are in the Gym
 # checkout (after check_gym_capture). Returns the number of failures.
 check_gym_agents() {
     local g="${NEMO_RL_DIR}/3rdparty/Gym-workspace/Gym" fails=0
@@ -556,6 +561,14 @@ check_gym_agents() {
             grep -q POD_ARCHIVE "${ca}/opencode_nemo_gym.py" 2>/dev/null \
                 && ok "Gym patch 0045: OpenCode archive uploaded by the adapter (opencode_install: upload)" \
                 || bad "Gym patch 0045 missing (POD_ARCHIVE in custom_agents/opencode_nemo_gym.py)" ;;
+        pi)
+            [[ -f "${ca}/pi_pod/install-pi.sh.j2" ]] && grep -q "class PiNemoGym" "${ca}/pi_nemo_gym.py" 2>/dev/null \
+                && ok "Gym patch 0047: PiNemoGym (uploaded release archive, capture-safe settings)" \
+                || bad "Gym patch 0047 missing (PiNemoGym, custom_agents/pi_pod/install-pi.sh.j2)"
+            # without it a pi rollout that ran into the context limit reads as ok (pi exits 0 in --mode json)
+            grep -q "def pi_end_flags" "${g}/responses_api_agents/harbor_agent/failure_classes.py" 2>/dev/null \
+                && ok "Gym patch 0047: failure classes from pi's events (agent/pi.txt)" \
+                || bad "Gym patch 0047 missing (pi_end_flags in harbor_agent/failure_classes.py)" ;;
         *) bad "check_gym_agents: no checks for agent '$1'" ;;
     esac
     return "${fails}"

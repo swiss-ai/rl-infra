@@ -1,0 +1,17 @@
+# Run PV (run-agent-v.sh AGENT=pi): the pi coding agent on the verified tasks. Merged last, after
+# ../harbor-capture-sc/pi-sc.yaml and run-agent-v.yaml; the counterpart of run-ov.yaml.
+# - Working directory: unset, the task image's WORKDIR, which differs per task (run-ov.yaml lists them); pi's cwd is
+#   its project and part of its system prompt.
+# - Time: Harbor's agent cap is 1800 s (the tasks allow 3000 s); pi is ended at 1740 s so its exit status and pi.txt
+#   are recorded and the verifier runs. PI_TIMEOUT_SEC overrides; at long context (CTX > 24576) run-agent-v.sh sets
+#   it to AGENT_CAP - 60 = 2940 s (common.sh agent_v_defaults).
+# - Install: always the uploaded archive (59 MB; fetch-pi.sh puts it into PI_DIR on the login node), no internet in
+#   the sandbox, only tar in the image.
+env:
+  nemo_gym:
+    harbor_agent:
+      responses_api_agents:
+        harbor_agent:
+          harbor_agent_kwargs:
+            pi_workdir: null
+            pi_timeout_sec: ${oc.decode:${oc.env:PI_TIMEOUT_SEC,1740}}

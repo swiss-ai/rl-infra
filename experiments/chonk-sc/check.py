@@ -297,9 +297,9 @@ def expect(name, got, want):
 
 
 print("  --- plan")
-# run OV (run-agent-v.sh): the expected values are the launcher's knobs, which check.sh exports
+# runs OV / PV (run-agent-v.sh): the expected values are the launcher's knobs, which check.sh exports
 # (common.sh agent_v_defaults) and passes as the same overrides (agent_v_args)
-AV = EXPECT in ("ov",)
+AV = EXPECT in ("ov", "pv")
 ENV = os.environ
 if AV:
     av_ctx, av_steps, av_prompts = int(ENV["CTX"]), int(ENV["STEPS"]), int(ENV["PROMPTS"])
@@ -436,6 +436,16 @@ else:
                    int(ENV.get("OPENCODE_TIMEOUT_SEC") or av_cap - 60))
             (ok if kw.get("opencode_timeout_sec") < av_cap else fail)(
                 f"OpenCode timeout {kw.get('opencode_timeout_sec')} < agent cap {av_cap}")
+        if EXPECT == "pv":
+            expect("agent", hcfg.get("harbor_agent_import_path", "").rsplit(":", 1)[-1], "PiNemoGym")
+            expect("pi version (Gym 0047: settings checked against 1.5.2)", kw.get("version"), "1.5.2")
+            expect("pi archive dir (PI_DIR)", kw.get("pi_archive_dir"), ENV.get("PI_DIR"))
+            expect("pi_workdir unset (the task's WORKDIR, run-pv.yaml)", kw.get("pi_workdir"), None)
+            expect("pi timeout (PI_TIMEOUT_SEC, default agent cap - 60)", kw.get("pi_timeout_sec"),
+                   int(ENV.get("PI_TIMEOUT_SEC") or av_cap - 60))
+            (ok if kw.get("pi_timeout_sec") < av_cap else fail)(
+                f"pi timeout {kw.get('pi_timeout_sec')} < agent cap {av_cap}")
+            expect("no OpenCode kwargs", sorted(k for k in kw if k.startswith("opencode_")), [])
         expect("sampling_overrides = train profile",
                dict(vm.get("sampling_overrides") or {}),
                {"temperature": gen["temperature"], "top_p": gen["top_p"], "max_tokens": gen["max_new_tokens"]})

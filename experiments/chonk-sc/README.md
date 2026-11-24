@@ -1,4 +1,4 @@
-# Apertus 2 Chonk on NeMo-RL's Single-Controller path (step 0, run A, run B, run S, run OV)
+# Apertus 2 Chonk on NeMo-RL's Single-Controller path (step 0, run A, run B, run S, run OV, run PV)
 
 **New here? Start with `TESTING.md`**: prerequisites, commands and expected results of runs V and OV at 64K.
 **`PORTING.md`**: which pieces to take for another model, task set, cluster or harness.
@@ -18,6 +18,7 @@ i.e. vLLM DP4 per node through NVIDIA-NeMo/RL#2517) trained through
 | `run-s-sft.yaml`, `run-s.sh` | run S: run B on the SFT checkpoint (16k layout, Apertus 2 message format) |
 | `run-v.sh`, `run-v-24k.sh` | run V: Terminus-2 on Kostas' verified tasks, Gym entrypoint (not SC), 24k on 20 nodes; `CTX=65536`: long context |
 | `run-agent-v.sh`, `run-agent-v.yaml`, `run-ov.yaml` | run OV: OpenCode in the pod on run V's verified tasks, SC + token capture, 24k on 20 nodes; `CTX=65536`: long context |
+| `run-pv.yaml` | run PV (`run-agent-v.sh AGENT=pi`): the pi coding agent instead of OpenCode; not run on the cluster yet |
 | `common.sh` | config composition, the long-context profile of runs V and OV, and the clone / Gym checks, shared by the scripts |
 
 Runs A and B: 3 steps, `async_rl` sampler `in_order` with lookahead 0 (synchronous), one chunk per
@@ -294,6 +295,29 @@ What to look at: `train step N/N`; `failure_<class>` per step (OpenCode writes n
 `ok`, `infra`, `agent_timeout`, `verifier_timeout` and `other` can occur; a context overflow ends OpenCode and is
 `ok` with the verifier's reward); masked and rejected rollouts (capture: unresolved parents, poisoned rows);
 HTTP 400 context-length answers in `model-calls/`; OpenCode exit 124 (1740 s); reward per campaign.
+
+## Run PV: pi on the verified tasks (`run-agent-v.sh AGENT=pi`)
+
+Run OV with the [pi coding agent](https://github.com/earendil-works/pi) (v1.5.2) instead of OpenCode: same tasks,
+layout, tunnel, token capture and long-context profile; config `../harbor-capture-sc/pi-sc.yaml` and `run-pv.yaml`
+in place of `opencode-sc.yaml` and `run-ov.yaml`. Gym patch 0047 (`PiNemoGym`): the release archive (59 MB) is fetched
+once into `$PI_DIR` (`$SCRATCH/pi`, `fetch-pi.sh`) and uploaded into each sandbox; pi runs with compaction, retries,
+timeouts, extensions, MCP and skills off and only `read`, `bash`, `edit`, `write`; `max_turns` is a pi extension that
+blocks the tool calls of the last allowed turn; the failure classes read pi's events in `agent/pi.txt` (in
+`--mode json` pi exits 0 also after an error). pi is ended at `PI_TIMEOUT_SEC` (1740 s; at long context
+`AGENT_CAP - 60`). **Untested on the cluster**: the settings come from reading the pi source
+(`research/reports/2026-11-24-pi-v1.5.2-source-notes.md` in the workspace); a smoke run first.
+
+```bash
+CTX=65536 RUNS=pv bash experiments/chonk-sc/check.sh
+SMOKE=1 CTX=65536 AGENT=pi DRY_RUN=1 bash experiments/chonk-sc/run-agent-v.sh
+SMOKE=1 CTX=65536 AGENT=pi bash experiments/chonk-sc/run-agent-v.sh      # 1 step, 4 x 8
+```
+
+What to look at in the smoke: `agent/setup/` (install), `agent/command-0/` (return code), `agent/pi.txt` (events;
+`stopReason` of the last assistant message), `agent/pi-agent/` (the written config), the capture's rejected rows
+(each extra or rewritten call masks the rollout), and in `model-calls/` that the requests carry no `store`,
+`reasoning_effort` or `developer` role.
 
 ## Long context: runs V and OV at 64K (`CTX=65536`)
 

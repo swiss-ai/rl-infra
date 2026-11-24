@@ -6,9 +6,9 @@ pieces of this branch you need and which settings are specific to Apertus 2 Chon
 only the combination in `TESTING.md`; everything else here is untested.
 
 The Gym side of in-sandbox agents (adapter options, the per-sandbox model tunnel, token capture) is documented in
-Gym's `harbor_agent` README, sections "Agents inside the sandbox (OpenCode, mini-swe-agent)" and "Failure
+Gym's `harbor_agent` README, sections "Agents inside the sandbox (OpenCode, pi, mini-swe-agent)" and "Failure
 classes". After `setup-gym.sh` it is at `$NEMO_RL_DIR/3rdparty/Gym-workspace/Gym/responses_api_agents/harbor_agent/README.md`;
-it comes from Gym patches 0037, 0041-0043 and 0046.
+it comes from Gym patches 0037, 0041-0043, 0046 and 0047.
 
 ## The stack
 
@@ -36,6 +36,7 @@ Without our launchers, the Gym tree is: `git checkout <GYM_COMMIT>`, then `git a
 | Terminus-2 truncation handling | 0035, 0036, 0042 | `max_consecutive_truncations`, `truncation_retry`, `context_limit_truncation` |
 | Failure class per rollout and masking | 0037, 0041, 0043 (+ 0027) | `harbor_mask_infra`, `harbor_mask_context_overflow`, `harbor_mask_agent_timeout` |
 | Documentation of the above | 0046 | |
+| pi adapter (uploaded release, capture-safe settings, turn budget, failure classes from `agent/pi.txt`) | 0047 | `harbor_agent_kwargs.pi_*` |
 
 Several are open PRs against swiss-ai/nemo-gym; rl-infra drops a patch once its PR is merged.
 
@@ -135,6 +136,9 @@ are not supported. Our tasks also set `[verifier] environment_mode = "separate"`
 - **In the sandbox:** a Gym adapter like `OpenCodeNemoGym` (point the agent at `api_base`; switch off every model
   call that is not the main loop, or capture masks the rollout; record its log for failure classes). In rl-infra,
   a new `AGENT` value for `run-agent-v.sh`: `common.sh` `agent_v_tag`, `agent_v_agent`, `agent_v_overlays`,
-  `check_gym_agents`, an overlay `run-<tag>.yaml`, and the expected values in `check.py`.
+  `check_gym_agents`, an overlay `run-<tag>.yaml`, and the expected values in `check.py`. `AGENT=pi` (run PV, Gym 0047,
+  `pi-sc.yaml`, `run-pv.yaml`, `fetch-pi.sh`) is the complete set of these changes for one agent; for a new agent,
+  check its source for every model call besides the main loop (titles, summaries, retries) and every rewrite of
+  earlier messages, since each one masks the rollout under capture.
 - **In the Harbor process** (like Terminus-2): the adapter returns token IDs and logprobs itself (Harbor's
   `rollout_details`), no tunnel or capture needed, and the Gym entrypoint works (run V).

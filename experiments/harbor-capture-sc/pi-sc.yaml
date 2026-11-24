@@ -1,0 +1,51 @@
+# Task overlay: the pi coding agent (github.com/earendil-works/pi) instead of Terminus-2, inside the task sandbox
+# (run-agent-v.sh AGENT=pi, always together with tunnel-sc.yaml). pi calls the model through the per-sandbox reverse
+# tunnel, sandbox 127.0.0.1:8000 -> policy_model (Gym patches 0016+0017), like opencode-sc.yaml.
+#
+# Gym patch 0047 (PiNemoGym, custom_agents/pi_nemo_gym.py), checked against the pi v1.5.2 source; keep that version:
+#   - install: the release archive (Bun-compiled binary, no Node) is uploaded from PI_DIR (fetch-pi.sh) into each
+#     sandbox, sha256-checked; only the binary and its package.json are unpacked (the image needs tar).
+#   - capture: no compaction, auto-retry, cache warming, HTTP timeouts, extensions, MCP, skills or project .pi/
+#     files (each extra call or rewritten history masks the rollout); the request carries only model, messages,
+#     tools, stream, stream_options and max_tokens.
+#   - max_turns -> a pi extension that blocks the tool calls of the last allowed turn (no extra model call).
+#   - failure classes from agent/pi.txt (pi exits 0 in --mode json also after an error).
+# Notes: research/reports/2026-11-24-pi-v1.5.2-source-notes.md (alpernates workspace).
+#
+# Env (run-agent-v.sh exports them when set):
+#   PI_VERSION      default 1.5.2; another version needs pi_sha256 and re-checked settings
+#   PI_DIR          where fetch-pi.sh put <version>/pi-linux-x64.tar.gz
+#   PI_TIMEOUT_SEC  default 1740 (run-pv.yaml): pi is ended with exit 124 before Harbor's agent timeout, so
+#                   return-code.txt and pi.txt are written and the verifier runs
+
+env:
+  nemo_gym:
+    harbor_agent:
+      responses_api_agents:
+        harbor_agent:
+          harbor_agent_name: null
+          harbor_agent_import_path: "responses_api_agents.harbor_agent.custom_agents.pi_nemo_gym:PiNemoGym"
+          # the tunnel's sandbox end (tunnel-sc.yaml pod_port); harbor_agent appends /ng-rollout/<id>/...
+          harbor_model_base_url: http://127.0.0.1:8000
+          # merged with the task file's kwargs (max_turns -> the turn-budget extension)
+          harbor_agent_kwargs:
+            version: ${oc.env:PI_VERSION,1.5.2}
+            pi_archive_dir: ${oc.env:PI_DIR}
+            # oc.decode: oc.env returns strings
+            pi_timeout_sec: ${oc.decode:${oc.env:PI_TIMEOUT_SEC,1740}}
+            # the task file gives max_output_tokens = the whole context; pi's maxTokens should be the per-turn
+            # generation limit (as opencode-sc.yaml)
+            model_info:
+              max_input_tokens: ${policy.max_total_sequence_length}
+              max_output_tokens: ${policy.generation.max_new_tokens}
+            # deep-merged last into pi's settings.json, e.g. {retry: {enabled: true}}
+            pi_settings: {}
+    policy_model:
+      responses_api_models:
+        vllm_model:
+          # REQUIRED: pi sends no temperature or top_p (models.json has no samplingParams); NeMo-RL's HTTP server
+          # asserts the train profile (vllm_worker_async.py). Gym applies these last to every engine request.
+          sampling_overrides:
+            temperature: ${policy.generation.temperature}
+            top_p: ${policy.generation.top_p}
+            max_tokens: ${policy.generation.max_new_tokens}
