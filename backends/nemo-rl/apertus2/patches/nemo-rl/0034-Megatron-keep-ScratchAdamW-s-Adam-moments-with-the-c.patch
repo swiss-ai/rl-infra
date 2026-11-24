@@ -1,0 +1,121 @@
+From 6903c10c277ab987b43c7055cb5c552870a4cab5 Mon Sep 17 00:00:00 2001
+From: Chengshang Liu <lchengshang@ethz.ch>
+Date: Wed, 25 Nov 2026 00:43:49 +0100
+Subject: [PATCH] Megatron: keep ScratchAdamW's Adam moments with the
+ checkpoints
+
+With policy.megatron_cfg.optimizer.cpu_optimizer_state_dir (Megatron patch
+0007) the CPU optimizer keeps Adam's m and v in files on scratch, outside the
+Megatron checkpoint. save_checkpoint now hard-links this rank's current files
+into <weights>/optimizer-scratch/ (every optimizer step writes new files, so the
+links never change and cost no copy). After the checkpoint load in
+setup_model_and_optimizer, the moments saved with the loaded checkpoint become
+the current ones when the load filled the optimizer state; otherwise (fresh
+run, weights-only resume, fine-tuning) they start from zero, whatever an earlier
+job left in the state folder. Without patch 0007 both calls do nothing.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ nemo_rl/models/megatron/setup.py              | 25 +++++++++++++++++++
+ nemo_rl/models/policy/__init__.py             |  3 +++
+ .../policy/workers/megatron_policy_worker.py  | 20 +++++++++++++++
+ 3 files changed, 48 insertions(+)
+
+diff --git a/nemo_rl/models/megatron/setup.py b/nemo_rl/models/megatron/setup.py
+index af3cff8dc..988e6cca4 100644
+--- a/nemo_rl/models/megatron/setup.py
++++ b/nemo_rl/models/megatron/setup.py
+@@ -240,6 +240,28 @@ def _force_sync_optimizer_fp32_from_model(optimizer, model):
+         )
+ 
+ 
++def _sync_scratch_adam_after_load(optimizer, load_dir):
++    """Adam moments on scratch (optimizer.cpu_optimizer_state_dir, Megatron patch 0007).
++
++    They are not part of the Megatron checkpoint: save_checkpoint links them into
++    <weights>/optimizer-scratch/. When the load filled the optimizer state, the
++    moments saved with that checkpoint become the current ones; otherwise (fresh
++    run, weights-only resume, fine-tuning) they start from zero, whatever an
++    earlier job left in the state folder.
++    """
++    if optimizer is None:
++        return
++    try:
++        from megatron.core.optimizer.cpu_offloading.scratch_adam import (
++            after_checkpoint_load,
++        )
++    except ImportError:  # Megatron without patch 0007
++        return
++    outcome = after_checkpoint_load(optimizer, load_dir)
++    if outcome is not None and torch.distributed.get_rank() == 0:
++        print(f"ScratchAdamW moments: {outcome} (checkpoint {load_dir})", flush=True)
++
++
+ def _force_sync_model_from_optimizer_fp32(optimizer):
+     """Restore BF16 compute weights from loaded HybridDeviceOptimizer masters.
+ 
+@@ -2607,6 +2629,9 @@ def setup_model_and_optimizer(
+                 _force_sync_optimizer_fp32_from_model(optimizer, model)
+             elif resume_checkpoint_exists:
+                 _force_sync_model_from_optimizer_fp32(optimizer)
++    _sync_scratch_adam_after_load(
++        optimizer, megatron_cfg.checkpoint.load if should_load_checkpoint else None
++    )
+     torch.distributed.barrier()
+ 
+     draft_model = get_attached_draft_model(model)
+diff --git a/nemo_rl/models/policy/__init__.py b/nemo_rl/models/policy/__init__.py
+index 7efd0a442..6e963a42f 100644
+--- a/nemo_rl/models/policy/__init__.py
++++ b/nemo_rl/models/policy/__init__.py
+@@ -325,6 +325,9 @@ class MegatronOptimizerConfig(TypedDict):
+     optimizer_offload_fraction: float
+     # overlap optimizer state transfers with CPU optimizer updates
+     overlap_cpu_optimizer_d2h_h2d: NotRequired[bool]
++    # Adam moments in files under this folder instead of host memory (ScratchAdamW,
++    # Megatron patch 0007); needs optimizer_cpu_offload and overlap_cpu_optimizer_d2h_h2d=false
++    cpu_optimizer_state_dir: NotRequired[str]
+     # Precision-aware Adam moment / remainder dtypes (YAML strings resolved in setup).
+     exp_avg_dtype: NotRequired[str]
+     exp_avg_sq_dtype: NotRequired[str]
+diff --git a/nemo_rl/models/policy/workers/megatron_policy_worker.py b/nemo_rl/models/policy/workers/megatron_policy_worker.py
+index d42c14f0c..34b5d2480 100644
+--- a/nemo_rl/models/policy/workers/megatron_policy_worker.py
++++ b/nemo_rl/models/policy/workers/megatron_policy_worker.py
+@@ -4739,6 +4739,8 @@ class MegatronPolicyWorkerImpl(
+                     ckpt_cfg=self.mcore_state.cfg.checkpoint,
+                     blocking=True,
+                 )
++            if optimizer_to_save is not None:
++                self._save_scratch_adam_state(weights_path)
+             if self.should_disable_forward_pre_hook:
+                 self.enable_forward_pre_hook()
+ 
+@@ -4761,6 +4763,24 @@ class MegatronPolicyWorkerImpl(
+         finally:
+             self.mcore_state.cfg.checkpoint.save = original_save_path
+ 
++    def _save_scratch_adam_state(self, weights_path: str) -> None:
++        """Link this rank's Adam moments on scratch into the checkpoint.
++
++        With optimizer.cpu_optimizer_state_dir (Megatron patch 0007) m and v live in
++        files outside the Megatron checkpoint. Every optimizer step writes new files,
++        so hard links to the current ones stay valid: the link costs no copy and no
++        time, and setup's _sync_scratch_adam_after_load restores them on resume.
++        """
++        try:
++            from megatron.core.optimizer.cpu_offloading.scratch_adam import (
++                save_scratch_state,
++                scratch_optimizers,
++            )
++        except ImportError:  # Megatron without patch 0007
++            return
++        if scratch_optimizers(self.optimizer):
++            save_scratch_state(self.optimizer, weights_path)
++
+     def _requires_nvrx_cuda_cache_release(self) -> bool:
+         """Whether checkpoint finalization must also drop cached CUDA IPC handles."""
+         ckpt_cfg = self.mcore_state.cfg.checkpoint
+-- 
+2.37.1 (Apple Git-137.1)
+

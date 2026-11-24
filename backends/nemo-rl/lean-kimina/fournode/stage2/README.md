@@ -8,37 +8,6 @@ of gradient copies per trainer node.
 python3 budget.py --nodes 4 --pp 2 4 --detail
 ```
 
-## What already exists in our stack
-
-Megatron-LM-MoE (`~/projects/megatron-lm-moe-apertus2`, 0536034) offloads experts, and Chonk's SFT ran with it
-(`sft-chonk.sh`: `MOE_OFFLOAD=1`, PP4 EP16). NeMo-RL (2f7739e) supports it in its policy worker: fp8 copies, reference
-swaps and exports. Recipes set it through `policy.megatron_cfg.model_overrides`.
-
-```yaml
-policy:
-  megatron_cfg:
-    pipeline_model_parallel_size: 2
-    expert_model_parallel_size: 8          # 16 GPUs / PP2
-    model_overrides:
-      moe_use_offloading_experts: true     # bf16 experts in pinned host memory, fp8 copies streamed per layer
-      moe_use_inplace_fp8_param: true
-      moe_offloading_mode: coarse-grained  # NeMo-RL needs coarse-grained or extra fp8 storage
-      moe_offloading_num_chunks: 8
-      moe_offloading_num_stages: 2
-      moe_offload_activations: [moe_input, moe_fc1_output]
-      # moe_offload_main_grad: true        # later (scratch-all): expert fp32 grads on the host
-    optimizer:
-      optimizer_cpu_offload: true
-      optimizer_offload_fraction: 1.0
-      overlap_cpu_optimizer_d2h_h2d: false # one CPU optimizer over all parameters (needed by ScratchAdamW)
-      cpu_optimizer_state_dir: ${oc.env:SCRATCH}/lean/fournode-opt/${RUN}   # new, see "Megatron patch" below
-  generation:
-    colocated:
-      enabled: true
-cluster:
-  num_nodes: 4
-```
-
 ## Memory at 4 nodes (budget.py, PP2 EP8)
 
 | Option | GPU static / peak | Host per node | Scratch I/O per step |
@@ -49,35 +18,71 @@ cluster:
 | + expert grads on host used in place, master on scratch | 17 / 46-60 GB | 335 GB | 650 GB per node |
 
 The host figure assumes the measured 115 GB of overhead per trainer node. Job 4008441's trainers used 274 GB in all, so
-the real overhead is probably lower. Stage 1's `stream-adam` measures whether the scratch I/O fits inside generation.
+the real overhead is probably lower. Colocated generation frees the gradient buffers (Megatron's `offload_to_cpu`
+resizes them to 0) and copies only the dense weights to the host. Stage 1's `stream-adam` measures whether the scratch
+I/O fits inside generation.
 
-## Built here
+## The pieces
 
-- `scratch_adam.py`: **ScratchAdamW**, a CPU AdamW whose m and v live in files on scratch.
-  - It streams them through a few aligned buffers, with readers, update and writers overlapped.
-  - Its results are bit-identical to `torch.optim.AdamW(foreach=False)` (tested, including learning-rate changes and
-    parameters without a gradient).
-  - State is double-buffered on scratch with an atomic `manifest.json`. A failed step leaves the previous step's state
-    intact, and a restart from the manifest continues bit-identically.
-  - Chunk sizes are rounded to 256 elements. Torch's CPU kernels vectorize from a tensor's start, and a chunk starting
-    mid-block would differ by one ulp (found by the tests).
-- `stage2_test.py`: 9 tests. They include the budget's calibration against job 4008441.
+**Expert offloading** already exists in Megatron-LM-MoE (0536034), and Chonk's SFT ran with it (`sft-chonk.sh`:
+`MOE_OFFLOAD=1`). NeMo-RL supports it through `policy.megatron_cfg.model_overrides`.
 
-## Still to build
+**ScratchAdamW** (`scratch_adam.py`) is a CPU AdamW whose m and v live in files on scratch.
+- It streams them through a few aligned buffers, with readers, update and writers overlapped. A reader takes a buffer
+  before it claims a chunk; the other order deadlocked (found by `test_pipeline_never_deadlocks`).
+- Results are bit-identical to torch's AdamW: fused (Megatron's CPU optimizer uses `fused=True`) through
+  `torch._fused_adamw_` per chunk, otherwise the single-tensor operations. Chunks start on 256-element boundaries.
+- Every step writes a new generation into fresh files, then replaces `manifest.json` atomically. A failed step leaves
+  the previous state intact. Since files are never rewritten, a checkpoint holds hard links to them: no copy, no time.
+- The step counts in the optimizer state (Megatron's checkpoint has them) must equal the steps the files were written
+  at; `step()` refuses otherwise, so moments are never paired with another step's weights.
+- Files are checked lazily: Megatron first builds a throwaway optimizer over unsharded params in the same folder.
+- `skip_next_step()` turns Megatron's `dummy_step()` (a zero-grad step before a load) into a no-op for the files.
 
-1. **Megatron patch 0007.** Add `OptimizerConfig.cpu_optimizer_state_dir`. When it is set, `get_megatron_optimizer` passes
-   `functools.partial(ScratchAdamW, state_dir=<dir>/rank<r>/hdo<i>)` as `cpu_optimizer_cls`. There is one folder per
-   hybrid optimizer instance, since the distributed optimizer builds several. NeMo-RL passes `megatron_cfg.optimizer` keys
-   on to `OptimizerConfig`.
-2. **Checkpoints.** The hybrid optimizer's state then holds only `step` for these parameters.
-   - Save: write the Megatron checkpoint without m and v, and hard-link the last finished generation's files plus
-     `manifest.json` into `step_N/optimizer-scratch/rank<r>/`. Lustre hard links are instant, so the every-step recovery
-     checkpoint stays cheap.
-   - Load: copy or link them back into the state folder before the optimizer is built.
-   - Converting today's step_50 checkpoint (m and v inside the distributed checkpoint) into the files needs a one-off
-     export, through `ScratchAdamW.moments` in reverse.
-3. **Recipe** `apertus2-chonk-...-4n-colocated.yaml` with the block above, plus a 4-node dry run (preflight only).
-4. **Probe job.** 4 nodes, 3-5 GRPO steps of 16k Lean rollouts. It records GPU memory per rank, host memory per NUMA node,
-   step and phase times, and checks ScratchAdamW's I/O speed against stage 1.
-5. **Later (scratch-all).** Turn on `moe_offload_main_grad` and let the hybrid optimizer use the host-resident expert
-   gradients in place, instead of its own pinned copies. Then put the master weights on scratch too.
+**Megatron patch 0007** (`apertus2/patches/megatron/0007-cpu-optimizer-state-dir-scratch-adam.patch`):
+- `OptimizerConfig.cpu_optimizer_state_dir`: each HybridDeviceOptimizer gets `bind(<dir>, "rank<r>/hdo<n>")`.
+- `HybridDeviceOptimizer.dummy_step()` calls `skip_next_step()`.
+- `DistributedOptimizer.state_dict()` reads the step count from ScratchAdamW as from torch's AdamW.
+- It carries a copy of `scratch_adam.py`. After changing `scratch_adam.py`, run `python3 patch_tool.py`
+  (`stage2_test.py` fails while they differ).
+
+**NeMo-RL patch 0034** (`apertus2/patches/nemo-rl/0034-...`):
+- `save_checkpoint` links each rank's current moments into `<weights>/optimizer-scratch/rank<r>/hdo<n>/`.
+- After the load in `setup_model_and_optimizer`, `after_checkpoint_load` restores the moments saved with the loaded
+  checkpoint when the load filled the optimizer state, and starts from zero otherwise (fresh run, weights-only resume).
+- Both do nothing without patch 0007 or without `cpu_optimizer_state_dir`.
+
+**Recipe** `recipes/apertus2-chonk-sftv02-18315-vllm-adamw-code-4n-colocated.yaml`: 4 nodes, colocated vLLM
+(synchronous GRPO; NeMo-RL allows colocated vLLM only without async), PP2 EP8, expert offloading, ScratchAdamW with its
+live folder next to the run's `step_<N>` folders. vLLM's memory share (0.75) is a guess until stage 1's sleep/wake data.
+
+**Resuming**: moments are tied to the parallel layout (4 nodes, PP2, EP8). The 200-step run's checkpoints are
+`dp_reshardable` with 8 trainer nodes, so their optimizer state cannot move to 4 nodes at all, with or without
+ScratchAdamW. A 4-node run starts from the SFT export, or from such a checkpoint's weights with `load_optim: false`
+(fresh moments).
+
+## Tests
+
+- `stage2_test.py` (laptop, 22 tests): bit-identity with torch AdamW (single-tensor and fused), restart, layout and
+  step mismatches, failed steps, checkpoint links that survive later steps, restore, reset, the dummy step, Megatron's
+  nesting and param groups, deadlock stress, the patch copy, the budget's calibration.
+- `gpu/hdo_gpu_test.py` via `gpu/hdo_job.sbatch` (one GH200 node, preemptable, 30 min): the patched
+  HybridDeviceOptimizer with bf16 CUDA params, ScratchAdamW against torch's fused AdamW, a resume as Megatron does it
+  (dummy step, `load_state_dict`, restore from the links), a fresh start, O_DIRECT and hard links on Lustre, and one
+  step's speed over 2 B params. The job patches a copy of the pinned `hybrid_optimizer.py`; the shared clone is not
+  touched. Code goes to `$SCRATCH/lean/fournode-stage2/code/` (with `megatron-patches/`), results to `out/<job>-hdo/`.
+
+```bash
+sbatch --output=$SCRATCH/lean/fournode-stage2/logs/%j-hdo.out $SCRATCH/lean/fournode-stage2/code/gpu/hdo_job.sbatch
+```
+
+## Still to do
+
+1. Run `gpu/hdo_job.sbatch` (one node).
+2. Apply the patches to the shared clones (`apertus2/setup.sh`: Megatron 0007 by `git apply`, NeMo-RL 0034 by
+   `git am`); both are no-ops for runs without `cpu_optimizer_state_dir`.
+3. `preflight.sh` on the 4-node recipe (login node), then a **probe job**: 4 nodes, 3-5 GRPO steps of 16k Lean
+   rollouts, a checkpoint and a resume. It records GPU memory per rank, host memory per NUMA node, phase times and
+   ScratchAdamW's step time.
+4. Later (scratch-all): `moe_offload_main_grad` with the hybrid optimizer using the host-resident expert gradients in
+   place, then the fp32 masters on scratch too.

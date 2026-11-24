@@ -189,7 +189,11 @@ def test_host_job_and_report(tmp_path):
     # srun: drops its own options; with --ntasks=4 runs the command 4 times in parallel with SLURM_LOCALID set
     (bin_dir / "srun").write_text("""#!/bin/bash
 n=1
-while [[ $# -gt 0 && $1 == --* ]]; do [[ $1 == --ntasks=* ]] && n=${1#--ntasks=}; shift; done
+while [[ $# -gt 0 && $1 == --* ]]; do
+  [[ $1 == --ntasks=* ]] && n=${1#--ntasks=}
+  [[ $1 == --environment=* && $1 != --environment=nemo-rl-apertus2 ]] && { echo "srun: wrong container $1" >&2; exit 9; }
+  shift
+done
 pids=()
 for ((i = 0; i < n; i++)); do SLURM_LOCALID=$i "$@" & pids+=($!); done
 rc=0; for p in "${pids[@]}"; do wait $p || rc=1; done; exit $rc
@@ -204,6 +208,7 @@ rc=0; for p in "${pids[@]}"; do wait $p || rc=1; done; exit $rc
     for f in ("host_bench.py",):
         (code / f).write_text((HERE / f).read_text())
     env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}", SCRATCH=str(scratch), SLURM_JOB_ID="77",
+               ENVIRONMENT="BATCH",   # Slurm sets this in every batch job
                SKIP="c2c gradsum", IO_GB="0.03", IO_BLOCK_MB="0.25", ADAM_PARAMS_M="0.2", STREAM_PARAMS_M="0.2", STREAM_CHUNK_M="0.05",
                START_DELAY="1", LFS_LOG=str(tmp_path / "lfs.log"))
     out = subprocess.run(["bash", str(HERE / "host_job.sbatch")], env=env, capture_output=True, text=True, timeout=600)

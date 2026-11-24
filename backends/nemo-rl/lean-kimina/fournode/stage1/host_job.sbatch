@@ -7,6 +7,7 @@
 #   IO_GB     bytes per io run (default 96 GB), STREAM_PARAMS_M per socket for stream-adam (default 4000 = 48 GB)
 #   IO_BLOCK_MB (16), C2C_GB (4), GRADSUM_PARAMS_M (2000), ADAM_PARAMS_M (2000), STREAM_CHUNK_M (128), START_DELAY (45 s): sizes
 #   SKIP      measurements to leave out, e.g. "c2c gradsum"
+#   CONTAINER_EDF  container environment (default nemo-rl-apertus2)
 #SBATCH --job-name=fournode-s1-host
 #SBATCH --account=infra01
 #SBATCH --partition=preemptable
@@ -31,7 +32,8 @@ C2C_GB=${C2C_GB:-4}
 GRADSUM_PARAMS_M=${GRADSUM_PARAMS_M:-2000}
 ADAM_PARAMS_M=${ADAM_PARAMS_M:-2000}
 START_DELAY=${START_DELAY:-45}
-ENVIRONMENT=${ENVIRONMENT:-nemo-rl-apertus2}
+# not ENVIRONMENT: Slurm sets ENVIRONMENT=BATCH in every batch job
+CONTAINER_EDF=${CONTAINER_EDF:-nemo-rl-apertus2}
 case "${OUT}" in "${SCRATCH}"/lean/fournode-stage1/out/*) ;; *) echo "ERROR: OUT ${OUT} outside the stage-1 folder" >&2; exit 1 ;; esac
 mkdir -p "${OUT}"
 say() { echo "[host_job $(date '+%F %T')] $*"; }
@@ -50,14 +52,14 @@ per_socket() {
     local start=$(( $(date +%s) + START_DELAY ))     # container start-up; processes then meet at this time
     local cmd="export CUDA_VISIBLE_DEVICES=\${SLURM_LOCALID} BENCH_RANK=\${SLURM_LOCALID} BENCH_NUMA=\${SLURM_LOCALID}; exec ${B[*]} --start-at ${start} $*"
     srun --ntasks=4 --ntasks-per-node=4 --cpus-per-task=72 --cpu-bind=verbose,map_ldom:0,1,2,3 \
-        --environment="${ENVIRONMENT}" bash -c "${cmd}" && return 0
+        --environment="${CONTAINER_EDF}" bash -c "${cmd}" && return 0
     say "${name}: srun with NUMA binding failed; once more without it"
     start=$(( $(date +%s) + START_DELAY ))
     cmd="export CUDA_VISIBLE_DEVICES=\${SLURM_LOCALID} BENCH_RANK=\${SLURM_LOCALID}; exec ${B[*]} --start-at ${start} $*"
-    srun --ntasks=4 --ntasks-per-node=4 --cpus-per-task=72 --environment="${ENVIRONMENT}" bash -c "${cmd}"
+    srun --ntasks=4 --ntasks-per-node=4 --cpus-per-task=72 --environment="${CONTAINER_EDF}" bash -c "${cmd}"
 }
 one_task() {
-    srun --ntasks=1 --cpus-per-task=288 --environment="${ENVIRONMENT}" "${B[@]}" "$@"
+    srun --ntasks=1 --cpus-per-task=288 --environment="${CONTAINER_EDF}" "${B[@]}" "$@"
 }
 want() { [[ " ${SKIP:-} " != *" $1 "* ]] && [[ ! -e "${OUT}/done.$1" ]]; }
 step() {  # step NAME command...: runs it unless skipped or done, marks it done on success
