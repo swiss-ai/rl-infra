@@ -33,13 +33,13 @@ they ran. A variant that wins moves its changes into `base.yaml`; when a run is 
 | STEM: math, reasoning, physics, chemistry | `stem/` | `base.yaml`: the 8-dataset mix of run 5; GSM8K, DAPO-Math, Reasoning Gym and chemistry alone in `dev/`; runs 1-5 in `archive/` |
 | Code, SWE, terminal, agentic | `code/` | template on the archived runs: competitive coding on Gym's code_gen (sandbox node or OpenSandbox pods), Harbor terminal/SWE tasks |
 | Knowledge, factuality, QA | `knowledge/` | template: open QA (judge) and multiple choice; the STEM mix already trains science multiple choice and open science QA |
-| Tool use, web search | `tool-use/` | template on the archived workplace-assistant run (27 simulated tools) |
+| Tool use, web search | `tool-use/` | `base.yaml`: Chonk on a mix of swiss-ai/apertus-tool-use, which sets the rows and Gym servers; web search in `dev/` |
 | Translation | `translation/` | template: translations graded by the shared LLM judge |
 | Lean (formal proofs) | `lean/` | template on the archived Lean 4 run (Gym math_formal_lean) |
 
 `run.sh` submits no run while one of its dataset files is missing (`backends/nemo-rl/config/preflight.sh`), which holds
-back the templates until their datasets exist (`DRY_RUN=1` shows the config). The templates of chat, code,
-tool-use and lean take their latest archived run through `defaults` until their `base.yaml` is written.
+back the templates until their datasets exist (`DRY_RUN=1` shows the config). The templates of chat, code
+and lean take their latest archived run through `defaults` until their `base.yaml` is written.
 
 What several experts take in lives in `shared/` at the top of the repository:
 - `shared/frames/`: the system frame every prompt of the Apertus 2 message format starts with, as small JSON files:

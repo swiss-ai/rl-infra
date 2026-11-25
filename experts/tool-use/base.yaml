@@ -1,8 +1,81 @@
-# Tool use and web search expert, its official run. Not written yet: this expert's runs so far are task files in
-# archive/ (older layout: recipe in `defaults`, launch settings on the command line). Until this file is written, it
-# takes workplace-assistant-sft.yaml (tool calls on Gym's workplace assistant) through `defaults`, so `bash run.sh
-# tool-use` runs that run (run.sh submits it only when its dataset files exist).  To make it the expert's base (as
-# experts/stem/base.yaml): move the datasets, environments and validation of the run that becomes official here, name
-# its recipe with `recipe:`, set `context:`, `size:`, `job_time:` and its steps, and drop the defaults line. Variants
-# go to dev/, finished runs to archive/, data builders to scripts/.
-defaults: archive/workplace-assistant-sft.yaml
+# Tool use expert, its official run: Chonk SFT v0.2 with GRPO on the tool-use gyms of swiss-ai/apertus-tool-use.
+# The run's rows and Gym servers come from a mix of that repo's task pool: `rl-pool mix` writes the mix into the store,
+# with its task.yaml (in `defaults` here) and a copy of the servers (apertus-tool-use: docs/mixes.md). Tier, time
+# limit and context are set here; experts/main.yaml sets the rest that every expert shares.
+#   bash run.sh tool-use        full run (W&B); DEBUG=1 for a short debug run, DRY_RUN=1 to see it first
+# A variant goes to dev/ with `defaults: ../base.yaml` and what it changes, for example the task.yaml of another mix.
+defaults: /capstor/store/cscs/swissai/infra01/datasets/tool_use_rl_apertus_v2/mixes/tool_use/v1/task.yaml
+recipe: recipes/chonk-sftv02.yaml
+script: examples/nemo_gym/run_grpo_nemo_gym.py
+size: lite  # 8 trainer and 4 vLLM nodes
+job_time: "12:00:00"  # the longest job of the partition normal on Alps
+# Set here, not taken from experts/main.yaml: the profiles and evals of apertus-tool-use let a turn run as long
+context: 32768
+
+grpo:
+  # The recipe's 512 tasks a step. As many rollouts of a task as the profiles draw: a task that passes all of them
+  # there is too easy here
+  num_generations_per_prompt: 8
+  # A reward between 0 and 1 (a call cost, an efficiency share) keeps its size: divided by the spread of a group where
+  # all pass, it would weigh as much as a failure
+  normalize_rewards: false
+  max_num_epochs: 1
+  max_num_steps: 1000000  # one pass over the mix ends the run
+  # The Gym entry point runs each row of the validation file once, and refuses reward shaping with async GRPO
+  max_val_samples: null
+  val_batch_size: null
+  val_num_generations_per_prompt: 1
+  reward_shaping:
+    enabled: false
+
+policy:
+  train_global_batch_size: 4096  # all rollouts of a step: one optimizer step for each step, as the recipe's loss needs
+  generation:
+    # Training samples at NeMo-RL's temperature and top_p of 1.0, which explore more; validation measures the model as it
+    # is hosted (apertus-tool-use: configs/evals/models/chonk-sft-v0.2.yaml), as the evals do
+    val_temperature: 0.6
+    val_top_p: 0.95
+    # Thinking level high: the SFT data has high where a sample thinks and low where it does not
+    system_prompt_file: ${oc.env:RL_INFRA_DIR}/shared/frames/apertus2-system-high.json
+    vllm_cfg:
+      # Gym's servers call vLLM's HTTP server, which needs the tokenizer. NeMo-RL starts vLLM without one unless this is
+      # set in the config: the Gym entry point sets it only after that choice.
+      expose_http_server: true
+      # vLLM renders each request with a chat template, and the Apertus 2 format then replaces the prompt's token IDs
+      # with the encoder's. The checkpoint's tokenizer has no template (the recipe's is null): this one lets the render pass.
+      http_server_serving_chat_kwargs:
+        chat_template: "{{ bos_token }}{% for message in messages %}{{ message['content'] }}{% endfor %}"
+    vllm_kwargs:
+      enable_chunked_prefill: true  # Chonk's hybrid Mamba layers need it
+
+checkpointing:
+  # A job resumes with the optimizer state of the last checkpoint: without it, NeMo-RL starts the optimizer again
+  save_optimizer: true
+  # The optimizer state makes a checkpoint several times larger: keep the two best by validation reward and the latest
+  keep_top_k: 2
+  metric_name: val:accuracy
+  # Validate a step before its save, so that the checkpoint carries the validation reward that keep_top_k reads. A
+  # failure in the validation then loses the steps since the last checkpoint.
+  save_before_validation: false
+
+env:
+  should_use_nemo_gym: true
+  should_mask_flagged_samples: true  # a rollout that its gym could not score (mask_sample) leaves the loss
+  # Every rollout in full, in the store: rollouts are data, and scratch deletes old files
+  rollout_dir: /capstor/store/cscs/swissai/infra01/datasets/tool_use_rl_apertus_v2/runs/${oc.env:RUN}/rollouts
+  nemo_gym:
+    use_absolute_ip: true  # Gym's servers live on several Ray nodes
+    place_on_generation_node: true  # the memory of the servers stays off the trainer's nodes
+    mask_degenerate_rollouts: true  # a first prompt longer than the context gives no tokens: a masked stand-in
+    policy_model:
+      responses_api_models:
+        vllm_model:
+          # NeMo-RL clears its own stop settings for Gym, so they travel with each request
+          extra_body:
+            stop: []
+            stop_token_ids: ${policy.generation.stop_token_ids}
+
+logger:
+  wandb:  # every job of a run logs to one W&B run
+    id: ${logger.wandb.name}
+    resume: allow

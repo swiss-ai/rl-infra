@@ -69,7 +69,9 @@ happened, as they ran) and `scripts/` (data builders and checks); empty folders 
 | `stem/scripts/scienceworld/` (18) | setup / check / history | ScienceWorld install, data build, episode probes and scoring, environment test, the launchers of its trial and debug run |
 | `stem/scripts/eval/` | tool | Validation of an HF export with vLLM only (the run's own `grpo.validate()`), benchmark sets (AIME, MATH-500, MMLU-Pro, held-out training sets) |
 | `stem/README.md` | doc | The STEM expert's files |
-| `code/base.yaml`, `chat/base.yaml`, `tool-use/base.yaml`, `lean/base.yaml` | template | Take the latest archived run through `defaults` until written |
+| `code/base.yaml`, `chat/base.yaml`, `lean/base.yaml` | template | Take the latest archived run through `defaults` until written |
+| `tool-use/base.yaml` | run | Tool use official run: a mix of apertus-tool-use (its task.yaml: rows and Gym servers) on Chonk SFT v0.2 |
+| `tool-use/dev/web-search.yaml` | run | Web search on a mix of apertus-tool-use, with the judge on a node of its own |
 | `code/scripts/sandbox/*` (9) | setup / run | Code sandbox node for code_gen: server, harness, data, start script, attack test |
 | `lean/scripts/*` (11) | setup / run | Lean 4 sandbox (NeMo-Skills image) and its data |
 | `code/archive/code-gen-sft.yaml`, `code-gen-osb-sft.yaml` | history | Competitive coding on Gym's code_gen, tests on a sandbox node or on OpenSandbox pods |

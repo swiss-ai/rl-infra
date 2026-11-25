@@ -1,0 +1,53 @@
+# Web search: the gyms of apertus-tool-use that search the live web through Tavily. A judge model grades the last
+# reply, on a node of its own. Each user needs the Tavily key in ~/.tavily_api_key (chmod 600), and the judge's
+# weights in the Hugging Face cache on scratch (apertus-tool-use: docs/training.md).
+#   bash run.sh experts/tool-use/dev/web-search.yaml
+defaults:
+  - ../base.yaml
+  - /capstor/store/cscs/swissai/infra01/datasets/tool_use_rl_apertus_v2/mixes/web_search/v1/task.yaml
+
+env:
+  # The judge of the gyms (resources_servers/web_search of apertus-tool-use), with the settings of its checks
+  # (configs/evals/models/qwen3.8-27b-judge.yaml there)
+  judge_pool:
+    num_nodes: 1
+    # How full each replica is, to see whether the judge holds training up (shared/judges/judge_stats.py)
+    stats_path: ${checkpointing.checkpoint_dir}/judge_stats.jsonl
+    stats_interval_s: 2.0
+    generation:  # a complete generation config: it takes nothing from policy.generation
+      backend: vllm
+      model_name: ${oc.env:SCRATCH}/huggingface/hub/models--Qwen--Qwen3.8-27B-FP8/snapshots/c3a462cc3d38cf351f3b26cbd763469eeb74ef81
+      max_new_tokens: 1024
+      # Greedy, as the server asks for it: NeMo-RL's server refuses other sampling
+      temperature: 0.0
+      top_p: 1.0
+      top_k: null
+      val_temperature: 0.0
+      val_top_p: 1.0
+      val_top_k: null
+      stop_token_ids: null
+      stop_strings: null
+      colocated:
+        enabled: false
+      vllm_cfg:
+        async_engine: true
+        expose_http_server: true
+        precision: bfloat16
+        kv_cache_dtype: auto
+        logprobs_mode: processed_logprobs
+        tensor_parallel_size: 1
+        pipeline_parallel_size: 1
+        expert_parallel_size: 1
+        gpu_memory_utilization: 0.88
+        max_model_len: 16384  # the grader prompt, a reply of one turn and the verdict
+        enforce_eager: false
+        use_deep_gemm: false
+        num_last_layers_in_bf16: 0
+        num_first_layers_in_bf16: 0
+        enable_vllm_metrics_logger: true
+        vllm_metrics_logger_interval: 2.0
+        refit_with_reload_api: false
+        enable_prefix_caching: true
+      vllm_kwargs:
+        max_num_seqs: 128
+        max_num_batched_tokens: 16384
