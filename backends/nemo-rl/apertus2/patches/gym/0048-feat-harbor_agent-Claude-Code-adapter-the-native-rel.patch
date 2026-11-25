@@ -1,0 +1,1393 @@
+From 51c33e56ffb9cddbbba8528f7ed562dba76efcc9 Mon Sep 17 00:00:00 2001
+From: Lukas Drescher <lukas.drescher@cscs.ch>
+Date: Thu, 26 Nov 2026 00:18:47 +0100
+Subject: [PATCH 48/49] feat(harbor_agent): Claude Code adapter, the native
+ release uploaded into the sandbox
+
+ClaudeCodeNemoGym (custom_agents/claude_code_nemo_gym.py) runs Anthropic's Claude Code CLI inside the task
+sandbox against the Gym model server, like OpenCodeNemoGym and PiNemoGym:
+
+- install: the native release binary, gzipped on the node (rl-infra fetch-claude-code.sh writes
+  <dir>/<version>/claude-<platform>.gz and the .gz's sha256), is uploaded and unpacked to
+  /opt/claude-nemo-gym/claude; the binary's sha256 from the release manifest is checked again in the sandbox.
+  Harbor's own install needs curl, Node.js, npm and internet in the image.
+- model: Anthropic Messages to ANTHROPIC_BASE_URL = api_base without /v1 (every Gym model server serves
+  /v1/messages, also under the capture prefix); every model tier and the sub-agent model resolve to the policy.
+- capture: compaction, retries, the non-streaming fallback, sub-agents and web tools (denied), MCP, the task
+  repository's settings/hooks/commands, prompt suggestions, background tasks, prompt caching and the
+  attribution block are off; --system-prompt-snapshot on resends the first call's system prompt verbatim;
+  request timeouts are at least the agent's time limit (stream replay sends nothing before generation ends).
+- run: one recorded command (installed_compat), `claude --print --output-format=stream-json --verbose`,
+  stdin from /dev/null, events to agent/claude-code.txt, session to agent/sessions; --max-turns for max_turns;
+  no ATIF trajectory (the model server's capture holds the rollout).
+
+failure_classes.claude_code_end_flags reads the stream-json events (replies by message id, synthetic API-error
+messages skipped; terminal_reason prompt_too_long or a context-length result text) with the rules shared as
+_context_end_flags; app.py uses it when the trial has claude-code.txt and no flags file. README: Claude Code in
+"Agents inside the sandbox".
+
+Behaviour of Claude Code 2.1.326 measured against a stub of the Gym endpoint (rl-infra
+experiments/claude-code-probe), both profiles: only POST /v1/messages, no side calls, no connections outside
+ANTHROPIC_BASE_URL; one root, system prompt and tools identical on every call; tool results never rewritten;
+no retry on 529; --max-turns ends with error_max_turns without another call; a 400 "prompt is too long" ends
+the episode (terminal_reason prompt_too_long). Tool calls echo as Claude Code parsed them (Edit's
+replace_all default filled in, a string timeout turned into a number), which breaks the lineage fingerprint
+until the next patch.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ responses_api_agents/harbor_agent/README.md   |  62 ++-
+ responses_api_agents/harbor_agent/app.py      |  15 +-
+ .../custom_agents/claude_code_nemo_gym.py     | 352 ++++++++++++
+ .../claude_code_pod/install-claude-code.sh.j2 |  49 ++
+ .../test_claude_code_nemo_gym.py              | 502 ++++++++++++++++++
+ .../harbor_agent/failure_classes.py           |  64 +++
+ .../harbor_agent/tests/test_app.py            |  45 ++
+ .../tests/test_failure_classes.py             | 135 +++++
+ 8 files changed, 1217 insertions(+), 7 deletions(-)
+ create mode 100644 responses_api_agents/harbor_agent/custom_agents/claude_code_nemo_gym.py
+ create mode 100644 responses_api_agents/harbor_agent/custom_agents/claude_code_pod/install-claude-code.sh.j2
+ create mode 100644 responses_api_agents/harbor_agent/custom_agents/test_claude_code_nemo_gym.py
+
+diff --git a/responses_api_agents/harbor_agent/README.md b/responses_api_agents/harbor_agent/README.md
+index 27b30f11..b6c621c5 100644
+--- a/responses_api_agents/harbor_agent/README.md
++++ b/responses_api_agents/harbor_agent/README.md
+@@ -474,22 +474,23 @@ policy:
+       enable_chunked_prefill: false     # Disable chunked prefill for stability
+ ```
+ 
+-### Agents inside the sandbox (OpenCode, pi, mini-swe-agent)
++### Agents inside the sandbox (OpenCode, pi, Claude Code, mini-swe-agent)
+ 
+ Terminus-2 runs in the Harbor process and returns its tokens itself (`collect_rollout_details`). An agent that
+-runs *inside* the task sandbox, such as OpenCode, pi or mini-swe-agent, needs three things instead:
++runs *inside* the task sandbox, such as OpenCode, pi, Claude Code or mini-swe-agent, needs three things instead:
+ 
+ 1. **An adapter** that points the agent at the Gym model server: `harbor_agent_import_path`
+    `responses_api_agents.harbor_agent.custom_agents.opencode_nemo_gym:OpenCodeNemoGym`,
+-   `...pi_nemo_gym:PiNemoGym` or `...mini_swe_agent_nemo_gym:MiniSweAgentNemoGym`. harbor_agent passes the rollout's model URL as `api_base`.
++   `...pi_nemo_gym:PiNemoGym`, `...claude_code_nemo_gym:ClaudeCodeNemoGym` or
++   `...mini_swe_agent_nemo_gym:MiniSweAgentNemoGym`. harbor_agent passes the rollout's model URL as `api_base`.
+ 2. **A model server the sandbox can reach.** `harbor_model_base_url` sets the root of that URL as seen from the
+    sandbox (harbor_agent appends the rollout prefix and `/v1`). If sandboxes cannot open connections to the
+    training nodes, use the per-sandbox model tunnel below and set `harbor_model_base_url: http://127.0.0.1:8000`.
+-3. **Token capture at the model endpoint.** OpenCode and pi write no trajectory with token IDs, so the training tokens
++3. **Token capture at the model endpoint.** OpenCode, pi and Claude Code write no trajectory with token IDs, so the training tokens
+    can only come from Gym's capture: the run-level `token_id_capture.enabled` plus the agent's `token_id_capture`
+    (or `token_id_capture.all_agents`). NeMo RL's single-controller entrypoint turns both on with
+-   `token_capture.enabled: true`. Without capture, a rollout without output items is masked, which for OpenCode
+-   and pi is every rollout.
++   `token_capture.enabled: true`. Without capture, a rollout without output items is masked, which for OpenCode,
++   pi and Claude Code is every rollout.
+ 
+ Under capture, a rollout whose calls form more than one conversation is masked (no single chain to rebuild it
+ from). The OpenCode adapter therefore turns off every call besides the main loop (session title, sub-agents,
+@@ -581,6 +582,55 @@ harbor_agent_kwargs:
+ | `max_turns` | none | Model calls per episode. |
+ | `model_info` | `{}` | `max_input_tokens` / `max_output_tokens`: pi's `contextWindow` / `maxTokens`, and the context limit for failure classes. |
+ 
++**Claude Code** (Anthropic's CLI, closed source; `ClaudeCodeNemoGym`): the native release binary, gzipped on the node
++(rl-infra's `fetch-claude-code.sh` writes `<dir>/<version>/claude-<platform>.gz` and a `.sha256` of the `.gz`), is
++uploaded into each sandbox and unpacked to `/opt/claude-nemo-gym/claude`; the image needs `gzip`, and the binary's
++sha256 from the release manifest is checked again there if `sha256sum` is present. Claude Code speaks Anthropic
++Messages: `ANTHROPIC_BASE_URL` is `api_base` without its `/v1`, and every Gym model server serves `/v1/messages`
++(also under the capture prefix). The run is `claude --print --output-format=stream-json --verbose` with the tools
++`Bash`, `Read`, `Edit`, `Write`, `Glob`, `Grep`; events go to `agent/claude-code.txt`, the session to
++`agent/sessions` (`CLAUDE_CONFIG_DIR`). For capture the adapter turns off compaction, retries, the non-streaming
++fallback, sub-agents and web tools (denied), MCP servers, the task repository's settings, hooks and commands,
++prompt suggestions, background tasks, prompt caching and the attribution block, and passes
++`--system-prompt-snapshot on` so the system prompt of the first call is resent verbatim; request timeouts are at
++least the agent's time limit (stream replay sends nothing before generation ends). Every model tier and the
++sub-agent model resolve to the policy, so a stray side call is still visible in the capture. Claude Code sends no
++sampling parameters: use `sampling_overrides`. `max_turns` is the CLI's own `--max-turns`; Claude Code exits 1
++after an error (`result` event with `is_error`); the failure classes read `agent/claude-code.txt`. Behaviour was
++measured with rl-infra's `experiments/claude-code-probe` for the pinned version: one chain per rollout, no calls
++besides `POST /v1/messages`, no rewritten tool results. Tool calls echo as Claude Code parsed them (schema
++defaults filled in, numbers given as strings converted), which the capture's fingerprint has to allow for.
++
++```yaml
++harbor_agent_name: null
++harbor_agent_import_path: "responses_api_agents.harbor_agent.custom_agents.claude_code_nemo_gym:ClaudeCodeNemoGym"
++harbor_model_base_url: http://127.0.0.1:8000        # the tunnel's sandbox end
++harbor_agent_kwargs:
++  version: 2.1.326
++  claude_archive_dir: /path/to/claude-code          # <dir>/<version>/claude-linux-x64.gz (+ .sha256)
++  claude_timeout_sec: 1740                          # below harbor_agent_max_timeout, so the verifier still runs
++  max_turns: 100
++  model_info:
++    max_input_tokens: ${policy.max_total_sequence_length}
++    max_output_tokens: ${policy.generation.max_new_tokens}
++```
++
++| Option | Default | Meaning |
++|---|---|---|
++| `version` | `2.1.326` | Claude Code release. Flags and environment were probed against this release; another one needs `claude_sha256` and the probe again. |
++| `claude_archive_dir` | required | Directory with `<version>/claude-<platform>.gz` and its `.sha256` (fetch-claude-code.sh). The `.gz` is checked against the sidecar once per process. |
++| `claude_platform` | `linux-x64` | Release platform (`linux-x64`, `linux-arm64`, `-musl` variants). |
++| `claude_sha256` | built in for 2.1.326 | sha256 of the binary (the manifest's checksum), checked in the sandbox. |
++| `claude_timeout_sec` | none | Claude Code is ended with exit 124 after this, so its log and exit status are recorded before Harbor's agent timeout. |
++| `claude_workdir` | none | Absolute path Claude Code runs in (created if missing); unset = the image's working directory. |
++| `claude_profile` | `default` | `default`: Claude Code's own system prompt and tool schemas. `bare`: `--bare`, a minimal system prompt. |
++| `claude_tools` | `Bash,Read,Edit,Write,Glob,Grep` | Built-in tools offered (`--tools`). |
++| `claude_settings` | `{}` | Deep-merged last into the `--settings` JSON; `null` deletes a key. |
++| `claude_env` | `{}` | Deep-merged last into the CLI's environment; `null` deletes a variable. |
++| `claude_debug` | `false` | Debug log to `agent/sessions/debug.log`. |
++| `max_turns` | none | `--max-turns`. |
++| `model_info` | `{}` | `max_input_tokens` / `max_output_tokens`: `CLAUDE_CODE_MAX_CONTEXT_TOKENS` / `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, and the context limit for failure classes. |
++
+ **Per-sandbox model tunnel** (`harbor_environment_kwargs.model_tunnel`, `NemoGymSandboxEnvironment`): for clusters
+ where sandboxes cannot reach the training nodes but the node reaches the sandbox through the provider's endpoint
+ (e.g. OpenSandbox's proxy or gateway, WebSockets included). At every start the environment uploads
+diff --git a/responses_api_agents/harbor_agent/app.py b/responses_api_agents/harbor_agent/app.py
+index f2aaa470..991a51c8 100644
+--- a/responses_api_agents/harbor_agent/app.py
++++ b/responses_api_agents/harbor_agent/app.py
+@@ -46,7 +46,12 @@ from nemo_gym.openai_utils import (
+     NeMoGymResponse,
+     NeMoGymResponseCreateParamsNonStreaming,
+ )
+-from responses_api_agents.harbor_agent.failure_classes import classify_rollout, opencode_end_flags, pi_end_flags
++from responses_api_agents.harbor_agent.failure_classes import (
++    classify_rollout,
++    claude_code_end_flags,
++    opencode_end_flags,
++    pi_end_flags,
++)
+ from responses_api_agents.harbor_agent.utils import HarborAgentUtils
+ 
+ 
+@@ -157,6 +162,8 @@ class HarborVerifyResponse(BaseVerifyResponse):
+ _OPENCODE_LOG = "opencode.txt"
+ # pi's `--mode json` event stream in the trial's agent dir (PiNemoGym).
+ _PI_LOG = "pi.txt"
++# Claude Code's `--output-format=stream-json` events in the trial's agent dir (ClaudeCodeNemoGym, Harbor's layout).
++_CLAUDE_CODE_LOG = "claude-code.txt"
+ 
+ 
+ def _exception_type(trial_result: Optional[dict]) -> Optional[str]:
+@@ -361,6 +368,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
+                     flags_path = trial_dir / "agent" / "agent_error_flags.json"
+                     opencode_log = trial_dir / "agent" / _OPENCODE_LOG
+                     pi_log = trial_dir / "agent" / _PI_LOG
++                    claude_code_log = trial_dir / "agent" / _CLAUDE_CODE_LOG
+                     if flags_path.exists():
+                         flags = json.loads(flags_path.read_text())
+                     elif opencode_log.exists():
+@@ -371,6 +379,11 @@ class HarborAgent(SimpleResponsesAPIAgent):
+                     elif pi_log.exists():
+                         # nor does pi (and in --mode json it exits 0 after an error too)
+                         flags = pi_end_flags(pi_log.read_text(errors="replace"), self._agent_context_limit())
++                    elif claude_code_log.exists():
++                        # nor does Claude Code; it ends on the endpoint's 400 for an overflow without retrying
++                        flags = claude_code_end_flags(
++                            claude_code_log.read_text(errors="replace"), self._agent_context_limit()
++                        )
+                     else:
+                         flags = {}
+                     return (
+diff --git a/responses_api_agents/harbor_agent/custom_agents/claude_code_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/claude_code_nemo_gym.py
+new file mode 100644
+index 00000000..3ccab674
+--- /dev/null
++++ b/responses_api_agents/harbor_agent/custom_agents/claude_code_nemo_gym.py
+@@ -0,0 +1,352 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++# http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""Harbor's installed Claude Code agent, pointed at a NeMo Gym model server over Anthropic Messages.
++
++Harbor's own ClaudeCode installs the CLI in the sandbox with Anthropic's bootstrap script or npm (it needs curl,
++bash, Node.js, npm, procps and internet in the image) and raises when the CLI exits non-zero. This subclass uploads
++the pinned native release binary, gzipped on the node by rl-infra's fetch-claude-code.sh, and runs it through
++`installed_compat` like PiNemoGym and OpenCodeNemoGym: one recorded command, the exit status written down instead
++of raised.
++
++Claude Code speaks only Anthropic Messages: it posts to `ANTHROPIC_BASE_URL` + `/v1/messages`. Every Gym model
++server serves that route (nemo_gym/base_responses_api_model.py, AnthropicConverter to Responses), also under a
++rollout's capture prefix, so ANTHROPIC_BASE_URL is harbor_agent's `api_base` without its trailing `/v1`.
++
++Under token capture a rollout is usable only if all its model calls form one chain whose system prompt and tool
++list stay byte-stable, so the configuration keeps Claude Code to its main loop: no compaction, retries, non-streaming
++fallback, sub-agents, web tools, MCP servers, skills, slash commands, prompt suggestions or background tasks; the
++system prompt is recorded on the first call and resent verbatim (`--system-prompt-snapshot on`, which `--bare` would
++otherwise turn off); the attribution block, prompt-cache markers and experimental betas are off. Every request
++timeout is at or above the agent's own time limit, because under stream replay the model server sends no byte
++before generation ends. Sampling parameters come from the Gym model server's `sampling_overrides`.
++
++Claude Code is closed source: flags and environment variables below were checked by their effect on the requests
++it sends, with rl-infra's experiments/claude-code-probe (a stub of the Gym endpoint), for the version pinned here.
++Another version needs the probe again.
++
++The CLI runs inside the task sandbox, so `api_base` must be reachable from there (harbor_agent's
++`harbor_model_base_url`, e.g. the per-sandbox model tunnel). The adapter writes no ATIF trajectory: for training the
++tokens come from model-server capture. The stream-json event log goes to `/logs/agent/claude-code.txt`
++(failure_classes.claude_code_end_flags reads it), the session to `/logs/agent/sessions` (CLAUDE_CONFIG_DIR).
++"""
++
++import json
++import re
++import shlex
++from pathlib import Path
++from typing import Any, Mapping
++
++from harbor.agents.installed.base import with_prompt_template
++from harbor.agents.installed.claude_code import ClaudeCode
++from harbor.environments.base import BaseEnvironment
++from harbor.models.agent.context import AgentContext
++
++from responses_api_agents.harbor_agent.custom_agents.installed_compat import (
++    PIPEFAIL_IF_SUPPORTED,
++    TIMEOUT_KILL_AFTER_SEC,
++    ExecInput,
++    deep_merge,
++    drop_shared_kwargs,
++    install_from_template,
++    kwargs_for_harbor_options,
++    run_commands,
++    verified_archive,
++)
++
++
++# Gym's model server replaces the request's model with its own (vllm_model/app.py); the policy's name may be a path.
++MODEL_ID = "policy"
++# Every model tier Claude Code may pick resolves to the policy, so a stray side call still reaches the model server
++# (and is then visible as a second root in the capture).
++MODEL_ENV_VARS = (
++    "ANTHROPIC_MODEL",
++    "ANTHROPIC_SMALL_FAST_MODEL",
++    "ANTHROPIC_DEFAULT_OPUS_MODEL",
++    "ANTHROPIC_DEFAULT_SONNET_MODEL",
++    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
++    "ANTHROPIC_DEFAULT_FABLE_MODEL",
++    "CLAUDE_CODE_SUBAGENT_MODEL",
++)
++
++# Release whose flags and environment this adapter was probed against.
++DEFAULT_VERSION = "2.1.326"
++DEFAULT_PLATFORM = "linux-x64"
++# platforms.<platform>.checksum of https://downloads.claude.ai/claude-code-releases/<version>/manifest.json: the
++# sha256 of the binary itself, checked again in the sandbox after it is unpacked.
++KNOWN_BINARY_SHA256 = {
++    ("2.1.326", "linux-x64"): "b6b3647d981130dc44fc670846ae97b6cde531ffb667cf9c4d17cfcafb38cb37",
++    ("2.1.326", "linux-arm64"): "98d56f6ffe53469767a74864a38eaf359d62ef557a8de1b1ad524d61a66ec119",
++}
++INSTALL_TEMPLATE = Path(__file__).parent / "claude_code_pod" / "install-claude-code.sh.j2"
++INSTALL_DIR = "/opt/claude-nemo-gym"
++CLAUDE_BIN = f"{INSTALL_DIR}/claude"
++# where the adapter uploads the gzipped binary (the install script removes it)
++POD_ARCHIVE = "/installed-agent/claude.gz"
++
++LOG_FILE = "/logs/agent/claude-code.txt"  # Harbor's ClaudeCode layout
++CONFIG_DIR = "/logs/agent/sessions"  # CLAUDE_CONFIG_DIR, Harbor's layout; the session JSONL lands under projects/
++
++PROFILES = ("default", "bare")
++# Built-in tools offered to the model (--tools); the rest of the default set (sub-agents, web, notebooks, todo and
++# plan tools, ...) is not offered at all.
++DEFAULT_TOOLS = ("Bash", "Read", "Edit", "Write", "Glob", "Grep")
++# Denied as well, in case a version brings one back into a restricted set: each would start calls outside the
++# main loop (a sub-agent) or reach the internet.
++DISALLOWED_TOOLS = ("Task", "Agent", "WebFetch", "WebSearch")
++
++_VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+-]*$")
++_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
++_PLATFORM_RE = re.compile(r"^linux-(x64|arm64)(-musl)?$")
++
++
++class ClaudeCodeNemoGym(ClaudeCode):
++    @classmethod
++    def preflight(cls, kwargs: dict[str, Any] | None = None, env: Mapping[str, str] | None = None) -> None:
++        # Harbor 0.25 checks the config's kwargs before any trial (Job.create); ours are taken by __init__
++        super().preflight(kwargs=kwargs_for_harbor_options(cls, kwargs), env=env)
++
++    @classmethod
++    def check_model_credentials(cls, connection, *, kwargs, env, explicit_env=None) -> None:
++        # The model server takes any key; Harbor's Anthropic credential rules (API key, OAuth) do not apply.
++        return None
++
++    def __init__(
++        self,
++        *args: Any,
++        api_base: str | None = None,
++        api_key: str = "EMPTY",
++        responses_create_params: dict[str, Any] | None = None,
++        max_turns: int | None = None,
++        model_info: dict[str, Any] | None = None,
++        claude_archive_dir: str | None = None,
++        claude_sha256: str | None = None,
++        claude_platform: str = DEFAULT_PLATFORM,
++        claude_timeout_sec: int | None = None,
++        claude_workdir: str | None = None,
++        claude_profile: str = "default",
++        claude_tools: str | None = None,
++        claude_settings: dict[str, Any] | None = None,
++        claude_env: dict[str, Any] | None = None,
++        claude_debug: bool = False,
++        **kwargs: Any,
++    ) -> None:
++        # Harbor's base keeps `version` (the Claude Code release).
++        super().__init__(*args, **drop_shared_kwargs(kwargs))
++        if not api_base:
++            raise ValueError("ClaudeCodeNemoGym needs api_base (harbor_agent passes the model server URL)")
++        if claude_timeout_sec is not None and int(claude_timeout_sec) <= 0:
++            raise ValueError(f"claude_timeout_sec must be positive, got {claude_timeout_sec!r}")
++        if claude_profile not in PROFILES:
++            raise ValueError(f"claude_profile must be one of {PROFILES}, got {claude_profile!r}")
++        if self._version is None:
++            self._version = DEFAULT_VERSION
++        if not _VERSION_RE.match(self._version):
++            raise ValueError(f"invalid Claude Code version {self._version!r}")
++        if not _PLATFORM_RE.match(claude_platform):
++            raise ValueError(f"invalid claude_platform {claude_platform!r} (linux-x64, linux-arm64, ...-musl)")
++        if claude_sha256 is not None and not _SHA256_RE.match(claude_sha256):
++            raise ValueError("claude_sha256 must be 64 lowercase hex digits")
++        if claude_workdir is not None and not str(claude_workdir).startswith("/"):
++            raise ValueError(f"claude_workdir must be an absolute path, got {claude_workdir!r}")
++        if not claude_archive_dir:
++            raise ValueError(
++                "ClaudeCodeNemoGym needs claude_archive_dir (with <version>/claude-<platform>.gz, "
++                "e.g. from fetch-claude-code.sh)"
++            )
++        sha256 = claude_sha256 or KNOWN_BINARY_SHA256.get((self._version, claude_platform))
++        if not sha256:
++            raise ValueError(f"Claude Code {self._version} ({claude_platform}) has no known digest: set claude_sha256")
++        archive = Path(claude_archive_dir) / self._version / f"claude-{claude_platform}.gz"
++        # The .gz is ours (fetch-claude-code.sh wrote it after checking the binary against `sha256`); its own digest
++        # is in the sidecar, so a truncated or replaced file fails here and not in 64 sandboxes.
++        sidecar = archive.with_name(archive.name + ".sha256")
++        if not sidecar.is_file():
++            raise FileNotFoundError(f"{sidecar} not found (fetch-claude-code.sh writes it next to the archive)")
++        self._archive = verified_archive(
++            archive, sidecar.read_text().strip(), what="Claude Code", dir_option="claude_archive_dir"
++        )
++        self._api_base = api_base
++        self._api_key = api_key
++        self._responses_create_params = responses_create_params or {}
++        self._max_turns = int(max_turns) if max_turns else None
++        self._model_info = model_info or {}
++        self._sha256 = sha256
++        self._timeout_sec = int(claude_timeout_sec) if claude_timeout_sec is not None else None
++        self._workdir = claude_workdir
++        self._profile = claude_profile
++        self._tools = claude_tools if claude_tools is not None else ",".join(DEFAULT_TOOLS)
++        self._settings_overlay = claude_settings or {}
++        self._env_overlay = claude_env or {}
++        self._debug = bool(claude_debug)
++
++    @staticmethod
++    def name() -> str:
++        return "claude-code-nemo-gym"
++
++    # --- install -------------------------------------------------------------------------------
++
++    def install_variables(self) -> dict[str, str]:
++        """Variables of the install script (INSTALL_TEMPLATE)."""
++        return {
++            "version": shlex.quote(self._version),
++            "sha256": shlex.quote(self._sha256),
++            "install_dir": shlex.quote(INSTALL_DIR),
++            "archive": shlex.quote(POD_ARCHIVE),
++        }
++
++    async def install(self, environment: BaseEnvironment) -> None:
++        await environment.upload_file(source_path=self._archive, target_path=POD_ARCHIVE)
++        # as root: it writes to INSTALL_DIR
++        await install_from_template(self, environment, INSTALL_TEMPLATE, self.install_variables())
++
++    # --- configuration -------------------------------------------------------------------------
++
++    def model_limits(self) -> dict[str, int]:
++        """Context window and per-reply output limit from Terminus-2-style `model_info` (empty when unknown).
++
++        `max_input_tokens` is the whole context window in our overlays (max_total_sequence_length), as for
++        Terminus-2; the output limit is additionally capped by the request's max_output_tokens.
++        """
++        context = self._model_info.get("max_input_tokens") or self._model_info.get("max_tokens")
++        if not context:
++            return {}
++        output = self._model_info.get("max_output_tokens") or context
++        request_cap = self._responses_create_params.get("max_output_tokens")
++        if request_cap:
++            output = min(int(output), int(request_cap))
++        return {"context": int(context), "output": int(output)}
++
++    def request_timeout_ms(self) -> int:
++        """Claude Code's API request timeout: at least the agent's own time limit (one turn may take all of it,
++        and under stream replay nothing arrives before generation ends)."""
++        return max(self._timeout_sec or 0, 3600) * 1000
++
++    def settings_json(self) -> dict[str, Any]:
++        settings: dict[str, Any] = {
++            # threshold compaction is a summary call under another prompt (and rewrites the history)
++            "autoCompactEnabled": False,
++            # no co-author trailer or attribution text in commits and PRs the agent writes
++            "includeCoAuthoredBy": False,
++            "permissions": {"deny": list(DISALLOWED_TOOLS)},
++        }
++        return deep_merge(settings, self._settings_overlay)
++
++    def claude_env(self) -> dict[str, str]:
++        timeout_ms = str(self.request_timeout_ms())
++        env: dict[str, Any] = {
++            # --- the endpoint: Claude Code appends /v1/messages itself
++            "ANTHROPIC_BASE_URL": self._api_base.removesuffix("/").removesuffix("/v1"),
++            # x-api-key; under --bare the only credential Claude Code reads. The server takes any key.
++            "ANTHROPIC_API_KEY": self._api_key,
++            **{name: MODEL_ID for name in MODEL_ENV_VARS},
++            # --- one chain of calls per rollout
++            "DISABLE_COMPACT": "1",
++            "DISABLE_AUTO_COMPACT": "1",
++            # a retry or a non-streaming fallback is a second call for the same turn
++            "CLAUDE_CODE_MAX_RETRIES": "0",
++            "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK": "1",
++            "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
++            "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION": "false",
++            "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1",
++            # a per-request block in the system prompt would change it on every call
++            "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
++            # --- request shape
++            "DISABLE_PROMPT_CACHING": "1",
++            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
++            "DISABLE_INTERLEAVED_THINKING": "1",
++            # the policy's server owns reasoning; Claude Code asks for no thinking budget
++            "MAX_THINKING_TOKENS": "0",
++            # --- silent calls under stream replay
++            "API_TIMEOUT_MS": timeout_ms,
++            "CLAUDE_STREAM_IDLE_TIMEOUT_MS": timeout_ms,
++            # --- isolation: no traffic to Anthropic, no updates, no feature flags
++            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
++            "DISABLE_TELEMETRY": "1",
++            "DISABLE_ERROR_REPORTING": "1",
++            "DISABLE_AUTOUPDATER": "1",
++            "CLAUDE_CODE_DISABLE_FEATURE_FLAGS": "1",
++            # bypassPermissions as root (Harbor sets it too)
++            "IS_SANDBOX": "1",
++            "CLAUDE_CONFIG_DIR": CONFIG_DIR,
++        }
++        limits = self.model_limits()
++        if limits:
++            env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(limits["output"])
++            # otherwise Claude Code assumes its own model's window for an unknown model name
++            env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(limits["context"])
++        env = deep_merge(env, self._env_overlay)
++        return {key: str(value) for key, value in env.items()}
++
++    # --- run -----------------------------------------------------------------------------------
++
++    def claude_argv(self, instruction: str) -> list[str]:
++        argv: list[str] = []
++        if self._timeout_sec is not None:
++            # Ends Claude Code before Harbor's agent timeout so the command's return code is recorded.
++            argv += ["timeout", "-k", str(TIMEOUT_KILL_AFTER_SEC), str(self._timeout_sec)]
++        argv += [
++            CLAUDE_BIN,
++            "--print",
++            "--output-format=stream-json",
++            # stream-json in print mode requires --verbose
++            "--verbose",
++            "--permission-mode=bypassPermissions",
++            "--tools",
++            self._tools,
++            "--disallowed-tools",
++            ",".join(DISALLOWED_TOOLS),
++            # no MCP servers, and none of the task repository's settings, hooks, skills or commands
++            "--strict-mcp-config",
++            "--setting-sources",
++            "user",
++            "--disable-slash-commands",
++            "--prompt-suggestions",
++            "false",
++            # the system prompt of the first call is resent verbatim (the capture's envelope)
++            "--system-prompt-snapshot",
++            "on",
++            "--settings",
++            json.dumps(self.settings_json(), separators=(",", ":")),
++        ]
++        if self._profile == "bare":
++            argv.append("--bare")
++        if self._max_turns:
++            argv += ["--max-turns", str(self._max_turns)]
++        if self._debug:
++            argv += ["--debug-file", f"{CONFIG_DIR}/debug.log"]
++        # "--": an instruction starting with "-" stays the prompt
++        argv += ["--", instruction]
++        return argv
++
++    def create_run_agent_commands(self, instruction: str) -> list[ExecInput]:
++        # stdin from /dev/null: the sandbox exec leaves it open, and with a non-TTY stdin the CLI would wait for it.
++        # pipefail keeps Claude Code's exit status (e.g. 124 from timeout) instead of tee's.
++        run = f"{shlex.join(self.claude_argv(instruction))} 2>&1 </dev/null | tee {shlex.quote(LOG_FILE)}"
++        command = PIPEFAIL_IF_SUPPORTED + f"mkdir -p {shlex.quote(CONFIG_DIR)} && {run}"
++        if self._workdir:
++            # Claude Code's cwd is its project (and in its system prompt); tasks may expect the agent to create it.
++            # If that fails, it still runs in the exec's cwd.
++            workdir = shlex.quote(self._workdir)
++            command = f"mkdir -p {workdir} && cd {workdir}; {command}"
++        return [ExecInput(command=command, env=self.claude_env())]
++
++    @with_prompt_template
++    async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
++        await run_commands(self, environment, self.create_run_agent_commands(instruction))
++
++    def populate_context_post_run(self, context: AgentContext) -> None:
++        # Harbor's ClaudeCode converts its session into an ATIF trajectory.json, which harbor_agent would turn into
++        # output items; as for PiNemoGym, the model server's capture holds the rollout instead.
++        pass
+diff --git a/responses_api_agents/harbor_agent/custom_agents/claude_code_pod/install-claude-code.sh.j2 b/responses_api_agents/harbor_agent/custom_agents/claude_code_pod/install-claude-code.sh.j2
+new file mode 100644
+index 00000000..06b64dac
+--- /dev/null
++++ b/responses_api_agents/harbor_agent/custom_agents/claude_code_pod/install-claude-code.sh.j2
+@@ -0,0 +1,49 @@
++#!/bin/bash
++# Installs the native Claude Code release binary from the gzipped copy ClaudeCodeNemoGym uploaded.
++# Rendered by ClaudeCodeNemoGym; version, sha256, install_dir and archive arrive shell-quoted.
++# The .gz was checked on the node; the binary inside is checked here against the release manifest's sha256 when
++# the image has sha256sum. Needs gzip. The upload is removed at exit: the sandbox's files live in node memory.
++set -euo pipefail
++
++version={{ version }}
++sha256={{ sha256 }}
++install_dir={{ install_dir }}
++archive={{ archive }}
++dest="$install_dir/claude"
++tmp=""
++
++cleanup() {
++  if [ -n "$tmp" ]; then rm -f "$tmp"; fi
++  rm -f "$archive"
++}
++trap cleanup EXIT
++
++installed_version() {
++  # "2.1.326 (Claude Code)"
++  "$1" --version 2>/dev/null | awk '{print $1; exit}' || true
++}
++
++if [ -x "$dest" ] && [ "$(installed_version "$dest")" = "$version" ]; then
++  echo "Claude Code $version already installed at $dest"
++  exit 0
++fi
++
++mkdir -p "$install_dir"
++tmp="$dest.part.$$"
++gzip -dc "$archive" > "$tmp"
++if [ -n "$sha256" ] && command -v sha256sum >/dev/null 2>&1; then
++  actual=$(sha256sum "$tmp")
++  if [ "${actual%% *}" != "$sha256" ]; then
++    echo "sha256 mismatch for the Claude Code binary unpacked from $archive: expected $sha256" >&2
++    exit 1
++  fi
++fi
++chmod 755 "$tmp"
++mv -f "$tmp" "$dest"
++tmp=""
++actual=$(installed_version "$dest")
++if [ "$actual" != "$version" ]; then
++  echo "Claude Code version mismatch: wanted $version, $dest --version printed ${actual:-nothing}" >&2
++  exit 1
++fi
++echo "installed Claude Code $actual at $dest"
+diff --git a/responses_api_agents/harbor_agent/custom_agents/test_claude_code_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/test_claude_code_nemo_gym.py
+new file mode 100644
+index 00000000..5f545e2f
+--- /dev/null
++++ b/responses_api_agents/harbor_agent/custom_agents/test_claude_code_nemo_gym.py
+@@ -0,0 +1,502 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++# http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++import gzip
++import hashlib
++import json
++import os
++import shlex
++import shutil
++import subprocess
++from pathlib import Path
++
++import pytest
++
++
++pytest.importorskip("harbor")
++
++from jinja2 import Environment  # noqa: E402
++
++from responses_api_agents.harbor_agent.custom_agents import claude_code_nemo_gym as mod  # noqa: E402
++from responses_api_agents.harbor_agent.custom_agents.claude_code_nemo_gym import ClaudeCodeNemoGym  # noqa: E402
++
++
++API_BASE = "http://127.0.0.1:8000/ng-rollout/3-1/training-token-capture/v1"
++# a policy model name as NeMo-RL passes it: a path (vllm_model replaces the request's model with its own)
++MODEL = "/scratch/models/chonk-sft-v0.2"
++MODEL_INFO = {"max_input_tokens": 65536, "max_output_tokens": 16384}
++VERSION = "2.1.326"
++needs_bash = pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
++
++
++def _binary(printed_version: str = VERSION) -> bytes:
++    """A stand-in for the release binary: prints the version as `claude --version` does."""
++    return f'#!/bin/sh\necho "{printed_version} (Claude Code)"\n'.encode()
++
++
++def _archive_dir(tmp_path: Path, version: str = VERSION, printed_version: str = VERSION) -> tuple[Path, bytes, str]:
++    """A claude_archive_dir as fetch-claude-code.sh leaves it: <dir>/<version>/claude-<platform>.gz and its .sha256
++    sidecar. Returns (dir, gz bytes, sha256 of the binary)."""
++    binary = _binary(printed_version)
++    data = gzip.compress(binary, mtime=0)
++    archive_dir = tmp_path / "claude-code"
++    gz = archive_dir / version / f"claude-{mod.DEFAULT_PLATFORM}.gz"
++    gz.parent.mkdir(parents=True, exist_ok=True)
++    gz.write_bytes(data)
++    (gz.parent / (gz.name + ".sha256")).write_text(hashlib.sha256(data).hexdigest() + "\n")
++    return archive_dir, data, hashlib.sha256(binary).hexdigest()
++
++
++def _agent(tmp_path: Path, **kwargs) -> ClaudeCodeNemoGym:
++    if "claude_archive_dir" not in kwargs:
++        archive_dir, _, digest = _archive_dir(tmp_path / "default")
++        kwargs = {"claude_archive_dir": str(archive_dir), "claude_sha256": digest, **kwargs}
++    return ClaudeCodeNemoGym(logs_dir=tmp_path, model_name=MODEL, api_base=API_BASE, **kwargs)
++
++
++def _command(agent: ClaudeCodeNemoGym, instruction: str = "x"):
++    (cmd,) = agent.create_run_agent_commands(instruction)
++    return cmd
++
++
++def test_requires_api_base(tmp_path: Path) -> None:
++    with pytest.raises(ValueError, match="api_base"):
++        ClaudeCodeNemoGym(logs_dir=tmp_path, model_name=MODEL)
++
++
++# --- environment and settings --------------------------------------------------------------------------
++
++
++def test_env_points_claude_code_at_the_model_server(tmp_path: Path) -> None:
++    env = _agent(tmp_path).claude_env()
++    # Claude Code appends /v1/messages itself
++    assert env["ANTHROPIC_BASE_URL"] == API_BASE.removesuffix("/v1")
++    assert env["ANTHROPIC_API_KEY"] == "EMPTY"
++    # every tier resolves to the policy, so a stray side call still reaches the model server
++    assert {name: env[name] for name in mod.MODEL_ENV_VARS} == {name: mod.MODEL_ID for name in mod.MODEL_ENV_VARS}
++    assert env["CLAUDE_CONFIG_DIR"] == mod.CONFIG_DIR
++    assert env["IS_SANDBOX"] == "1"
++
++
++def test_env_keeps_claude_code_to_one_chain(tmp_path: Path) -> None:
++    """Each of these was a second call or a changed history in the probe (rl-infra experiments/claude-code-probe)."""
++    env = _agent(tmp_path).claude_env()
++    for name, value in {
++        "DISABLE_COMPACT": "1",
++        "DISABLE_AUTO_COMPACT": "1",
++        "CLAUDE_CODE_MAX_RETRIES": "0",
++        "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK": "1",
++        "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
++        "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
++        "DISABLE_PROMPT_CACHING": "1",
++        "MAX_THINKING_TOKENS": "0",
++        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
++        "DISABLE_TELEMETRY": "1",
++        "DISABLE_AUTOUPDATER": "1",
++    }.items():
++        assert env[name] == value, name
++
++
++def test_request_timeouts_are_at_least_the_agent_time_limit(tmp_path: Path) -> None:
++    # under stream replay the model server sends nothing before generation ends
++    assert _agent(tmp_path, claude_timeout_sec=7200).claude_env()["API_TIMEOUT_MS"] == "7200000"
++    assert _agent(tmp_path, claude_timeout_sec=870).claude_env()["API_TIMEOUT_MS"] == "3600000"
++    env = _agent(tmp_path).claude_env()
++    assert env["API_TIMEOUT_MS"] == env["CLAUDE_STREAM_IDLE_TIMEOUT_MS"] == "3600000"
++
++
++def test_limits_from_model_info_capped_by_the_request(tmp_path: Path) -> None:
++    env = _agent(tmp_path, model_info=MODEL_INFO).claude_env()
++    assert (env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"]) == ("16384", "65536")
++    env = _agent(tmp_path, model_info=MODEL_INFO, responses_create_params={"max_output_tokens": 6144}).claude_env()
++    assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "6144"
++    env = _agent(tmp_path).claude_env()
++    assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS" not in env and "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in env
++
++
++def test_env_overlay_is_deep_merged_last(tmp_path: Path) -> None:
++    env = _agent(
++        tmp_path, claude_env={"CLAUDE_CODE_MAX_RETRIES": 2, "DISABLE_TELEMETRY": None, "FOO": "bar"}
++    ).claude_env()
++    assert (env["CLAUDE_CODE_MAX_RETRIES"], env["FOO"]) == ("2", "bar")
++    assert "DISABLE_TELEMETRY" not in env
++
++
++def test_settings_switch_off_compaction_and_deny_sub_agents_and_web_tools(tmp_path: Path) -> None:
++    settings = _agent(tmp_path).settings_json()
++    assert settings["autoCompactEnabled"] is False
++    assert settings["includeCoAuthoredBy"] is False
++    assert set(settings["permissions"]["deny"]) == {"Task", "Agent", "WebFetch", "WebSearch"}
++    overlaid = _agent(tmp_path, claude_settings={"autoCompactEnabled": True, "permissions": {"allow": ["Bash"]}})
++    settings = overlaid.settings_json()
++    assert settings["autoCompactEnabled"] is True
++    assert settings["permissions"] == {"deny": list(mod.DISALLOWED_TOOLS), "allow": ["Bash"]}
++
++
++# --- the run command -------------------------------------------------------------------------------------
++
++
++def test_run_command(tmp_path: Path) -> None:
++    agent = _agent(tmp_path, max_turns=30, claude_timeout_sec=1740)
++    argv = agent.claude_argv("-fix it")
++    assert argv[:5] == ["timeout", "-k", "10", "1740", mod.CLAUDE_BIN]
++    for flag in (
++        "--print",
++        "--output-format=stream-json",
++        "--verbose",
++        "--permission-mode=bypassPermissions",
++        "--strict-mcp-config",
++        "--disable-slash-commands",
++    ):
++        assert flag in argv
++    pairs = {argv[i]: argv[i + 1] for i in range(len(argv) - 1) if argv[i].startswith("--")}
++    assert pairs["--tools"] == "Bash,Read,Edit,Write,Glob,Grep"
++    assert pairs["--disallowed-tools"] == "Task,Agent,WebFetch,WebSearch"
++    assert pairs["--setting-sources"] == "user"
++    assert pairs["--prompt-suggestions"] == "false"
++    # the capture's envelope: the first call's system prompt is resent verbatim (off by default under --bare)
++    assert pairs["--system-prompt-snapshot"] == "on"
++    assert json.loads(pairs["--settings"]) == agent.settings_json()
++    assert pairs["--max-turns"] == "30"
++    assert "--bare" not in argv
++    # "--": an instruction starting with "-" stays the prompt
++    assert argv[-2:] == ["--", "-fix it"]
++    cmd = _command(agent, "-fix it")
++    assert cmd.command.startswith(mod.PIPEFAIL_IF_SUPPORTED)
++    assert cmd.command.endswith(f"2>&1 </dev/null | tee {mod.LOG_FILE}")
++    assert cmd.env == agent.claude_env()
++
++
++def test_bare_profile_and_debug_file(tmp_path: Path) -> None:
++    argv = _agent(tmp_path, claude_profile="bare", claude_debug=True).claude_argv("x")
++    assert "--bare" in argv
++    assert argv[argv.index("--debug-file") + 1] == f"{mod.CONFIG_DIR}/debug.log"
++    assert "--max-turns" not in argv and argv[0] == mod.CLAUDE_BIN
++
++
++@pytest.mark.parametrize(
++    "kwargs, match",
++    [
++        ({"claude_timeout_sec": 0}, "claude_timeout_sec"),
++        ({"claude_profile": "full"}, "claude_profile"),
++        ({"claude_workdir": "app"}, "absolute"),
++        ({"claude_platform": "darwin-arm64"}, "claude_platform"),
++        ({"claude_sha256": "ABC"}, "claude_sha256"),
++        ({"version": "2.1.326; rm -rf /"}, "version"),
++        ({"claude_archive_dir": None}, "claude_archive_dir"),
++    ],
++)
++def test_rejects_bad_kwargs(tmp_path: Path, kwargs: dict, match: str) -> None:
++    with pytest.raises((ValueError, FileNotFoundError), match=match):
++        _agent(tmp_path, **kwargs)
++
++
++def _fake_claude(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str) -> Path:
++    """Points the adapter's pod paths into tmp_path and installs a fake claude there; returns the log path."""
++    pod = tmp_path / "pod"
++    monkeypatch.setattr(mod, "CLAUDE_BIN", str(pod / "opt" / "claude"))
++    monkeypatch.setattr(mod, "CONFIG_DIR", str(pod / "logs" / "sessions"))
++    monkeypatch.setattr(mod, "LOG_FILE", str(pod / "logs" / "claude-code.txt"))
++    (pod / "opt").mkdir(parents=True)
++    (pod / "logs").mkdir(parents=True)
++    fake = pod / "opt" / "claude"
++    fake.write_text(body)
++    fake.chmod(0o755)
++    return pod / "logs" / "claude-code.txt"
++
++
++@needs_bash
++@pytest.mark.parametrize("timeout_sec", [None, 30])
++def test_run_command_in_bash_closes_stdin_and_keeps_the_exit_status(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, timeout_sec: int | None
++) -> None:
++    if timeout_sec and shutil.which("timeout") is None:
++        pytest.skip("needs coreutils timeout")
++    # Stands in for claude: reads stdin to EOF, prints its last two arguments and its config dir, exits 1 (as after
++    # an API error).
++    log = _fake_claude(
++        tmp_path,
++        monkeypatch,
++        '#!/bin/bash\nstdin=$(cat)\nn=$#\nprintf "%s\\n" "${@:n-1}"\necho "stdin=[$stdin]"\n'
++        'test -d "$CLAUDE_CONFIG_DIR" && echo config-dir\necho "key=$ANTHROPIC_API_KEY"\nexit 1\n',
++    )
++    cmd = _command(_agent(tmp_path, claude_timeout_sec=timeout_sec), "-fix it")
++    read_end, write_end = os.pipe()  # stdin left open, like the sandbox exec's
++    try:
++        proc = subprocess.run(
++            ["bash", "-c", cmd.command],
++            stdin=read_end,
++            capture_output=True,
++            text=True,
++            env={**os.environ, **cmd.env},
++            timeout=20,
++        )
++    finally:
++        os.close(read_end)
++        os.close(write_end)
++    assert proc.returncode == 1  # claude's status, not tee's 0
++    lines = log.read_text().splitlines()
++    assert lines == proc.stdout.splitlines()
++    assert lines == ["--", "-fix it", "stdin=[]", "config-dir", "key=EMPTY"]
++
++
++@pytest.mark.parametrize("shell", ["sh", "dash"])
++def test_run_command_starts_claude_in_a_posix_sh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shell: str) -> None:
++    """The sandbox exec may use /bin/sh; a shell without pipefail must still run Claude Code."""
++    if shutil.which(shell) is None:
++        pytest.skip(f"needs {shell}")
++    log = _fake_claude(tmp_path, monkeypatch, "#!/bin/sh\necho started\nexit 3\n")
++    cmd = _command(_agent(tmp_path))
++    proc = subprocess.run(
++        [shell, "-c", cmd.command], capture_output=True, text=True, env={**os.environ, **cmd.env}, timeout=20
++    )
++    supports_pipefail = subprocess.run([shell, "-c", "set -o pipefail"], capture_output=True).returncode == 0
++    assert log.read_text().splitlines() == ["started"]
++    assert proc.returncode == (3 if supports_pipefail else 0)
++
++
++@needs_bash
++def test_run_command_starts_claude_in_the_created_workdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
++    log = _fake_claude(tmp_path, monkeypatch, "#!/bin/sh\npwd\n")
++    workdir = tmp_path / "does" / "not" / "exist yet"
++    cmd = _command(_agent(tmp_path, claude_workdir=str(workdir)))
++    proc = subprocess.run(
++        ["bash", "-c", cmd.command], cwd="/", capture_output=True, text=True, env={**os.environ, **cmd.env}, timeout=20
++    )
++    assert proc.returncode == 0
++    assert log.read_text().splitlines() == [str(workdir)]
++
++
++@pytest.mark.asyncio
++async def test_run_records_the_command_and_a_failed_exit_without_raising(tmp_path: Path) -> None:
++    from harbor.models.agent.context import AgentContext
++
++    agent = _agent(tmp_path, claude_timeout_sec=870)
++    env = _Env(return_code=124)
++    await agent.run("do it", env, AgentContext())
++    (call,) = env.calls
++    expected = _command(agent, "do it")
++    assert call["command"] == expected.command and call["env"] == expected.env
++    assert call["user"] is None  # the environment's default user, as for OpenCode and pi
++    assert (tmp_path / "command-0" / "return-code.txt").read_text() == "124"
++
++
++# --- install -----------------------------------------------------------------------------------------
++
++
++class _Env:
++    """Records exec/upload calls; every command exits with return_code."""
++
++    def __init__(self, return_code: int = 0) -> None:
++        self.calls: list[dict] = []
++        self.uploads: list[tuple[bytes, str]] = []
++        self.return_code = return_code
++        self.default_user = None
++
++    async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
++        from harbor.environments.base import ExecResult
++
++        self.calls.append({"command": command, "cwd": cwd, "env": env, "timeout_sec": timeout_sec, "user": user})
++        return ExecResult(stdout="out", stderr=None, return_code=self.return_code)
++
++    async def upload_file(self, source_path, target_path):
++        self.uploads.append((Path(source_path).read_bytes(), target_path))
++
++
++@pytest.mark.asyncio
++async def test_install_uploads_the_archive_then_runs_the_script_as_root(tmp_path: Path) -> None:
++    archive_dir, data, digest = _archive_dir(tmp_path)
++    agent = _agent(tmp_path, claude_archive_dir=str(archive_dir), claude_sha256=digest)
++    env = _Env()
++    await agent.install(env)
++    script = Environment().from_string(mod.INSTALL_TEMPLATE.read_text()).render(**agent.install_variables())
++    assert env.uploads == [(data, mod.POD_ARCHIVE), (script.encode(), "/installed-agent/install.sh")]
++    assert env.calls[-1]["command"] == "bash /installed-agent/install.sh"
++    assert env.calls[-1]["user"] == "root"
++
++
++def test_default_version_and_pinned_digests() -> None:
++    assert mod.DEFAULT_VERSION == VERSION
++    # platforms.<platform>.checksum of the release's manifest.json
++    assert mod.KNOWN_BINARY_SHA256[(VERSION, "linux-x64")] == (
++        "b6b3647d981130dc44fc670846ae97b6cde531ffb667cf9c4d17cfcafb38cb37"
++    )
++    assert mod.KNOWN_BINARY_SHA256[(VERSION, "linux-arm64")] == (
++        "98d56f6ffe53469767a74864a38eaf359d62ef557a8de1b1ad524d61a66ec119"
++    )
++
++
++def test_install_variables_carry_the_pinned_binary_digest(tmp_path: Path) -> None:
++    archive_dir, _, _ = _archive_dir(tmp_path)
++    agent = ClaudeCodeNemoGym(
++        logs_dir=tmp_path, model_name=MODEL, api_base=API_BASE, claude_archive_dir=str(archive_dir)
++    )
++    assert agent.install_variables()["sha256"] == mod.KNOWN_BINARY_SHA256[(VERSION, "linux-x64")]
++
++
++def test_another_version_needs_its_digest(tmp_path: Path) -> None:
++    archive_dir, _, _ = _archive_dir(tmp_path, version="2.2.0")
++    with pytest.raises(ValueError, match="claude_sha256"):
++        _agent(tmp_path, claude_archive_dir=str(archive_dir), version="2.2.0", claude_sha256=None)
++
++
++def test_missing_archive_or_sidecar_and_a_changed_archive(tmp_path: Path) -> None:
++    with pytest.raises(FileNotFoundError, match="fetch-claude-code.sh"):
++        _agent(tmp_path, claude_archive_dir=str(tmp_path / "nothing"), claude_sha256="0" * 64)
++    archive_dir, _, digest = _archive_dir(tmp_path)
++    gz = archive_dir / VERSION / f"claude-{mod.DEFAULT_PLATFORM}.gz"
++    gz.write_bytes(gz.read_bytes()[:-3])  # truncated after fetch-claude-code.sh wrote its digest
++    with pytest.raises(ValueError, match="Claude Code archive .* sha256"):
++        _agent(tmp_path, claude_archive_dir=str(archive_dir), claude_sha256=digest)
++
++
++BASIC_TOOLS = ("bash", "gzip", "mkdir", "rm", "mv", "chmod", "awk", "cat", "sha256sum")
++needs_path_tools = pytest.mark.skipif(
++    any(shutil.which(tool) is None for tool in BASIC_TOOLS), reason="needs " + ", ".join(BASIC_TOOLS)
++)
++
++
++def _run_install(tmp_path: Path, printed_version: str = VERSION, sha256: str | None = None, tools=BASIC_TOOLS):
++    """Renders the install script for a fake uploaded archive and runs it with only `tools` on PATH."""
++    binary = _binary(printed_version)
++    pod_archive = tmp_path / "installed-agent" / "claude.gz"
++    pod_archive.parent.mkdir(parents=True, exist_ok=True)
++    pod_archive.write_bytes(gzip.compress(binary, mtime=0))
++    bin_dir = tmp_path / "path"
++    bin_dir.mkdir(exist_ok=True)
++    for tool in (*tools, "sh"):
++        if not (bin_dir / tool).exists() and shutil.which(tool):
++            (bin_dir / tool).symlink_to(shutil.which(tool))
++    variables = {
++        **_agent(tmp_path).install_variables(),
++        "sha256": shlex.quote(hashlib.sha256(binary).hexdigest() if sha256 is None else sha256),
++        "install_dir": shlex.quote(str(tmp_path / "opt" / "claude")),
++        "archive": shlex.quote(str(pod_archive)),
++    }
++    script = tmp_path / "install.sh"
++    script.write_text(Environment().from_string(mod.INSTALL_TEMPLATE.read_text()).render(**variables))
++    result = subprocess.run(
++        [str(bin_dir / "bash"), str(script)], capture_output=True, text=True, timeout=60, env={"PATH": str(bin_dir)}
++    )
++    return result, pod_archive
++
++
++@needs_path_tools
++def test_install_script_unpacks_and_checks_the_binary(tmp_path: Path) -> None:
++    result, pod_archive = _run_install(tmp_path)
++    assert result.returncode == 0, result.stderr
++    assert f"installed Claude Code {VERSION}" in result.stdout
++    installed = tmp_path / "opt" / "claude"
++    assert sorted(p.name for p in installed.iterdir()) == ["claude"]
++    assert os.access(installed / "claude", os.X_OK)
++    # the sandbox's files live in node memory: the upload goes once the binary is installed
++    assert not pod_archive.exists()
++    # a second install of the same version leaves it alone
++    again, _ = _run_install(tmp_path)
++    assert again.returncode == 0 and "already installed" in again.stdout
++
++
++@needs_path_tools
++def test_install_script_works_without_sha256sum(tmp_path: Path) -> None:
++    result, _ = _run_install(tmp_path, tools=tuple(t for t in BASIC_TOOLS if t != "sha256sum"))
++    assert result.returncode == 0, result.stderr
++
++
++@needs_path_tools
++def test_install_script_rejects_a_wrong_digest(tmp_path: Path) -> None:
++    result, _ = _run_install(tmp_path, sha256="0" * 64)
++    assert result.returncode != 0
++    assert "sha256 mismatch" in result.stderr
++    assert not (tmp_path / "opt" / "claude" / "claude").exists()
++
++
++@needs_path_tools
++def test_install_script_rejects_a_wrong_version(tmp_path: Path) -> None:
++    result, _ = _run_install(tmp_path, printed_version="0.0.0")
++    assert result.returncode != 0
++    assert "version mismatch" in result.stderr
++
++
++# --- Harbor 0.25 kwargs, credentials and trajectory -------------------------------------------------------
++
++
++def test_unknown_kwargs_still_fail(tmp_path: Path) -> None:
++    with pytest.raises(ValueError, match="Unknown option 'bogus'"):
++        _agent(tmp_path, bogus=1)
++
++
++def test_no_anthropic_credential_check() -> None:
++    # the model server takes any key; Harbor's ClaudeCode would ask for an Anthropic API key or OAuth token
++    assert ClaudeCodeNemoGym.check_model_credentials(None, kwargs={}, env={}) is None
++
++
++def test_writes_no_atif_trajectory(tmp_path: Path) -> None:
++    """Harbor's ClaudeCode converts its session into trajectory.json, which harbor_agent would turn into output
++    items; under token capture the model server rebuilds the rollout, as for OpenCode and pi."""
++    from harbor.models.agent.context import AgentContext
++
++    context = AgentContext()
++    _agent(tmp_path).populate_context_post_run(context)
++    assert not (tmp_path / "trajectory.json").exists()
++    assert context.is_empty()
++
++
++def test_preflight_accepts_the_kwargs_harbor_agent_passes() -> None:
++    kwargs = {
++        "api_base": API_BASE,
++        "responses_create_params": {"temperature": 1.0},
++        "temperature": 1.0,
++        "max_turns": 50,
++        "interleaved_thinking": False,
++        "model_info": MODEL_INFO,
++        "claude_archive_dir": "/scratch/claude-code",
++        "claude_timeout_sec": 870,
++        "claude_workdir": "/app",
++        "claude_profile": "bare",
++        "claude_settings": {"autoCompactEnabled": False},
++        "claude_env": {"FOO": "1"},
++        "version": VERSION,
++    }
++    ClaudeCodeNemoGym.preflight(kwargs=kwargs, env={})
++
++
++def test_preflight_still_rejects_an_unknown_option() -> None:
++    with pytest.raises(ValueError, match="Unknown option 'not_an_option'"):
++        ClaudeCodeNemoGym.preflight(kwargs={"api_base": API_BASE, "not_an_option": 1}, env={})
++
++
++def _training_yaml_kwargs() -> dict:
++    from omegaconf import OmegaConf
++
++    path = Path(__file__).parents[1] / "configs" / "harbor_agent_opensandbox_training.yaml"
++    cfg = OmegaConf.to_container(OmegaConf.load(path), resolve=False)
++    return cfg["harbor_agent"]["responses_api_agents"]["harbor_agent"]["harbor_agent_kwargs"]
++
++
++def test_init_and_preflight_accept_the_training_yaml_kwargs(tmp_path: Path) -> None:
++    """The Terminus-2 kwargs of Gym's training yaml reach every agent (job 5330618)."""
++    kwargs = {
++        **_training_yaml_kwargs(),
++        "max_consecutive_truncations": 8,
++        "truncation_retry": "resample",
++        "context_limit_truncation": "overflow",
++        "api_base": API_BASE,
++        "responses_create_params": {"temperature": 1.0},
++        "temperature": 1.0,
++    }
++    ClaudeCodeNemoGym.preflight(kwargs=kwargs, env={})
++    archive_dir, _, digest = _archive_dir(tmp_path)
++    ClaudeCodeNemoGym(
++        logs_dir=tmp_path, model_name=MODEL, claude_archive_dir=str(archive_dir), claude_sha256=digest, **kwargs
++    )
+diff --git a/responses_api_agents/harbor_agent/failure_classes.py b/responses_api_agents/harbor_agent/failure_classes.py
+index df5119fa..46ee2bd0 100644
+--- a/responses_api_agents/harbor_agent/failure_classes.py
++++ b/responses_api_agents/harbor_agent/failure_classes.py
+@@ -347,6 +347,70 @@ def pi_end_flags(log_text: str, context_limit: Optional[int] = None) -> dict[str
+     return _context_end_flags("pi", steps, overflow_error, context_limit)
+ 
+ 
++# Claude Code's own wording of a context overflow (its `result` text and synthetic error message), next to the vLLM
++# phrases of _CONTEXT_TEXT that its `result` repeats when the endpoint's 400 carries them.
++_CLAUDE_CODE_CONTEXT_TEXT = re.compile(r"prompt is too long", re.IGNORECASE)
++
++
++def claude_code_end_flags(log_text: str, context_limit: Optional[int] = None) -> dict[str, Any]:
++    """``agent_error_flags.json`` fields for a Claude Code episode that ended at the context limit, else ``{}``.
++
++    ``log_text`` is Claude Code's ``--print --output-format=stream-json --verbose`` output (one JSON event per line).
++    Each served reply appears as one ``assistant`` event per content block, all with the reply's ``message.id``,
++    ``stop_reason`` and ``usage`` (``input_tokens``, ``output_tokens``, cache fields); an API error appears as an
++    ``assistant`` event with ``is_api_error_message`` and model ``<synthetic>``, which is not a model call. The last
++    event is ``result``: ``terminal_reason`` (``prompt_too_long``, ``api_error``, ``max_turns``, ...), ``is_error``
++    and the ``result`` text. Claude Code exits 1 after an error. A context overflow shows up as:
++
++    - ``terminal_reason: prompt_too_long``, or an error ``result`` with a context-length text: the endpoint answered
++      the overflow with a 400 (Gym's Messages route does for its context-overflow placeholder), and Claude Code ended
++      the episode without retrying;
++    - the rules of ``opencode_end_flags`` on the replies (a last ``max_tokens`` reply without tokens; a last
++      ``max_tokens`` reply cut by the context ceiling).
++
++    Checked with rl-infra's experiments/claude-code-probe for Claude Code 2.1.326.
++    """
++    steps: list[tuple[str, int, int]] = []
++    seen: set[str] = set()
++    overflow_error: Optional[str] = None
++    for line in str(log_text or "").splitlines():
++        line = line.strip()
++        if not line.startswith("{"):
++            continue
++        try:
++            event = json.loads(line)
++        except ValueError:
++            continue
++        if not isinstance(event, dict):
++            continue
++        if event.get("type") == "result":
++            text = str(event.get("result") or "")
++            if overflow_error is None and (
++                event.get("terminal_reason") == "prompt_too_long"
++                or (event.get("is_error") and (_CONTEXT_TEXT.search(text) or _CLAUDE_CODE_CONTEXT_TEXT.search(text)))
++            ):
++                overflow_error = f"{event.get('terminal_reason') or 'error'}: {text}".strip()
++            continue
++        if event.get("type") != "assistant" or event.get("is_api_error_message"):
++            continue
++        message = event.get("message")
++        if not isinstance(message, dict) or message.get("model") == "<synthetic>":
++            continue
++        message_id = str(message.get("id") or "")
++        if message_id in seen:
++            continue  # the same reply, another content block
++        seen.add(message_id)
++        usage = message.get("usage") if isinstance(message.get("usage"), dict) else {}
++        prompt = (
++            _int(usage.get("input_tokens"))
++            + _int(usage.get("cache_read_input_tokens"))
++            + _int(usage.get("cache_creation_input_tokens"))
++        )
++        reason = "length" if message.get("stop_reason") == "max_tokens" else str(message.get("stop_reason") or "")
++        steps.append((reason, prompt, _int(usage.get("output_tokens"))))
++    return _context_end_flags("claude-code", steps, overflow_error, context_limit)
++
++
+ def classify_rollout(
+     trial_result: Optional[dict],
+     agent_error_flags: Optional[dict] = None,
+diff --git a/responses_api_agents/harbor_agent/tests/test_app.py b/responses_api_agents/harbor_agent/tests/test_app.py
+index ecaa860b..2ece4c48 100644
+--- a/responses_api_agents/harbor_agent/tests/test_app.py
++++ b/responses_api_agents/harbor_agent/tests/test_app.py
+@@ -650,6 +650,51 @@ class TestApp:
+         assert dumped["failure_detail"].startswith("ContextLengthExceededError: pi: model call 2 ")
+         assert response.instance_config == {"mask_sample": mask_context_overflow}
+ 
++    @pytest.mark.parametrize("mask_context_overflow", [True, False])
++    async def test_run_classifies_a_claude_code_context_overflow_and_masks_it_under_capture(
++        self, mask_context_overflow: bool
++    ):
++        # Claude Code writes no ATIF (ClaudeCodeNemoGym) and no agent_error_flags.json; its stream-json events are
++        # agent/claude-code.txt. The endpoint's 400 for an overflow ends it with terminal_reason prompt_too_long.
++        reply = {
++            "id": "chatcmpl-1",
++            "model": "policy",
++            "role": "assistant",
++            "content": [{"type": "tool_use"}],
++            "stop_reason": "tool_use",
++            "usage": {"input_tokens": 4691, "output_tokens": 80},
++        }
++        log = "\n".join(
++            [
++                json.dumps({"type": "assistant", "message": reply}),
++                json.dumps(
++                    {
++                        "type": "result",
++                        "is_error": True,
++                        "terminal_reason": "prompt_too_long",
++                        "result": "Prompt is too long",
++                    }
++                ),
++            ]
++        )
++        server = self._capture_server(
++            harbor_agent_name=None,
++            harbor_agent_import_path=(
++                "responses_api_agents.harbor_agent.custom_agents.claude_code_nemo_gym:ClaudeCodeNemoGym"
++            ),
++            harbor_mask_context_overflow=mask_context_overflow,
++        )
++        trial_result = {**DEFAULT_TRIAL_RESULT, "verifier_result": {"rewards": {"reward": 0.0}}}
++        with _harbor_run_mocks(trial_result=trial_result, agent_files={"claude-code.txt": log}):
++            response = await server.run(self._capture_request())
++
++        dumped = response.model_dump()
++        assert (dumped["failure_class"], dumped["failure_context_overflow"]) == ("context_overflow", 1)
++        assert (
++            dumped["failure_detail"] == "ContextLengthExceededError: claude-code: prompt_too_long: Prompt is too long"
++        )
++        assert response.instance_config == {"mask_sample": mask_context_overflow}
++
+     async def test_run_opencode_log_without_overflow_stays_ok(self):
+         log = json.dumps({"type": "step_finish", "part": {"reason": "stop", "tokens": {"input": 5600, "output": 40}}})
+         server = self._capture_server(harbor_mask_context_overflow=True)
+diff --git a/responses_api_agents/harbor_agent/tests/test_failure_classes.py b/responses_api_agents/harbor_agent/tests/test_failure_classes.py
+index d9f48de3..72e75866 100644
+--- a/responses_api_agents/harbor_agent/tests/test_failure_classes.py
++++ b/responses_api_agents/harbor_agent/tests/test_failure_classes.py
+@@ -22,6 +22,7 @@ from responses_api_agents.harbor_agent.custom_agents.llms.nemo_gym_llm import co
+ from responses_api_agents.harbor_agent.failure_classes import (
+     FAILURE_CLASSES,
+     classify_rollout,
++    claude_code_end_flags,
+     mask_secrets,
+     opencode_context_cut_margin,
+     opencode_end_flags,
+@@ -573,3 +574,137 @@ def test_pi_reply_cut_by_the_context_ceiling() -> None:
+ )
+ def test_pi_logs_without_a_context_overflow_give_no_flags(log, context_limit) -> None:
+     assert pi_end_flags(log, context_limit=context_limit) == {}
++
++
++# --- Claude Code: its `--output-format=stream-json --verbose` events (agent/claude-code.txt) ---------------------
++# Event shapes of Claude Code 2.1.326 as recorded by rl-infra's experiments/claude-code-probe: one `assistant` event per
++# content block of a served reply (all with the reply's id, stop_reason and usage); an API error as an `assistant`
++# event with is_api_error_message and model <synthetic>; a final `result` event.
++
++
++def _cc_reply(message_id: str, stop_reason: str, prompt: int, completion: int, blocks=("text", "tool_use")) -> str:
++    usage = {"input_tokens": prompt, "output_tokens": completion, "cache_read_input_tokens": 0}
++    return "\n".join(
++        json.dumps(
++            {
++                "type": "assistant",
++                "message": {
++                    "id": message_id,
++                    "model": "policy",
++                    "role": "assistant",
++                    "type": "message",
++                    "content": [{"type": block}],
++                    "stop_reason": stop_reason,
++                    "usage": usage,
++                },
++            }
++        )
++        for block in blocks
++    )
++
++
++def _cc_api_error(text: str, status: int) -> str:
++    message = {
++        "id": "1f15ca59-3800-423b-b1aa-6b60564365bd",
++        "model": "<synthetic>",
++        "role": "assistant",
++        "content": [{"type": "text", "text": text}],
++        "stop_reason": "stop_sequence",
++        "usage": {"input_tokens": 0, "output_tokens": 0},
++    }
++    return json.dumps(
++        {"type": "assistant", "message": message, "is_api_error_message": True, "api_error_status": status}
++    )
++
++
++def _cc_result(terminal_reason: str, result: str, is_error: bool, subtype: str = "success") -> str:
++    return json.dumps(
++        {
++            "type": "result",
++            "subtype": subtype,
++            "is_error": is_error,
++            "terminal_reason": terminal_reason,
++            "result": result,
++        }
++    )
++
++
++def _cc_log(*chunks: str) -> str:
++    # tool results come as `user` events between the replies; the parser does not read them
++    return "\n".join([json.dumps({"type": "system", "subtype": "init", "session_id": "s1"}), *chunks]) + "\n"
++
++
++_CC_TOOL_TURN = _cc_reply("chatcmpl-1", "tool_use", 4691, 80)
++
++
++def test_claude_code_prompt_too_long_is_a_context_overflow() -> None:
++    # the endpoint's 400 for an overflow: Claude Code ends at once (terminal_reason prompt_too_long), no retry
++    log = _cc_log(
++        _CC_TOOL_TURN,
++        _cc_api_error("Prompt is too long", 400),
++        _cc_result("prompt_too_long", "Prompt is too long", True),
++    )
++    flags = claude_code_end_flags(log, context_limit=65536)
++
++    assert (flags["answered_model_calls"], flags["prompt_over_context_limit"]) == (1, True)
++    failure = classify_rollout(_trial(), flags)
++    assert failure.failure_class == "context_overflow"
++    assert failure.detail == "ContextLengthExceededError: claude-code: prompt_too_long: Prompt is too long"
++
++
++def test_claude_code_vllm_context_text_in_an_error_result_is_a_context_overflow() -> None:
++    text = "API Error: 400 This model's maximum context length is 65536 tokens. However, you requested 70000 tokens"
++    flags = claude_code_end_flags(_cc_log(_CC_TOOL_TURN, _cc_result("api_error", text, True)), context_limit=None)
++
++    assert classify_rollout(_trial(), flags).failure_class == "context_overflow"
++
++
++def test_claude_code_counts_each_reply_once_and_skips_synthetic_messages() -> None:
++    # the reply cut by the context ceiling comes as two content-block events with the same id
++    log = _cc_log(
++        _CC_TOOL_TURN,
++        _cc_reply("chatcmpl-2", "max_tokens", 60000, 5536, blocks=("text", "tool_use")),
++        _cc_api_error("API Error: 529 Overloaded", 529),
++        _cc_result("api_error", "API Error: 529 Overloaded", True),
++    )
++    flags = claude_code_end_flags(log, context_limit=65536)
++
++    assert (flags["answered_model_calls"], flags["last_truncation_at_context_limit"]) == (2, True)
++    assert (
++        "reply cut by the context limit (prompt 60000 + completion 5536 of 65536); claude-code ended"
++        in (flags["end_message"])
++    )
++
++
++@pytest.mark.parametrize(
++    "log, context_limit",
++    [
++        pytest.param(
++            _cc_log(
++                _CC_TOOL_TURN, _cc_reply("chatcmpl-2", "end_turn", 5000, 40), _cc_result("completed", "Done", False)
++            ),
++            65536,
++            id="finished",
++        ),
++        # --max-turns: the run stops after a tool_use reply, without another model call
++        pytest.param(
++            _cc_log(_CC_TOOL_TURN, _cc_result("max_turns", "", True, subtype="error_max_turns")), 65536, id="max-turns"
++        ),
++        pytest.param(
++            _cc_log(
++                _CC_TOOL_TURN,
++                _cc_api_error("API Error: 529 Overloaded", 529),
++                _cc_result("api_error", "Overloaded", True),
++            ),
++            65536,
++            id="other-api-error",
++        ),
++        pytest.param(_cc_log(_cc_reply("chatcmpl-1", "max_tokens", 6000, 764)), 65536, id="length-room-left"),
++        pytest.param("", 65536, id="empty-log"),
++        pytest.param(
++            "{not json\n[1, 2]\n" + json.dumps({"type": "assistant", "message": "x"}) + "\n", 65536, id="junk"
++        ),
++    ],
++)
++def test_claude_code_logs_without_a_context_overflow_give_no_flags(log, context_limit) -> None:
++    assert claude_code_end_flags(log, context_limit=context_limit) == {}
+-- 
+2.43.0
+

@@ -1,0 +1,676 @@
+From 6866bcde59dcf64da9f8235d45bd9b2c037724a8 Mon Sep 17 00:00:00 2001
+From: Lukas Drescher <lukas.drescher@cscs.ch>
+Date: Thu, 26 Nov 2026 00:50:32 +0100
+Subject: [PATCH 49/49] fix(messages): Claude Code under token capture: parsed
+ tool-call echoes, unparseable arguments, context overflow
+
+Three things Claude Code 2.1.326 does over /v1/messages (measured with rl-infra experiments/claude-code-probe
+against a stub of this route, resolved with the lineage functions below) that masked its rollouts:
+
+- Tool calls echo as Claude Code parsed them, not as the model wrote them: Edit comes back with its schema default
+  "replace_all": false filled in, a Bash "timeout" written as "5000" comes back as 5000. The served call hashed
+  the model's arguments, the echo the parsed ones, so the next call matched no parent. assistant_fingerprint now
+  reads the tool schemas from the request envelope (the same for a call's ledger row and for its echo) and
+  compares arguments as normalize_to_schema reads them: a value equal to its declared default is dropped, a
+  number/integer/boolean given as a string is converted (finite decimals only). Without schemas nothing changes.
+  FINGERPRINT_VERSION 5 -> 6. conversation_digest is unchanged.
+- Tool-call arguments that are not a JSON object (not JSON, or JSON of another type) made the response
+  conversion raise, a 500 that ends Claude Code's episode. They are now served as
+  {"_ng_unparsed_arguments": <raw>}; Claude Code answers with a validation-error tool result (a normal turn) and
+  echoes the input, which hashes as the unparseable marker like the served call (arguments that are not a JSON
+  object now hash the marker for every dialect).
+- The context-overflow placeholder (vllm_model's empty reply with finish_reason length) reached Claude Code as an
+  empty max_tokens reply; it re-sent the request three times with "Output token limit hit. Resume directly ..."
+  appended to its first user message (each re-send a new root) and ended with an API error. messages() now answers
+  the placeholder with Anthropic's 400 invalid_request_error "prompt is too long" after finalizing the call's
+  capture as before, which ends the episode at once (terminal_reason prompt_too_long). A reply really cut by the
+  output limit carries output tokens and passes as before. (propagate_context_overflow_errors also ends Claude
+  Code's episode, but then the failed call poisons the rollout, where OpenCode and pi commit the placeholder.)
+
+REQUEST_ENVELOPE_ROLE and UNPARSED_ARGUMENTS_KEY live in token_id_capture.fingerprint; base_responses_api_model
+and anthropic_converter import them. Tests: test_token_capture_schema_echo.py (echo shapes from the probe through
+AnthropicConverter and _request_messages), the overflow route tests in test_responses_api_model_messages.py, and
+_tool_use_input in test_anthropic_converter.py.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ nemo_gym/anthropic_converter.py               |  24 ++-
+ nemo_gym/base_responses_api_model.py          |  34 +++-
+ nemo_gym/token_id_capture/fingerprint.py      | 129 ++++++++++++-
+ tests/unit_tests/test_anthropic_converter.py  |  12 +-
+ .../test_responses_api_model_messages.py      |  77 ++++++++
+ .../test_token_capture_schema_echo.py         | 181 ++++++++++++++++++
+ 6 files changed, 434 insertions(+), 23 deletions(-)
+ create mode 100644 tests/unit_tests/test_token_capture_schema_echo.py
+
+diff --git a/nemo_gym/anthropic_converter.py b/nemo_gym/anthropic_converter.py
+index e1cc6ad4..1e69f7a4 100644
+--- a/nemo_gym/anthropic_converter.py
++++ b/nemo_gym/anthropic_converter.py
+@@ -67,6 +67,7 @@ from nemo_gym.openai_utils import (
+     NeMoGymResponseUsage,
+     NeMoGymSummary,
+ )
++from nemo_gym.token_id_capture.fingerprint import UNPARSED_ARGUMENTS_KEY
+ 
+ 
+ SUPPORTED_ANTHROPIC_IMAGE_MEDIA_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+@@ -734,14 +735,25 @@ class AnthropicConverter:
+             "type": "tool_use",
+             "id": item["call_id"],
+             "name": item["name"],
+-            "input": self._json_object_from_arguments(item["arguments"]),
++            "input": self._tool_use_input(item["arguments"]),
+         }
+ 
+-    def _json_object_from_arguments(self, arguments: str) -> Dict[str, Any]:
+-        parsed = json.loads(arguments or "{}")
+-        if not isinstance(parsed, dict):
+-            raise ValueError(f"Anthropic tool_use input must be a JSON object, got {type(parsed).__name__}")
+-        return parsed
++    def _tool_use_input(self, arguments: str) -> Dict[str, Any]:
++        """The ``tool_use.input`` for a model's tool-call arguments, which must be a JSON object.
++
++        A model can write arguments that are not one (not JSON, or JSON of another type). Failing the whole
++        reply would answer the harness with a 500 and end its episode; instead such arguments are served as
++        ``{UNPARSED_ARGUMENTS_KEY: <raw>}``. The harness answers that with a validation-error tool result, a
++        normal turn (Claude Code 2.1.326 does), and the capture's fingerprint hashes the echoed input as the
++        unparseable marker, like the served call.
++        """
++        try:
++            parsed = json.loads(arguments or "{}")
++        except (TypeError, ValueError):
++            parsed = None
++        if isinstance(parsed, dict):
++            return parsed
++        return {UNPARSED_ARGUMENTS_KEY: str(arguments)}
+ 
+     def _copy_sampling_params(self, body_dict: Dict[str, Any], anthropic_body: Dict[str, Any]) -> None:
+         for source, target in (
+diff --git a/nemo_gym/base_responses_api_model.py b/nemo_gym/base_responses_api_model.py
+index ef8fc0bf..0a2b37a8 100644
+--- a/nemo_gym/base_responses_api_model.py
++++ b/nemo_gym/base_responses_api_model.py
+@@ -43,7 +43,7 @@ from uuid import uuid4
+ import orjson
+ from fastapi import Body, FastAPI, Request, Response
+ from fastapi.exceptions import RequestValidationError
+-from fastapi.responses import StreamingResponse
++from fastapi.responses import JSONResponse, StreamingResponse
+ from pydantic import BaseModel, Field, ValidationError, model_validator
+ 
+ from nemo_gym.anthropic_converter import AnthropicConverter
+@@ -88,6 +88,7 @@ from nemo_gym.token_id_capture import (
+ # The leaf package does not re-export it.
+ from nemo_gym.token_id_capture.config import token_id_capture_config
+ from nemo_gym.token_id_capture.control_routes import install_rollout_control_routes
++from nemo_gym.token_id_capture.fingerprint import REQUEST_ENVELOPE_ROLE
+ from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
+ from nemo_gym.token_id_capture.protocols import CaptureLedger, LineageResolver
+ from nemo_gym.token_id_capture.records import UNCOMMITTED_CALL_REASON
+@@ -126,8 +127,27 @@ def _request_messages(body: Any) -> list[dict]:
+ 
+ 
+ # This role cannot collide with a dialect role.
+-# It is not assistant-authored and does not affect the lookup fingerprint.
+-_ENVELOPE_ROLE = "_ng_request_envelope"
++# It is not assistant-authored; the lookup fingerprint reads only the tool schemas from it.
++_ENVELOPE_ROLE = REQUEST_ENVELOPE_ROLE
++
++# Anthropic's answer to a prompt that exceeds the context window (an `invalid_request_error`).
++_ANTHROPIC_PROMPT_TOO_LONG = {
++    "type": "error",
++    "error": {"type": "invalid_request_error", "message": "prompt is too long: it exceeds the model's context length"},
++}
++
++
++def _is_context_overflow_placeholder(anthropic_response: dict) -> bool:
++    """Whether a Messages reply is the backend's context-overflow placeholder: cut by the output limit
++    (``max_tokens``) without a single output token and without content. A reply really cut by the output
++    limit always carries its output tokens."""
++    usage = anthropic_response.get("usage") or {}
++    if anthropic_response.get("stop_reason") != "max_tokens" or usage.get("output_tokens"):
++        return False
++    for block in anthropic_response.get("content") or []:
++        if block.get("type") == "tool_use" or block.get("text") or block.get("thinking"):
++            return False
++    return True
+ 
+ 
+ def _request_envelope(getter: Any) -> list[dict]:
+@@ -360,6 +380,14 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
+         response = await self._invoke_responses(request, params)
+         model_name = body.get("model") or response.model
+         anthropic_response = _ANTHROPIC_CONVERTER.responses_to_anthropic_response(response, model=model_name)
++        if _is_context_overflow_placeholder(anthropic_response):
++            # The backend answers a prompt that does not fit with an empty reply cut by the output limit (vllm_model's
++            # context-overflow placeholder), so capture records the call as for every dialect. Over Messages that
++            # reply would make Claude Code re-send the request with a resume prompt appended to its history (each
++            # re-send another root); Anthropic's own answer to an overflow, a 400 "prompt is too long", ends its
++            # episode at once (terminal_reason prompt_too_long), and the verifier still runs.
++            await self._finalize_served_response(anthropic_response)
++            return JSONResponse(status_code=400, content=_ANTHROPIC_PROMPT_TOO_LONG)
+         if body.get("stream"):
+             return await self._stream_served_response(
+                 anthropic_response,
+diff --git a/nemo_gym/token_id_capture/fingerprint.py b/nemo_gym/token_id_capture/fingerprint.py
+index 23ebbdcc..462d3134 100644
+--- a/nemo_gym/token_id_capture/fingerprint.py
++++ b/nemo_gym/token_id_capture/fingerprint.py
+@@ -34,6 +34,7 @@ from __future__ import annotations
+ 
+ import hashlib
+ import json
++import math
+ import re
+ from typing import Any
+ 
+@@ -42,7 +43,8 @@ import orjson
+ 
+ # Increment when fingerprint canonicalization or hash layout changes.
+ # Resolvers ignore entries stamped with a different version.
+-FINGERPRINT_VERSION = 5
++# 6: tool arguments normalized against the request's tool schemas; non-object JSON arguments hash the marker.
++FINGERPRINT_VERSION = 6
+ 
+ _FINGERPRINT_DOMAIN = b"nemo-gym-lineage"
+ _CONTEXT_DOMAIN = b"nemo-gym-lineage-context"
+@@ -57,6 +59,12 @@ _UNPARSEABLE_ARGUMENTS = "\x00unparseable-json"
+ # with ``{"tool": <served name>, "error": "Invalid input for tool <name>: JSON parsing failed: ..."}``.
+ _INVALID_TOOL_NAME = "invalid"
+ _JSON_PARSE_ERROR = "JSON parsing failed"
++# The Anthropic converter serves arguments that are not a JSON object as ``{UNPARSED_ARGUMENTS_KEY: <raw>}``
++# (a tool_use input must be an object); Claude Code echoes that input, which hashes as the marker.
++UNPARSED_ARGUMENTS_KEY = "_ng_unparsed_arguments"
++
++# The pseudo-turn the model server prepends to a request's messages (``_request_messages``): instructions and tools.
++REQUEST_ENVELOPE_ROLE = "_ng_request_envelope"
+ 
+ 
+ def assistant_fingerprint(messages: list[dict]) -> str:
+@@ -77,7 +85,12 @@ def assistant_fingerprint(messages: list[dict]) -> str:
+     A harness may echo that text verbatim or only the content after the block.
+     Both echoes must find the call, so leading think blocks are stripped before hashing.
+     A turn left with no text and no tool call hashes the empty-turn marker.
++
++    Tool arguments are compared as the request's own tool schemas read them (``normalize_to_schema``).
++    A harness may echo a call as it parsed it: Claude Code fills in schema defaults and turns a number given
++    as a string into a number. The call it produced and its echo then hash the same.
+     """
++    schemas = _tool_schemas(messages)
+     hasher = hashlib.sha256(_FINGERPRINT_DOMAIN)
+     count = 0
+     # Whether the current run of consecutive model-authored items hashed any field.
+@@ -100,7 +113,7 @@ def assistant_fingerprint(messages: list[dict]) -> str:
+             _update_field(hasher, b"\x00", content_type)
+             _update_field(hasher, b"\x01", payload)
+             run_hashed = True
+-        for call_id, name, arguments in _tools_of(message):
++        for call_id, name, arguments in _tools_of(message, schemas):
+             _update_field(hasher, b"\x02", call_id)
+             _update_field(hasher, b"\x03", name)
+             _update_field(hasher, b"\x04", arguments)
+@@ -112,6 +125,71 @@ def assistant_fingerprint(messages: list[dict]) -> str:
+     return hasher.hexdigest()
+ 
+ 
++def _tool_schemas(messages: list[dict]) -> dict[str, dict]:
++    """Return the request's tool parameter schemas by tool name, read from its envelope pseudo-turn.
++
++    The served call's ledger row and the echo of that call carry the same envelope, so both sides of a
++    comparison normalize against the same schemas. A request without an envelope gives no schemas.
++    """
++    for message in messages or []:
++        if not isinstance(message, dict) or message.get("role") != REQUEST_ENVELOPE_ROLE:
++            continue
++        try:
++            envelope = json.loads(message.get("content") or "{}")
++        except (TypeError, ValueError):
++            return {}
++        schemas: dict[str, dict] = {}
++        for tool in (envelope.get("tools") if isinstance(envelope, dict) else None) or []:
++            if not isinstance(tool, dict):
++                continue
++            function = tool.get("function") if isinstance(tool.get("function"), dict) else {}
++            name = tool.get("name") or function.get("name")
++            schema = tool.get("parameters") or tool.get("input_schema") or function.get("parameters")
++            if isinstance(name, str) and isinstance(schema, dict):
++                schemas[name] = schema
++        return schemas
++    return {}
++
++
++def normalize_to_schema(arguments: dict, schema: dict) -> dict:
++    """Return top-level tool arguments as a harness that validates them against ``schema`` would echo them.
++
++    A key whose value equals the property's declared ``default`` is dropped, so a call that left it out and
++    an echo that filled it in compare equal. A string where the property is a number, integer or boolean is
++    converted when it reads as one. Everything else, nested values included, stays as it is.
++    """
++    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
++    normalized = {}
++    for key, value in arguments.items():
++        prop = properties.get(key)
++        if isinstance(prop, dict):
++            value = _coerce_scalar(value, prop.get("type"))
++            if "default" in prop and type(value) is type(prop["default"]) and value == prop["default"]:
++                continue
++        normalized[key] = value
++    return normalized
++
++
++_INTEGER_TEXT = re.compile(r"[+-]?\d+")
++# plain decimal literals only: float() would also take "inf" and "nan", which JSON cannot carry
++_NUMBER_TEXT = re.compile(r"[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?")
++
++
++def _coerce_scalar(value: Any, declared: Any) -> Any:
++    if not isinstance(value, str):
++        return value
++    types = set(declared) if isinstance(declared, list) else {declared}
++    text = value.strip()
++    if "boolean" in types and text in ("true", "false"):
++        return text == "true"
++    if ("integer" in types or "number" in types) and _INTEGER_TEXT.fullmatch(text):
++        return int(text)
++    if "number" in types and _NUMBER_TEXT.fullmatch(text):
++        number = float(text)
++        return number if math.isfinite(number) else value  # "1e400" overflows to inf
++    return value
++
++
+ def conversation_digest(messages: list[dict]) -> str:
+     """Hash every turn of a conversation, model-authored or not.
+ 
+@@ -228,13 +306,15 @@ def _strip_leading_reasoning(parts: list[tuple[str, str]]) -> list[tuple[str, st
+     return ([("text", rest)] if rest else []) + parts[1:]
+ 
+ 
+-def _tools_of(message: dict) -> list[tuple[str, str, str]]:
++def _tools_of(message: dict, schemas: dict[str, dict] | None = None) -> list[tuple[str, str, str]]:
+     """Return tool calls as ``(id, name, canonical arguments)`` tuples.
+ 
+     Chat stores calls in the message's ``tool_calls`` field.
+     Anthropic stores calls in ``tool_use`` content blocks.
+     Responses stores each call as a standalone ``function_call`` item.
++    ``schemas`` (tool name to parameter schema) normalizes the arguments of the tools it names.
+     """
++    schemas = schemas or {}
+     tools: list[tuple[str, str, str]] = []
+     # A Responses item is the tool call.
+     if message.get("type") == "function_call":
+@@ -244,39 +324,70 @@ def _tools_of(message: dict) -> list[tuple[str, str, str]]:
+             # Preserve the namespace so different tools with the same short name cannot match.
+             name = f"{message['namespace']}__{name}"
+         call_id = str(message.get("call_id") or message.get("id") or "")
+-        tools.append(_tool_identity(call_id, name, message.get("arguments")))
++        tools.append(_tool_identity(call_id, name, message.get("arguments"), schemas.get(name)))
+     content = message.get("content")
+     if isinstance(content, list):
+         for block in content:
+             if isinstance(block, dict) and block.get("type") == "tool_use":
+                 block_id = str(block.get("id") or "")
+-                tools.append(_tool_identity(block_id, str(block.get("name", "")), block.get("input")))
++                block_name = str(block.get("name", ""))
++                tools.append(_tool_identity(block_id, block_name, block.get("input"), schemas.get(block_name)))
+     for call in message.get("tool_calls") or []:
+         function = (call or {}).get("function") or {}
++        call_name = str(function.get("name", ""))
+         tools.append(
+-            _tool_identity(str((call or {}).get("id") or ""), str(function.get("name", "")), function.get("arguments"))
++            _tool_identity(
++                str((call or {}).get("id") or ""), call_name, function.get("arguments"), schemas.get(call_name)
++            )
+         )
+     return tools
+ 
+ 
+-def _tool_identity(call_id: str, name: str, arguments: Any) -> tuple[str, str, str]:
++def _tool_identity(call_id: str, name: str, arguments: Any, schema: dict | None = None) -> tuple[str, str, str]:
+     """Return a tool call's ``(id, name, canonical arguments)`` for hashing.
+ 
+-    A call with an id whose arguments are not JSON hashes a marker in place of its arguments.
++    A call with an id whose arguments are not a JSON object hashes a marker in place of its arguments.
+     A harness that cannot parse them need not echo them byte for byte to keep the call's lineage.
+     OpenCode echoes such a call as ``invalid`` with the served tool's name and the parse error.
+     That echo hashes as the call it repairs: same id, the named tool, the marker.
+     The id still identifies the served call; other ``invalid`` calls hash as they are.
++    The Anthropic converter serves such arguments as ``{UNPARSED_ARGUMENTS_KEY: <raw>}``; that echo hashes
++    the marker as well.
++    With the tool's parameter ``schema``, object arguments are compared as ``normalize_to_schema`` reads them.
+     """
+     if call_id and name == _INVALID_TOOL_NAME:
+         repaired = _repaired_tool_name(arguments)
+         if repaired is not None:
+             return call_id, repaired, _UNPARSEABLE_ARGUMENTS
+-    if call_id and isinstance(arguments, str) and not _is_json(arguments):
++    if call_id and _is_unparseable(arguments):
+         return call_id, name, _UNPARSEABLE_ARGUMENTS
++    if schema is not None:
++        try:
++            parsed = json.loads(arguments) if isinstance(arguments, str) else arguments
++        except (TypeError, ValueError):
++            parsed = None  # not JSON and no id to hash the marker under: compared as it is, below
++        if isinstance(parsed, dict):
++            return call_id, name, _canonical_json(normalize_to_schema(parsed, schema))
+     return call_id, name, canonicalize_tool_arguments(arguments)
+ 
+ 
++def _is_unparseable(arguments: Any) -> bool:
++    """Whether tool arguments are not a JSON object: a string that is not JSON, JSON of another type, or the
++    converter's ``{UNPARSED_ARGUMENTS_KEY: <raw>}`` stand-in for either. No arguments at all are not."""
++    if isinstance(arguments, str):
++        try:
++            parsed = json.loads(arguments)
++        except (TypeError, ValueError):
++            return True
++    else:
++        parsed = arguments
++    if parsed is None:
++        return False
++    if isinstance(parsed, dict):
++        return set(parsed) == {UNPARSED_ARGUMENTS_KEY} and isinstance(parsed[UNPARSED_ARGUMENTS_KEY], str)
++    return True
++
++
+ def _repaired_tool_name(arguments: Any) -> str | None:
+     """Return the tool an ``invalid`` echo stands for, if it reports a JSON parse failure."""
+     if isinstance(arguments, str):
+diff --git a/tests/unit_tests/test_anthropic_converter.py b/tests/unit_tests/test_anthropic_converter.py
+index 6fe99770..169d52dc 100644
+--- a/tests/unit_tests/test_anthropic_converter.py
++++ b/tests/unit_tests/test_anthropic_converter.py
+@@ -585,11 +585,13 @@ class TestSharedHelperBranches:
+         with pytest.raises(NotImplementedError):
+             conv._content_to_text([{"type": "input_image", "image_url": "x"}])
+ 
+-    def test_json_object_from_arguments_rejects_non_object(self) -> None:
+-        import pytest
+-
+-        with pytest.raises(ValueError):
+-            _converter()._json_object_from_arguments("[1, 2]")
++    def test_tool_use_input_wraps_arguments_that_are_not_a_json_object(self) -> None:
++        # a tool_use input must be an object; the raw arguments go to the harness instead of a 500
++        conv = _converter()
++        assert conv._tool_use_input('{"command": "ls"}') == {"command": "ls"}
++        assert conv._tool_use_input("") == {}
++        for raw in ("[1, 2]", '"ls"', "ls -la", '{"command": "ls"'):
++            assert conv._tool_use_input(raw) == {"_ng_unparsed_arguments": raw}
+ 
+     def test_copy_tool_choice_required_maps_to_any(self) -> None:
+         conv = _converter()
+diff --git a/tests/unit_tests/test_responses_api_model_messages.py b/tests/unit_tests/test_responses_api_model_messages.py
+index 0b7304f4..2b7a6fb6 100644
+--- a/tests/unit_tests/test_responses_api_model_messages.py
++++ b/tests/unit_tests/test_responses_api_model_messages.py
+@@ -150,3 +150,80 @@ class TestDefaultMessagesRoute:
+         assert "event: message_start" in body
+         assert "event: content_block_delta" in body
+         assert "event: message_stop" in body
++
++
++def _cut_response(output: list, output_tokens: int | None) -> NeMoGymResponse:
++    """A reply cut by the output limit; with no tokens and no content it is vllm_model's context-overflow
++    placeholder (the empty completion with finish_reason length that answers a prompt that does not fit)."""
++    usage = None
++    if output_tokens is not None:
++        usage = {
++            "input_tokens": 100,
++            "output_tokens": output_tokens,
++            "total_tokens": 100 + output_tokens,
++            "input_tokens_details": {"cached_tokens": 0},
++            "output_tokens_details": {"reasoning_tokens": 0},
++        }
++    return NeMoGymResponse(
++        id=f"resp_{uuid4().hex}",
++        created_at=int(time()),
++        model="downstream-model",
++        object="response",
++        output=output,
++        status="incomplete",
++        incomplete_details={"reason": "max_output_tokens"},
++        usage=usage,
++        tool_choice="auto",
++        parallel_tool_calls=True,
++        tools=[],
++    )
++
++
++_EMPTY_MESSAGE = {
++    "type": "message",
++    "id": "msg_empty",
++    "role": "assistant",
++    "status": "completed",
++    "content": [{"type": "output_text", "text": "", "annotations": []}],
++}
++
++
++def _cut_model(response: NeMoGymResponse):
++    class _CutModel(_BodyOnlyModel):
++        async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
++            return response
++
++    return _CutModel
++
++
++class TestContextOverflowOverMessages:
++    """Claude Code re-sends a request after an empty max_tokens reply, with a resume prompt appended to its
++    history (each re-send another root under capture); a 400 "prompt is too long" ends its episode at once."""
++
++    def _post(self, model_cls, stream: bool):
++        client, _ = _client(model_cls)
++        return client.post(
++            "/v1/messages",
++            json={
++                "model": "policy",
++                "max_tokens": 8,
++                "stream": stream,
++                "messages": [{"role": "user", "content": "x"}],
++            },
++        )
++
++    def test_placeholder_is_answered_with_anthropic_prompt_too_long(self) -> None:
++        for output in ([], [_EMPTY_MESSAGE]):
++            for stream in (False, True):
++                resp = self._post(_cut_model(_cut_response(output, output_tokens=None)), stream)
++                assert resp.status_code == 400, (output, stream)
++                assert resp.json()["type"] == "error"
++                assert resp.json()["error"]["type"] == "invalid_request_error"
++                assert "prompt is too long" in resp.json()["error"]["message"]
++
++    def test_a_reply_really_cut_by_the_output_limit_passes(self) -> None:
++        text = {**_EMPTY_MESSAGE, "content": [{"type": "output_text", "text": "partial", "annotations": []}]}
++        for output, tokens in (([text], 8), ([], 8)):
++            resp = self._post(_cut_model(_cut_response(output, output_tokens=tokens)), stream=False)
++            assert resp.status_code == 200
++            assert resp.json()["stop_reason"] == "max_tokens"
+diff --git a/tests/unit_tests/test_token_capture_schema_echo.py b/tests/unit_tests/test_token_capture_schema_echo.py
+new file mode 100644
+index 00000000..cb1e91d4
+--- /dev/null
++++ b/tests/unit_tests/test_token_capture_schema_echo.py
+@@ -0,0 +1,181 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++"""A tool call that a harness echoes as it parsed it keeps its lineage.
++
++Observed with Claude Code 2.1.326 over ``/v1/messages`` (rl-infra experiments/claude-code-probe): the history of
++each request carries the tool calls as Claude Code validated them against its tool schemas, not as the model wrote
++them. ``Edit`` comes back with its schema default ``"replace_all": false`` filled in, and a ``Bash`` ``timeout``
++written as the string ``"5000"`` comes back as the number ``5000``. The served call hashed the model's arguments,
++the echo the parsed ones, so the next call matched no parent and the rollout was masked.
++
++The request's envelope carries the tool schemas, the same for the served call's row and for the echo, so both sides
++are compared as the schema reads them: a value equal to its declared default is dropped, a number or boolean given
++as a string is converted. Arguments that are not a JSON object, served over Messages as
++``{"_ng_unparsed_arguments": <raw>}``, hash as the unparseable marker on both sides.
++"""
++
++from __future__ import annotations
++
++import json
++
++from nemo_gym.anthropic_converter import AnthropicConverter
++from nemo_gym.base_responses_api_model import _request_messages
++from nemo_gym.token_id_capture.fingerprint import (
++    FINGERPRINT_VERSION,
++    assistant_fingerprint,
++    conversation_digest,
++    normalize_to_schema,
++)
++
++
++CONVERTER = AnthropicConverter()
++
++# Tool schemas as Claude Code 2.1.326 sends them (trimmed to the properties that matter here).
++TOOLS = [
++    {
++        "name": "Edit",
++        "description": "Performs exact string replacements in files.",
++        "input_schema": {
++            "type": "object",
++            "properties": {
++                "file_path": {"type": "string"},
++                "old_string": {"type": "string"},
++                "new_string": {"type": "string"},
++                "replace_all": {"type": "boolean", "default": False},
++            },
++            "required": ["file_path", "old_string", "new_string"],
++        },
++    },
++    {
++        "name": "Bash",
++        "description": "Executes a bash command.",
++        "input_schema": {
++            "type": "object",
++            "properties": {
++                "command": {"type": "string"},
++                "timeout": {"type": "number"},
++                "description": {"type": "string"},
++            },
++            "required": ["command"],
++        },
++    },
++]
++SYSTEM = [{"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."}]
++USER = {"role": "user", "content": [{"type": "text", "text": "Change the greeting in hello.py from Hello to Hi."}]}
++
++
++def _request(*messages: dict, tools=TOOLS) -> list[dict]:
++    """A Messages request as the model server's lineage sees it: converted to Responses, envelope prepended."""
++    body = {"model": "policy", "max_tokens": 16384, "system": SYSTEM, "messages": [USER, *messages], "stream": True}
++    if tools is not None:
++        body["tools"] = tools
++    return _request_messages(CONVERTER.anthropic_request_to_responses(body))
++
++
++def _served(name: str, call_id: str, arguments: str) -> dict:
++    """What the model server served: the model's own arguments, as generated."""
++    return {"type": "function_call", "id": f"fc_{call_id}", "call_id": call_id, "name": name, "arguments": arguments}
++
++
++def _echo(name: str, call_id: str, tool_input: dict) -> dict:
++    return {"role": "assistant", "content": [{"type": "tool_use", "id": call_id, "name": name, "input": tool_input}]}
++
++
++def _result(call_id: str, text: str) -> dict:
++    return {"role": "user", "content": [{"type": "tool_result", "tool_use_id": call_id, "content": text}]}
++
++
++def _continues(served: dict, echo: dict, tools=TOOLS) -> bool:
++    """Whether the request after `served` resolves to it: its model-authored turns match the served call's row
++    (request items + output items) and its prefix matches the served call's request."""
++    first = _request(tools=tools)
++    row_fingerprint = assistant_fingerprint(list(first) + [served])
++    nxt = _request(echo, _result(served["call_id"], "ok"), tools=tools)
++    return assistant_fingerprint(nxt) == row_fingerprint and conversation_digest(nxt[: len(first)]) == (
++        conversation_digest(first)
++    )
++
++
++EDIT = {"file_path": "/app/hello.py", "old_string": "Hello", "new_string": "Hi"}
++
++
++def test_fingerprint_version_is_bumped() -> None:
++    assert FINGERPRINT_VERSION == 6
++
++
++def test_an_echo_with_the_schema_default_filled_in_continues_the_served_call() -> None:
++    served = _served("Edit", "call_1", json.dumps(EDIT))
++    assert _continues(served, _echo("Edit", "call_1", {"replace_all": False, **EDIT}))
++
++
++def test_an_echo_with_a_string_number_converted_continues_the_served_call() -> None:
++    served = _served("Bash", "call_2", json.dumps({"command": "echo hi", "timeout": "5000"}))
++    assert _continues(served, _echo("Bash", "call_2", {"command": "echo hi", "timeout": 5000}))
++
++
++def test_a_value_other_than_the_default_still_tells_calls_apart() -> None:
++    served = _served("Edit", "call_3", json.dumps({**EDIT, "replace_all": True}))
++    assert not _continues(served, _echo("Edit", "call_3", {**EDIT, "replace_all": False}))
++    assert _continues(served, _echo("Edit", "call_3", {**EDIT, "replace_all": True}))
++
++
++def test_without_the_tool_schemas_the_arguments_compare_as_they_are() -> None:
++    served = _served("Edit", "call_4", json.dumps(EDIT))
++    assert not _continues(served, _echo("Edit", "call_4", {"replace_all": False, **EDIT}), tools=None)
++
++
++def test_arguments_that_are_not_a_json_object_and_their_messages_echo_hash_the_same() -> None:
++    for raw in ("ls -la", "[1, 2]", '"ls"'):
++        served = _served("Bash", "call_5", raw)
++        # what the Anthropic converter serves for them, and Claude Code echoes back
++        echoed_input = CONVERTER._tool_use_input(raw)
++        assert echoed_input == {"_ng_unparsed_arguments": raw}
++        assert _continues(served, _echo("Bash", "call_5", echoed_input)), raw
++
++
++def test_normalize_to_schema() -> None:
++    schema = {
++        "properties": {
++            "flag": {"type": "boolean", "default": False},
++            "count": {"type": "integer", "default": 0},
++            "limit": {"type": ["integer", "null"]},
++            "ratio": {"type": "number"},
++            "nested": {"type": "object", "default": {}},
++            "name": {"type": "string", "default": "x"},
++        }
++    }
++    assert normalize_to_schema({"flag": False, "count": 0, "name": "x", "nested": {}}, schema) == {}
++    # the default only for a value of its own type: 0 is not False, "0" counts as 0 for an integer
++    assert normalize_to_schema({"flag": 0, "count": "0"}, schema) == {"flag": 0}
++    assert normalize_to_schema({"flag": "true", "limit": "5", "ratio": "2.5"}, schema) == {
++        "flag": True,
++        "limit": 5,
++        "ratio": 2.5,
++    }
++    # strings JSON cannot carry as numbers, and anything not a scalar string, stay as they are
++    assert normalize_to_schema({"ratio": "inf", "limit": "1e400", "other": "5"}, schema) == {
++        "ratio": "inf",
++        "limit": "1e400",
++        "other": "5",
++    }
++    assert normalize_to_schema({"ratio": "1e400"}, schema) == {"ratio": "1e400"}
++    assert normalize_to_schema({"nested": {"flag": "true"}}, schema) == {"nested": {"flag": "true"}}
++
++
++def test_a_call_without_an_id_and_unparseable_arguments_still_hashes() -> None:
++    # no id, so no marker: the raw text is compared as it is, also when the tool has a schema
++    items = [*_request(), {"type": "function_call", "call_id": "", "name": "Bash", "arguments": "ls -la"}]
++    assert assistant_fingerprint(items)
+-- 
+2.43.0
+
