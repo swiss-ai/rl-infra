@@ -179,7 +179,8 @@ def fake_job(tmp, *, gpu_peak_mib=88000, restored=RANKS, oom=False, host_low=40.
     (ld / "probe-phases.tsv").write_text(f"{t0}\tA\tstart steps=3\n{t0 + 1500}\tA\tend rc=0\n"
                                          f"{t0 + 1600}\tB\tstart steps=5\n{t0 + 3000}\tB\tend rc=0\n")
     ev = b"".join(event(s, "timing/train/total_step_time", 900.0 + s) + event(s, "timing/train/generation", 400.0)
-                  + event(s, "timing/train/checkpointing", 60.0) for s in range(1, 6))
+                  + event(s, "timing/train/checkpointing", 60.0)
+                  + event(s, "train/token_mult_prob_error", 1.01 + s / 1000) for s in range(1, 6))
     (ld / "exp_001" / "tensorboard" / "events.out.tfevents.1.nid1.1.0").write_bytes(ev)
     driver = ["ScratchAdamW moments: reset (checkpoint None)"] * RANKS + \
              [f"[probe_driver] 2026-11-25T10:00:00 phase B start steps=5"] + \
@@ -247,3 +248,23 @@ def test_report_flags_problems(tmp_path, capsys):
 def test_report_oom_is_no_go(tmp_path, capsys):
     out, job = fake_job(tmp_path, oom=True)
     assert run_report(out, job, capsys).startswith("Probe verdict: NO-GO")
+
+
+def test_r3_switch_adds_router_replay_and_its_checks(tmp_path):
+    e = dict(os.environ, SCRATCH=str(tmp_path / "scratch"), HOME=str(tmp_path / "home"), RUN="r3run", R3="1")
+    p = subprocess.run(["bash", str(HERE / "probe.sh"), "env"], env=e, capture_output=True, text=True, check=True)
+    extra = dict(line.split("=", 1) for line in p.stdout.splitlines())["EXTRA_OVERRIDES"].split()
+    out = tmp_path / "scratch" / "lean" / "fournode-probe" / "nemo-rl"
+    assert "++policy.router_replay.enabled=true" in extra
+    for k in ("NRL_ROUTER_REPLAY_VALIDATE", "NRL_R3_TRACE", "NRL_R3_TRACE_VERIFY_FORWARD", "NRL_R3_TRACE_STEPS"):
+        assert f"++policy.megatron_cfg.env_vars.{k}='\"1\"'" in extra, k
+    assert f"++policy.megatron_cfg.env_vars.NRL_R3_TRACE_DIR={out}/logs/r3run/r3_trace" in extra
+    e.pop("R3")
+    p = subprocess.run(["bash", str(HERE / "probe.sh"), "env"], env=e, capture_output=True, text=True, check=True)
+    assert "router_replay" not in p.stdout
+
+
+def test_report_shows_the_mismatch_per_step(tmp_path, capsys):
+    out, job = fake_job(tmp_path)
+    text = run_report(out, job, capsys).split("Train/inference mismatch")[1]
+    assert "token_mult_prob_error" in text and "1.011" in text and "1.015" in text

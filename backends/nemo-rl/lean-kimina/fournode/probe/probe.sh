@@ -24,6 +24,9 @@
 #   VLLM_UTIL        vLLM's GPU memory share, default the recipe's 0.75 (stage 1's sleep/wake numbers may change it)
 #   PARTITION        default normal (never preempted; 4 nodes do not fit debug's 90 node-minutes)
 #   JOB_TIME         default 04:00:00: two start-ups of ~20 min, five steps of ~20-30 min, five checkpoints
+#   R3               1: router replay on (policy.router_replay.enabled; Megatron patch 0008 for Chonk's quantile-balancing
+#                    routers), with NeMo RL's route validation and an R3 trace of step 1 in logs/<RUN>/r3_trace (check it
+#                    with tools/check_r3_trace.py). A probe without and one with R3 compare the train/inference mismatch.
 #   EXTRA_OVERRIDES  appended after the probe's own (they win)
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -68,6 +71,14 @@ export PYDEPS_GYM=1 PYDEPS="${SCRATCH}/nemo-rl-apertus2/pydeps-gym-apertus2" \
 export SKIP_SETUP=1
 probe_overrides="grpo.max_num_steps=${STEPS} checkpointing.save_period=${FIRST_STEPS}"
 [[ -z "${VLLM_UTIL:-}" ]] || probe_overrides+=" policy.generation.vllm_cfg.gpu_memory_utilization=${VLLM_UTIL}"
+if [[ "${R3:-0}" == 1 ]]; then
+    # '"1"': Ray takes only strings as environment values (see run-200.sh's Triton settings)
+    probe_overrides+=" ++policy.router_replay.enabled=true"
+    for kv in NRL_ROUTER_REPLAY_VALIDATE=1 NRL_R3_TRACE=1 NRL_R3_TRACE_VERIFY_FORWARD=1 NRL_R3_TRACE_STEPS=1; do
+        probe_overrides+=" ++policy.megatron_cfg.env_vars.${kv%%=*}='\"${kv#*=}\"'"
+    done
+    probe_overrides+=" ++policy.megatron_cfg.env_vars.NRL_R3_TRACE_DIR=${OUT}/logs/${RUN}/r3_trace"
+fi
 export EXTRA_OVERRIDES="${probe_overrides}${EXTRA_OVERRIDES:+ ${EXTRA_OVERRIDES}}"
 
 print_env() {

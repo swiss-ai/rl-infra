@@ -307,6 +307,17 @@ def timing_part(rep, series, steps):
     rep.say()
 
 
+def mismatch_part(rep, series, steps):
+    """Train/inference mismatch per step (the quantities router replay should lower), whichever of them are logged."""
+    tags = sorted(t for t in series if t.startswith("train/") and
+                  re.search(r"mult_prob_error|gen_kl|logprob_error|masked|r3", t))
+    rep.say("Train/inference mismatch per step (train/*; compare a probe with R3=1 against one without)")
+    cols = list(range(1, steps + 1))
+    rows = [[t[len("train/"):]] + ["-" if s not in series[t] else "%.4g" % series[t][s] for s in cols] for t in tags]
+    rep.table(["metric"] + ["step %d" % s for s in cols], rows)
+    rep.say()
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("out")
@@ -340,6 +351,7 @@ def main(argv=None):
     checkpoint_part(rep, ckpt_dir, args.ranks, args.first_steps, series)
     scratch_part(rep, ckpt_dir, args.ranks)
     timing_part(rep, series, args.steps)
+    mismatch_part(rep, series, args.steps)
     sys.stdout.write(rep.text())
     return 0
 

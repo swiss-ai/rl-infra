@@ -1,0 +1,48 @@
+Router replay (R3) for quantile-balancing routing.
+
+Chonk's routers use quantile balancing (QB). QB picks the top-k experts itself and passes them to
+topk_routing_with_score_function as precomputed_indices, which bypasses the RouterReplay hook there: with
+moe_enable_routing_replay (NeMo RL policy.router_replay.enabled) the replayed vLLM routes were silently ignored.
+TopKRouter._replay_qb_indices now applies RouterReplay to QB's picks through RouterReplay.get_replay_topk, the same
+entry point as the top-k path: REPLAY_FORWARD / REPLAY_BACKWARD use the recorded rollout routes, RECORD records QB's
+picks, no action leaves them unchanged. Wrappers of get_replay_topk (NeMo RL's fallback for tokens without rollout
+routes) take QB's pick for such rows. The QB beta update still uses the forward's own scores.
+
+diff --git a/megatron/core/transformer/moe/router.py b/megatron/core/transformer/moe/router.py
+index 716902d..a7626cb 100644
+--- a/megatron/core/transformer/moe/router.py
++++ b/megatron/core/transformer/moe/router.py
+@@ -355,6 +355,20 @@ class TopKRouter(Router):
+         scores = logits * map
+         return scores, map
+ 
++    def _replay_qb_indices(self, biased_scores: torch.Tensor, qb_indices: torch.Tensor) -> torch.Tensor:
++        """Router replay for quantile balancing: the replayed top-k indices for REPLAY_FORWARD and
++        REPLAY_BACKWARD, QB's own (recorded) for RECORD, unchanged without an action. Goes through
++        RouterReplay.get_replay_topk like the top-k path, so wrappers of it (e.g. NeMo RL's fallback for
++        tokens without rollout routes, which takes QB's pick for those rows) apply here too."""
++
++        def qb_topk(scores, topk, num_groups=None, group_topk=None):
++            return scores.gather(1, qb_indices), qb_indices
++
++        _, indices = self.router_replay.get_replay_topk(
++            biased_scores, self.topk, None, None, qb_topk
++        )
++        return indices.to(dtype=qb_indices.dtype)
++
+     def quantile_balancing(
+         self, logits: torch.Tensor, padding_mask: Optional[torch.Tensor] = None
+     ):
+@@ -506,6 +520,12 @@ class TopKRouter(Router):
+                         self.qb_beta_accum.add_(beta_local)
+                         self.qb_beta_count.add_(1)
+ 
++        # Router replay (R3): QB passes its own picks as precomputed_indices, which bypasses the replay hook
++        # in topk_routing_with_score_function; replay (or record) them here instead. The beta update above
++        # already used this forward's own scores, as without replay.
++        if self.router_replay is not None:
++            indices = self._replay_qb_indices(biased_scores, indices)
++
+         # QB only picks the experts; reuse the shared score function for the probs.
+         probs, routing_map = topk_routing_with_score_function(
+             logits,

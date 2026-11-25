@@ -72,6 +72,16 @@ The job writes under `$PROBE` and in `$SCRATCH/lean-kimina/runs/<RUN>` (the in-j
 
 The probe has its own Triton cache in `$PROBE/triton`, seeded from the shared one.
 
+## Router replay (R3)
+
+With `R3=1`, the probe turns on router replay: NeMo RL records which experts vLLM picked for every token and Megatron
+uses the same ones. Chonk's quantile-balancing routers need Megatron patch 0008 for that; without it the replayed routes
+were silently ignored (`apertus2/router_replay_qb_test.py`). The probe also turns on NeMo RL's route validation and an
+R3 trace of step 1 (`logs/<RUN>/r3_trace`, checked with `tools/check_r3_trace.py --require-forward-verify` in the NeMo RL
+clone). `report.py` prints the train/inference mismatch per step; a probe without and one with R3 are the comparison.
+The routes are 39 layers x 8 experts per token, several GB per step: the probe's host-memory and step times show their
+cost.
+
 ## Settings
 
 All are environment variables; `probe.sh` documents them:
@@ -82,13 +92,14 @@ All are environment variables; `probe.sh` documents them:
 - `VLLM_UTIL` (the recipe's 0.75 when unset)
 - `PARTITION` (normal)
 - `JOB_TIME` (04:00:00)
+- `R3` (0; 1 turns router replay on)
 - `EXTRA_OVERRIDES`
 
 Driver retries are off, so a failure ends the probe instead of being hidden by a retry.
 
 ## Tests
 
-`probe_test.py` (laptop, 11 tests) covers:
+`probe_test.py` (laptop, 13 tests) covers:
 
 - the two phases with a stand-in driver: step counts, the new deadline for phase B, a skipped phase A,
   failures;
