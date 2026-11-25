@@ -28,7 +28,9 @@ mkdir -p "${OUT}/configs"
 # with a script gets an overlay of its own.
 TASK_SCRIPT="$(yq r "${TASK}" script)"
 if [[ -n "${TASK_SCRIPT}" ]]; then
-    export SCRIPT="${TASK_SCRIPT}" PYDEPS_GYM=1 PYDEPS="${SCRATCH}/nemo-rl-apertus2/pydeps-gym"
+    # PYDEPS_GYM_DIR: an overlay of a launcher's own (a separate clone with another package list must not
+    # replace the overlay that other runs import from).
+    export SCRIPT="${TASK_SCRIPT}" PYDEPS_GYM=1 PYDEPS="${PYDEPS_GYM_DIR:-${SCRATCH}/nemo-rl-apertus2/pydeps-gym}"
     # Gym builds its server venvs with uv and keeps uv's cache (about 70k files per build) in the
     # directory NeMo-RL gives it: the container's `uv cache dir`, unless the config names one. NeMo-RL's
     # ray.sub unsets UV_CACHE_DIR before srun, so under pyxis (HANGANG) the container spec's value never
