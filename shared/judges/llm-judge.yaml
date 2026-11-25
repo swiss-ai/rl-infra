@@ -1,5 +1,5 @@
 # The LLM judge grader, shared by the experts that grade open answers (STEM openqa; templates of safety, knowledge,
-# translation): the llm_judge environment (NeMo-RL patches 0053-0056; handover/openqa-judge-integration.md). It asks
+# translation): the llm_judge environment (NeMo-RL patches 0058-0061; handover/openqa-judge-integration.md). It asks
 # a judge server (env.extra_judge_pools.<model>, named judge_<model>) whether an answer agrees with the reference and turns the reply into a reward.
 # Which judge model serves it, and on how many nodes, is the expert's choice: its base.yaml takes this file, a server
 # file from shared/judges/servers/, gives that server its nodes and points env.llm_judge.judge_pool at it:

@@ -65,7 +65,7 @@ data:
   # Reasoning Gym prompts reach 3.6k tokens; chemistry prompts at most 1,897 characters.
   max_input_seq_length: 4096
   # A row whose prompt has max_input_seq_length tokens or more is left out at setup, with a count per dataset in
-  # the driver log (NeMo-RL patch 0062), instead of being kept cut to 4 tokens and out of the loss.
+  # the driver log (NeMo-RL patch 0067), instead of being kept cut to 4 tokens and out of the loss.
   drop_long_prompts: true
   shuffle: true
   num_workers: 1
