@@ -19,6 +19,8 @@
 #                    EDF's default) every job compiles and tunes again: step 1 took 282 s of training and 180 s of
 #                    log-probs, later steps about 140 and 40 s (job 4008441). Empty: the EDF's /tmp.
 #   EXTRA_OVERRIDES  more overrides, space-separated, appended last (they win)
+#   RECIPE           default recipes/apertus2-chonk-sftv02-18315-vllm-adamw-code-12n.yaml (fournode/probe uses the
+#                    4-node colocated one)
 set -euo pipefail
 LEAN_KIMINA_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "${LEAN_KIMINA_DIR}/../../.." && pwd)"
@@ -90,5 +92,5 @@ read -r -a more <<< "${EXTRA_OVERRIDES:-}"
 
 cd "${ROOT}"
 export RUN="${RUN:-lean-kimina-v02-grpo200-128x8}" PARTITION="${PARTITION:-preemptable}" \
-    JOB_TIME="${JOB_TIME:-24:00:00}" RECIPE=recipes/apertus2-chonk-sftv02-18315-vllm-adamw-code-12n.yaml HEADER_ROWS="${ROWS}"
+    JOB_TIME="${JOB_TIME:-24:00:00}" RECIPE="${RECIPE:-recipes/apertus2-chonk-sftv02-18315-vllm-adamw-code-12n.yaml}" HEADER_ROWS="${ROWS}"
 exec bash "${LEAN_KIMINA_DIR}/train.sh" "${overrides[@]}" ${more[@]+"${more[@]}"}

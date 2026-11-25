@@ -33,6 +33,7 @@ import mmap
 import os
 import queue
 import shutil
+import socket
 import threading
 import time
 from pathlib import Path
@@ -324,7 +325,20 @@ class ScratchAdamW(torch.optim.Optimizer):
         moved = sum(16 * (e - s) for _, _, s, e, _, _ in work) if old is not None else sum(8 * (e - s) for _, _, s, e, _, _ in work)
         self.stats.append({"seconds": seconds, "compute_seconds": compute, "params": sum(e - s for q, _, s, e, _, _ in work if q.grad is not None),
                            "io_GBps": moved / seconds / 1e9})
+        self._log_stats(self.stats[-1])
         return loss
+
+    def _log_stats(self, entry):
+        """Appends the step's stats as one JSON line to <state_dir>.stats.jsonl (next to the folder, so checkpoints,
+        which link only the folder's files, leave it out). Never fails the step."""
+        steps = [s for s in self._gen_steps if s is not None]
+        line = dict(entry, t=round(time.time(), 3), host=socket.gethostname(), pid=os.getpid(),
+                    generation=self.generation, step=int(max(steps)) if steps else None)
+        try:
+            with open(self.state_dir.parent / f"{self.state_dir.name}.stats.jsonl", "a") as f:
+                f.write(json.dumps(line) + "\n")
+        except OSError:
+            pass
 
     def _update(self, group, p, s, e, m, v):
         """torch's AdamW on one chunk: the fused CPU kernel, or _single_tensor_adamw's operations in its order."""

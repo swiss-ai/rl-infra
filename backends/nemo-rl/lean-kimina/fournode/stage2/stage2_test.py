@@ -382,3 +382,20 @@ def test_budget_per_stage_split():
     assert chosen["gpu_fits"] and chosen["host_fits"] and round(chosen["host_total"]) == 435
     with pytest.raises(ValueError):
         budget.budget(4, 4, "bf16-scratch-mv", [12, 10, 10])
+
+
+def test_stats_line_per_step_outside_the_state_folder(tmp_path):
+    a = make_params(5, SHAPES)
+    opt = ScratchAdamW(a, **HP, state_dir=tmp_path / "rank00000" / "hdo0", chunk_numel=700, direct=False)
+    for step in (1, 2):
+        set_grads(a, step)
+        opt.step()
+    opt.skip_next_step()
+    opt.step()                                   # the dummy step writes no line
+    lines = [json.loads(x) for x in (tmp_path / "rank00000" / "hdo0.stats.jsonl").read_text().splitlines()]
+    assert [x["step"] for x in lines] == [1, 2] and [x["generation"] for x in lines] == [0, 1]
+    assert all(x["seconds"] > 0 and x["host"] and x["params"] > 0 for x in lines)
+    # checkpoints link the folder's files only
+    scratch_adam.save_scratch_state(opt, tmp_path / "ckpt")
+    linked = {p.name for p in (tmp_path / "ckpt" / scratch_adam.CHECKPOINT_SUBDIR).rglob("*") if p.is_file()}
+    assert "manifest.json" in linked and not any(n.endswith(".stats.jsonl") for n in linked)

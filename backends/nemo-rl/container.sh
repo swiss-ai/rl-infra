@@ -30,10 +30,16 @@ container_render() {
         -e "s|@@VLLM_APERTUS2@@|${VLLM_APERTUS2:-}|g"
 }
 
-# edf: installs the rendered spec as ~/.edf/<EDF_NAME>.toml (the old one is backed up if it differs).
+# edf: installs the rendered spec as ~/.edf/<EDF_NAME>.toml (the old one is backed up if it differs). With EDF_DIR
+# set, as <EDF_DIR>/<EDF_NAME>.toml instead, and jobs name it by that absolute path (container_edf_ref); a run with
+# private source clones uses this to leave the shared EDF alone.
+container_edf_ref() {
+    if [[ -n "${EDF_DIR:-}" ]]; then echo "${EDF_DIR}/${EDF_NAME}.toml"; else echo "${EDF_NAME}"; fi
+}
 container_install_edf() {
-    local edf_file="${HOME}/.edf/${EDF_NAME}.toml" rendered
-    mkdir -p "${HOME}/.edf"
+    local dir="${EDF_DIR:-${HOME}/.edf}" edf_file rendered
+    edf_file="${dir}/${EDF_NAME}.toml"
+    mkdir -p "${dir}"
     rendered="$(mktemp)"
     container_render > "${rendered}"
     if [[ -f "${edf_file}" ]] && cmp -s "${rendered}" "${edf_file}"; then

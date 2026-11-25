@@ -39,11 +39,17 @@ if [[ -n "${SFT_EXPORT}" ]]; then
     export CHONK_MODEL_STAGE=copy STAGE_SHARDS=link
 fi
 
+# SKIP_SETUP=1 leaves the setup out, for a caller that did it already and must not touch the shared model folder
+# (stage_model.sh re-links its files) while another run reads it (lean-kimina/fournode/probe/probe.sh).
 LOG="${OUT}/setup.log"
-echo "== setup (log: ${LOG})"
-{ SKIP_VLLM_IMAGE=1 bash "${APERTUS2_DIR}/setup.sh" && bash "${ROOT}/experiments/grpo-chonk/stage_model.sh" \
-    && { [[ -z "${TASK_SCRIPT}" ]] || bash "${APERTUS2_DIR}/setup-gym.sh"; }; } \
-    > "${LOG}" 2>&1 || { tail -n 20 "${LOG}"; echo "ERROR: setup failed, see ${LOG}" >&2; exit 1; }
+if [[ "${SKIP_SETUP:-0}" == 1 ]]; then
+    echo "== setup skipped (SKIP_SETUP=1)"
+else
+    echo "== setup (log: ${LOG})"
+    { SKIP_VLLM_IMAGE=1 bash "${APERTUS2_DIR}/setup.sh" && bash "${ROOT}/experiments/grpo-chonk/stage_model.sh" \
+        && { [[ -z "${TASK_SCRIPT}" ]] || bash "${APERTUS2_DIR}/setup-gym.sh"; }; } \
+        > "${LOG}" 2>&1 || { tail -n 20 "${LOG}"; echo "ERROR: setup failed, see ${LOG}" >&2; exit 1; }
+fi
 
 # The task is merged over the recipe, so it can also override any recipe setting. Its copy drops
 # its own defaults, which would otherwise merge the recipe that RECIPE replaced over this one, and

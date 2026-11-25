@@ -92,12 +92,13 @@ sbatch --output=$SCRATCH/lean/fournode-stage2/logs/%j-hdo.out $SCRATCH/lean/four
 
 ## Still to do
 
-1. Run `gpu/hdo_job.sbatch` (one node).
-2. Apply the patches to the shared clones (`apertus2/setup.sh`: Megatron 0007 by `git apply`, NeMo-RL 0034 by
-   `git am`); both are no-ops for runs without `cpu_optimizer_state_dir`.
-3. `preflight.sh` on the 4-node recipe (login node), then a **probe job**: 4 nodes, 3-5 GRPO steps of 16k Lean
-   rollouts, a checkpoint and a resume. It records GPU memory per rank, host memory per NUMA node, phase times and
-   ScratchAdamW's step time.
+1. Run `gpu/hdo_job.sbatch` (one node; job 4025404 queued 2026-11-25).
+2. The **probe job** (`../probe/`): 4 nodes, steps 1-3, a checkpoint, a resume in the same job, steps 4-5, on private
+   copies of the clones with patches 0007 + 0034 (the shared clones stay as they are). It records GPU memory per GPU,
+   host memory per node, phase times and ScratchAdamW's step time; `probe/report.py` gives the verdicts.
+3. Apply the patches to the shared clones (`apertus2/setup.sh`: Megatron 0007 by `git apply`, NeMo-RL 0034 by
+   `git am`) once the probe passed and no chain job is queued; both are no-ops for runs without
+   `cpu_optimizer_state_dir`.
 4. If the probe shows the heaviest node short of host memory: the fp32 masters on scratch too (another 108 GB per node
    off the host, 650 GB of scratch I/O per node per step). The GPU side has about 5 GB to spare at the measured peak;
-   the probe's per-rank numbers decide whether that holds.
+   the probe's per-GPU numbers decide whether that holds.

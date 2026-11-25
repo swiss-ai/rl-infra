@@ -134,10 +134,10 @@ cluster.num_nodes=${NODES} cluster.gpus_per_node=${GPUS_PER_NODE} \
 checkpointing.checkpoint_dir=${OUT}/results/${RUN} \
 logger.log_dir=${OUT}/logs/${RUN} ${WANDB_ARGS} $*"
 
-# Container: EDF names the installed ~/.edf file; pyxis gets CONTAINER, MOUNTS and
+# Container: EDF names the installed ~/.edf file (or its absolute path with EDF_DIR); pyxis gets CONTAINER, MOUNTS and
 # PYXIS_EXTRA_ARGS, with the spec's environment exported here (sbatch passes it on).
 case "${CONTAINER_RUNTIME}" in
-    edf)   export EDF="${EDF_NAME}" ;;
+    edf)   export EDF="$(container_edf_ref)" ;;
     pyxis) unset EDF; container_pyxis_env ;;
     *)     echo "ERROR: unknown CONTAINER_RUNTIME '${CONTAINER_RUNTIME}' (edf or pyxis)" >&2; exit 1 ;;
 esac
