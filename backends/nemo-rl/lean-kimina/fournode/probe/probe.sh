@@ -134,9 +134,11 @@ setup() {
         || { tail -n 20 "${PROBE}/setup.log"; echo "ERROR: setup failed" >&2; exit 1; }
     grep -E "^== (NeMo-RL|Megatron-LM|EDF)" "${PROBE}/setup.log" || true
     # The patches reached the copies, and the EDF mounts them.
-    local subject
+    # (the log goes into a variable first: grep -q ends the pipe early, and git's SIGPIPE fails it under pipefail)
+    local subject applied
     subject="$(git mailinfo /dev/null /dev/null < "$(ls "${ROOT}"/backends/nemo-rl/apertus2/patches/nemo-rl/0034-*.patch)" | sed -n 's/^Subject: //p')"
-    git -C "${NEMO_RL_DIR}" log --format=%s | grep -qxF -- "${subject}" || { echo "ERROR: NeMo-RL 0034 is not in ${NEMO_RL_DIR}" >&2; exit 1; }
+    applied="$(git -C "${NEMO_RL_DIR}" log --format=%s)"
+    grep -qxF -- "${subject}" <<< "${applied}" || { echo "ERROR: NeMo-RL 0034 is not in ${NEMO_RL_DIR}" >&2; exit 1; }
     grep -q cpu_optimizer_state_dir "${MEGATRON_DIR}/megatron/core/optimizer/optimizer_config.py" \
         || { echo "ERROR: Megatron 0007 is not in ${MEGATRON_DIR}" >&2; exit 1; }
     cmp -s "${STAGE2}/scratch_adam.py" "${MEGATRON_DIR}/megatron/core/optimizer/cpu_offloading/scratch_adam.py" \
