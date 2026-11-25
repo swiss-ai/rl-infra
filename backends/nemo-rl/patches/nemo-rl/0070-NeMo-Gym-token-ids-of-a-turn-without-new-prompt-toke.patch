@@ -1,0 +1,34 @@
+From 96b9c66acfb169a95ee7dfebd1522410ecb20dfe Mon Sep 17 00:00:00 2001
+From: Ramon Kaspar <ramonkaspar@gmail.com>
+Date: Mon, 16 Nov 2026 14:50:00 +0100
+Subject: [PATCH 70/72] NeMo Gym: token ids of a turn without new prompt tokens
+ stay integers
+
+torch.tensor of an empty list is float32. A later turn of a multi-turn
+rollout can add no prompt tokens to the tokens so far: 4 of the 512
+rollouts of a ToolGrow step had such a turn, at step 33 of a Chonk run.
+The user message of such a turn then had float32 token ids and loss
+mask, and batched_message_log_to_flat_message stopped the training loop
+with "expected consistent types". These token ids are now int64.
+
+A turn without generated tokens needs no change: the loop skips it.
+---
+ nemo_rl/environments/nemo_gym.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/nemo_rl/environments/nemo_gym.py b/nemo_rl/environments/nemo_gym.py
+index 30588e4f4..991477dfa 100644
+--- a/nemo_rl/environments/nemo_gym.py
++++ b/nemo_rl/environments/nemo_gym.py
+@@ -1275,7 +1275,7 @@ output prompt token ids till seen: {output_item_dict["prompt_token_ids"][: len(s
+             user_message = {
+                 "role": "user",
+                 "content": "",
+-                "token_ids": torch.tensor(new_prompt_token_ids),
++                "token_ids": torch.tensor(new_prompt_token_ids, dtype=torch.long),
+             }
+             if routed_experts is not None:
+                 user_message["routed_experts"] = routed_experts[prompt_start:prompt_end]
+-- 
+2.43.0
+

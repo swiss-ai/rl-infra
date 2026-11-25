@@ -138,7 +138,7 @@ happened, as they ran) and `scripts/` (data builders and checks); empty folders 
 | `diagnostics/check_env.sh`, `check_env_job.sh` | check | Stack sanity check on one GPU node; `check_env_job.sh` runs it, the others here or a repository script as a one-node job |
 | `setup/download_model.sh` | setup | Downloads an HF repository from a compute node |
 | `patches/ray-sub/` (2) | run | NeMo-RL's `ray.sub` for the Alps container engine / pyxis, applied first |
-| `patches/nemo-rl/0001-0067` (59) | run | Our NeMo-RL changes on top of the pin, applied in order |
+| `patches/nemo-rl/0001-0072` (64) | run | Our NeMo-RL changes on top of the pin, applied in order |
 | `patches/megatron/` (7) | run | Megatron-LM-MoE: optimizer and checkpoint fixes, 0007 = KCP context parallelism for the KDA layers |
 | `patches/gym/` (15), `automodel/` (2), `vllm/` (1) | run / setup | Changes to Gym, Automodel, the vLLM Apertus 2 model |
 

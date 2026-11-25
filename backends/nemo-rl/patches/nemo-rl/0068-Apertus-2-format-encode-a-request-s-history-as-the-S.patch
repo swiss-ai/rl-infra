@@ -1,0 +1,252 @@
+From 2f88f0228c4147f187600874a6e21d04559d7935 Mon Sep 17 00:00:00 2001
+From: Ramon Kaspar <ramonkaspar@gmail.com>
+Date: Wed, 4 Nov 2026 21:49:32 +0100
+Subject: [PATCH 68/72] Apertus 2 format: encode a request's history as the SFT
+ data write it
+
+A task of Gym can start with the conversation so far, which NeMo-RL
+encodes with from_openai. An assistant turn with an empty content became
+an empty reply frame. A client that writes the reasoning of a past turn
+as <think> text at the start of the content, or only in `reasoning`, got
+it as text in a reply frame or lost it, with no error. Now an empty
+content gives no reply frame, and the reasoning goes into a think frame.
+
+The SFT render starts each burst with a think, empty if the turn has no
+reasoning, and writes arguments as compact JSON. A prompt now does the
+same, so its tokens equal those of the render for the same conversation.
+---
+ nemo_rl/data/apertus2_format.py         |  57 ++++++++++-
+ tests/unit/data/test_apertus2_format.py | 128 ++++++++++++++++++++++++
+ 2 files changed, 184 insertions(+), 1 deletion(-)
+
+diff --git a/nemo_rl/data/apertus2_format.py b/nemo_rl/data/apertus2_format.py
+index a92d3c0ef..e40561a75 100644
+--- a/nemo_rl/data/apertus2_format.py
++++ b/nemo_rl/data/apertus2_format.py
+@@ -19,6 +19,7 @@ text can never pass for a control token.
+ """
+ 
+ import json
++import re
+ from dataclasses import dataclass
+ from functools import lru_cache
+ from typing import Any
+@@ -26,6 +27,7 @@ from typing import Any
+ APERTUS2_OUTPUT_FORMAT = "apertus2"
+ # A claim is a bare answer; a longer one is the model talking in the claim frame.
+ LONG_CLAIM_CHARS = 40
++_HISTORY_REASONING = re.compile(r"<think>(.*?)</think>(.*)", re.DOTALL)
+ # How a think frame opens and closes, which vLLM needs to enforce a thinking budget.
+ APERTUS2_THINK_START = "<|out|>think<|hdr|>"
+ APERTUS2_THINK_END = "<|/out|>"
+@@ -113,6 +115,54 @@ def encode_prompt(
+     )
+ 
+ 
++def _compact_arguments(arguments: str) -> str:
++    """Arguments of a past call as the SFT data write them, or as they are if not JSON."""
++    try:
++        return json.dumps(json.loads(arguments), ensure_ascii=False, separators=(",", ":"))
++    except ValueError:
++        return arguments
++
++
++def _history_message(message: dict[str, Any], opens_burst: bool) -> dict[str, Any]:
++    """A message of a request's history, as the SFT data write it.
++
++    Gym's model server sends the reasoning of an assistant turn in ``reasoning`` and
++    ``reasoning_content``, of which from_openai reads the second. Other clients write it as
++    ``<think>`` text at the start of the content, which from_openai would map to a reply. An
++    empty content is no reply. A burst starts with a think, empty if the turn has no
++    reasoning, and arguments are compact.
++    """
++    if message["role"] != "assistant":
++        return message
++    mapped = {
++        key: value for key, value in message.items() if key not in ("content", "reasoning")
++    }
++    if mapped.get("reasoning_content") is None and message.get("reasoning") is not None:
++        mapped["reasoning_content"] = message["reasoning"]
++    content = message.get("content")
++    if isinstance(content, str):
++        reasoning = _HISTORY_REASONING.fullmatch(content)
++        if reasoning:
++            mapped["reasoning_content"] = reasoning[1]
++            content = reasoning[2]
++    if content:
++        mapped["content"] = content
++    if opens_burst and mapped.get("reasoning_content") is None:
++        mapped["reasoning_content"] = ""
++    if mapped.get("tool_calls"):
++        mapped["tool_calls"] = [
++            {
++                **call,
++                "function": {
++                    **call["function"],
++                    "arguments": _compact_arguments(call["function"]["arguments"]),
++                },
++            }
++            for call in mapped["tool_calls"]
++        ]
++    return mapped
++
++
+ def encode_chat_prompt(
+     tokenizer_path: str,
+     *,
+@@ -145,7 +195,12 @@ def encode_chat_prompt(
+         del defaults["tools"]
+     try:
+         mapped = from_openai(
+-            messages,
++            [
++                _history_message(
++                    message, index == 0 or messages[index - 1]["role"] != "assistant"
++                )
++                for index, message in enumerate(messages)
++            ],
+             # vLLM's request model adds fields of its own, which from_openai refuses.
+             tools=[
+                 {"type": tool["type"], "function": tool["function"]} for tool in tools
+diff --git a/tests/unit/data/test_apertus2_format.py b/tests/unit/data/test_apertus2_format.py
+index 7ce2e8714..7f42fd56c 100644
+--- a/tests/unit/data/test_apertus2_format.py
++++ b/tests/unit/data/test_apertus2_format.py
+@@ -175,6 +175,134 @@ def test_chat_prompt_declares_the_request_tools(encoding):
+     )
+ 
+ 
++def test_chat_prompt_reads_the_thinking_of_the_history(encoding):
++    call = {
++        "id": "call_1",
++        "type": "function",
++        "function": {"name": "get_weather", "arguments": '{"city":"Bern"}'},
++    }
++    prompt = encode_chat_prompt(
++        TOKENIZER,
++        system_prompt=SYSTEM_PROMPT,
++        messages=[
++            {"role": "user", "content": "Weather?"},
++            {
++                "role": "assistant",
++                "content": "<think>Look it up.</think>",
++                "tool_calls": [call],
++            },
++            {"role": "tool", "tool_call_id": "call_1", "content": "Sunny"},
++            {"role": "assistant", "content": "<think>Done.\nSay it.</think>Sunny."},
++            {"role": "user", "content": "Thanks"},
++        ],
++        tools=[WEATHER_TOOL],
++    )
++    assert prompt == encoding.encode_conversation(
++        Conversation(
++            system=_weather_system(),
++            items=[
++                User(payload="Weather?"),
++                Think(payload="Look it up."),
++                Call(name="get_weather", counter=0, payload='{"city":"Bern"}'),
++                Wait(),
++                Result(name="get_weather", counter=0, payload="Sunny"),
++                Think(payload="Done.\nSay it."),
++                Reply(payload="Sunny."),
++                Wait(),
++                User(payload="Thanks"),
++            ],
++        )
++    )
++
++
++def test_chat_prompt_has_no_empty_reply_next_to_a_call(encoding):
++    call = {
++        "id": "call_1",
++        "type": "function",
++        "function": {"name": "get_weather", "arguments": "{}"},
++    }
++    prompt = encode_chat_prompt(
++        TOKENIZER,
++        system_prompt=SYSTEM_PROMPT,
++        messages=[
++            {"role": "user", "content": "Weather?"},
++            {"role": "assistant", "content": "", "tool_calls": [call]},
++            {"role": "tool", "tool_call_id": "call_1", "content": "Sunny"},
++        ],
++        tools=[WEATHER_TOOL],
++    )
++    assert prompt == encoding.encode_conversation(
++        Conversation(
++            system=_weather_system(),
++            items=[
++                User(payload="Weather?"),
++                Think(payload=""),
++                Call(name="get_weather", counter=0, payload="{}"),
++                Wait(),
++                Result(name="get_weather", counter=0, payload="Sunny"),
++            ],
++        )
++    )
++
++
++def test_chat_prompt_reads_the_reasoning_fields_of_gym():
++    fields = {"reasoning": "Hm.", "reasoning_content": "Hm."}
++    only_reasoning = {"reasoning": "Hm."}
++    messages = [{"role": "user", "content": "Hi"}]
++    prompts = [
++        encode_chat_prompt(
++            TOKENIZER,
++            system_prompt=SYSTEM_PROMPT,
++            messages=[
++                *messages,
++                {"role": "assistant", "content": "Hello.", **given},
++                {"role": "user", "content": "Bye"},
++            ],
++            tools=None,
++        )
++        for given in (fields, only_reasoning, {"content": "<think>Hm.</think>Hello."})
++    ]
++    assert prompts[0] == prompts[1] == prompts[2]
++
++
++def test_chat_prompt_writes_past_arguments_compact(encoding):
++    call = {
++        "id": "call_1",
++        "type": "function",
++        "function": {"name": "get_weather", "arguments": '{"city": "Zürich"}'},
++    }
++    prompt = encode_chat_prompt(
++        TOKENIZER,
++        system_prompt=SYSTEM_PROMPT,
++        messages=[
++            {"role": "user", "content": "Weather?"},
++            {"role": "assistant", "content": "", "tool_calls": [call]},
++            {"role": "tool", "tool_call_id": "call_1", "content": "Sunny"},
++        ],
++        tools=[WEATHER_TOOL],
++    )
++    assert '<|hdr|>{"city":"Zürich"}<|/out|>' in encoding.decode_text(prompt)
++
++
++def test_chat_prompt_keeps_past_arguments_that_are_not_json(encoding):
++    call = {
++        "id": "call_1",
++        "type": "function",
++        "function": {"name": "get_weather", "arguments": '{"city": '},
++    }
++    prompt = encode_chat_prompt(
++        TOKENIZER,
++        system_prompt=SYSTEM_PROMPT,
++        messages=[
++            {"role": "user", "content": "Weather?"},
++            {"role": "assistant", "content": "", "tool_calls": [call]},
++            {"role": "tool", "tool_call_id": "call_1", "content": "Sunny"},
++        ],
++        tools=[WEATHER_TOOL],
++    )
++    assert '<|hdr|>{"city": <|/out|>' in encoding.decode_text(prompt)
++
++
+ def test_chat_prompt_merges_system_and_developer_messages():
+     prompt = encode_chat_prompt(
+         TOKENIZER,
+-- 
+2.43.0
+

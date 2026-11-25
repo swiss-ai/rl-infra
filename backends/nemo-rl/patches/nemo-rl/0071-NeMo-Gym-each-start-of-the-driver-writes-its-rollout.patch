@@ -1,0 +1,31 @@
+From ea76f916ac18c0137395ff16f2454a9dce1d09ae Mon Sep 17 00:00:00 2001
+From: Ramon Kaspar <ramonkaspar@gmail.com>
+Date: Wed, 18 Nov 2026 20:35:14 +0100
+Subject: [PATCH 71/72] NeMo Gym: each start of the driver writes its rollouts
+ to a folder of its own
+
+A driver that driver_retry.sh or a requeue starts again resumes from the
+last checkpoint and writes the rollouts of the steps since then again.
+Patch 0020 appends them to the files of the earlier start in
+env.rollout_dir, so these steps held both starts. Each start now writes to
+the next exp_<n> folder of env.rollout_dir, as it does for logger.log_dir.
+---
+ examples/nemo_gym/run_grpo_nemo_gym.py | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/examples/nemo_gym/run_grpo_nemo_gym.py b/examples/nemo_gym/run_grpo_nemo_gym.py
+index a285751f2..43aead9ab 100644
+--- a/examples/nemo_gym/run_grpo_nemo_gym.py
++++ b/examples/nemo_gym/run_grpo_nemo_gym.py
+@@ -154,6 +154,8 @@ def main() -> None:
+     # Get the next experiment directory with incremented ID
+     config.logger["log_dir"] = get_next_experiment_dir(config.logger["log_dir"])
+     print(f"📊 Using log directory: {config.logger['log_dir']}")
++    if config.env.get("rollout_dir"):
++        config.env["rollout_dir"] = get_next_experiment_dir(config.env["rollout_dir"])
+     if config.checkpointing["enabled"]:
+         print(
+             f"📊 Using checkpoint directory: {config.checkpointing['checkpoint_dir']}"
+-- 
+2.43.0
+

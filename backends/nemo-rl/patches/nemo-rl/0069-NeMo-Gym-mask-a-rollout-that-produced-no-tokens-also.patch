@@ -1,0 +1,98 @@
+From a0ca2c7e92e806050c0a0fbd4689a0089a80294d Mon Sep 17 00:00:00 2001
+From: Ramon Kaspar <ramonkaspar@gmail.com>
+Date: Thu, 5 Nov 2026 10:52:30 +0100
+Subject: [PATCH 69/72] NeMo Gym: mask a rollout that produced no tokens, also
+ without a flag
+
+Gym's vLLM model server answers a first prompt over max_model_len with an
+empty message, and agents such as simple_agent do not set mask_sample. The
+postprocess then raised, which ends a validation with no result, with no
+error but a log line, and stops training at the first such task. With
+mask_degenerate_rollouts, such a rollout now becomes a masked stand-in.
+---
+ nemo_rl/environments/nemo_gym.py              | 21 +++++++++++--------
+ .../test_nemo_gym_degenerate_rollouts.py      | 12 +++++++++--
+ 2 files changed, 22 insertions(+), 11 deletions(-)
+
+diff --git a/nemo_rl/environments/nemo_gym.py b/nemo_rl/environments/nemo_gym.py
+index 80b194156..30588e4f4 100644
+--- a/nemo_rl/environments/nemo_gym.py
++++ b/nemo_rl/environments/nemo_gym.py
+@@ -333,8 +333,8 @@ class NemoGymConfig(TypedDict):
+     # from the manifest control route. None/absent = legacy token-echo path.
+     token_capture: NotRequired[Dict[str, Any] | None]
+     # Turn a rollout that produced no trainable token into a zero-loss sample
+-    # instead of aborting the step. Only applies to rollouts the environment has
+-    # already flagged with instance_config.mask_sample, and requires
++    # instead of aborting the step. It flags the rollout itself
++    # (instance_config.mask_sample) when the environment has not, and requires
+     # env.should_mask_flagged_samples, which is what actually zeroes the loss.
+     # Agentic environments that run a whole container per rollout (harbor_agent,
+     # anyswe_agent) fail this way for reasons unrelated to the policy -- a
+@@ -470,14 +470,11 @@ def _degenerate_message_log(
+ 
+     Returns:
+         A two-message log, or None when the caller should raise instead: masking
+-        is off, the environment did not flag this rollout, router replay needs
+-        per-token routes that a stand-in cannot supply, or the tokenizer has no
+-        EOS token to pad with.
++        is off, router replay needs per-token routes that a stand-in cannot
++        supply, or the tokenizer has no EOS token to pad with.
+     """
+     if not cfg.get("mask_degenerate_rollouts"):
+         return None
+-    if not (nemo_gym_result.get("instance_config") or {}).get("mask_sample"):
+-        return None
+     if cfg.get("require_routed_experts"):
+         # A stand-in has no routed_experts, and R3 asserts on their presence for
+         # every trainable item, so masking here would only move the failure
+@@ -488,9 +485,15 @@ def _degenerate_message_log(
+     if eos_token_id is None:
+         return None
+ 
++    # Gym's vLLM model server answers a first prompt over max_model_len with an empty
++    # message, and agents such as simple_agent do not flag the rollout themselves.
++    nemo_gym_result["instance_config"] = {
++        **(nemo_gym_result.get("instance_config") or {}),
++        "mask_sample": True,
++    }
+     print(
+-        "Masking a degenerate NeMo Gym rollout (no generation data, flagged "
+-        f"mask_sample) for instance {nemo_gym_result.get('instance_id')!r}. "
++        "Masking a degenerate NeMo Gym rollout (no generation data) for instance "
++        f"{nemo_gym_result.get('instance_id')!r}. "
+         "It is replaced by a zero-weight sample and excluded from the "
+         "gradient; watch the num_mask_sample_filtered metric for the rate.",
+         file=sys.stderr,
+diff --git a/tests/unit/environments/test_nemo_gym_degenerate_rollouts.py b/tests/unit/environments/test_nemo_gym_degenerate_rollouts.py
+index 1c16991b2..e5c38abab 100644
+--- a/tests/unit/environments/test_nemo_gym_degenerate_rollouts.py
++++ b/tests/unit/environments/test_nemo_gym_degenerate_rollouts.py
+@@ -73,10 +73,9 @@ def test_flagged_empty_rollout_becomes_zero_weight_stand_in():
+     ("cfg", "mask_sample"),
+     [
+         ({}, True),
+-        ({"mask_degenerate_rollouts": True}, False),
+         ({"mask_degenerate_rollouts": True, "require_routed_experts": True}, True),
+     ],
+-    ids=["knob-off", "not-flagged", "router-replay"],
++    ids=["knob-off", "router-replay"],
+ )
+ def test_empty_rollout_still_raises_when_masking_does_not_apply(cfg, mask_sample):
+     with pytest.raises(ValueError, match="no generation data"):
+@@ -116,3 +115,12 @@ def test_mask_degenerate_rollouts_requires_should_mask_flagged_samples():
+             enable_router_replay=False,
+             use_fastokens=False,
+         )
++
++
++def test_empty_rollout_without_a_flag_is_masked():
++    # A first prompt over max_model_len: Gym's model server answers with an empty message.
++    gym_result = _empty_result(mask_sample=False)
++    result = _postprocess({"mask_degenerate_rollouts": True}, gym_result)
++
++    assert result["message_log"][1]["token_ids"].tolist() == [_EOS]
++    assert gym_result["instance_config"]["mask_sample"] is True
+-- 
+2.43.0
+

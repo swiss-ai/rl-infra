@@ -19,7 +19,7 @@ the checklist to hand an agent session.
 | Context length | `CP`, `KCP`, `CAP`, packing set by hand | `context:` in the task; the recipe's `context_parallel` gives CP (context / tokens_per_gpu, rounded up to a power of 2), KCP above CP 4, packing = context and the memory fraction (the next power of 2 up: 50K gets the 64K settings) |
 | Run modes | `DRY_RUN=1` ran setup and printed the job; launchers had `DEBUG=1` by default | plain `run.sh` = full run (W&B required); `DEBUG=1` = debug run; `DRY_RUN=1` = everything shown, no setup, no job |
 | Config at job start | the job read the recipe and task chain from their original paths when it started | the job reads copies made at launch (`$OUT/configs/<run>-<time>/`, with the setup log) |
-| NeMo-RL code | experiment clones (`nemo-rl-apertus2-stem32k`, ...) carried commits that were not patches in rl-infra | every change is a patch in `backends/nemo-rl/patches/nemo-rl/`; 0034 and 0057-0066 added (Reasoning Gym verifier, claim_multichoice, llm_judge, Enigmata, ScienceWorld), after main's 0052-0056; 0067 (drop_long_prompts) added later; the next free number is 0068 |
+| NeMo-RL code | experiment clones (`nemo-rl-apertus2-stem32k`, ...) carried commits that were not patches in rl-infra | every change is a patch in `backends/nemo-rl/patches/nemo-rl/`; 0034 and 0057-0066 added (Reasoning Gym verifier, claim_multichoice, llm_judge, Enigmata, ScienceWorld), after main's 0052-0056; 0067 (drop_long_prompts) and 0068-0072 (tool use on NeMo Gym) added later; the next free number is 0073 |
 | KCP | `experiments/long-context/setup-kcp.sh`, `kcp/`, `KCP=1` in the launchers | Megatron patch 0007 (`backends/nemo-rl/patches/megatron/`) and flash-linear-attention 0.5.2 in the overlay, used automatically for a context above 32K |
 | Backend | `backends/nemo-rl/` with the stock NGC stack and the Apertus 2 stack in `apertus2/` | one stack, grouped by when its files run: `launch.sh`, `env/`, `setup/`, `config/`, `job/`, `diagnostics/`, `patches/` (section 6) |
 | Data paths | absolute paths in task files (`/scratch/hanint06/data/...`) | `${oc.env:RL_DATA_DIR}/...` (set in `sites/<site>.env` or `site.env`); your own files under `${oc.env:RL_USER_HOME}` |
@@ -80,13 +80,13 @@ them refer to the commit before the restructure (`965e15c` on main, `f1ec52e` on
 4. **Delete your launcher** once its variables are keys or overrides. Keep a script only for what `run.sh` cannot
    do (for example starting a sandbox job first).
 5. **Turn NeMo-RL commits into patches.** Every commit in a clone of your own that a run depends on becomes a patch
-   with the next free number (0068 on), with a subject no other patch has (`setup.sh` matches patches by subject):
+   with the next free number (0073 on), with a subject no other patch has (`setup.sh` matches patches by subject):
    ```bash
-   git -C <your clone> format-patch --start-number 68 -o backends/nemo-rl/patches/nemo-rl/ <base>..<head>
+   git -C <your clone> format-patch --start-number 73 -o backends/nemo-rl/patches/nemo-rl/ <base>..<head>
    ```
    Check that the series is complete: in a fresh worktree at the pin (the PR merges of `backends/nemo-rl/env/pin`), apply every
    patch in order with `git am -3`, and compare the tree with the clone you tested on (`git diff --stat`). Patches
-   numbered 0015-0017 and 0035-0039 on other branches are not on main: renumber them after 0067.
+   numbered 0015-0017 and 0035-0039 on other branches are not on main: renumber them after 0072.
 6. **Replace personal paths:** datasets under `${oc.env:RL_DATA_DIR}/...`, files in your home under
    `${oc.env:RL_USER_HOME}/...`, the judge model under `${oc.env:SCRATCH}/models/...`.
 7. **Check before the first run:** `DRY_RUN=1 bash run.sh experts/<expert>/<task>.yaml` prints nodes, context, the
