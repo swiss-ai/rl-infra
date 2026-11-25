@@ -43,6 +43,7 @@ bash run.sh stem      (experts/main.yaml + experts/stem/base.yaml)
 
 | File | Role | Purpose |
 |---|---|---|
+| `README.md` | doc | The profiles, the load order, how to add a cluster |
 | `sites/load.sh` | run | Loads the settings in order: environment, `site.env`, site profile, stack env files |
 | `sites/hangang.env` | run | KISTI HANGANG: account, partition, Slurm flags, scratch, pyxis, NCCL/libfabric fixes, mounts, image, Slingshot suffix, `RL_DATA_DIR` |
 | `sites/alps.env` | run | CSCS Alps: the same for Clariden (container engine EDF) |
@@ -67,6 +68,7 @@ happened, as they ran) and `scripts/` (data builders and checks); empty folders 
 | `stem/scripts/enigmata/` (15) | setup / check / history | Enigmata puzzle pool and dataset build, pass-rate scoring (its one-node recipe and tasks), environment test, the launcher of the Enigmata trial |
 | `stem/scripts/scienceworld/` (18) | setup / check / history | ScienceWorld install, data build, episode probes and scoring, environment test, the launchers of its trial and debug run |
 | `stem/scripts/eval/` | tool | Validation of an HF export with vLLM only (the run's own `grpo.validate()`), benchmark sets (AIME, MATH-500, MMLU-Pro, held-out training sets) |
+| `stem/README.md` | doc | The STEM expert's files |
 | `code/base.yaml`, `chat/base.yaml`, `tool-use/base.yaml`, `lean/base.yaml` | template | Take the latest archived run through `defaults` until written |
 | `code/scripts/sandbox/*` (9) | setup / run | Code sandbox node for code_gen: server, harness, data, start script, attack test |
 | `lean/scripts/*` (11) | setup / run | Lean 4 sandbox (NeMo-Skills image) and its data |
@@ -87,6 +89,7 @@ happened, as they ran) and `scripts/` (data builders and checks); empty folders 
 
 | File | Role | Purpose |
 |---|---|---|
+| `README.md` | doc | What each folder holds |
 | `frames/apertus2-system.json`, `-high.json` | run | System frame of the Apertus 2 format: thinking medium, high |
 
 | `judges/llm-judge.yaml` | run | The LLM judge grader (`env.llm_judge`: verdict, scoring, frames), taken in by STEM and the judge-based templates |
@@ -116,6 +119,7 @@ happened, as they ran) and `scripts/` (data builders and checks); empty folders 
 
 | File | Role | Purpose |
 |---|---|---|
+| `README.md`, `patches/README.md` | doc | The folders by when they run; how patches are applied and added |
 | `launch.sh` | run | Config + node count → preflight, container flags, `sbatch ray.sub` with the driver command |
 | `env/stack.env` | run | The stack: clone paths, image, overlay, driver, outputs (`OUT`) |
 | `env/pin` | run | NeMo-RL fork commit + PRs, Automodel, Megatron-LM-MoE, Bridge, vLLM files, Gym, apertus-common commits |

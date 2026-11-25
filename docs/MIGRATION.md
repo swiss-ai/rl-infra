@@ -3,6 +3,8 @@
 The branch `restructure` (started from main at `965e15c`, 2026-11-19) reorganises where task files live, what
 `run.sh` does, and how NeMo-RL changes reach a run. This file lists every change a branch based on the old main has
 to follow, and the steps to move one over. `docs/repository-map.md` describes the new layout file by file.
+A person or an agent session porting a branch follows section 3 with the tables of sections 5 and 6; section 7 is
+the checklist to hand an agent session.
 
 ## 1. What changed
 
@@ -19,6 +21,7 @@ to follow, and the steps to move one over. `docs/repository-map.md` describes th
 | Config at job start | the job read the recipe and task chain from their original paths when it started | the job reads copies made at launch (`$OUT/configs/<run>-<time>/`, with the setup log) |
 | NeMo-RL code | experiment clones (`nemo-rl-apertus2-stem32k`, ...) carried commits that were not patches in rl-infra | every change is a patch in `backends/nemo-rl/patches/nemo-rl/`; 0034 and 0057-0066 added (Reasoning Gym verifier, claim_multichoice, llm_judge, Enigmata, ScienceWorld), after main's 0052-0056; 0067 (drop_long_prompts) added later; the next free number is 0068 |
 | KCP | `experiments/long-context/setup-kcp.sh`, `kcp/`, `KCP=1` in the launchers | Megatron patch 0007 (`backends/nemo-rl/patches/megatron/`) and flash-linear-attention 0.5.2 in the overlay, used automatically for a context above 32K |
+| Backend | `backends/nemo-rl/` with the stock NGC stack and the Apertus 2 stack in `apertus2/` | one stack, grouped by when its files run: `launch.sh`, `env/`, `setup/`, `config/`, `job/`, `diagnostics/`, `patches/` (section 6) |
 | Data paths | absolute paths in task files (`/scratch/hanint06/data/...`) | `${oc.env:RL_DATA_DIR}/...` (set in `sites/<site>.env` or `site.env`); your own files under `${oc.env:RL_USER_HOME}` |
 
 Removed: `experiments/long-context/launch-stem-ctx.sh` and its three node-split recipes, the launchers of
@@ -93,22 +96,23 @@ them refer to the commit before the restructure (`965e15c` on main, `f1ec52e` on
 8. **A new expert** starts from its template in `experts/<expert>/` (or copies one): fill in the datasets marked
    TODO. `run.sh` submits no run while a `data_path` is missing (`backends/nemo-rl/config/preflight.sh`).
 
-## 4. Branches in this checkout that are not migrated yet (2026-11-20)
+## 4. Branches on origin that are not migrated yet (2026-11-25)
 
-Commits not in `restructure`, per local branch of `~/projects/rl-infra`:
+A trial merge of each branch into `restructure` (`git merge-tree`), with the number of files in conflict. A branch
+without conflicts can still need work: files it adds under `experiments/`, `envs/` or an old backend path stay there,
+and a launcher that calls an old path no longer runs.
 
-| Branch | Commits | Last commit | Note |
+| Branch | Author | Commits not on main | Files in conflict |
 |---|---|---|---|
-| `apertus-v11` | 7 | 2026-11-20 | in progress |
-| `megachonk` | 5 | 2026-11-18 | |
-| `pr6` | 3 | 2026-11-15 | |
-| `chonk-debug` | 2 | 2026-10-28 | |
-| `enigmata`, `rg-review` | 2 each | 2026-11-14 | merged into `stem5` in another form; check before migrating |
-| `process-rubric` | 2 | 2026-11-11 | |
-| `openqa-judge` | 1 | 2026-11-14 | as `enigmata` |
-| `harbor-sft`, `lean`, `multi-judge` | 1 each | 2026-11-03 to 06 | |
-
-The NeMo-RL clones of these branches may also hold commits that are not patches yet (step 5).
+| `chonk-sc-pi` | Philip Mueller | 162 | 57 |
+| `chonk-sc-harbor025` | Philip Mueller | 159 | 53 |
+| `apertus-v11` | Tommaso Bendinelli | 60 | 7 |
+| `terminus2-verified-1k` | Philip Mueller | 6 | 6 (its NeMo-RL patches are main's 0052-0056) |
+| `restructure-megachonk-sft` | davmels | 68 | 4 (NeMo-RL 0062 and Megatron 0007 taken twice) |
+| `lean-kimina-verifier` | Chengshang Liu | 18 | 4 |
+| `or-benign-balance`, `feat/oss-validator-or-single-turn` | Emma Anastassova | 6, 24 | 0 |
+| `grpo_mt` | Javi GG | 4 | 0 |
+| `reasoning-gym-native` | Antonio Lopardo | 3 | 0 |
 
 ## 5. Moved files (main `965e15c` and `stem5` → now)
 
@@ -149,3 +153,46 @@ The NeMo-RL clones of these branches may also hold commits that are not patches 
 | `experiments/grpo-math/`, `experiments/vlm-geo3k/` | removed with the stock NeMo-RL stack (Qwen configs, 2026-11-24) |
 | `experiments/grpo-chonk/README.md` | `recipes/archive/chain/README.md` |
 | `experiments/runs.md`, `megachonk.md`, `long-context/README.md` | `docs/runs.md`, `docs/megachonk.md`, `docs/long-context.md` |
+
+## 6. Backend files (main → now)
+
+Paths under `backends/nemo-rl/` unless they start with `experts/` or `shared/`.
+
+| Before | Now |
+|---|---|
+| `apertus2/env` | `env/stack.env` (it also sets `OUT`, which came from the stock `env`) |
+| `apertus2/pin`, `apertus2/edf.toml.template` | `env/pin`, `env/edf.toml.template` |
+| `apertus2/launch.sh`, `launch.sh` | `launch.sh` (one script; it exports the stack's variables itself) |
+| `apertus2/setup.sh`, `stage_model.sh`, `setup-gym.sh`, `download_model.sh` | `setup/` |
+| `config.sh`, `container.sh`, `preflight.sh` | `config/`; preflight also checks that every dataset file exists |
+| `apertus2/driver.sh`, `apertus2/pydeps.sh`, `driver_retry.sh`, `failure_report.sh`, `hang_watch.sh`, `numa_watch.sh` | `job/` |
+| `apertus2/check_env.sh`, `check_env_job.sh` | `diagnostics/`; `CHECK_SCRIPT` takes a repository path |
+| `apertus2/check_judge.sh`, `check_judge.py` | `experts/chat/scripts/check_rubric_judge.sh`, `.py` |
+| `apertus2/check_rg_verifier.sh` | `experts/stem/scripts/check_rg_verifier.sh` |
+| `apertus2/judge_stats.py` | `shared/judges/judge_stats.py` |
+| `apertus2/patches/<repository>/` | `patches/<repository>/` (`nemo-rl`, `megatron`, `gym`, `automodel`, `vllm`) |
+| `patches/0001-*.patch`, `patches/0002-*.patch` (`ray.sub`) | `patches/ray-sub/` |
+| `apertus2/kcp/` (patch, `setup.sh`, `use.sh`) | Megatron patch `patches/megatron/0007-*`; above CP 4 run.sh adds flash-linear-attention 0.5.2 to the overlay |
+| `sandbox/` | `experts/code/scripts/sandbox/` |
+| `lean/` | `experts/lean/scripts/` |
+| `apertus2/uccl-fix/`, `apertus2/patches/uccl/` | outside the repository (the image they built exists) |
+| the stock stack: `env`, `pin`, `edf.toml.template`, `check_env.sh`, `examples/`, the top-level `setup.sh` | removed |
+| `strip_optimizer.py`, `strtok_ts.c` | removed |
+| `APERTUS2_DIR` | `BACKEND_DIR` (= `backends/nemo-rl`) |
+| `rl_infra_load "${APERTUS2_DIR}/env"` | `rl_infra_load` (it always loads `env/stack.env`) |
+| NeMo-RL patches 0052-0062 of `restructure` | 0057-0067 (main's 0052-0056 come first) |
+| `template: true` | removed: preflight refuses a run whose dataset files are missing |
+
+## 7. Checklist for an agent session porting a branch
+
+Give the session this file and `docs/repository-map.md`, then ask it to:
+
+1. Merge `restructure` into the branch (`git merge origin/restructure`; main once it is merged), and resolve the
+   conflicts once.
+2. For every file the branch adds or changes at an old path, take the new path from sections 5 and 6, `git mv` it,
+   and fix the paths inside it (`grep -rn "apertus2/\|envs/\|experiments/"`).
+3. Keep every patch number of `restructure`. Renumber the branch's own new patches after the highest number there,
+   without changing their subjects (`setup.sh` matches patches by subject).
+4. Replace each launcher by a task file with the keys of section 3 (steps 3 and 4).
+5. Run `DRY_RUN=1 bash run.sh <task>` for every task the branch runs, then one `DEBUG=1` run.
+6. Report what it moved, what it changed inside files, and what it could not place, for the branch's author.
