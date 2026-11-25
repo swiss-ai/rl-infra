@@ -9,7 +9,7 @@
 # Env (defaults in brackets):
 #   SANDBOXES [1024], PROMPTS [128] (x 8 rollouts; the batch follows), AGE [4], STEPS [the task file's 20],
 #   RUN [t2-verified-1k-<date>], JOB_TIME [12:00:00], PARTITION [normal: Daint has no preemptable queue],
-#   WANDB_PROJECT [grpo-dev], WANDB_ENTITY [apertus], the key from WANDB_API_KEY (environment) or, when that is
+#   WANDB_PROJECT [rl-swe-scalingtest], WANDB_ENTITY [apertus], the key from WANDB_API_KEY (environment) or, when that is
 #   unset, from WANDB_KEY_FILE [~/.w_and_b_key; read at job start by driver.sh], WANDB=0 turns W&B off,
 #   HARBOR_ROOT [$SCRATCH/osb/harbor_verified], VERIFIED_STORE [the capstor task store], COLLECT_ARGS,
 #   EXCLUDE_CAMPAIGNS / EXCLUDE_TASKS [the campaign and the 5 tasks left out on Alps, see below; empty = none],
@@ -41,7 +41,7 @@ KEY="$(realpath -m "${OPENSANDBOX_API_KEY_FILE:-${HOME}/.opensandbox_token}")"
 # Weights & Biases (backends/nemo-rl/launch.sh): WANDB_PROJECT turns it on. The key: WANDB_API_KEY from the
 # environment (sbatch passes it on to the job), else driver.sh reads WANDB_KEY_FILE at job start.
 if [[ "${WANDB:-1}" != 0 ]]; then
-    export WANDB_PROJECT="${WANDB_PROJECT:-grpo-dev}" WANDB_ENTITY="${WANDB_ENTITY:-apertus}"
+    export WANDB_PROJECT="${WANDB_PROJECT:-rl-swe-scalingtest}" WANDB_ENTITY="${WANDB_ENTITY:-apertus}"
     if [[ -z "${WANDB_API_KEY:-}" ]]; then
         export WANDB_KEY_FILE="$(realpath -m "${WANDB_KEY_FILE:-${HOME}/.w_and_b_key}")"
         [[ -r "${WANDB_KEY_FILE}" ]] || {

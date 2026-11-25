@@ -10,7 +10,7 @@ on Alps. `run.sh` launches it through `../../run.sh` with these changes to the t
 | Rollouts per step | 64 x 8 = 512 | 128 x 8 = 1024 | `grpo.num_prompts_per_step` (`PROMPTS`) |
 | Global batch | 512 | 1024 (one optimizer step per step) | `policy.train_global_batch_size` (follows `PROMPTS`) |
 | Trajectory age | 2 | 4 | `grpo.async_grpo.max_trajectory_age_steps` (`AGE`) |
-| Weights & Biases | off | on (project `grpo-dev`, entity `apertus`, run name = `RUN`) | `WANDB_PROJECT` / `WANDB_ENTITY` |
+| Weights & Biases | off | on (project `rl-swe-scalingtest`, entity `apertus`, run name = `RUN`) | `WANDB_PROJECT` / `WANDB_ENTITY` |
 
 Everything else is the task file's and the recipe's: 12 nodes (8 trainer, 4 vLLM), 16384 tokens per
 trajectory, 6144 per turn, 30 turns, 20 steps, no validation, no checkpoints, agent and verifier caps
