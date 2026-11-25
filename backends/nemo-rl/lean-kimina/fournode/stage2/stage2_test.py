@@ -399,3 +399,40 @@ def test_stats_line_per_step_outside_the_state_folder(tmp_path):
     scratch_adam.save_scratch_state(opt, tmp_path / "ckpt")
     linked = {p.name for p in (tmp_path / "ckpt" / scratch_adam.CHECKPOINT_SUBDIR).rglob("*") if p.is_file()}
     assert "manifest.json" in linked and not any(n.endswith(".stats.jsonl") for n in linked)
+
+
+def test_skip_next_step_can_be_taken_back(tmp_path):
+    a = make_params(10, SHAPES)
+    opt = ScratchAdamW(a, **HP, state_dir=tmp_path / "s", chunk_numel=700, direct=False)
+    opt.skip_next_step()
+    opt.skip_next_step(False)      # what patch 0007 does after a dummy_step() that failed before its step
+    set_grads(a, 1)
+    opt.step()
+    assert all(float(opt.state[p]["step"]) == 1.0 for p in a) and (tmp_path / "s" / "manifest.json").exists()
+
+
+SETUP_SH_LOOP = r'''
+for p in "$PATCHES"/*.patch; do
+    if git apply --reverse --check "$p" 2>/dev/null; then echo "skip $(basename "$p")"; continue; fi
+    git apply "$p" && echo "applied $(basename "$p")" || echo "FAILED $(basename "$p")"
+done
+'''
+
+
+@pytest.mark.skipif(not os.environ.get("MLM_PIN_FILES"), reason="MLM_PIN_FILES (the pinned Megatron files) not set")
+def test_megatron_patches_apply_twice_like_setup_sh(tmp_path):
+    """apertus2/setup.sh applies each Megatron patch unless `git apply --reverse --check` says it is in. A later patch
+    that changes an earlier one's context makes that check fail on the next run (0007 did, against 0004). Needs the
+    pinned versions of the files the patches touch, in their repository paths, under MLM_PIN_FILES."""
+    import shutil
+    import subprocess
+    repo = tmp_path / "mlm"
+    shutil.copytree(os.environ["MLM_PIN_FILES"], repo)
+    patches = HERE.parents[2] / "apertus2" / "patches" / "megatron"
+    env = dict(os.environ, PATCHES=str(patches))
+    subprocess.run(["git", "init", "-q", "."], cwd=repo, check=True)
+    rounds = [subprocess.run(["bash", "-c", SETUP_SH_LOOP], cwd=repo, env=env, capture_output=True, text=True).stdout
+              for _ in range(2)]
+    names = sorted(p.name for p in patches.glob("*.patch"))
+    assert rounds[0].split() == [w for n in names for w in ("applied", n)], rounds[0]
+    assert rounds[1].split() == [w for n in names for w in ("skip", n)], rounds[1]

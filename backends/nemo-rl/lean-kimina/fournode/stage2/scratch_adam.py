@@ -185,13 +185,14 @@ class ScratchAdamW(torch.optim.Optimizer):
 
     # --- the step -------------------------------------------------------------------------------------------------
 
-    def skip_next_step(self):
-        """Make the next step() only create the step counts, without I/O or updates.
+    def skip_next_step(self, skip=True):
+        """Make the next step() only create the step counts, without I/O or updates (skip=False takes that back).
 
         HybridDeviceOptimizer.dummy_step() runs a step with zero gradients so that the optimizer state exists before a
         checkpoint load fills it. Here that step would shrink m and v on scratch and apply weight decay, so it is
-        skipped; the checkpoint load sets the step counts afterwards."""
-        self._skip_next = True
+        skipped; the checkpoint load sets the step counts afterwards. Patch 0007 sets it around dummy_step() and
+        takes it back afterwards, so a dummy_step() that fails early cannot turn the next real step into a no-op."""
+        self._skip_next = bool(skip)
 
     @torch.no_grad()
     def step(self, closure=None):

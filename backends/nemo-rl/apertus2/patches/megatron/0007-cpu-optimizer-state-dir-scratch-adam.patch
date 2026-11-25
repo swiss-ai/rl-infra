@@ -57,27 +57,55 @@ index 45987678b..ba7c437c7 100644
      check_config_overrides_consistency(config, config_overrides)
  
 diff --git a/megatron/core/optimizer/cpu_offloading/hybrid_optimizer.py b/megatron/core/optimizer/cpu_offloading/hybrid_optimizer.py
-index e42947e06..1421f76df 100644
+index e42947e..0fc5824 100644
 --- a/megatron/core/optimizer/cpu_offloading/hybrid_optimizer.py
 +++ b/megatron/core/optimizer/cpu_offloading/hybrid_optimizer.py
-@@ -478,6 +478,11 @@ class HybridDeviceOptimizer(torch.optim.Optimizer):
-             for param in group["params"]:
-                 if param not in self.gpu_params_map_cpu_copy:
-                     param.grad = torch.randn_like(param)
-+        # A CPU optimizer with its state outside host memory (ScratchAdamW) only creates its step counts: a real
-+        # step with zero grads would shrink its stored moments and apply weight decay.
-+        for optimizer in self.cpu_optimizers:
-+            if hasattr(optimizer, "skip_next_step"):
-+                optimizer.skip_next_step()
-         self.step()
-         self.zero_grad()
-         for param in cpu_params:
+@@ -1,4 +1,5 @@
+ # Copyright (c) 2025, NVIDIA CORPORATION and Alibaba PAI. All rights reserved.
++import functools
+ from collections import defaultdict
+ from typing import Dict
+ 
+@@ -11,6 +12,25 @@ def _param_generator(cpu_optimizer):
+             yield param
+ 
+ 
++def _skip_state_outside_host_memory(dummy_step):
++    """dummy_step() for CPU optimizers whose state lives outside host memory (ScratchAdamW): their step only creates
++    the step counts, since a real step with zero grads would shrink the stored moments and apply weight decay. The
++    flag is cleared again if dummy_step() fails before the step."""
++
++    @functools.wraps(dummy_step)
++    def wrapper(self):
++        skipping = [o for o in self.cpu_optimizers if hasattr(o, "skip_next_step")]
++        for optimizer in skipping:
++            optimizer.skip_next_step()
++        try:
++            return dummy_step(self)
++        finally:
++            for optimizer in skipping:
++                optimizer.skip_next_step(False)
++
++    return wrapper
++
++
+ class HybridDeviceOptimizer(torch.optim.Optimizer):
+     """
+     HybridDeviceOptimizer is a custom optimizer designed to facilitate
+@@ -460,6 +480,7 @@ class HybridDeviceOptimizer(torch.optim.Optimizer):
+                     else:
+                         param.decoupled_grad.zero_()
+ 
++    @_skip_state_outside_host_memory
+     def dummy_step(self):
+         """
+         The dummy step can be used to initialize the potential optimizer.state,
 diff --git a/megatron/core/optimizer/cpu_offloading/scratch_adam.py b/megatron/core/optimizer/cpu_offloading/scratch_adam.py
 new file mode 100644
-index 0000000..f25e54dee
+index 0000000..fb437aa21
 --- /dev/null
 +++ b/megatron/core/optimizer/cpu_offloading/scratch_adam.py
-@@ -0,0 +1,520 @@
+@@ -0,0 +1,521 @@
 +"""AdamW whose moments (m, v) live on scratch, not in host memory: the CPU optimizer for four-node Chonk GRPO.
 +
 +Megatron's HybridDeviceOptimizer runs a torch optimizer over fp32 master copies in host memory. At 4 nodes Adam's m and v
@@ -265,13 +293,14 @@ index 0000000..f25e54dee
 +
 +    # --- the step -------------------------------------------------------------------------------------------------
 +
-+    def skip_next_step(self):
-+        """Make the next step() only create the step counts, without I/O or updates.
++    def skip_next_step(self, skip=True):
++        """Make the next step() only create the step counts, without I/O or updates (skip=False takes that back).
 +
 +        HybridDeviceOptimizer.dummy_step() runs a step with zero gradients so that the optimizer state exists before a
 +        checkpoint load fills it. Here that step would shrink m and v on scratch and apply weight decay, so it is
-+        skipped; the checkpoint load sets the step counts afterwards."""
-+        self._skip_next = True
++        skipped; the checkpoint load sets the step counts afterwards. Patch 0007 sets it around dummy_step() and
++        takes it back afterwards, so a dummy_step() that fails early cannot turn the next real step into a no-op."""
++        self._skip_next = bool(skip)
 +
 +    @torch.no_grad()
 +    def step(self, closure=None):
