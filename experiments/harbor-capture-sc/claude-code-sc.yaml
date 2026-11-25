@@ -1,0 +1,62 @@
+# Task overlay: Anthropic's Claude Code CLI instead of Terminus-2, inside the task sandbox (run-agent-v.sh
+# AGENT=claude-code, always together with tunnel-sc.yaml). Claude Code calls the model through the per-sandbox
+# reverse tunnel, sandbox 127.0.0.1:8000 -> policy_model (Gym patches 0016+0017), like opencode-sc.yaml and pi-sc.yaml,
+# over Anthropic Messages: every Gym model server serves /v1/messages, also under the capture prefix.
+#
+# Gym patch 0048 (ClaudeCodeNemoGym, custom_agents/claude_code_nemo_gym.py), probed for Claude Code 2.1.326
+# (experiments/claude-code-probe); keep that version:
+#   - install: the native release binary, gzipped by fetch-claude-code.sh into CC_DIR, is uploaded into each sandbox
+#     and checked against the release manifest's sha256 there (the image needs gzip; no internet, curl or Node).
+#   - capture: no compaction, retries, non-streaming fallback, sub-agents, web tools, MCP, task-repository settings
+#     or hooks, prompt suggestions or background tasks; the first call's system prompt is resent verbatim
+#     (--system-prompt-snapshot on). The probe saw one chain per rollout and only POST /v1/messages.
+#   - max_turns -> Claude Code's own --max-turns (ends with error_max_turns, no extra call).
+#   - failure classes from agent/claude-code.txt (stream-json; Claude Code exits 1 after an API error).
+# Gym patch 0049 (needed with Claude Code): tool calls echo as Claude Code parsed them (schema defaults filled in,
+# string numbers converted), which the capture's fingerprint now compares against the request's tool schemas;
+# tool-call arguments that are not a JSON object reach Claude Code as {"_ng_unparsed_arguments": ...} instead of a
+# 500; and the context-overflow placeholder is answered with Anthropic's 400 "prompt is too long" on /v1/messages,
+# which ends Claude Code's episode (it re-sends the request with a resume prompt after an empty max_tokens reply).
+#
+# Env (run-agent-v.sh exports them when set; CC_*, not CLAUDE_CODE_*, which is Claude Code's own namespace):
+#   CC_VERSION      default 2.1.326; another version needs claude_sha256 and the probe again
+#   CC_DIR          where fetch-claude-code.sh put <version>/claude-linux-x64.gz (+ .sha256)
+#   CC_TIMEOUT_SEC  default 870 (the micro tasks' agent timeout is 900 s; run-cv.yaml: 1740): Claude Code is ended
+#                   with exit 124 before Harbor's agent timeout, so return-code.txt and claude-code.txt are written and
+#                   the verifier runs
+#   CC_PROFILE      default: Claude Code's own system prompt and tool schemas (about 6k + 11k characters, under 5k
+#                   tokens in the probe); bare: --bare, a minimal system prompt
+
+env:
+  nemo_gym:
+    harbor_agent:
+      responses_api_agents:
+        harbor_agent:
+          harbor_agent_name: null
+          harbor_agent_import_path: "responses_api_agents.harbor_agent.custom_agents.claude_code_nemo_gym:ClaudeCodeNemoGym"
+          # the tunnel's sandbox end (tunnel-sc.yaml pod_port); harbor_agent appends /ng-rollout/<id>/...
+          harbor_model_base_url: http://127.0.0.1:8000
+          # merged with the task file's kwargs (max_turns -> --max-turns)
+          harbor_agent_kwargs:
+            version: ${oc.env:CC_VERSION,2.1.326}
+            claude_archive_dir: ${oc.env:CC_DIR}
+            # oc.decode: oc.env returns strings
+            claude_timeout_sec: ${oc.decode:${oc.env:CC_TIMEOUT_SEC,870}}
+            claude_profile: ${oc.env:CC_PROFILE,default}
+            # the task file gives max_output_tokens = the whole context; Claude Code's CLAUDE_CODE_MAX_OUTPUT_TOKENS
+            # should be the per-turn generation limit (as opencode-sc.yaml, pi-sc.yaml)
+            model_info:
+              max_input_tokens: ${policy.max_total_sequence_length}
+              max_output_tokens: ${policy.generation.max_new_tokens}
+            # deep-merged last into the --settings JSON / the CLI's environment
+            claude_settings: {}
+            claude_env: {}
+    policy_model:
+      responses_api_models:
+        vllm_model:
+          # REQUIRED: Claude Code sends no temperature or top_p; NeMo-RL's HTTP server asserts the train profile
+          # (vllm_worker_async.py). Gym applies these last to every engine request.
+          sampling_overrides:
+            temperature: ${policy.generation.temperature}
+            top_p: ${policy.generation.top_p}
+            max_tokens: ${policy.generation.max_new_tokens}

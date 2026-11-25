@@ -92,6 +92,10 @@ CTX=65536 AGENT=opencode bash experiments/chonk-sc/run-agent-v.sh               
 CTX=65536 RUNS=pv bash experiments/chonk-sc/check.sh
 SMOKE=1 CTX=65536 AGENT=pi bash experiments/chonk-sc/run-agent-v.sh
 
+# run CV (Claude Code instead of OpenCode; probed against a stub, not run on the cluster yet, README.md "Run CV")
+CTX=65536 RUNS=cv bash experiments/chonk-sc/check.sh
+SMOKE=1 CTX=65536 AGENT=claude-code bash experiments/chonk-sc/run-agent-v.sh
+
 # run V (Terminus-2)
 SMOKE=1 CTX=65536 DRY_RUN=1 bash experiments/chonk-sc/run-v-24k.sh
 SMOKE=1 CTX=65536 bash experiments/chonk-sc/run-v-24k.sh
@@ -129,8 +133,12 @@ label) before starting the next run.
 - **Single Controller**: the driver log sometimes lacks the controller's output (seen once, cause unknown); the
   hang watchdog then reports an idle driver (stack dumps, no kill before 4 h) although training runs. Harbor failure
   classes are not in TensorBoard on this path (they are on run V's path).
-- **OpenCode and chisel**: Breithorn mounts them read-only into every sandbox (`/opt/rl-tools/<name>/<version>/`,
+- **OpenCode and pi**: Breithorn mounts them read-only into every sandbox (`/opt/rl-tools/<name>/<version>/`,
   since 2026-11-27); the runs use them (Gym 0047, pi 0049) and upload nothing; the trial logs show each binary's
-  `--version`. Not yet run on the cluster.
+  `--version`.
+- **Claude Code**: Breithorn does not mount it yet, so the gzipped release binary is uploaded per sandbox
+  (about 170 MB through the OpenSandbox gateway; Gym 0050 checks its sha256 in the pod). Run CV has done
+  64K one-step smokes (job 1061605); a full run is still pending. A mounted binary would avoid the upload
+  (see `README.md` "Run CV" and `PORTING.md`).
 - Gym runs at a pinned commit plus 49 patches (`backends/nemo-rl/apertus2/patches/gym/`); the ones of ours are on
   their way upstream into swiss-ai/nemo-gym.

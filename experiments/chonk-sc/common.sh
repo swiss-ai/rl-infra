@@ -190,7 +190,8 @@ sft_task_copy() {
 }
 
 # Run OV (run-agent-v.sh AGENT=opencode): OpenCode inside each pod on Kostas' verified tasks (the task file of
-# run V), on the SC path; run PV (AGENT=pi) the same with the pi coding agent: an in-pod agent only makes OpenAI-compatible HTTP calls, so its token IDs come from Gym's
+# run V), on the SC path; run PV (AGENT=pi) the same with the pi coding agent, run CV (AGENT=claude-code) with Claude
+# Code (Anthropic Messages): an in-pod agent only makes HTTP calls to the model server, so its token IDs come from Gym's
 # token capture at the model endpoint, which only the SC entrypoint turns on (NeMo-RL
 # single_controller_utils/setup.py token_capture; the Gym entrypoint of run V has none). Another in-pod agent is
 # one more AGENT value: a case in agent_v_tag, agent_v_overlays and check_gym_agents (and check.py).
@@ -204,20 +205,24 @@ verified_task_copy() {
     grep -q '^env:' "$1" && ! grep -qE '^(defaults|script):' "$1" || { echo "verified_task_copy: unexpected ${VERIFIED_TASK}" >&2; return 1; }
 }
 
-# agent_v_tag <agent>: the run's short name (run OV = opencode, run PV = pi); unknown agents fail here first.
+# agent_v_tag <agent>: the run's short name (run OV = opencode, run PV = pi, run CV = claude-code); unknown agents
+# fail here first.
 agent_v_tag() {
     case "$1" in
         opencode) echo ov ;;
         pi) echo pv ;;
-        *) echo "agent_v_tag: AGENT must be opencode (run OV) or pi (run PV), not '$1'" >&2; return 1 ;;
+        claude-code) echo cv ;;
+        *) echo "agent_v_tag: AGENT must be opencode (run OV), pi (run PV) or claude-code (run CV), not '$1'" >&2
+           return 1 ;;
     esac
 }
 
-# agent_v_agent <tag>: the inverse (check.sh RUNS=ov / RUNS=pv).
+# agent_v_agent <tag>: the inverse (check.sh RUNS=ov / RUNS=pv / RUNS=cv).
 agent_v_agent() {
     case "$1" in
         ov) echo opencode ;;
         pv) echo pi ;;
+        cv) echo claude-code ;;
         *) echo "agent_v_agent: no in-pod agent run '$1'" >&2; return 1 ;;
     esac
 }
@@ -249,11 +254,12 @@ agent_v_defaults() {
     : "${STEPS:=10}" "${PROMPTS:=8}" "${SANDBOXES:=64}" "${GATEWAY_PROXY:=0}" "${MODEL_CALLS:=1}"
     : "${HARBOR_ROOT:=${SCRATCH}/osb/harbor_verified}"
     [[ "${GATEWAY_PROXY}" == [01] ]] || { echo "agent_v_defaults: GATEWAY_PROXY must be 0 or 1, not ${GATEWAY_PROXY}" >&2; return 1; }
-    # OpenCode / pi end 60 s before Harbor's agent cap, so their exit status and log are recorded (run-ov.yaml,
-    # run-pv.yaml)
+    # OpenCode / pi / Claude Code end 60 s before Harbor's agent cap, so their exit status and log are recorded
+    # (run-ov.yaml, run-pv.yaml, run-cv.yaml)
     if [[ -n "${AGENT_CAP}" ]]; then
         : "${OPENCODE_TIMEOUT_SEC:=$(( AGENT_CAP - 60 ))}" "${PI_TIMEOUT_SEC:=$(( AGENT_CAP - 60 ))}"
-        export OPENCODE_TIMEOUT_SEC PI_TIMEOUT_SEC
+        : "${CC_TIMEOUT_SEC:=$(( AGENT_CAP - 60 ))}"
+        export OPENCODE_TIMEOUT_SEC PI_TIMEOUT_SEC CC_TIMEOUT_SEC
     fi
     export CTX STEPS PROMPTS SANDBOXES GATEWAY_PROXY MODEL_CALLS HARBOR_ROOT AGENT_V_RECIPE AGENT_V_DP
 }
@@ -262,7 +268,8 @@ agent_v_defaults() {
 #   run-b-harbor-sc.yaml run-s-sft.yaml     SC, token capture, the SFT model, pod labels, credentials by file
 #   <agent overlay>, tunnel-sc.yaml          the agent in the pod (model URL = the tunnel's pod end), the tunnel
 #   run-agent-v.yaml                        what the verified tasks need on SC for any in-pod agent
-#   run-<tag>.yaml                          the agent's settings for these tasks (run-ov.yaml, run-pv.yaml: WORKDIR, 1740 s)
+#   run-<tag>.yaml                          the agent's settings for these tasks (run-ov.yaml, run-pv.yaml, run-cv.yaml:
+#                                           WORKDIR, 1740 s)
 agent_v_overlays() {
     printf '%s\n' "${HERE}/run-b-harbor-sc.yaml" "${HERE}/run-s-sft.yaml"
     case "$1" in
@@ -270,7 +277,9 @@ agent_v_overlays() {
                       "${HERE}/run-agent-v.yaml" "${HERE}/run-ov.yaml" ;;
         pi) printf '%s\n' "${CAPTURE_SC}/pi-sc.yaml" "${CAPTURE_SC}/tunnel-sc.yaml" \
                 "${HERE}/run-agent-v.yaml" "${HERE}/run-pv.yaml" ;;
-        *) echo "agent_v_overlays: AGENT must be opencode or pi, not $1" >&2; return 1 ;;
+        claude-code) printf '%s\n' "${CAPTURE_SC}/claude-code-sc.yaml" "${CAPTURE_SC}/tunnel-sc.yaml" \
+                         "${HERE}/run-agent-v.yaml" "${HERE}/run-cv.yaml" ;;
+        *) echo "agent_v_overlays: AGENT must be opencode, pi or claude-code, not $1" >&2; return 1 ;;
     esac
 }
 
@@ -334,14 +343,14 @@ compose_cfg() {
         # W: run O on SWE-Lego (run-s.sh AGENT=opencode TASKS=swe-lego): + run-s-swe-lego.yaml
         w) compose_cfg o "$2" || return 1
            printf '  - %s\n' "$(realpath "${HERE}/run-s-swe-lego.yaml")" >> "$2" ;;
-        # OV / PV: run-agent-v.sh AGENT=opencode / pi (run-harbor-osb.sh writes RECIPE, TASK, OVERLAY...); needs
-        # agent_v_defaults first (the recipe follows CTX)
-        ov|pv) local o agent
+        # OV / PV / CV: run-agent-v.sh AGENT=opencode / pi / claude-code (run-harbor-osb.sh writes RECIPE, TASK,
+        # OVERLAY...); needs agent_v_defaults first (the recipe follows CTX)
+        ov|pv|cv) local o agent
            agent="$(agent_v_agent "$1")" || return 1
            verified_task_copy "${2%.yaml}-task.yaml" || return 1
            printf 'defaults:\n  - %s\n  - %s\n' "${AGENT_V_RECIPE}" "$(realpath "${2%.yaml}-task.yaml")" > "$2"
            while read -r o; do printf '  - %s\n' "$(realpath "${o}")" >> "$2"; done < <(agent_v_overlays "${agent}") ;;
-        *) echo "compose_cfg: run must be a, b, s, o, w, ov or pv" >&2; return 1 ;;
+        *) echo "compose_cfg: run must be a, b, s, o, w, ov, pv or cv" >&2; return 1 ;;
     esac
 }
 
@@ -535,8 +544,8 @@ check_gym_capture() {
     return "${fails}"
 }
 
-# check_gym_agents <agent>: the in-pod agent (opencode: runs O/OV; pi: run PV) and the per-pod model tunnel are in the Gym
-# checkout (after check_gym_capture). Returns the number of failures.
+# check_gym_agents <agent>: the in-pod agent (opencode: runs O/OV; pi: run PV; claude-code: run CV) and the per-pod model
+# tunnel are in the Gym checkout (after check_gym_capture). Returns the number of failures.
 check_gym_agents() {
     local g="${NEMO_RL_DIR}/3rdparty/Gym-workspace/Gym" fails=0
     local ca="${g}/responses_api_agents/harbor_agent/custom_agents"
@@ -577,6 +586,24 @@ check_gym_agents() {
             grep -q 'pi_install' "${ca}/pi_nemo_gym.py" 2>/dev/null \
                 && ok "Gym patch 0049: pi from the release tree mounted into the sandbox (pi_install: mounted)" \
                 || bad "Gym patch 0049 missing (pi_install in custom_agents/pi_nemo_gym.py)" ;;
+        claude-code)
+            [[ -f "${ca}/claude_code_pod/install-claude-code.sh.j2" ]] \
+                && grep -q "class ClaudeCodeNemoGym" "${ca}/claude_code_nemo_gym.py" 2>/dev/null \
+                && ok "Gym patch 0050: ClaudeCodeNemoGym (uploaded release binary, capture-safe settings)" \
+                || bad "Gym patch 0050 missing (ClaudeCodeNemoGym, custom_agents/claude_code_pod/install-claude-code.sh.j2)"
+            # without it a Claude Code rollout that ran into the context limit reads as ok
+            grep -q "def claude_code_end_flags" "${g}/responses_api_agents/harbor_agent/failure_classes.py" 2>/dev/null \
+                && ok "Gym patch 0050: failure classes from Claude Code's events (agent/claude-code.txt)" \
+                || bad "Gym patch 0050 missing (claude_code_end_flags in harbor_agent/failure_classes.py)"
+            # without it Claude Code's echo of a call (schema defaults filled in, string numbers converted) matches no
+            # parent and the rollout is masked (probe: Edit's replace_all)
+            grep -q "def normalize_to_schema" "${g}/nemo_gym/token_id_capture/fingerprint.py" 2>/dev/null \
+                && ok "Gym patch 0051: tool calls compared against the request's tool schemas (Claude Code's echo)" \
+                || bad "Gym patch 0051 missing (normalize_to_schema in nemo_gym/token_id_capture/fingerprint.py)"
+            # without it an overflow makes Claude Code re-send its request with a resume prompt (one more root each)
+            grep -q "_is_context_overflow_placeholder" "${g}/nemo_gym/base_responses_api_model.py" 2>/dev/null \
+                && ok "Gym patch 0051: context overflow answered with 400 prompt is too long on /v1/messages" \
+                || bad "Gym patch 0051 missing (_is_context_overflow_placeholder in nemo_gym/base_responses_api_model.py)" ;;
         *) bad "check_gym_agents: no checks for agent '$1'" ;;
     esac
     return "${fails}"

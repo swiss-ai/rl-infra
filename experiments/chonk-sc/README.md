@@ -1,4 +1,4 @@
-# Apertus 2 Chonk on NeMo-RL's Single-Controller path (step 0, run A, run B, run S, run OV, run PV)
+# Apertus 2 Chonk on NeMo-RL's Single-Controller path (step 0, run A, run B, run S, run OV, run PV, run CV)
 
 **New here? Start with `TESTING.md`**: prerequisites, commands and expected results of runs V and OV at 64K.
 **`PORTING.md`**: which pieces to take for another model, task set, cluster or harness.
@@ -19,6 +19,7 @@ i.e. vLLM DP4 per node through NVIDIA-NeMo/RL#2517) trained through
 | `run-v.sh`, `run-v-24k.sh` | run V: Terminus-2 on Kostas' verified tasks, Gym entrypoint (not SC), 24k on 20 nodes; `CTX=65536`: long context |
 | `run-agent-v.sh`, `run-agent-v.yaml`, `run-ov.yaml` | run OV: OpenCode in the pod on run V's verified tasks, SC + token capture, 24k on 20 nodes; `CTX=65536`: long context |
 | `run-pv.yaml` | run PV (`run-agent-v.sh AGENT=pi`): the pi coding agent instead of OpenCode; not run on the cluster yet |
+| `run-cv.yaml` | run CV (`run-agent-v.sh AGENT=claude-code`): Claude Code instead of OpenCode; probed against a stub (`../claude-code-probe/`), not run on the cluster yet |
 | `common.sh` | config composition, the long-context profile of runs V and OV, and the clone / Gym checks, shared by the scripts |
 
 Runs A and B: 3 steps, `async_rl` sampler `in_order` with lookahead 0 (synchronous), one chunk per
@@ -318,6 +319,36 @@ What to look at in the smoke: `agent/setup/` (install), `agent/command-0/` (retu
 `stopReason` of the last assistant message), `agent/pi-agent/` (the written config), the capture's rejected rows
 (each extra or rewritten call masks the rollout), and in `model-calls/` that the requests carry no `store`,
 `reasoning_effort` or `developer` role.
+
+## Run CV: Claude Code on the verified tasks (`run-agent-v.sh AGENT=claude-code`)
+
+Run OV with Anthropic's Claude Code CLI (2.1.326) instead of OpenCode: same tasks, layout, tunnel, token capture and
+long-context profile; config `../harbor-capture-sc/claude-code-sc.yaml` and `run-cv.yaml` in place of
+`opencode-sc.yaml` and `run-ov.yaml`. Claude Code speaks Anthropic Messages to the Gym model server's `/v1/messages`.
+Gym patch 0048 (`ClaudeCodeNemoGym`): the native release binary is fetched once and gzipped into `$CC_DIR`
+(`$SCRATCH/claude-code`, `fetch-claude-code.sh`; about 170 MB per sandbox, the image needs only gzip) and uploaded
+into each sandbox. Claude Code runs with compaction, retries, the non-streaming fallback, sub-agents, web tools, MCP
+and the task repository's settings and hooks off, with `Bash`, `Read`, `Edit`, `Write`, `Glob`, `Grep`.
+`max_turns` is its own `--max-turns`; the failure classes read its stream-json events in `agent/claude-code.txt`.
+Gym patch 0049 is needed with it: the fingerprint compares tool calls against the request's tool schemas (Claude
+Code echoes `Edit` with `replace_all: false` filled in), tool-call arguments that are not a JSON object reach it as
+`{"_ng_unparsed_arguments": ...}`, and the context-overflow placeholder is answered with a 400 "prompt is too long"
+on `/v1/messages`, which ends the episode. Claude Code is ended at `CC_TIMEOUT_SEC` (1740 s; at long context
+`AGENT_CAP - 60`); `CC_PROFILE=bare` swaps its system prompt for `--bare`'s minimal one. Claude Code is closed
+source, so the settings were checked by their effect with `../claude-code-probe/` (results in its README).
+**Untested on the cluster**: the one-node rung first (`AGENT=claude-code bash ../harbor-capture-sc/run.sh`), then a
+smoke run.
+
+```bash
+CTX=65536 RUNS=cv bash experiments/chonk-sc/check.sh
+SMOKE=1 CTX=65536 AGENT=claude-code DRY_RUN=1 bash experiments/chonk-sc/run-agent-v.sh
+SMOKE=1 CTX=65536 AGENT=claude-code bash experiments/chonk-sc/run-agent-v.sh      # 1 step, 4 x 8
+```
+
+What to look at in the smoke: `agent/setup/` (install time and the in-pod sha256 check), `agent/command-0/` (return
+code; 1 after an API error), `agent/claude-code.txt` (the `result` event's `terminal_reason`), the capture's
+rejected rows (each extra or rewritten call masks the rollout; roots 1, chains 1 per rollout), and in
+`model-calls/` that every request is `POST /v1/messages` with one system prompt per rollout.
 
 ## Long context: runs V and OV at 64K (`CTX=65536`)
 

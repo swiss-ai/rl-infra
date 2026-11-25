@@ -1,0 +1,17 @@
+# Run CV (run-agent-v.sh AGENT=claude-code): Claude Code on the verified tasks. Merged last, after
+# ../harbor-capture-sc/claude-code-sc.yaml and run-agent-v.yaml; the counterpart of run-ov.yaml and run-pv.yaml.
+# - Working directory: unset, the task image's WORKDIR, which differs per task (run-ov.yaml lists them); Claude Code's
+#   cwd is its project and part of its system prompt.
+# - Time: Harbor's agent cap is 1800 s (the tasks allow 3000 s); Claude Code is ended at 1740 s so its exit status and
+#   claude-code.txt are recorded and the verifier runs. CC_TIMEOUT_SEC overrides; at long context (CTX > 24576)
+#   run-agent-v.sh sets it to AGENT_CAP - 60 = 2940 s (common.sh agent_v_defaults).
+# - Install: always the uploaded binary (about 170 MB gzipped per sandbox through the OpenSandbox gateway;
+#   fetch-claude-code.sh puts it into CC_DIR on the login node), no internet in the sandbox, only gzip in the image.
+env:
+  nemo_gym:
+    harbor_agent:
+      responses_api_agents:
+        harbor_agent:
+          harbor_agent_kwargs:
+            claude_workdir: null
+            claude_timeout_sec: ${oc.decode:${oc.env:CC_TIMEOUT_SEC,1740}}

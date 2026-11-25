@@ -5,6 +5,9 @@
 #   AGENT=opencode  run OV: OpenCode 1.17.11 (as runs O / R2), the binary Breithorn mounts into each pod (Gym 0047)
 #   AGENT=pi        run PV: the pi coding agent 1.5.2 (Gym 0048), the release tree Breithorn mounts into each pod
 #                   (Gym 0049); untested on the cluster
+#   AGENT=claude-code  run CV: Claude Code 2.1.326 (Gym 0050, 0051; probed with experiments/claude-code-probe), the
+#                   release binary fetched once (fetch-claude-code.sh) and uploaded gzipped into each pod; untested
+#                   on the cluster
 # (another agent = a new AGENT value: common.sh agent_v_tag / agent_v_agent / agent_v_overlays / check_gym_agents,
 # its overlay run-<tag>.yaml, check.py)
 # The agent calls the model through the per-pod chisel tunnel (pod 127.0.0.1:8000 -> policy_model), and the token
@@ -22,7 +25,8 @@
 #   SMOKE=1 AGENT=opencode bash experiments/chonk-sc/run-agent-v.sh
 #   = STEPS=1 PROMPTS=4 JOB_TIME=02:30:00
 # 10 steps (the defaults): AGENT=opencode bash experiments/chonk-sc/run-agent-v.sh
-# Check first: RUNS=ov (AGENT=opencode) or RUNS=pv (AGENT=pi) bash experiments/chonk-sc/check.sh (same env as here).
+# Check first: RUNS=ov (AGENT=opencode), RUNS=pv (AGENT=pi) or RUNS=cv (AGENT=claude-code) bash
+# experiments/chonk-sc/check.sh (same env as here).
 # Env: AGENT (required), STEPS (10), PROMPTS (8; x 8 rollouts, train_global_batch_size PROMPTS x 8, a multiple
 # of the data-parallel size), SANDBOXES (64: harbor_agent concurrency = at most 64 pods on Breithorn; one pod per
 # trial, the agent pod is stopped before the verifier pod starts), CTX (24576; 16384 = the 12-node recipe),
@@ -32,7 +36,8 @@
 # fails), MODEL_CALLS (1: Gym model-call capture under $SCRATCH/harbor-jobs/<run>/model-calls; 0 off),
 # OPENCODE_TIMEOUT_SEC (1740; AGENT_CAP - 60 when AGENT_CAP is set), OPENCODE_VERSION, OPENCODE_DEBUG, CHISEL_DIR,
 # (chisel and the agent in the pods: Breithorn's read-only mounts under /opt/rl-tools, Gym 0047/0049); for
-# AGENT=pi: PI_TIMEOUT_SEC (as OPENCODE_TIMEOUT_SEC), PI_VERSION
+# AGENT=pi: PI_TIMEOUT_SEC (as OPENCODE_TIMEOUT_SEC), PI_VERSION; for AGENT=claude-code: CC_TIMEOUT_SEC (as
+# OPENCODE_TIMEOUT_SEC), CC_VERSION, CC_PROFILE (default or bare), CC_DIR ($SCRATCH/claude-code)
 # ($SCRATCH/chisel), the long-context knobs (common.sh: SFT_CKPT, THINKING, CP, KCP, CAP, NCCL_MIN, MAX_NEW, MAX_TURNS,
 # AGENT_CAP, TTL, MASK_AGENT_TIMEOUT, MASK_OVERFLOW, KCP_MEGATRON_DIR, KCP_FLA_DIR, KCP_EDF_NAME, HANG_*),
 # and as run-v.sh: VERIFIED_STORE, HARBOR_ROOT ($SCRATCH/osb/harbor_verified), COLLECT_ARGS, EXCLUDE_CAMPAIGNS,
@@ -144,16 +149,25 @@ for chk in check_gym_capture "check_gym_agents ${AGENT}" check_nemo_rl_clone; do
         exit 1
     fi
 done
-for v in OPENCODE_VERSION OPENCODE_TIMEOUT_SEC OPENCODE_DEBUG PI_VERSION PI_TIMEOUT_SEC; do
+for v in OPENCODE_VERSION OPENCODE_TIMEOUT_SEC OPENCODE_DEBUG PI_VERSION PI_TIMEOUT_SEC CC_VERSION CC_TIMEOUT_SEC \
+        CC_PROFILE; do
     [[ -z "${!v:-}" ]] || export "${v}"
 done
 # chisel: the client runs on the node (linux arm64, from CHISEL_DIR); the server in each pod is Breithorn's mounted
 # linux amd64 binary (tunnel-sc.yaml). The agent is mounted too: nothing to fetch for the pods.
 export CHISEL_VERSION="${CHISEL_VERSION:-1.12.0}" CHISEL_DIR="${CHISEL_DIR:-${SCRATCH}/chisel}"
 bash "${APERTUS2_DIR}/fetch-chisel.sh"
-echo "== chisel client on the node: ${CHISEL_DIR}/chisel_${CHISEL_VERSION}_linux_arm64; in the pods (mounted):" \
-     "/opt/rl-tools/chisel/${CHISEL_VERSION}/chisel, ${AGENT} $([[ "${AGENT}" == pi ]] \
-     && echo "/opt/rl-tools/pi/${PI_VERSION:-1.5.2}/pi/pi" || echo "/opt/rl-tools/opencode/${OPENCODE_VERSION:-1.17.11}/opencode")"
+if [[ "${AGENT}" == claude-code ]]; then
+    export CC_DIR="${CC_DIR:-${SCRATCH}/claude-code}"
+    bash "${APERTUS2_DIR}/fetch-claude-code.sh"
+fi
+if [[ "${AGENT}" == claude-code ]]; then
+    echo "== Claude Code in the pods: uploaded gzipped from ${CC_DIR} (not mounted)"
+else
+    echo "== chisel client on the node: ${CHISEL_DIR}/chisel_${CHISEL_VERSION}_linux_arm64; in the pods (mounted):" \
+         "/opt/rl-tools/chisel/${CHISEL_VERSION}/chisel, ${AGENT} $([[ "${AGENT}" == pi ]] \
+         && echo "/opt/rl-tools/pi/${PI_VERSION:-1.5.2}/pi/pi" || echo "/opt/rl-tools/opencode/${OPENCODE_VERSION:-1.17.11}/opencode")"
+fi
 
 TASK_COPY="${OUT}/configs/${RUN}-task.yaml"
 verified_task_copy "${TASK_COPY}"
@@ -168,6 +182,7 @@ echo "== run ${RUN} (${AGENT}): ${STEPS} steps, ${PROMPTS} x 8 rollouts, at most
      "recipe $(basename "${AGENT_V_RECIPE}"), GATEWAY_PROXY=${GATEWAY_PROXY}, model calls ${MODEL_CALLS}; Harbor trial dirs in ${JOBS}"
 AGENT_END="${OPENCODE_TIMEOUT_SEC:-1740}"
 [[ "${AGENT}" != pi ]] || AGENT_END="${PI_TIMEOUT_SEC:-1740}"
+[[ "${AGENT}" != claude-code ]] || AGENT_END="${CC_TIMEOUT_SEC:-1740}"
 [[ "${LONG_CTX}" != 1 ]] || echo "== long context: SFT ${SFT_CKPT}, thinking ${THINKING}, CP ${CP} KCP ${KCP}, cap ${CAP:-none}," \
      "${MAX_NEW:-6144} tokens per turn, ${MAX_TURNS:-30} turns, agent cap ${AGENT_CAP:-1800} s, ${AGENT} ends at ${AGENT_END} s," \
      "TTL ${TTL:-3600} s, mask agent timeout ${MASK_AGENT_TIMEOUT}, mask overflow ${MASK_OVERFLOW}, recipe copy ${AGENT_V_RECIPE}"

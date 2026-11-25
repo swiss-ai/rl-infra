@@ -42,8 +42,9 @@ The previous smoke test (4 sandboxes, ~7 min) is still one command:
 | `terminus-sc.yaml` | task: micro-tasks via `harbor_agent` + Terminus-2, Single-Controller blocks, token capture |
 | `opencode-sc.yaml` | overlay (`AGENT=opencode`): OpenCode (pinned binary in the pod) instead of Terminus-2, model via the tunnel, `sampling_overrides` |
 | `mini-sc.yaml` | overlay (`AGENT=mini`): mini-swe-agent (installed in the pod) instead of Terminus-2, model via the tunnel |
+| `claude-code-sc.yaml` | overlay (`AGENT=claude-code`): Claude Code (release binary uploaded into the pod) instead of Terminus-2, Anthropic Messages via the tunnel, `sampling_overrides`; probed in `../claude-code-probe/`, untested on the cluster |
 | `tunnel-sc.yaml` | overlay (`TUNNEL=1`): per-sandbox reverse tunnel, sandbox `127.0.0.1:8000` -> `policy_model` |
-| `run.sh` | `AGENT=terminus` (default), `AGENT=mini` or `AGENT=opencode`; calls `run-harbor-osb.sh` |
+| `run.sh` | `AGENT=terminus` (default), `AGENT=mini`, `AGENT=opencode` or `AGENT=claude-code`; calls `run-harbor-osb.sh` |
 | `../../backends/nemo-rl/apertus2/patches/gym/0011-0013` | Kostas Pitas (from `main`'s Harbor 0.25.0 port): Harbor 0.25.0 (separate verifier environments), its job options and exec user, `image_auth_file`. 0014-0031 are ported onto them (`research/reports/2026-11-11-gym-patches-on-harbor-0.25.md` in the workspace, not in this repo) |
 | `../../backends/nemo-rl/apertus2/patches/gym/0014-*.patch` | `harbor_agent` builds the agent's model URL with `base_url_for_run` (rollout capture prefix); new `harbor_model_base_url` |
 | `../../backends/nemo-rl/apertus2/patches/gym/0015-*.patch` | `OpenCodeNemoGym` agent; no masking of empty-output rollouts under capture |
@@ -80,10 +81,11 @@ The previous smoke test (4 sandboxes, ~7 min) is still one command:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AGENT` | `terminus` | `terminus`: Terminus-2, loop on the node, commands in the pod (task `terminus-sc.yaml`). `mini`: mini-swe-agent installed and run in the pod, model through the tunnel (adds `mini-sc.yaml`, forces `TUNNEL=1`, needs patch 0018). `opencode`: OpenCode installed and run in the pod, model through the tunnel (adds `opencode-sc.yaml`, forces `TUNNEL=1`, needs patches 0023-0029). Anything else is refused. |
+| `AGENT` | `terminus` | `terminus`: Terminus-2, loop on the node, commands in the pod (task `terminus-sc.yaml`). `mini`: mini-swe-agent installed and run in the pod, model through the tunnel (adds `mini-sc.yaml`, forces `TUNNEL=1`, needs patch 0018). `opencode`: OpenCode installed and run in the pod, model through the tunnel (adds `opencode-sc.yaml`, forces `TUNNEL=1`, needs patches 0023-0029). `claude-code`: Claude Code uploaded and run in the pod, model through the tunnel (adds `claude-code-sc.yaml`, forces `TUNNEL=1`, needs patches 0048 and 0049, fetches the binary with `fetch-claude-code.sh`). Anything else is refused. |
 | `OPENCODE_VERSION` | `1.17.11` | `AGENT=opencode` only: OpenCode release installed in each pod; patch 0026's config keys were checked against 1.17.11 (another version needs `opencode_sha256` and a re-check). |
 | `OPENCODE_TIMEOUT_SEC` | `870` | `AGENT=opencode` only: OpenCode's own time limit (`timeout`), below the agent timeout. |
 | `OPENCODE_DEBUG` | `false` | `AGENT=opencode` only: `true` writes OpenCode's debug log into `agent/opencode.txt`. |
+| `CC_VERSION`, `CC_TIMEOUT_SEC`, `CC_PROFILE`, `CC_DIR` | `2.1.326`, `870`, `default`, `$SCRATCH/claude-code` | `AGENT=claude-code` only: Claude Code release (another one needs `claude_sha256` and the probe again), its own time limit below the agent timeout, `bare` for `--bare`'s minimal system prompt, and where the gzipped binary is kept. |
 | `MSWEA_VERSION` | `8e8a515f...` (mini-sc.yaml) | `AGENT=mini` only: git ref of `li-boxuan/mini-swe-agent` (Harbor's install source) installed in each pod. |
 | `TUNNEL` | `0` | `1`: add `tunnel-sc.yaml` (needs patch 0016); fetches chisel into `CHISEL_DIR` (`$SCRATCH/chisel`) on the login node first. Run name gets `-tunnel`. |
 | `HARBOR_ROOT` | `$SCRATCH/osb/harbor_micro` | micro-task tree (`tasks/`, `train.jsonl`, `validation.jsonl`) |

@@ -13,7 +13,7 @@
 # Exits non-zero on any failure.
 #
 # Env: RUNS ("a b s", default; "o" = run S with AGENT=opencode, check it without the smoke overrides; "w" = o with TASKS=swe-lego, on its own;
-# "ov" = run-agent-v.sh AGENT=opencode on the verified tasks, on its own (RUNS=ov), "pv" the same with AGENT=pi (RUNS=pv), with
+# "ov" = run-agent-v.sh AGENT=opencode on the verified tasks, on its own (RUNS=ov), "pv" the same with AGENT=pi (RUNS=pv), "cv" with AGENT=claude-code (RUNS=cv), with
 # run-agent-v.sh's env (SMOKE, STEPS, PROMPTS, SANDBOXES, CTX, GATEWAY_PROXY, MODEL_CALLS, HARBOR_ROOT, the long-context
 # knobs of common.sh: CTX=65536 checks the 64K profile, ...) and its command-line overrides; credential files are only
 # tested for presence), CHECK_PYTHON (a Python >= 3.12 with omegaconf, hydra-core, pydantic;
@@ -36,9 +36,9 @@ mkdir -p "${WORK}"
 export SCRATCH RL_INFRA_DIR="${ROOT}"
 # run W reads the SWE-Lego tasks (run-s.sh TASKS=swe-lego); check it on its own (RUNS=w)
 if [[ " ${RUNS} " == *" w "* ]]; then export HARBOR_ROOT="${HARBOR_ROOT:-${SCRATCH}/osb/swe_lego_v05}"; fi
-# runs OV / PV read the verified tasks (run-agent-v.sh); check one on its own (RUNS=ov, RUNS=pv)
+# runs OV / PV / CV read the verified tasks (run-agent-v.sh); check one on its own (RUNS=ov, RUNS=pv, RUNS=cv)
 AV_RUNS=0
-if [[ " ${RUNS} " == *" ov "* || " ${RUNS} " == *" pv "* ]]; then
+if [[ " ${RUNS} " == *" ov "* || " ${RUNS} " == *" pv "* || " ${RUNS} " == *" cv "* ]]; then
     AV_RUNS=1
     agent_v_defaults || exit 1    # HARBOR_ROOT ($SCRATCH/osb/harbor_verified), CTX, STEPS, PROMPTS, ... (exported)
     long_ctx_summary
@@ -60,6 +60,9 @@ export NEMO_GYM_USER="${NEMO_GYM_USER:-${USER}}" NEMO_GYM_WORKLOAD="${NEMO_GYM_W
 export NEMO_GYM_RUN_ID="${NEMO_GYM_RUN_ID:-chonk-sc-check-s}"
 # run O (run S with AGENT=opencode): what run-s.sh exports for tunnel-sc.yaml
 export CHISEL_DIR="${CHISEL_DIR:-${SCRATCH}/chisel}"
+# run CV: where run-agent-v.sh fetches the Claude Code binary (claude-code-sc.yaml); OpenCode and pi are
+# mounted into the pods (Gym 0047/0049), so they have no archive dir here
+export CC_DIR="${CC_DIR:-${SCRATCH}/claude-code}"
 total=0
 
 echo "== (b) NeMo-RL clone"
@@ -71,7 +74,7 @@ if [[ " ${RUNS} " == *" b "* || " ${RUNS} " == *" s "* || " ${RUNS} " == *" o "*
 fi
 for run in ${RUNS}; do
     case "${run}" in
-        ov|pv) echo "== (c) Gym checkout for run ${run^^} (the agent in the pod, tunnel)"
+        ov|pv|cv) echo "== (c) Gym checkout for run ${run^^} (the agent in the pod, tunnel)"
             check_gym_agents "$(agent_v_agent "${run}")"; total=$((total + $?)) ;;
     esac
 done
@@ -110,7 +113,7 @@ else
         # OV: the recipe's own node count (20 at 24k) and run-agent-v.sh's overrides before the user's
         RUN_ARGS=()
         nodes="${NODES}"
-        if [[ "${run}" == ov || "${run}" == pv ]]; then
+        if [[ "${run}" == ov || "${run}" == pv || "${run}" == cv ]]; then
             nodes="$(awk '/^cluster:/{c=1; next} c && /^[^ ]/{c=0} c && $1 == "num_nodes:" {print $2}' "${AGENT_V_RECIPE}")"
             agent_v_args "${AGENT_V_TRAIN}" "${RL_REGISTRY_CRED_FILE}" "${AGENT_V_JOBS}" || { total=$((total + 1)); continue; }
             RUN_ARGS=("${AGENT_V_ARGS[@]}")
@@ -126,7 +129,7 @@ else
         if command -v yq >/dev/null; then
             echo "   preflight.sh (as launch.sh runs it before sbatch):"
             # as launch.sh: the driver's cluster.* overrides first, the run launcher's JOB_TIME default
-            case "${run}" in a) jt=01:30:00 ;; b) jt=02:30:00 ;; w) jt=04:00:00 ;; ov|pv) jt=08:00:00 ;; *) jt=03:00:00 ;; esac
+            case "${run}" in a) jt=01:30:00 ;; b) jt=02:30:00 ;; w) jt=04:00:00 ;; ov|pv|cv) jt=08:00:00 ;; *) jt=03:00:00 ;; esac
             NEMO_RL_DIR="${NEMO_RL_DIR}" JOB_TIME="${JOB_TIME:-${jt}}" \
                 bash "${ROOT}/backends/nemo-rl/preflight.sh" "${cfg}" "${nodes}" \
                 cluster.num_nodes="${nodes}" cluster.gpus_per_node=4 ${RUN_ARGS[@]+"${RUN_ARGS[@]}"} "$@" | sed 's/^/   | /'
@@ -154,10 +157,15 @@ if [[ "${AV_RUNS}" == 1 ]]; then
             || echo "  WARN  no prepared tasks in ${HARBOR_ROOT} and no task store ${store} (VERIFIED_STORE)"; }
     [[ -s "${AGENT_V_TRAIN}" ]] && echo "  ok    filtered rows ${AGENT_V_TRAIN}: $(wc -l < "${AGENT_V_TRAIN}")" \
         || echo "  note  ${AGENT_V_TRAIN} not written yet (run-agent-v.sh writes it)"
-    echo "  note  chisel and the agent in the pods: Breithorn's read-only mounts under /opt/rl-tools (each pod checks they are there and logs their --version)"
+    echo "  note  chisel and the agent in the pods: Breithorn's read-only mounts under /opt/rl-tools (each pod checks they are there and logs their --version); Claude Code is uploaded"
     # the client runs on the node (GH200: linux arm64); the pods' chisel is mounted
     f="${CHISEL_DIR}/chisel_${CHISEL_VERSION:-1.12.0}_linux_arm64"
     [[ -x "${f}" ]] && echo "  ok    chisel client for the node ${f}" || echo "  note  ${f} missing (run-agent-v.sh fetches it)"
+    if [[ " ${RUNS} " == *" cv "* ]]; then
+        f="${CC_DIR}/${CC_VERSION:-2.1.326}/claude-linux-x64.gz"
+        [[ -s "${f}" && -s "${f}.sha256" ]] && echo "  ok    Claude Code binary ${f}" \
+            || echo "  note  ${f} (+ .sha256) missing (run-agent-v.sh fetches it)"
+    fi
     [[ -r "${RL_REGISTRY_CRED_FILE}" && -s "${RL_REGISTRY_CRED_FILE}" ]] && echo "  ok    registry credentials file ${RL_REGISTRY_CRED_FILE} (not read)" \
         || echo "  WARN  no registry credentials file ${RL_REGISTRY_CRED_FILE} (the verified images are private)"
     # long context: the KCP inputs (common.sh kcp_setup; experiments/long-context/setup-kcp.sh) and how the launchers

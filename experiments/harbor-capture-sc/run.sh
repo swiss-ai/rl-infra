@@ -4,12 +4,15 @@
 #   bash experiments/harbor-capture-sc/run.sh [overrides...]
 # Env:
 #   AGENT                  terminus (default), mini (mini-swe-agent in the sandbox, implies TUNNEL=1; Gym
-#                          patch 0018, mini-sc.yaml) or opencode (OpenCode in the sandbox, implies TUNNEL=1;
-#                          Gym patches 0024+0029, opencode-sc.yaml)
+#                          patch 0018, mini-sc.yaml), opencode (OpenCode in the sandbox, implies TUNNEL=1;
+#                          Gym patches 0024+0029, opencode-sc.yaml) or claude-code (Claude Code in the sandbox,
+#                          implies TUNNEL=1; Gym patches 0048+0049, claude-code-sc.yaml; untested on the cluster)
 #   MSWEA_VERSION          mini only: li-boxuan/mini-swe-agent git ref (default: the commit pinned in mini-sc.yaml)
 #   OPENCODE_VERSION       opencode only: default 1.17.11 (the version whose keys 0026 was checked against)
 #   OPENCODE_TIMEOUT_SEC   opencode only: OpenCode's own time limit, below the agent timeout (default 870)
 #   OPENCODE_DEBUG         opencode only: true = OpenCode debug logs in agent/opencode.txt (default false)
+#   CC_VERSION, CC_TIMEOUT_SEC, CC_PROFILE, CC_DIR
+#                          claude-code only: as claude-code-sc.yaml (2.1.326, 870, default, $SCRATCH/claude-code)
 #   TUNNEL                 1: per-sandbox reverse tunnel sandbox 127.0.0.1:8000 -> policy_model (Gym patch
 #                          0016, tunnel-sc.yaml); every trial checks GET /health through it before starting.
 #                          With terminus the agent still calls the model from the node (step A: the tunnel
@@ -59,9 +62,26 @@ case "${AGENT}" in
         TUNNEL=1
         export OVERLAY="${HERE}/opencode-sc.yaml"
         ;;
-    *) echo "ERROR: AGENT must be terminus, mini or opencode, not ${AGENT}" >&2; exit 1 ;;
+    claude-code)
+        grep -q "class ClaudeCodeNemoGym" \
+            "${GYM_DIR}/responses_api_agents/harbor_agent/custom_agents/claude_code_nemo_gym.py" 2>/dev/null || {
+            echo "ERROR: AGENT=claude-code needs Gym patch 0048 (Claude Code adapter) in ${GYM_DIR}; re-run setup-gym.sh as above" >&2
+            exit 1
+        }
+        # without 0049 Claude Code's echo of an Edit call matches no parent and the rollout is masked
+        grep -q "def normalize_to_schema" "${GYM_DIR}/nemo_gym/token_id_capture/fingerprint.py" 2>/dev/null || {
+            echo "ERROR: AGENT=claude-code needs Gym patch 0049 (Messages under capture) in ${GYM_DIR}; re-run setup-gym.sh as above" >&2
+            exit 1
+        }
+        # the agent calls the model from inside the sandbox: only through the tunnel
+        TUNNEL=1
+        export CC_DIR="${CC_DIR:-${SCRATCH}/claude-code}"
+        bash "${APERTUS2_DIR}/fetch-claude-code.sh"
+        export OVERLAY="${HERE}/claude-code-sc.yaml"
+        ;;
+    *) echo "ERROR: AGENT must be terminus, mini, opencode or claude-code, not ${AGENT}" >&2; exit 1 ;;
 esac
-for v in OPENCODE_VERSION OPENCODE_TIMEOUT_SEC OPENCODE_DEBUG; do
+for v in OPENCODE_VERSION OPENCODE_TIMEOUT_SEC OPENCODE_DEBUG CC_VERSION CC_TIMEOUT_SEC CC_PROFILE; do
     [[ -z "${!v:-}" ]] || export "${v}"
 done
 [[ -z "${MSWEA_VERSION:-}" ]] || export MSWEA_VERSION
