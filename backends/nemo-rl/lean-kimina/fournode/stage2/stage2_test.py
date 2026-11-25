@@ -140,8 +140,14 @@ def test_budget_calibration_and_four_nodes():
     assert round(today8["host"]["fp32 grad copies (optimizer)"]) == 54
     assert not budget.budget(4, 2, "today")["host_fits"]
     assert not budget.budget(4, 2, "expert-offload")["host_fits"]
-    four = budget.budget(4, 2, "scratch-mv")
-    assert four["gpu_fits"] and four["host_fits"]
+    # coarse-grained fp8 experts keep pinned fp8 copies too: with m, v on scratch the host still overflows at 4 nodes
+    fp8 = budget.budget(4, 2, "scratch-mv")
+    assert fp8["gpu_fits"] and not fp8["host_fits"] and round(fp8["host_total"]) == 491
+    bf16_pp4 = budget.budget(4, 4, "bf16-scratch-mv")
+    assert bf16_pp4["gpu_fits"] and bf16_pp4["host_fits"] and round(bf16_pp4["gpu_peak"][1]) == 89
+    assert not budget.budget(4, 2, "bf16-scratch-mv")["gpu_fits"]
+    c2c = budget.c2c_per_gpu(fp8)
+    assert 4000 < c2c["H2D"] < 4400 and budget.c2c_per_gpu(bf16_pp4)["H2D"] < 20
     assert budget.budget(4, 3, "today") is None                     # 16 GPUs don't split into 3 stages
 
 

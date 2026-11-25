@@ -8,19 +8,25 @@ of gradient copies per trainer node.
 python3 budget.py --nodes 4 --pp 2 4 --detail
 ```
 
-## Memory at 4 nodes (budget.py, PP2 EP8)
+## Memory at 4 nodes (budget.py)
 
-| Option | GPU static / peak | Host per node | Scratch I/O per step |
-|---|---|---|---|
-| today's settings | 54 / 83-97 GB | 648 GB, does not fit | 0 |
-| + expert offloading | 42 / 71-85 GB | 648 GB, does not fit | 0 |
-| + m, v on scratch (**target**) | 42 / 71-85 GB | 439 GB | 433 GB per node |
-| + expert grads on host used in place, master on scratch | 17 / 46-60 GB | 335 GB | 650 GB per node |
+```bash
+python3 budget.py --nodes 4 --pp 2 4 --option bf16-scratch-mv scratch-mv --c2c --detail
+```
 
-The host figure assumes the measured 115 GB of overhead per trainer node. Job 4008441's trainers used 274 GB in all, so
-the real overhead is probably lower. Colocated generation frees the gradient buffers (Megatron's `offload_to_cpu`
-resizes them to 0) and copies only the dense weights to the host. Stage 1's `stream-adam` measures whether the scratch
-I/O fits inside generation.
+| Layout | Experts in training | GPU static / peak | Host per node | C2C per GPU per step |
+|---|---|---|---|---|
+| PP2 EP8, m, v on scratch | bf16 on the GPU | 54 / 83-97 GB, does not fit | 439 GB | 18 GB |
+| PP2 EP8, m, v on scratch | fp8, offloaded | 44 / 73-87 GB | 491 GB, does not fit | 4.2 TB host to GPU |
+| PP4 EP4, m, v on scratch | bf16 on the GPU | 46 / 75-89 GB | 429 GB | 15 GB |
+| PP4 EP4, m, v on scratch | fp8, offloaded | 39 / 68-82 GB | 480 GB, does not fit | 8.4 TB host to GPU |
+
+Scratch I/O is 433 GB per node per step in every row. Corrected 2026-11-25: the coarse-grained expert offload (the
+only mode NeMo-RL supports) keeps pinned fp8 copies of every expert in both orientations next to the bf16 ones
+(+51.5 GB per node), and its per-layer GPU buffers grow with PP. The host figure assumes the measured 115 GB of
+overhead per trainer node; job 4008441's trainers used 274 GB in all, so the real overhead may be about half, which
+would make the fp8 rows fit with little margin. GPU peaks add the activations and communication buffers measured on 8
+nodes with EP16. Colocated generation frees the gradient buffers (Megatron's `offload_to_cpu` resizes them to 0).
 
 ## The pieces
 

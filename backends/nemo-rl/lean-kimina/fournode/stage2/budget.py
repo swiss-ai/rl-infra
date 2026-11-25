@@ -10,8 +10,11 @@ measured overheads come from job 4008441 (8 trainer nodes, PP2, EP16): GPU activ
 
 Options (cumulative left to right is not implied; each is one configuration):
   today          no expert offload; Adam state and fp32 gradient copies on the host (HybridDeviceOptimizer, fraction 1)
-  expert-offload Megatron-LM-MoE's offloading experts (bf16 experts in pinned host memory, fp8 compute copies streamed
-                 per layer, coarse-grained, no extra fp8 storage); expert fp32 main grads stay on the GPU
+  bf16-scratch-mv  today's bf16 experts on the GPU (no expert offload) + Adam's m and v on scratch (ScratchAdamW)
+  expert-offload Megatron-LM-MoE's offloading experts, coarse-grained (what NeMo-RL supports): bf16 experts in pinned
+                 host memory plus pinned fp8 copies in both orientations (re-quantized on the GPU once per pass), each
+                 layer's fp8 copies reloaded for its forward and again for its backward, matmuls in fp8; expert fp32
+                 main grads stay on the GPU
   scratch-mv     expert-offload + Adam's m and v on scratch, streamed during the step (master stays on the host)
   scratch-all    expert-offload + expert main grads on the host (moe_offload_main_grad), used in place by the CPU
                  optimizer (no second copy), and master, m and v on scratch
@@ -28,7 +31,8 @@ GPU_TOTAL = 95.0          # usable per GH200 GPU
 HOST_TOTAL = 450.0        # Slurm's default job memory per node (the Grace LPDDR)
 HOST_OVERHEAD = 115.0     # measured per trainer node
 VLLM_FP8 = 1.0            # bytes per parameter of vLLM's fp8 weights kept on the host during level-1 sleep
-OPTIONS = ("today", "expert-offload", "scratch-mv", "scratch-all")
+OPTIONS = ("today", "bf16-scratch-mv", "expert-offload", "scratch-mv", "scratch-all")
+MOE_LAYERS = 39
 
 
 def layout(nodes, pp):
@@ -52,15 +56,23 @@ def budget(nodes, pp, option):
     host = {"overhead (measured)": HOST_OVERHEAD,
             "vLLM fp8 weights while asleep": VLLM_FP8 * TOTAL_PARAMS / nodes / GB}
     per_node = 4 / GB                                # x4 GPUs per node, in GB
-    if option == "today":
+    layer_e = e * pp / MOE_LAYERS                    # one MoE layer's local experts on this GPU
+    if option in ("today", "bf16-scratch-mv"):
         gpu["expert bf16 weights"] = 2 * e
         gpu["expert fp32 grads"] = 4 * e
-        host["Adam master+m+v (fp32)"] = 12 * opt_params * per_node
         host["fp32 grad copies (optimizer)"] = 4 * opt_params * per_node
         host["Megatron weights while vLLM runs (bf16)"] = 2 * (e + d) * per_node
+        if option == "today":
+            host["Adam master+m+v (fp32)"] = 12 * opt_params * per_node
+        else:
+            host["Adam master (fp32)"] = 4 * opt_params * per_node
+            host["m+v chunk buffers"] = 8.0
     else:
-        gpu["expert fp8 staging (2 stages)"] = 2 * 2 * e / 39       # one MoE layer's experts, both orientations
+        # coarse-grained reload (experts_offloading_fp8_util.get_coarse_fp8_weights / MoEOffloadManager.reload)
+        gpu["expert fp8 reload slots (2 layers, both orientations)"] = 2 * 2 * layer_e
+        gpu["expert quantization scratch (bf16 + 2 x fp8, 1 layer)"] = 4 * layer_e
         host["expert bf16 weights (pinned)"] = 2 * e * per_node
+        host["expert fp8 copies, both orientations (pinned)"] = 2 * e * per_node
         host["Megatron dense weights while vLLM runs"] = 2 * d * per_node
         if option in ("expert-offload", "scratch-mv"):
             gpu["expert fp32 grads"] = 4 * e
@@ -71,7 +83,7 @@ def budget(nodes, pp, option):
             else:
                 host["m+v chunk buffers"] = 8.0
         else:  # scratch-all
-            gpu["expert fp32 grad staging"] = 4 * e / 39
+            gpu["expert fp32 grad staging"] = 4 * layer_e
             host["expert fp32 grads (= optimizer grads)"] = 4 * e * per_node
             host["dense fp32 grad copies"] = 4 * dopt * per_node
             host["master+m+v chunk buffers"] = 12.0
@@ -83,13 +95,32 @@ def budget(nodes, pp, option):
     out["gpu_fits"] = out["gpu_peak"][1] <= GPU_TOTAL
     out["host_fits"] = out["host_total"] <= HOST_TOTAL
     # bytes to and from scratch per node per optimizer step
-    if option == "scratch-mv":
+    if option in ("scratch-mv", "bf16-scratch-mv"):
         out["scratch_io_per_step"] = 2 * 8 * opt_params * per_node
     elif option == "scratch-all":
         out["scratch_io_per_step"] = 2 * 12 * opt_params * per_node
     else:
         out["scratch_io_per_step"] = 0.0
     return out
+
+
+def c2c_per_gpu(r, tokens_per_step=10.6e6, mb_tokens=16384, train_reloads=3, logprob_passes=1):
+    """GB over one GPU's CPU-GPU link (C2C) per GRPO step that depend on the option (optimizer grad/param copies,
+    the same in every option, are left out).
+
+    fp8 options: each microbatch reloads every local MoE layer's fp8 weights (2 bytes per param, both orientations)
+    for the forward, the recompute (activation checkpointing) and the backward, and once per log-prob pass; plus one
+    bf16 read and one fp8 write per param to re-quantize per pass. bf16 options: the colocated swap moves the bf16
+    weights to the host and back once per step. tokens_per_step: about 10.1 M generated (J1 of the 200-step run) plus
+    prompts; the microbatches of a pipeline replica all pass every GPU of that replica."""
+    e, d = r["expert_per_gpu"], r["dense_per_gpu"]
+    mbs = tokens_per_step / mb_tokens / r["dp"]
+    if r["option"] in ("today", "bf16-scratch-mv"):
+        return {"microbatches per GPU": mbs, "H2D": 2 * (e + d) / GB, "D2H": 2 * (e + d) / GB}
+    passes = 1 + logprob_passes
+    h2d = mbs * (train_reloads + logprob_passes) * 2 * e + passes * 2 * e + 2 * d
+    d2h = passes * 2 * e + 2 * d
+    return {"microbatches per GPU": mbs, "H2D": h2d / GB, "D2H": d2h / GB}
 
 
 def table(rows):
@@ -109,9 +140,15 @@ def main(argv=None):
     ap.add_argument("--pp", type=int, nargs="*", default=[1, 2, 4])
     ap.add_argument("--option", nargs="*", default=list(OPTIONS))
     ap.add_argument("--detail", action="store_true", help="every item of every row")
+    ap.add_argument("--c2c", action="store_true", help="CPU-GPU link traffic per GPU per step (c2c_per_gpu)")
     args = ap.parse_args(argv)
     rows = [b for n in args.nodes for p in args.pp for o in args.option if (b := budget(n, p, o))]
     print(table(rows))
+    if args.c2c:
+        print("\n| nodes | PP | option | microbatches per GPU | C2C H2D per GPU per step | C2C D2H |\n|---|---|---|---|---|---|")
+        for r in rows:
+            c = c2c_per_gpu(r)
+            print(f"| {r['nodes']} | {r['pp']} | {r['option']} | {c['microbatches per GPU']:.0f} | {c['H2D']:,.0f} GB | {c['D2H']:,.0f} GB |")
     if args.detail:
         for r in rows:
             print(f"\n{r['nodes']} nodes PP{r['pp']} {r['option']}")
