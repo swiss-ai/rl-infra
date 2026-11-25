@@ -10,7 +10,7 @@ on Alps. `run.sh` launches it through `../../run.sh` with these changes to the t
 | Rollouts per step | 64 x 8 = 512 | 128 x 8 = 1024 | `grpo.num_prompts_per_step` (`PROMPTS`) |
 | Global batch | 512 | 1024 (one optimizer step per step) | `policy.train_global_batch_size` (follows `PROMPTS`) |
 | Trajectory age | 2 | 4 | `grpo.async_grpo.max_trajectory_age_steps` (`AGE`) |
-| Weights & Biases | off | on (project `rl-swe-scalingtest`, entity `apertus`, run name = `RUN`) | `WANDB_PROJECT` / `WANDB_ENTITY` |
+| Weights & Biases | off | on (project `rl-swe-scalingtest`, entity `apertus`, run name = `RUN`) | `T2V1K_WANDB_PROJECT` / `WANDB_ENTITY` |
 
 Everything else is the task file's and the recipe's: 12 nodes (8 trainer, 4 vLLM), 16384 tokens per
 trajectory, 6144 per turn, 30 turns, 20 steps, no validation, no checkpoints, agent and verifier caps
@@ -43,8 +43,12 @@ STEPS=1 bash experiments/terminus2-verified-1k/run.sh       # one step first
 This branch pins Gym and NeMo-RL differently from other branches that use the default clone
 `${PROJECTS_DIR}/nemo-rl-apertus2`, and `setup.sh` / `setup-gym.sh` would reset that clone under their
 running and queued jobs (a job mounts the clone its EDF names when it starts, not when it is submitted).
-So `run.sh` here uses a clone, Gym venvs, a pydeps overlay and an EDF of its own (`*-t2v1k`; `NEMO_RL_DIR`,
-`GYM_VENV_DIR`, `PYDEPS_GYM_DIR`, `EDF_NAME` override). The first launch clones and sets it up.
+So `run.sh` here uses a clone (next to the shared one), Gym venvs, a pydeps overlay and an EDF of its own
+(`*-t2v1k`). It ignores `NEMO_RL_DIR`, `GYM_VENV_DIR`, `PYDEPS_GYM_DIR`, `EDF_NAME` and `WANDB_PROJECT` from the
+environment (a login shell that exports `NEMO_RL_DIR` would otherwise point it at the shared clone) and refuses
+to run on the shared clone or a shared EDF; `T2V1K_NEMO_RL_DIR`, `T2V1K_GYM_VENV_DIR`, `T2V1K_PYDEPS_GYM_DIR`,
+`T2V1K_EDF_NAME` and `T2V1K_WANDB_PROJECT` override. The first launch clones and sets it up; `DRY_RUN=1` runs
+the setup too.
 
 ## Risks at this size (not tested)
 

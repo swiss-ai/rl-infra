@@ -9,12 +9,15 @@
 # Env (defaults in brackets):
 #   SANDBOXES [1024], PROMPTS [128] (x 8 rollouts; the batch follows), AGE [4], STEPS [the task file's 20],
 #   RUN [t2-verified-1k-<date>], JOB_TIME [12:00:00], PARTITION [normal: Daint has no preemptable queue],
-#   WANDB_PROJECT [rl-swe-scalingtest], WANDB_ENTITY [apertus], the key from WANDB_API_KEY (environment) or, when that is
-#   unset, from WANDB_KEY_FILE [~/.w_and_b_key; read at job start by driver.sh], WANDB=0 turns W&B off,
+#   T2V1K_WANDB_PROJECT [rl-swe-scalingtest; a WANDB_PROJECT in the environment is ignored], WANDB_ENTITY [apertus],
+#   the key from WANDB_API_KEY (environment) or, when that is unset, from WANDB_KEY_FILE [~/.w_and_b_key; read at
+#   job start by driver.sh], WANDB=0 turns W&B off,
 #   HARBOR_ROOT [$SCRATCH/osb/harbor_verified], VERIFIED_STORE [the capstor task store], COLLECT_ARGS,
 #   EXCLUDE_CAMPAIGNS / EXCLUDE_TASKS [the campaign and the 5 tasks left out on Alps, see below; empty = none],
 #   RECIPE [recipes/apertus2-chonk-sft19374-alps-vllm-adamw-tools.yaml, 12 nodes],
-#   APERTUS_COMMON_URL [SSH], NEMO_RL_DIR / GYM_VENV_DIR / PYDEPS_GYM_DIR / EDF_NAME [this experiment's own].
+#   APERTUS_COMMON_URL [SSH], T2V1K_NEMO_RL_DIR / T2V1K_GYM_VENV_DIR / T2V1K_PYDEPS_GYM_DIR / T2V1K_EDF_NAME
+#   [this experiment's own; NEMO_RL_DIR, GYM_VENV_DIR, PYDEPS_GYM_DIR and EDF_NAME in the environment are ignored].
+# DRY_RUN=1 still runs the setup (run.sh), on this experiment's own clone.
 # Harbor trial dirs: $SCRATCH/harbor-jobs/<RUN>.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -23,12 +26,20 @@ ROOT="$(cd "${HERE}/../.." && pwd)"
 # This branch pins Gym (15 patches) and NeMo-RL (without 0057) differently from chonk-sc-harbor025, whose
 # runs use the default clone ${PROJECTS_DIR}/nemo-rl-apertus2. setup.sh / setup-gym.sh would reset that clone
 # under its running and queued jobs (a job mounts the clone named in its EDF when it starts, not when it is
-# submitted), so this experiment gets a clone, Gym venvs, a pydeps overlay and an EDF of its own.
-PROJECTS_DIR="$(source "${ROOT}/sites/load.sh" > /dev/null && rl_infra_load > /dev/null && echo "${PROJECTS_DIR}")"
-export NEMO_RL_DIR="${NEMO_RL_DIR:-${PROJECTS_DIR}/nemo-rl-apertus2-t2v1k}"
-export GYM_VENV_DIR="${GYM_VENV_DIR:-${SCRATCH}/nemo-rl-apertus2-t2v1k/gym-venvs}"
-export PYDEPS_GYM_DIR="${PYDEPS_GYM_DIR:-${SCRATCH}/nemo-rl-apertus2-t2v1k/pydeps-gym}"
-export EDF_NAME="${EDF_NAME:-nemo-rl-apertus2-t2v1k}"
+# submitted), so this experiment gets a clone, Gym venvs, a pydeps overlay and an EDF of its own. Never taken from
+# the generic variables: a NEMO_RL_DIR exported in the login shell pointed the first dry run at the shared clone,
+# and main's setup-gym.sh replaced its Gym patches (2026-11-25).
+SHARED_NEMO_RL_DIR="$(APERTUS2_DIR="${ROOT}/backends/nemo-rl/apertus2" && source "${ROOT}/sites/load.sh" > /dev/null \
+    && rl_infra_load "${ROOT}/backends/nemo-rl/apertus2/env" > /dev/null && echo "${NEMO_RL_DIR}")"
+export NEMO_RL_DIR="${T2V1K_NEMO_RL_DIR:-$(dirname "${SHARED_NEMO_RL_DIR}")/nemo-rl-apertus2-t2v1k}"
+export GYM_VENV_DIR="${T2V1K_GYM_VENV_DIR:-${SCRATCH}/nemo-rl-apertus2-t2v1k/gym-venvs}"
+export PYDEPS_GYM_DIR="${T2V1K_PYDEPS_GYM_DIR:-${SCRATCH}/nemo-rl-apertus2-t2v1k/pydeps-gym}"
+export EDF_NAME="${T2V1K_EDF_NAME:-nemo-rl-apertus2-t2v1k}"
+unset VLLM_RUNNER VLLM_APERTUS2   # follow NEMO_RL_DIR (backends/nemo-rl/apertus2/env)
+[[ "$(realpath -m "${NEMO_RL_DIR}")" != "$(realpath -m "${SHARED_NEMO_RL_DIR}")" ]] || {
+    echo "ERROR: ${NEMO_RL_DIR} is the shared NeMo-RL clone; this branch's setup would replace its patches" >&2; exit 1; }
+[[ "${EDF_NAME}" != nemo-rl-apertus2* || "${EDF_NAME}" == *t2v1k* ]] || {
+    echo "ERROR: EDF ${EDF_NAME} is a shared one; use T2V1K_EDF_NAME=<name with t2v1k>" >&2; exit 1; }
 
 TASK_STORE="${VERIFIED_STORE:-/capstor/store/cscs/swissai/infra01/datasets/swe_and_agentic_gym_datasets/harbor_verified_tasks}"
 HARBOR_ROOT="${HARBOR_ROOT:-${SCRATCH}/osb/harbor_verified}"
@@ -41,7 +52,9 @@ KEY="$(realpath -m "${OPENSANDBOX_API_KEY_FILE:-${HOME}/.opensandbox_token}")"
 # Weights & Biases (backends/nemo-rl/launch.sh): WANDB_PROJECT turns it on. The key: WANDB_API_KEY from the
 # environment (sbatch passes it on to the job), else driver.sh reads WANDB_KEY_FILE at job start.
 if [[ "${WANDB:-1}" != 0 ]]; then
-    export WANDB_PROJECT="${WANDB_PROJECT:-rl-swe-scalingtest}" WANDB_ENTITY="${WANDB_ENTITY:-apertus}"
+    [[ -z "${WANDB_PROJECT:-}" || "${WANDB_PROJECT}" == "${T2V1K_WANDB_PROJECT:-rl-swe-scalingtest}" ]] \
+        || echo "note: WANDB_PROJECT=${WANDB_PROJECT} in the environment is ignored (T2V1K_WANDB_PROJECT sets it)"
+    export WANDB_PROJECT="${T2V1K_WANDB_PROJECT:-rl-swe-scalingtest}" WANDB_ENTITY="${WANDB_ENTITY:-apertus}"
     if [[ -z "${WANDB_API_KEY:-}" ]]; then
         export WANDB_KEY_FILE="$(realpath -m "${WANDB_KEY_FILE:-${HOME}/.w_and_b_key}")"
         [[ -r "${WANDB_KEY_FILE}" ]] || {
