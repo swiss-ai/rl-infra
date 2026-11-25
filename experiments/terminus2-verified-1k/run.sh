@@ -60,7 +60,19 @@ if [[ "${WANDB:-1}" != 0 ]]; then
         [[ -r "${WANDB_KEY_FILE}" ]] || {
             echo "ERROR: W&B needs WANDB_API_KEY in the environment or the key file ${WANDB_KEY_FILE} (WANDB=0: no W&B)" >&2
             exit 1; }
+        wandb_key="$(< "${WANDB_KEY_FILE}")"; wandb_key_from="${WANDB_KEY_FILE} (as driver.sh reads it)"
+    else
+        wandb_key="${WANDB_API_KEY}"; wandb_key_from="WANDB_API_KEY"
     fi
+    # wandb.init refuses any other character (job 5452698 died at login after the allocation); the key is never
+    # printed, only what is wrong with it
+    if [[ ! "${wandb_key}" =~ ^[A-Za-z0-9_]+$ ]]; then
+        bad="$(printf '%s' "${wandb_key}" | LC_ALL=C tr -d 'A-Za-z0-9_' | od -An -c | tr -s ' ' | head -c 60)"
+        echo "ERROR: the W&B key in ${wandb_key_from} has characters W&B refuses:${bad:- (empty)}" >&2
+        echo "       (a path, whitespace, \\r or quotes?) e.g. export WANDB_API_KEY=\"\$(tr -d '[:space:]\"' < ~/.w_and_b_key)\"" >&2
+        exit 1
+    fi
+    unset wandb_key
 else
     unset WANDB_PROJECT WANDB_ENTITY
 fi
