@@ -11,11 +11,10 @@
 #       ~/projects/harbor_verified_tasks/capstor/store/cscs/swissai/infra01/datasets/swe_and_agentic_gym_datasets/harbor_verified_tasks \
 #       ~/projects/task_datasets/harbor_verified
 #   RUN=<run> bash run.sh envs/harbor-verified-sft.yaml \
-#       harbor_data_dir=$HOME/projects/task_datasets/harbor_verified \
-#       env.nemo_gym.harbor_agent.responses_api_agents.harbor_agent.harbor_jobs_dir=$HOME/harbor-jobs/<run>
-# On HANGANG, harbor_jobs_dir goes to home: Harbor writes about 35 files per trial, and the group's
-# /scratch file quota (5M, shared by in0138) is close to full. The recipe is the SFT checkpoint
-# iter_0019374; RECIPE=recipes/apertus2-chonk-sft-vllm-adamw-tools.yaml starts from iter_0008075.
+#       harbor_data_dir=$HOME/projects/task_datasets/harbor_verified
+# Harbor's trial directories go next to the checkpoints in /scratch. The recipe is the SFT checkpoint
+# chonk-lc-16k-v0.2 iter_0018315; RECIPE=recipes/apertus2-chonk-sft19374-vllm-adamw-tools.yaml starts
+# from v0.1 iter_0019374.
 # A recipe on an SFT checkpoint needs swiss-ai/apertus-common, a private repository that setup.sh
 # clones over HTTPS when its checkout is missing or behind the pin. Without HTTPS credentials for
 # GitHub on the login node that fails with "could not read Username". Either run `gh auth setup-git`
@@ -24,7 +23,7 @@
 #       GIT_CONFIG_VALUE_0=https://github.com/swiss-ai/apertus-common.git
 # The pods of a run carry the labels user=rl-infra and run=<run name> and live at most sandbox_ttl_s;
 # to delete the ones a run leaves behind, see experiments/runs.md.
-defaults: ../recipes/apertus2-chonk-sft19374-vllm-adamw-tools.yaml
+defaults: ../recipes/apertus2-chonk-sft18315-v0.2-vllm-adamw-tools.yaml
 script: examples/nemo_gym/run_grpo_nemo_gym.py
 
 # train.jsonl, validation.jsonl and tasks/, as envs/prepare_harbor_verified_tasks.sh writes them.
@@ -35,9 +34,9 @@ registry_cred_file: ${oc.env:RL_USER_HOME}/.rl_registry_cred
 
 grpo:
   # 64 trials, so 64 task pods (and up to 64 verifier pods), in flight.
-  num_prompts_per_step: 64
+  num_prompts_per_step: 256
   num_generations_per_prompt: 8
-  max_num_steps: 20
+  max_num_steps: 200
   max_num_epochs: 100
   # No validation by default. For a training run: val_period=10 val_at_start=true val_at_end=true.
   val_period: 0
@@ -57,16 +56,24 @@ grpo:
   skip_zero_advantage_groups: false
   async_grpo:
     # Lets a step's rollouts start while the two previous steps' are still in flight.
-    max_trajectory_age_steps: 2
+    max_trajectory_age_steps: 4
 
 checkpointing:
-  # No checkpoints by default. For a training run: checkpointing.enabled=true.
-  enabled: false
-  save_period: 10
+  # The weights every 20 steps, without the optimizer state; only the latest is kept. A run resumed
+  # from one starts with a fresh optimizer.
+  enabled: true
+  save_period: 20
+  save_optimizer: false
+  # Ranks by recency: there is no validation metric to rank by.
+  metric_name: null
+  keep_top_k: 1
+  # No forced save-and-stop: the recipe stops at 11.5 h (apertus2-chonk-vllm-adamw-dapo.yaml). The run
+  # goes on until max_num_steps or the job time limit.
+  checkpoint_must_save_by: null
 
 policy:
   # One optimizer step per step.
-  train_global_batch_size: 512
+  train_global_batch_size: 2084
   generation:
     # Per agent turn. policy.max_total_sequence_length limits the whole trajectory.
     max_new_tokens: 6144
@@ -153,7 +160,9 @@ env:
           api_key: null
           # RL_USER_HOME is your HOME, from run.sh.
           api_key_file: ${oc.env:RL_USER_HOME}/.opensandbox_token
-          transport_backend: httpx
+          transport_backend: aiohttp
+          # No cap on the client connection pool, which also caps in-flight sandbox operations.
+          max_connections: null
           # Reach sandboxes through the ingress gateway, not through the OpenSandbox server, which
           # answered "no available server" at about 190 sandboxes. opensandbox.yaml sets true.
           use_server_proxy: false
@@ -169,8 +178,9 @@ env:
           # One trial, and one pod, per in-flight rollout.
           # Was one pod per rollout in the batch:
           # concurrency: ${mul:${grpo.num_prompts_per_step},${grpo.num_generations_per_prompt}}
-          # Below the ~250 pods at which sandboxes queued to start and failed readiness mid-trial.
-          concurrency: 200
+          # About the ~300 sandboxes the cluster runs at once (it starts about 1.2 pods per second); a
+          # higher cap only adds sandboxes waiting to start, which time out after 600 s and are recreated.
+          concurrency: 2048
           harbor_datasets:
             # The alias is the left half of every row's instance_id.
             verified:
@@ -194,6 +204,14 @@ env:
               # The task images are in a private registry project and the OpenSandbox cluster has no
               # pull secret for it (Gym patch 0013 reads username:password from this file).
               image_auth_file: ${registry_cred_file}
+              # Scheduling requests; each task.toml gives the limits. Without disk_gib the storage request
+              # defaults to the limit (storage_mb, 10-32 GiB), and the sandbox nodes ran out of reservable
+              # ephemeral storage at about 300 pods. The full harbor_agent_opensandbox_training.yaml map,
+              # as this replaces it.
+              resource_requests:
+                cpu: 0.5
+                memory_mib: 512
+                disk_gib: 1
             # A pod lives at most this long, also when a run dies; above the two caps below.
             sandbox_ttl_s: 3600
           # Caps, not overrides: these tasks declare 3000 s for both, and a step lasts as long as its
