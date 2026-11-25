@@ -31,9 +31,8 @@
 #              (expensive with twice the vLLM); or explicit counts, <trainer>+<vLLM> (e.g. 16+32)
 #   job_time:  Slurm time limit; a checkpointing run saves and stops 30 minutes before it
 #   pydeps:    a list of extra Python packages for the job (pip requirement strings), installed in an overlay
-#              of their own (backends/nemo-rl/apertus2/pydeps.sh)
+#              of their own (backends/nemo-rl/job/pydeps.sh)
 #   script:    entry point instead of examples/run_grpo.py (NeMo Gym tasks)
-#   template:  true in the placeholder files of a new expert; run.sh refuses to submit them
 # A task without `recipe:` names its recipe in `defaults` (the older layout).
 #
 # Environment: RUN names the run (default: the task's path under experts/ and the time, e.g.
@@ -57,9 +56,9 @@ fi
 TASK="$(realpath "${TASK}")"; shift
 # The run settings every expert shares; taken by tasks in the expert layout (with a `recipe:` key).
 MAIN="${ROOT}/experts/main.yaml"
-APERTUS2_DIR="${ROOT}/backends/nemo-rl/apertus2"
-source "${ROOT}/sites/load.sh" && rl_infra_load "${APERTUS2_DIR}/env"
-source "${ROOT}/backends/nemo-rl/config.sh"
+BACKEND_DIR="${ROOT}/backends/nemo-rl"
+source "${ROOT}/sites/load.sh" && rl_infra_load
+source "${ROOT}/backends/nemo-rl/config/config.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
 # The NeMo-RL clone may not exist yet (setup.sh below makes it); its files hold no rl-infra keys.
 export CONFIG_SKIP_MISSING_NEMO_RL=1
@@ -78,10 +77,6 @@ DEBUG="${DEBUG:-0}"; DRY_RUN="${DRY_RUN:-0}"
 # A debug run gets 2 hours unless JOB_TIME is given; the task's job_time is for its full run.
 if [[ "${DEBUG}" == 1 ]]; then JOB_TIME="${JOB_TIME:-02:00:00}"; else JOB_TIME="${JOB_TIME:-$(task_key job_time)}"; fi
 TASK_SCRIPT="$(task_key script)"
-# The placeholder files of a new expert carry `template: true` until their datasets are filled in.
-if [[ "$(task_key template)" == true && "${DRY_RUN}" != 1 ]]; then
-    echo "ERROR: ${TASK} is a template (template: true): fill in its datasets, then remove that key (DRY_RUN=1 works)" >&2; exit 1
-fi
 
 # --- run name and W&B
 if [[ -z "${RUN:-}" ]]; then
@@ -189,8 +184,9 @@ fi
 #                    rounded up to a power of 2 (Chonk 8192: 16K -> CP 2, 32K -> CP 4, 128K -> CP 16)
 #   memory_fraction  NRL_CUDA_MEMORY_FRACTION, PyTorch's share of a trainer GPU (the rest: NCCL, Triton, CUDA);
 #                    not set when the recipe leaves it out
-# Packing budget = context. Above CP 4 the KDA layers need KCP (backends/nemo-rl/apertus2/kcp): the pinned Megatron
-# splits their 28 heads over at most 4 CP ranks.
+# Packing budget = context. Above CP 4 the KDA layers need KCP: the pinned Megatron splits their 28 heads over at
+# most 4 CP ranks. KCP is Megatron patch 0007 (backends/nemo-rl/patches/megatron/), chosen by
+# linear_attention_cp_impl=kcp, and needs flash-linear-attention 0.5.2 (fla.ops.cp) in the overlay.
 if [[ -n "${CONTEXT}" ]]; then
     (( CONTEXT <= 131072 )) || { echo "ERROR: context ${CONTEXT} is above 131072" >&2; exit 1; }
     TPG="$(cfg context_parallel.tokens_per_gpu)"
@@ -210,7 +206,7 @@ if [[ -n "${CONTEXT}" ]]; then
           "++policy.generation.vllm_cfg.env_vars.VLLM_ALLOW_LONG_MAX_MODEL_LEN=\"'1'\"")
     [[ -z "${MEMFRAC}" ]] || OVR+=("++policy.megatron_cfg.env_vars.NRL_CUDA_MEMORY_FRACTION=\"'${MEMFRAC}'\"")
     if (( CP > 4 )); then
-        source "${APERTUS2_DIR}/kcp/use.sh"
+        KCP_PKGS=(flash-linear-attention==0.5.2 fla-core==0.5.2)
         OVR+=(++policy.megatron_cfg.model_overrides.linear_attention_cp_impl=kcp)
     fi
 fi
@@ -241,12 +237,13 @@ fi
 mkdir -p "${OUT}/configs"
 
 # --- runtime overlays (pydeps.sh)
-# The extra Python packages of a job: the task's `pydeps:` list, what NeMo Gym needs for a task with `script:`
-# (PYDEPS_GYM_PKGS, apertus2/env) and apertus-common for the Apertus 2 message format. Each package list gets a
+# The extra Python packages of a job: the task's `pydeps:` list, flash-linear-attention for KCP, what NeMo Gym needs for a task with `script:`
+# (PYDEPS_GYM_PKGS, backends/nemo-rl/env/stack.env) and apertus-common for the Apertus 2 message format. Each package list gets a
 # directory of its own, named after it: overlays live on scratch, shared by all of your jobs, and pydeps.sh
 # replaces one whose list changed, so a job never sees packages it did not ask for or an overlay another
 # launch is rebuilding.
 mapfile -t PKGS < <(yq r "${TMP}/task.yaml" 'pydeps[*]' 2>/dev/null | sed '/^null$/d;/^$/d')
+PKGS+=(${KCP_PKGS[@]+"${KCP_PKGS[@]}"})
 if [[ -n "${TASK_SCRIPT}" ]]; then
     PKGS+=("${PYDEPS_GYM_PKGS[@]}")
     export SCRIPT="${TASK_SCRIPT}"
@@ -303,18 +300,18 @@ printf '  %s\n' "${OVR[@]}"
 # --- dry run: preflight and the sbatch command, without setup (which may change the NeMo-RL clone)
 if [[ "${DRY_RUN}" == 1 ]]; then
     [[ -e "${NEMO_RL_DIR}/.git" ]] || {
-        echo "ERROR: no NeMo-RL clone at ${NEMO_RL_DIR} yet: launch once without DRY_RUN, or run backends/nemo-rl/apertus2/setup.sh" >&2; exit 1; }
-    exec bash "${APERTUS2_DIR}/launch.sh" "${CFG}" "${NODES}" "${RUN}" "${OVR[@]}" "$@"
+        echo "ERROR: no NeMo-RL clone at ${NEMO_RL_DIR} yet: launch once without DRY_RUN, or run backends/nemo-rl/setup/setup.sh" >&2; exit 1; }
+    exec bash "${BACKEND_DIR}/launch.sh" "${CFG}" "${NODES}" "${RUN}" "${OVR[@]}" "$@"
 fi
 
 LOG="${OUT}/setup.log"
 echo "== setup (log: ${LOG})"
-{ SKIP_VLLM_IMAGE=1 bash "${APERTUS2_DIR}/setup.sh" && bash "${ROOT}/backends/nemo-rl/apertus2/stage_model.sh" \
-    && { [[ -z "${TASK_SCRIPT}" ]] || bash "${APERTUS2_DIR}/setup-gym.sh"; }; } \
+{ SKIP_VLLM_IMAGE=1 bash "${BACKEND_DIR}/setup/setup.sh" && bash "${ROOT}/backends/nemo-rl/setup/stage_model.sh" \
+    && { [[ -z "${TASK_SCRIPT}" ]] || bash "${BACKEND_DIR}/setup/setup-gym.sh"; }; } \
     > "${LOG}" 2>&1 || { tail -n 20 "${LOG}"; echo "ERROR: setup failed, see ${LOG}" >&2; exit 1; }
 cp "${LOG}" "${DIR}/setup.log"
 
-submitted="$(bash "${APERTUS2_DIR}/launch.sh" "${CFG}" "${NODES}" "${RUN}" "${OVR[@]}" "$@" | tee /dev/stderr | grep -oE 'Submitted batch job [0-9]+')"
+submitted="$(bash "${BACKEND_DIR}/launch.sh" "${CFG}" "${NODES}" "${RUN}" "${OVR[@]}" "$@" | tee /dev/stderr | grep -oE 'Submitted batch job [0-9]+')"
 jobid="${submitted##* }"
 echo
 echo "Run ${RUN} is job ${jobid}."

@@ -1,0 +1,269 @@
+From 440b32a7bb9011f9b7e54a10533001cf53d32023 Mon Sep 17 00:00:00 2001
+From: davmels <davmelous@gmail.com>
+Date: Mon, 23 Nov 2026 16:41:51 +0100
+Subject: [PATCH] data: drop_long_prompts leaves out rows whose prompt is too
+ long
+
+With data.drop_long_prompts, AllTaskProcessedDataset runs the processor once
+over every row at setup and keeps the rows whose prompt is shorter than
+max_input_seq_length, printing how many it left out per task and how long it
+took. Without it (the default), such a row is kept, cut to a few tokens with
+loss_multiplier 0, and still generated for. The processor gets each kept row
+original index.
+
+A dataset of more than 1,000 rows is processed by forked worker processes, one
+per 500 rows up to the usable CPUs and 64 (NRL_DROP_LONG_PROMPTS_WORKERS), which
+inherit the dataset and tokenizer. On the STEM datasets (272k rows) this takes
+39 s instead of 187 s.
+---
+ nemo_rl/data/__init__.py                   |  3 +
+ nemo_rl/data/datasets/processed_dataset.py | 90 +++++++++++++++++++++-
+ nemo_rl/data/utils.py                      |  3 +
+ tests/unit/data/test_drop_long_prompts.py  | 52 +++++++++++++
+ 4 files changed, 147 insertions(+), 1 deletion(-)
+ create mode 100644 tests/unit/data/test_drop_long_prompts.py
+
+diff --git a/nemo_rl/data/__init__.py b/nemo_rl/data/__init__.py
+index 6219171a6..f58e3d07f 100644
+--- a/nemo_rl/data/__init__.py
++++ b/nemo_rl/data/__init__.py
+@@ -72,6 +72,9 @@ class DataConfig(TypedDict):
+     backend: NotRequired[Literal["hf", "energon"]]
+     energon: NotRequired[EnergonLoaderConfig]
+     max_input_seq_length: int | None
++    # Leave out, at setup, the rows whose prompt has max_input_seq_length tokens or more (default: keep them,
++    # cut to a few tokens and out of the loss).
++    drop_long_prompts: NotRequired[bool]
+     add_bos: NotRequired[bool]
+     add_eos: NotRequired[bool]
+     add_generation_prompt: NotRequired[bool]
+diff --git a/nemo_rl/data/datasets/processed_dataset.py b/nemo_rl/data/datasets/processed_dataset.py
+index a89f4fcf0..d90b182ab 100644
+--- a/nemo_rl/data/datasets/processed_dataset.py
++++ b/nemo_rl/data/datasets/processed_dataset.py
+@@ -12,6 +12,11 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
++import multiprocessing
++import os
++import sys
++import time
++from concurrent.futures import ProcessPoolExecutor
+ from typing import Any, Optional, Union
+ 
+ import torch
+@@ -44,6 +49,9 @@ class AllTaskProcessedDataset:
+             or a dict mapping task names to (TaskDataSpec, TaskDataProcessFnCallable) for multi-task
+         max_seq_length: Maximum sequence length for tokenized outputs
+         agent_name_sources: Stable NeMo Gym source identities used by sharded validation.
++        drop_long_prompts: Leave out, once at setup, every row whose prompt has max_seq_length tokens or
++            more, instead of keeping it cut to a few tokens with loss_multiplier 0 (what the processors
++            do with such a row). The processor still gets each kept row's original index.
+     """
+ 
+     def __init__(
+@@ -60,6 +68,7 @@ class AllTaskProcessedDataset:
+         ] = None,
+         max_seq_length: Optional[int] = None,
+         agent_name_sources: frozenset[NemoGymSourceIdentity] | None = None,
++        drop_long_prompts: bool = False,
+     ):
+         self.dataset = dataset
+         self.agent_name_sources = agent_name_sources
+@@ -70,6 +79,8 @@ class AllTaskProcessedDataset:
+         self.task_data_preprocessors = task_data_preprocessors
+         self.max_seq_length = max_seq_length
+         self._bos_checked = False
++        # Positions in `dataset` of the rows this dataset serves (None: all of them).
++        self._kept: list[int] | None = None
+ 
+         if (
+             isinstance(task_data_processors, dict)
+@@ -79,8 +90,61 @@ class AllTaskProcessedDataset:
+             for _, (task_data_spec, _) in task_data_processors.items():
+                 task_data_spec.copy_defaults(self.default_task_data_spec)
+ 
++        if drop_long_prompts and max_seq_length is not None:
++            self._drop_long_prompts()
++
++    def _drop_long_prompts(self) -> None:
++        """Keep the rows whose processed prompt is shorter than max_seq_length.
++
++        Every row goes through the processor once. A dataset of more than 1,000 rows is split over
++        forked worker processes, one per 500 rows up to the CPUs this process may use and 64
++        (NRL_DROP_LONG_PROMPTS_WORKERS sets the most), which inherit the dataset and the tokenizer
++        instead of receiving copies.
++        """
++        global _FILTERING
++        start = time.time()
++        total = len(self.dataset)
++        most = int(
++            os.environ.get("NRL_DROP_LONG_PROMPTS_WORKERS", min(len(os.sched_getaffinity(0)), 64))
++        )
++        workers = min(most, -(-total // 500))
++        _FILTERING = self
++        try:
++            if workers > 1 and total > 1000:
++                # Output still buffered here would be written again by every worker.
++                sys.stdout.flush()
++                sys.stderr.flush()
++                size = -(-total // (workers * 4))
++                chunks = [range(s, min(s + size, total)) for s in range(0, total, size)]
++                with ProcessPoolExecutor(
++                    workers,
++                    mp_context=multiprocessing.get_context("fork"),
++                    initializer=_init_filter_worker,
++                ) as pool:
++                    results = [r for part in pool.map(_prompt_lengths, chunks) for r in part]
++            else:
++                workers = 1
++                results = _prompt_lengths(range(total))
++        finally:
++            _FILTERING = None
++        kept: list[int] = []
++        dropped: dict[str, int] = {}
++        for raw_idx, (length, task) in enumerate(results):
++            if length is not None and length >= self.max_seq_length:
++                dropped[task] = dropped.get(task, 0) + 1
++            else:
++                kept.append(raw_idx)
++        self._kept = kept
++        detail = ", ".join(f"{task}: {n}" for task, n in sorted(dropped.items()))
++        print(
++            f"  - Left out {total - len(kept)} of {total} rows with a prompt of "
++            f"{self.max_seq_length} tokens or more (data.drop_long_prompts, "
++            f"{time.time() - start:.1f} s on {workers} process(es))"
++            + (f": {detail}" if detail else "")
++        )
++
+     def __len__(self) -> int:
+-        return len(self.dataset)
++        return len(self.dataset) if self._kept is None else len(self._kept)
+ 
+     def encode_single(
+         self, text: Union[str, list[str]]
+@@ -102,6 +166,10 @@ class AllTaskProcessedDataset:
+ 
+     def __getitem__(self, idx: int) -> DatumSpec:
+         """Return a single prompt."""
++        return self._process(idx if self._kept is None else self._kept[idx])
++
++    def _process(self, idx: int) -> DatumSpec:
++        """Process the row at position idx of the underlying dataset."""
+         entry = self.dataset[idx]
+ 
+         # preprocessing
+@@ -149,3 +217,23 @@ class AllTaskProcessedDataset:
+             self._bos_checked = True
+ 
+         return datum_spec
++
++
++# The dataset _drop_long_prompts is filtering, for its forked workers (they inherit it; nothing is pickled).
++_FILTERING: "AllTaskProcessedDataset | None" = None
++
++
++def _init_filter_worker() -> None:
++    # The tokenizer's own thread pool does not survive a fork.
++    os.environ["TOKENIZERS_PARALLELISM"] = "false"
++
++
++def _prompt_lengths(indices: range) -> list[tuple[Optional[int], str]]:
++    """Prompt length and task name of each row in indices, from the processor."""
++    assert _FILTERING is not None
++    out = []
++    for idx in indices:
++        datum_spec = _FILTERING._process(idx)
++        out.append((datum_spec.get("length"), str(datum_spec.get("task_name", "?"))))
++    return out
++
+diff --git a/nemo_rl/data/utils.py b/nemo_rl/data/utils.py
+index 35adbcdad..97f7f7e2b 100644
+--- a/nemo_rl/data/utils.py
++++ b/nemo_rl/data/utils.py
+@@ -227,6 +227,7 @@ def setup_response_data(
+                 task_data_preprocessors=task_data_preprocessors,
+                 max_seq_length=data_config["max_input_seq_length"],
+                 agent_name_sources=getattr(data, "agent_name_sources", None),
++                drop_long_prompts=data_config.get("drop_long_prompts", False),
+             )
+             for data in data_list
+         }
+@@ -241,6 +242,7 @@ def setup_response_data(
+             task_data_preprocessors=task_data_preprocessors,
+             max_seq_length=data_config["max_input_seq_length"],
+             agent_name_sources=_combine_agent_name_sources(data_list),
++            drop_long_prompts=data_config.get("drop_long_prompts", False),
+         )
+     sample_count = sum(len(data.dataset) for data in data_list)
+     print(f"  ✓ Training dataset loaded with {sample_count} samples.")
+@@ -314,6 +316,7 @@ def setup_response_data(
+             agent_name_sources=_combine_agent_name_source_sets(
+                 val_agent_name_source_sets
+             ),
++            drop_long_prompts=data_config.get("drop_long_prompts", False),
+         )
+         print(f"  ✓ Validation dataset loaded with {len(val_dataset)} samples.")
+ 
+diff --git a/tests/unit/data/test_drop_long_prompts.py b/tests/unit/data/test_drop_long_prompts.py
+new file mode 100644
+index 000000000..524fb77ae
+--- /dev/null
++++ b/tests/unit/data/test_drop_long_prompts.py
+@@ -0,0 +1,52 @@
++"""data.drop_long_prompts: rows with a prompt of max_seq_length tokens or more are left out at setup."""
++
++from nemo_rl.data.datasets.processed_dataset import AllTaskProcessedDataset
++
++
++def _processor(entry, task_data_spec, tokenizer, max_seq_length, idx):
++    # A prompt of entry["n"] tokens, cut and masked when too long, as the math processors do.
++    length = entry["n"]
++    return {
++        "message_log": [],
++        "length": length,
++        "loss_multiplier": 0.0 if length >= max_seq_length else 1.0,
++        "idx": idx,
++        "task_name": entry["task_name"],
++    }
++
++
++ROWS = [{"n": n, "task_name": "t"} for n in (10, 100, 99, 200, 5)]
++
++
++def test_keeps_every_row_by_default():
++    ds = AllTaskProcessedDataset(ROWS, None, None, _processor, max_seq_length=100)
++    assert len(ds) == 5
++    assert [ds[i]["length"] for i in range(len(ds))] == [10, 100, 99, 200, 5]
++
++
++def test_drops_rows_at_or_above_the_limit_and_keeps_original_indices():
++    ds = AllTaskProcessedDataset(
++        ROWS, None, None, _processor, max_seq_length=100, drop_long_prompts=True
++    )
++    assert len(ds) == 3
++    assert [ds[i]["length"] for i in range(len(ds))] == [10, 99, 5]
++    assert [ds[i]["idx"] for i in range(len(ds))] == [0, 2, 4]
++
++
++def test_without_a_limit_nothing_is_dropped():
++    ds = AllTaskProcessedDataset(
++        ROWS, None, None, _processor, max_seq_length=None, drop_long_prompts=True
++    )
++    assert len(ds) == 5
++
++
++def test_large_dataset_is_filtered_in_worker_processes(monkeypatch, capsys):
++    monkeypatch.setenv("NRL_DROP_LONG_PROMPTS_WORKERS", "4")
++    rows = [{"n": i % 200, "task_name": "t"} for i in range(10000)]
++    ds = AllTaskProcessedDataset(
++        rows, None, None, _processor, max_seq_length=100, drop_long_prompts=True
++    )
++    assert len(ds) == 5000
++    assert all(ds[i]["length"] < 100 for i in range(0, len(ds), 97))
++    assert ds[4999]["idx"] == 9899
++    assert "on 4 process(es)" in capsys.readouterr().out
+-- 
+2.43.0
+

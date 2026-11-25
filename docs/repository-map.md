@@ -9,17 +9,19 @@ Every file of the repository and its role (364 files, branch `restructure`, 2026
 
 ```
 bash run.sh stem      (experts/main.yaml + experts/stem/base.yaml)
- └ run.sh ─ sites/load.sh (sites/hangang.env, site.env, backends/nemo-rl/apertus2/env, backends/nemo-rl/env)
-   ├ backends/nemo-rl/config.sh       merges the task's defaults chain, copies every config file for the job
-   ├ the recipe's nodes: + the size tier   node counts (tiers in run.sh)
-   ├ the recipe's context_parallel (+ kcp/use.sh above CP 4)   CP, packing, memory fraction
-   ├ backends/nemo-rl/apertus2/setup.sh         NeMo-RL clone at the pin + patches, Megatron, Bridge, vLLM files, image
-   ├ backends/nemo-rl/apertus2/stage_model.sh      model export staged on scratch
-   └ backends/nemo-rl/apertus2/launch.sh → backends/nemo-rl/launch.sh
-       ├ backends/nemo-rl/preflight.sh          config check, report next to the Slurm log
-       ├ backends/nemo-rl/container.sh          container flags from apertus2/edf.toml.template
-       └ sbatch <clone>/ray.sub → numa_watch.sh (hang_watch.sh) on every node
-           └ driver_retry.sh → apertus2/driver.sh (pydeps.sh) → python examples/run_grpo.py
+ └ run.sh ─ sites/load.sh (site.env, sites/alps.env, env/stack.env)
+   ├ config/config.sh            merges the task's defaults chain, copies every config file for the job
+   ├ the recipe's nodes: + the size tier             node counts (tiers in run.sh)
+   ├ the recipe's context_parallel (KCP above CP 4)  CP, packing, memory fraction
+   ├ setup/setup.sh              NeMo-RL clone at the pin + patches, Megatron, Bridge, vLLM files, image
+   ├ setup/stage_model.sh        model export staged on scratch
+   ├ setup/setup-gym.sh          Gym checkout (tasks with `script:`)
+   └ launch.sh
+       ├ config/preflight.sh     config check (settings, dataset files), report next to the Slurm log
+       ├ config/container.sh     container flags from env/edf.toml.template
+       └ sbatch <clone>/ray.sub → job/numa_watch.sh (job/hang_watch.sh) on every node
+           └ job/driver_retry.sh → job/driver.sh (job/pydeps.sh) → python examples/run_grpo.py
+(paths under backends/nemo-rl/ unless they start at the top)
 ```
 
 ## Top level
@@ -27,7 +29,6 @@ bash run.sh stem      (experts/main.yaml + experts/stem/base.yaml)
 | File | Role | Purpose |
 |---|---|---|
 | `run.sh` | run | The entry point: task file in, Slurm job out (rl-infra keys, tiers, context, config copies, setup, launch) |
-| `setup.sh` | setup | Setup of the stock NeMo-RL stack (the Qwen experiments in `backends/nemo-rl/examples`); the Apertus 2 setup is `backends/nemo-rl/apertus2/setup.sh` |
 | `README.md` | doc | Quick start, task files and tiers, NeMo-RL development, cluster notes |
 | `site.env.example` | doc | Template of the personal, gitignored `site.env` (account, scratch, W&B) |
 | `.gitignore` | — | Keeps `site.env` and generated files out of git |
@@ -61,11 +62,14 @@ happened, as they ran) and `scripts/` (data builders and checks); empty folders 
 | `stem/dev/chem-rdkit-sft.yaml`, `stem/dev/reasoning-gym-sft.yaml` | run | Single-environment tasks: chemistry alone, Reasoning Gym alone (older layout) |
 | `stem/archive/run5-32k-job1299180.yaml` | history | Run 5 at 32K (job 1299180) in the expert layout; its merged config equals the run's |
 | `stem/archive/stem-mix-run1.yaml` … `run5.yaml`, `-run3-base`, `-run3-sciworld`, `-enigmata`, `-openqa-judge` | history | Task files of the STEM runs 1-5 and their trials, as they ran |
+| `stem/frames/apertus2-system-sciworld-act.json`, `-high.json` | run | ScienceWorld's system frames: thinking medium or high, with the `act` tool declared (STEM only) |
 | `stem/scripts/prepare_chem_rdkit.py`, `gen_chem_rdkit.py`, `gen_chem_rdkit.sbatch`, `prepare_reasoning_gym.py` | setup | Chemistry and Reasoning Gym rows |
 | `stem/scripts/enigmata/` (15) | setup / check / history | Enigmata puzzle pool and dataset build, pass-rate scoring (its one-node recipe and tasks), environment test, the launcher of the Enigmata trial |
 | `stem/scripts/scienceworld/` (18) | setup / check / history | ScienceWorld install, data build, episode probes and scoring, environment test, the launchers of its trial and debug run |
 | `stem/scripts/eval/` | tool | Validation of an HF export with vLLM only (the run's own `grpo.validate()`), benchmark sets (AIME, MATH-500, MMLU-Pro, held-out training sets) |
-| `code/base.yaml`, `chat/base.yaml`, `tool-use/base.yaml`, `lean/base.yaml` | template | Take the latest archived run through `defaults` until written; `template: true` |
+| `code/base.yaml`, `chat/base.yaml`, `tool-use/base.yaml`, `lean/base.yaml` | template | Take the latest archived run through `defaults` until written |
+| `code/scripts/sandbox/*` (9) | setup / run | Code sandbox node for code_gen: server, harness, data, start script, attack test |
+| `lean/scripts/*` (11) | setup / run | Lean 4 sandbox (NeMo-Skills image) and its data |
 | `code/archive/code-gen-sft.yaml`, `code-gen-osb-sft.yaml` | history | Competitive coding on Gym's code_gen, tests on a sandbox node or on OpenSandbox pods |
 | `code/archive/harbor-osb-sft.yaml`, `harbor-verified-sft.yaml` | history | Harbor terminal/SWE tasks with Terminus-2 on OpenSandbox |
 | `code/README.md` | doc | How to run the Harbor SWE/terminal tasks (prerequisites, credentials, commands) |
@@ -74,6 +78,7 @@ happened, as they ran) and `scripts/` (data builders and checks); empty folders 
 | `code/scripts/trainer-memory.sh` | check | Trainer memory tests on the 16K coding task |
 | `chat/archive/ultrafeedback-rubric.yaml`, `-sft.yaml`, `-sft-2judges.yaml`, `-sft-3judges.yaml` | history | General chat rewarded by one, two or three LLM judges on rubrics, AlpacaEval validation |
 | `chat/scripts/prepare_ultrafeedback.py`, `prepare_alpaca_eval.py`, `ultrafeedback-few-shot.txt` | setup | Rows and few-shot prompt of the rubric tasks |
+| `chat/scripts/check_rubric_judge.sh`, `.py` | check | The rubric judge model on one GPU, scored with Gym's rubric_judge prompts, before a run |
 | `tool-use/archive/workplace-assistant-sft.yaml` | history | Tool calls on Gym's workplace assistant (27 simulated tools) |
 | `lean/archive/lean-sft.yaml` | history | Lean 4 proving with Gym math_formal_lean |
 | `medical/`, `safety/`, `knowledge/`, `translation/` `base.yaml` | template | Placeholders: medical multiple choice; safety, knowledge and translation graded by the shared judge |
@@ -83,8 +88,9 @@ happened, as they ran) and `scripts/` (data builders and checks); empty folders 
 | File | Role | Purpose |
 |---|---|---|
 | `frames/apertus2-system.json`, `-high.json` | run | System frame of the Apertus 2 format: thinking medium, high |
-| `frames/apertus2-system-sciworld-act.json`, `-high.json` | run | The same with ScienceWorld's `act` tool declared |
+
 | `judges/llm-judge.yaml` | run | The LLM judge grader (`env.llm_judge`: verdict, scoring, frames), taken in by STEM and the judge-based templates |
+| `judges/judge_stats.py` | tool | Judge load summary after a run (from a server's `stats_path` file) |
 | `judges/servers/gemma-4-26B-A4B-it.yaml` | run | The judge server with gemma-4-26B-A4B-it (`env.extra_judge_pools.gemma-4-26B-A4B-it`, server `judge_gemma-4-26B-A4B-it`: one replica per GPU; the expert sets its `num_nodes`) |
 | `prompts/gsm8k-five-shot.txt`, `stem-mix-four-shot.txt` | run / history | Few-shot prompts read at run time (GSM8K on the pretraining checkpoint; STEM runs 1-2) |
 | `scripts/stage_judge_model.sh` | setup | Downloads a judge model to scratch |
@@ -111,36 +117,26 @@ happened, as they ran) and `scripts/` (data builders and checks); empty folders 
 | File | Role | Purpose |
 |---|---|---|
 | `launch.sh` | run | Config + node count → preflight, container flags, `sbatch ray.sub` with the driver command |
-| `config.sh` | run | Merges a defaults chain as NeMo-RL does; freezes config copies for a job |
-| `preflight.sh` | run | Prints the settings that matter and fails on known mistakes, before submission |
-| `container.sh` | run | Renders the container spec into EDF (Alps) or pyxis flags (HANGANG) |
-| `driver_retry.sh` | run | Restarts a failed driver in the same allocation from the latest checkpoint |
-| `failure_report.sh` | run | Summary file of a failed driver attempt |
-| `numa_watch.sh`, `hang_watch.sh` | run | Per node: host memory on GPU HBM, Ray log copies; stack dumps when the job looks stuck, stops a hung driver |
-| `strtok_ts.c` | run | Thread-safe strtok preloaded into job processes (UCCL NIC parsing on HANGANG) |
-| `patches/0001-0002` | run | `ray.sub` for the Alps container engine / pyxis; applied to the clone by setup |
-| `pin`, `env`, `edf.toml.template`, `check_env.sh` | run (stock) | The stock NeMo-RL stack (NGC image), for the configs in `examples/` |
-| `examples/` (5) | history | Qwen3 GRPO on math (8B, 32B) on the stock stack, a math-verify debug script, two Qwen VL configs (Megatron refit broken in NeMo-RL v0.7.0) |
-| `strip_optimizer.py` | tool | Removes optimizer state from finished checkpoints (frees scratch) |
-| `apertus2/env` | run | The Apertus 2 stack: clone paths, image, overlay, driver |
-| `apertus2/pin` | run | NeMo-RL fork commit + PRs, Automodel, Megatron-LM-MoE, Bridge, vLLM files, Gym, apertus-common commits |
-| `apertus2/setup.sh` | run | Builds or updates the clone (PRs, patches by subject), Megatron, Bridge, vLLM files, image |
-| `apertus2/stage_model.sh` | run | Stages the model export on scratch (copied small files, linked shards; modeling code check), every launch |
-| `apertus2/launch.sh` | run | `launch.sh` with the Apertus 2 stack variables |
-| `apertus2/driver.sh` | run | Driver entry in the container: overlay, W&B key, unbuffered Python |
-| `apertus2/pydeps.sh` | run | Python overlay the image lacks (nemo-lens, soundfile; Gym, Reasoning Gym, apertus-common when needed) |
-| `apertus2/edf.toml.template` | run | Container image, mounts and environment of the Apertus 2 stack |
-| `apertus2/kcp/setup.sh`, `use.sh`, `0001-*.patch` | run | KCP context parallelism: Megatron copy with PR 112, flash-linear-attention 0.5.2 |
-| `apertus2/setup-gym.sh` | run | NeMo Gym checkout for Gym tasks (`script:`) |
-| `apertus2/patches/nemo-rl/0001-0061` (53 files) | run | Our NeMo-RL changes on top of the pin, applied in order |
-| `apertus2/patches/gym/` (15), `automodel/` (2), `megatron/` (6), `vllm/` (1), `uccl/` (2) | run / setup | Changes to Gym, Automodel, Megatron, the vLLM Apertus 2 model, UCCL |
-| `apertus2/uccl-fix/build_image.sh`, `rebuild_uccl.sh` | setup | Builds the image jobs run (UCCL rebuilt with the two patches) |
-| `apertus2/check_env.sh`, `check_env_job.sh` | check | Stack sanity check on one GPU node (also runs `download_model.sh`, `check_judge.sh`) |
-| `apertus2/download_model.sh` | setup | Downloads an HF repository from a compute node |
-| `apertus2/check_judge.sh`, `check_judge.py`, `judge_stats.py` | check / tool | Judge test before a run; judge load summary after |
-| `apertus2/check_rg_verifier.sh` | check | Test of the Reasoning Gym verifier (patch 0034) |
-| `sandbox/*` (9) | setup / run | Code sandbox node for code_gen: server, harness, data, start script, attack test |
-| `lean/*` (11) | setup / run | Lean 4 sandbox (NeMo-Skills image) and its data |
+| `env/stack.env` | run | The stack: clone paths, image, overlay, driver, outputs (`OUT`) |
+| `env/pin` | run | NeMo-RL fork commit + PRs, Automodel, Megatron-LM-MoE, Bridge, vLLM files, Gym, apertus-common commits |
+| `env/edf.toml.template` | run | Container image, mounts and environment |
+| `setup/setup.sh` | run | Builds or updates the clone (PRs, patches by subject), Megatron, Bridge, vLLM files, image |
+| `setup/stage_model.sh` | run | Stages the model export on scratch (copied small files, linked shards; modeling code check), every launch |
+| `setup/setup-gym.sh` | run | NeMo Gym checkout for Gym tasks (`script:`) |
+| `config/config.sh` | run | Merges a defaults chain as NeMo-RL does; freezes config copies for a job |
+| `config/container.sh` | run | Renders the container spec into EDF (Alps) or pyxis flags |
+| `config/preflight.sh` | run | Prints the settings that matter and fails on known mistakes and missing dataset files, before submission |
+| `job/driver.sh` | run | Driver entry in the container: overlay, W&B key, unbuffered Python |
+| `job/pydeps.sh` | run | Python overlay the image lacks (nemo-lens, soundfile; Gym, Reasoning Gym, apertus-common, KCP's flash-linear-attention when needed) |
+| `job/driver_retry.sh` | run | Restarts a failed driver in the same allocation from the latest checkpoint |
+| `job/failure_report.sh` | run | Summary file of a failed driver attempt |
+| `job/numa_watch.sh`, `job/hang_watch.sh` | run | Per node: host memory on GPU HBM, Ray log copies; stack dumps when the job looks stuck, stops a hung driver |
+| `diagnostics/check_env.sh`, `check_env_job.sh` | check | Stack sanity check on one GPU node; `check_env_job.sh` runs it, the others here or a repository script as a one-node job |
+| `setup/download_model.sh` | setup | Downloads an HF repository from a compute node |
+| `patches/ray-sub/` (2) | run | NeMo-RL's `ray.sub` for the Alps container engine / pyxis, applied first |
+| `patches/nemo-rl/0001-0062` (54) | run | Our NeMo-RL changes on top of the pin, applied in order |
+| `patches/megatron/` (7) | run | Megatron-LM-MoE: optimizer and checkpoint fixes, 0007 = KCP context parallelism for the KDA layers |
+| `patches/gym/` (15), `automodel/` (2), `vllm/` (1) | run / setup | Changes to Gym, Automodel, the vLLM Apertus 2 model |
 
 ## Still out of place (next cleanup steps)
 
@@ -148,5 +144,3 @@ happened, as they ran) and `scripts/` (data builders and checks); empty folders 
   layouts); the code expert needs its `experts/code/base.yaml` written (now a template) and tiers like STEM.
 - `experts/stem/scripts/enigmata/launch.sh`, `scienceworld/launch.sh`, `debug16.sh`, `probe.sh`,
   `experts/code/scripts/trainer-memory.sh`: launchers with their own overrides (they now run from this repository).
-- `backends/nemo-rl/sandbox/` and `lean/` are services of the code and Lean domains.
-- Two stacks (stock NeMo-RL for Qwen, Apertus 2): the stock one is only used by `backends/nemo-rl/examples/`.

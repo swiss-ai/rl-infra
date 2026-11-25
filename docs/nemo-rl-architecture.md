@@ -357,7 +357,7 @@ The same scalar is used for every response token. Code:
   math-verify extracts an answer from the WHOLE response by prioritized regexes (final-answer phrases and
   `\boxed{}` first, then "answer:", then any LaTeX / number; rightmost match within a priority), converts to sympy,
   compares (string, numeric to 6 decimals, `simplify(a - b) == 0`). Any exception -> 0.0.
-- Debug tool: `backends/nemo-rl/examples/debug_math_verify.py` in this repo.
+- Debug tool: `debug_math_verify.py` (no longer in this repo).
 
 ---
 

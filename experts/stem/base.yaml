@@ -42,12 +42,13 @@ pydeps:
   - zss==1.2.0
 
 # Thinking level per dataset: the system frame its prompts start with. The data entries below refer to these keys,
-# so a run file changes a level by overriding one key here. ScienceWorld's frame also declares the act tool.
+# so a run file changes a level by overriding one key here. The plain levels are shared (shared/frames/); ScienceWorld's
+# frames also declare its act tool and live with STEM (experts/stem/frames/).
 frames:
   default: ${oc.env:RL_INFRA_DIR}/shared/frames/apertus2-system-high.json
   reasoning_gym: ${frames.default}
   chemistry: ${frames.default}
-  scienceworld: ${oc.env:RL_INFRA_DIR}/shared/frames/apertus2-system-sciworld-act-high.json
+  scienceworld: ${oc.env:RL_INFRA_DIR}/experts/stem/frames/apertus2-system-sciworld-act-high.json
 
 grpo:
   # Enigmata's 4,002 rows run out at step 125 and its dataloader restarts.
@@ -63,6 +64,9 @@ data:
   _override_: true
   # Reasoning Gym prompts reach 3.6k tokens; chemistry prompts at most 1,897 characters.
   max_input_seq_length: 4096
+  # A row whose prompt has max_input_seq_length tokens or more is left out at setup, with a count per dataset in
+  # the driver log (NeMo-RL patch 0062), instead of being kept cut to 4 tokens and out of the loss.
+  drop_long_prompts: true
   shuffle: true
   num_workers: 1
   use_multiple_dataloader: true

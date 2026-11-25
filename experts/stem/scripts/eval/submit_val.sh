@@ -32,7 +32,7 @@ while IFS= read -r line; do
 done < <(sed -n '/DRY_RUN: site/,$p' "${DRY}" | tail -n +3)
 grep -q "${CLONE}:/opt/nemo-rl" <<< "${MOUNTS}" || { echo "ERROR: the dry run does not mount ${CLONE}" >&2; exit 1; }
 EXTRA="--sets ${SETS} --thinking ${THINKING:-high}"; [[ -n "${LIMIT:-}" ]] && EXTRA+=" --limit ${LIMIT}"
-export COMMAND="cd /opt/nemo-rl && RAY_DEDUP_LOGS=0 bash ${ROOT}/backends/nemo-rl/apertus2/driver.sh ${HERE}/run_val.py --model ${MODEL} --step ${STEP} --name ${NAME} --gen-nodes ${GEN} ${EXTRA}"
+export COMMAND="cd /opt/nemo-rl && RAY_DEDUP_LOGS=0 bash ${ROOT}/backends/nemo-rl/job/driver.sh ${HERE}/run_val.py --model ${MODEL} --step ${STEP} --name ${NAME} --gen-nodes ${GEN} ${EXTRA}"
 export WANDB_KEY_FILE=${WANDB_KEY_FILE:-${HOME}/.wandb_api_key}
 export RAY_NODE_NAME_SUFFIX=-hsn0
 unset NUMA_WATCH

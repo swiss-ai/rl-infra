@@ -19,7 +19,7 @@ The dataset has 15,000 rows over 104 tasks, all at default difficulty, CC BY 4.0
   verifier cannot score: an empty claim gets 0).
 DROP below names all 21 tasks. That leaves 83. Validation then train are sampled round-robin over the tasks
 (seed 0), so both are balanced across tasks and disjoint. The dataset is read at a fixed revision, so the
-rows are the same on every run. Check them with backends/nemo-rl/apertus2/check_rg_verifier.sh.
+rows are the same on every run. Check them with experts/stem/scripts/check_rg_verifier.sh.
 """
 
 import argparse

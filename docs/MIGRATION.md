@@ -11,14 +11,14 @@ to follow, and the steps to move one over. `docs/repository-map.md` describes th
 | Task files | `envs/<task>.yaml`, all side by side | `experts/<expert>/`: one folder per RL expert (medical, safety, chat, stem, code, knowledge, tool-use, translation, lean); inside: `base.yaml` (the official run), `dev/`, `archive/` (runs as they ran), `scripts/` (data builders); `experts/main.yaml` holds the run settings all experts share (`experts/README.md`) |
 | Launch command | `bash run.sh envs/<task>.yaml` or a launcher | `bash run.sh <expert>` (the expert's `base.yaml` with `experts/main.yaml` under it), `bash run.sh experts/<expert>/dev/<file>.yaml`, `bash run.sh experts/<expert>/archive/<file>.yaml` |
 | Shared pieces | `envs/apertus2-system*.json`, `envs/stage_judge_model.sh`, ... | `shared/frames/`, `shared/judges/llm-judge.yaml`, `shared/prompts/`, `shared/scripts/`, `shared/debug/` |
-| Launch settings | launcher variables (`CP`, `CAP`, `GEN_NODES`, `STEPS`, `SAVE_BY`, ...) in a launcher per experiment | rl-infra keys read by `run.sh`: `size`, `job_time`, `context` in `experts/main.yaml` (a dev file may change them), `recipe` and `template` in the expert's `base.yaml`; Hydra overrides on the command line |
+| Launch settings | launcher variables (`CP`, `CAP`, `GEN_NODES`, `STEPS`, `SAVE_BY`, ...) in a launcher per experiment | rl-infra keys read by `run.sh`: `size`, `job_time`, `context` in `experts/main.yaml` (a dev file may change them), `recipe` in the expert's `base.yaml`; Hydra overrides on the command line |
 | Recipes | 34 recipes, each a few keys on a chain of up to 14 files (`recipes/`, `experiments/grpo-chonk/`) | one flat file per active model, on NeMo-RL's defaults only: `recipes/chonk-sftv02.yaml`; the rest in `recipes/archive/` and `recipes/archive/chain/` (`recipes/README.md`) |
 | Node layouts | one recipe per node split | `size:` a tier of the recipe's base layout (`nodes:`; Chonk 8+8): lite 8+4, cheap 8+8, expensive 16+16, ultra 16+32, or explicit counts such as `16+64`; judge nodes come from the task |
 | Context length | `CP`, `KCP`, `CAP`, packing set by hand | `context:` in the task; the recipe's `context_parallel` gives CP (context / tokens_per_gpu, rounded up to a power of 2), KCP above CP 4, packing = context and the memory fraction (the next power of 2 up: 50K gets the 64K settings) |
 | Run modes | `DRY_RUN=1` ran setup and printed the job; launchers had `DEBUG=1` by default | plain `run.sh` = full run (W&B required); `DEBUG=1` = debug run; `DRY_RUN=1` = everything shown, no setup, no job |
 | Config at job start | the job read the recipe and task chain from their original paths when it started | the job reads copies made at launch (`$OUT/configs/<run>-<time>/`, with the setup log) |
-| NeMo-RL code | experiment clones (`nemo-rl-apertus2-stem32k`, ...) carried commits that were not patches in rl-infra | every change is a patch in `backends/nemo-rl/apertus2/patches/nemo-rl/`; 0034 and 0052-0061 added (Reasoning Gym verifier, claim_multichoice, llm_judge, Enigmata, ScienceWorld); the next free number is 0062 |
-| KCP | `experiments/long-context/setup-kcp.sh`, `kcp/`, `KCP=1` in the launchers | `backends/nemo-rl/apertus2/kcp/`, used automatically for a context above 32K |
+| NeMo-RL code | experiment clones (`nemo-rl-apertus2-stem32k`, ...) carried commits that were not patches in rl-infra | every change is a patch in `backends/nemo-rl/patches/nemo-rl/`; 0034 and 0052-0061 added (Reasoning Gym verifier, claim_multichoice, llm_judge, Enigmata, ScienceWorld); 0062 (drop_long_prompts) added later; the next free number is 0063 |
+| KCP | `experiments/long-context/setup-kcp.sh`, `kcp/`, `KCP=1` in the launchers | Megatron patch 0007 (`backends/nemo-rl/patches/megatron/`) and flash-linear-attention 0.5.2 in the overlay, used automatically for a context above 32K |
 | Data paths | absolute paths in task files (`/scratch/hanint06/data/...`) | `${oc.env:RL_DATA_DIR}/...` (set in `sites/<site>.env` or `site.env`); your own files under `${oc.env:RL_USER_HOME}` |
 
 Removed: `experiments/long-context/launch-stem-ctx.sh` and its three node-split recipes, the launchers of
@@ -34,7 +34,7 @@ them refer to the commit before the restructure (`965e15c` on main, `f1ec52e` on
   `DEBUG=0` (as `experiments/long-context/launch-code-ctx.sh` now does); otherwise an exported `DEBUG=1` adds the debug
   defaults before your overrides, and validation would be switched off.
 - **`DRY_RUN=1` no longer runs setup.** It needs an existing NeMo-RL clone; on a fresh account launch once or run
-  `backends/nemo-rl/apertus2/setup.sh`.
+  `backends/nemo-rl/setup/setup.sh`.
 - **The checkpoint deadline follows the time limit.** For a run with checkpoints, `run.sh` sets
   `checkpointing.checkpoint_must_save_by` to 30 minutes before `JOB_TIME` (or the task's `job_time`), over the value in
   the recipe. A different deadline goes on the command line, quoted: `checkpointing.checkpoint_must_save_by="'00:11:00:00'"`.
@@ -77,21 +77,21 @@ them refer to the commit before the restructure (`965e15c` on main, `f1ec52e` on
 4. **Delete your launcher** once its variables are keys or overrides. Keep a script only for what `run.sh` cannot
    do (for example starting a sandbox job first).
 5. **Turn NeMo-RL commits into patches.** Every commit in a clone of your own that a run depends on becomes a patch
-   with the next free number (0062 on), with a subject no other patch has (`setup.sh` matches patches by subject):
+   with the next free number (0063 on), with a subject no other patch has (`setup.sh` matches patches by subject):
    ```bash
-   git -C <your clone> format-patch --start-number 62 -o backends/nemo-rl/apertus2/patches/nemo-rl/ <base>..<head>
+   git -C <your clone> format-patch --start-number 62 -o backends/nemo-rl/patches/nemo-rl/ <base>..<head>
    ```
-   Check that the series is complete: in a fresh worktree at the pin (the PR merges of `apertus2/pin`), apply every
+   Check that the series is complete: in a fresh worktree at the pin (the PR merges of `backends/nemo-rl/env/pin`), apply every
    patch in order with `git am -3`, and compare the tree with the clone you tested on (`git diff --stat`). Patches
    numbered 0015-0017 and 0035-0039 on other branches are not on main: renumber them after 0061.
 6. **Replace personal paths:** datasets under `${oc.env:RL_DATA_DIR}/...`, files in your home under
    `${oc.env:RL_USER_HOME}/...`, the judge model under `${oc.env:SCRATCH}/models/...`.
 7. **Check before the first run:** `DRY_RUN=1 bash run.sh experts/<expert>/<task>.yaml` prints nodes, context, the
    overrides `run.sh` adds, the config copies and the preflight report. To confirm nothing changed, merge the old and
-   the new config with `backends/nemo-rl/config.sh` (`config_resolve`) and compare them leaf by leaf
+   the new config with `backends/nemo-rl/config/config.sh` (`config_resolve`) and compare them leaf by leaf
    (`yq r <file> --printMode pv '**' | sort`).
 8. **A new expert** starts from its template in `experts/<expert>/` (or copies one): fill in the datasets marked
-   TODO and delete `template: true`, which `run.sh` refuses to submit.
+   TODO. `run.sh` submits no run while a `data_path` is missing (`backends/nemo-rl/config/preflight.sh`).
 
 ## 4. Branches in this checkout that are not migrated yet (2026-11-20)
 
@@ -125,15 +125,16 @@ The NeMo-RL clones of these branches may also hold commits that are not patches 
 | `envs/ultrafeedback-few-shot.txt`, `prepare_ultrafeedback.py`, `prepare_alpaca_eval.py` | `experts/chat/scripts/` |
 | `envs/workplace-assistant-sft.yaml` | `experts/tool-use/archive/` |
 | `envs/lean-sft.yaml` | `experts/lean/archive/` |
-| `envs/apertus2-system.json`, `-high.json`, `-sciworld-act.json`, `-sciworld-act-high.json` | `shared/frames/` |
+| `envs/apertus2-system.json`, `-high.json` | `shared/frames/` |
+| `envs/apertus2-system-sciworld-act.json`, `-sciworld-act-high.json` | `experts/stem/frames/` (only ScienceWorld declares the `act` tool) |
 | `envs/stage_judge_model.sh`, `envs/strip_few_shot.py` | `shared/scripts/` |
 | `envs/score-text.yaml` | `shared/debug/` |
 | the judge blocks of `envs/stem-mix-run4.yaml` / `run5.yaml` (`env.llm_judge`, `env.judge_pool`) | `shared/judges/llm-judge.yaml` (the grader) and `shared/judges/servers/gemma-4-26B-A4B-it.yaml` (the server), both in the expert's `defaults:`; the server's nodes (`env.extra_judge_pools.<model>.num_nodes`) and the grader's server (`env.llm_judge.judge_pool`) in its base.yaml |
-| `experiments/long-context/setup-kcp.sh`, `experiments/long-context/kcp/` | `backends/nemo-rl/apertus2/kcp/setup.sh`, `kcp/` |
+| `experiments/long-context/setup-kcp.sh`, `experiments/long-context/kcp/` | Megatron patch `backends/nemo-rl/patches/megatron/0007-*` (flash-linear-attention 0.5.2 in the overlay) |
 | `experiments/long-context/recipes/sftv02-stem-*.yaml` | `size:` tiers (`experts/main.yaml`) |
 | `recipes/apertus2-*.yaml` (all 34) | `recipes/archive/`; the STEM recipe written out as `recipes/chonk-sftv02.yaml` |
 | `experiments/grpo-chonk/*.yaml` (27) | `recipes/archive/chain/` |
-| `experiments/grpo-chonk/stage_model.sh` | `backends/nemo-rl/apertus2/stage_model.sh` |
+| `experiments/grpo-chonk/stage_model.sh` | `backends/nemo-rl/setup/stage_model.sh` |
 | `experiments/long-context/launch-stem-ctx.sh` | `run.sh stem` (run 5 again: `run.sh experts/stem/archive/run5-32k-job1299180.yaml`) |
 | `sizes/cheap.yaml`, `expensive.yaml`, `ultra.yaml` | `size:` tiers computed from the recipe's `nodes:` (old expensive 16+32 = new `ultra`; old cheap 8+16 = `size: 8+16`); no batch scaling |
 | `experiments/enigmata/`, `experiments/scienceworld/` | `experts/stem/scripts/enigmata/`, `scienceworld/` (launchers now run from this repository: `recipes/archive/`, the NeMo-RL clone of `site.env`) |
@@ -145,6 +146,6 @@ The NeMo-RL clones of these branches may also hold commits that are not patches 
 | `experiments/long-context/convert_rl_ckpt.sh` | `shared/scripts/convert_rl_ckpt.sh` |
 | `experiments/long-context/tools/` | `shared/scripts/analysis/` (rollouts, timings), `network/` (netcheck, Ray transfer), `sandbox/` (pod probes) |
 | `experiments/chonk-sft/` | `shared/sft-checkpoint/` |
-| `experiments/grpo-math/`, `experiments/vlm-geo3k/` | `backends/nemo-rl/examples/` |
+| `experiments/grpo-math/`, `experiments/vlm-geo3k/` | removed with the stock NeMo-RL stack (Qwen configs, 2026-11-24) |
 | `experiments/grpo-chonk/README.md` | `recipes/archive/chain/README.md` |
 | `experiments/runs.md`, `megachonk.md`, `long-context/README.md` | `docs/runs.md`, `docs/megachonk.md`, `docs/long-context.md` |

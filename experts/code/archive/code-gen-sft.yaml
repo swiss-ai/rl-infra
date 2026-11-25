@@ -1,9 +1,9 @@
 # Task file: competitive coding on an SFT checkpoint, on Gym's code_gen: one reply with a Python code
 # block, which runs against the problem's unit tests. Model-written code runs only in the sandbox
 # service, on a node of its own, so start that first:
-#   GYM_DIR=... bash backends/nemo-rl/sandbox/setup.sh
-#   MAX_TRAIN_ROW_BYTES=... MAX_VALIDATION_ROW_BYTES=... bash backends/nemo-rl/sandbox/setup-data.sh
-#   JOB_TIME=06:00:00 bash backends/nemo-rl/sandbox/start.sh
+#   GYM_DIR=... bash experts/code/scripts/sandbox/setup.sh
+#   MAX_TRAIN_ROW_BYTES=... MAX_VALIDATION_ROW_BYTES=... bash experts/code/scripts/sandbox/setup-data.sh
+#   JOB_TIME=06:00:00 bash experts/code/scripts/sandbox/start.sh
 #   bash run.sh experts/code/archive/code-gen-sft.yaml
 # The reward is 1 only if every test passes, Gym's standard score, so a time-out on any test scores 0.
 defaults: ../../../recipes/archive/apertus2-chonk-sft-vllm-adamw-code.yaml

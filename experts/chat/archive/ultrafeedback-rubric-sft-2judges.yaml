@@ -4,7 +4,7 @@
 # so a lenient judge does not reach other prompts. Validation stays on Qwen, so AlpacaEval stays
 # comparable with the one-judge runs. Each agent logs its own metrics. For a third judge, add a pool to
 # extra_judge_pools, copy the three Gym entries at the end of this file, and add its agent to the choices.
-#   HF_REPO=google/gemma-4-26B-A4B-it CHECK_SCRIPT=download_model.sh bash backends/nemo-rl/apertus2/check_env_job.sh
+#   HF_REPO=google/gemma-4-26B-A4B-it CHECK_SCRIPT=backends/nemo-rl/setup/download_model.sh bash backends/nemo-rl/diagnostics/check_env_job.sh
 #   bash run.sh experts/chat/archive/ultrafeedback-rubric-sft-2judges.yaml
 defaults: ../../../recipes/archive/apertus2-chonk-sft-vllm-adamw-rubric.yaml
 script: examples/nemo_gym/run_grpo_nemo_gym.py

@@ -4,7 +4,7 @@
 # ScienceWorld (AllenAI, Apache-2.0): multi-turn text simulator of 30 elementary-school science tasks, played by the
 # scienceworld environment (NeMo-RL branch apertus2-sciworld). Rows: train variations only, task-balanced (see
 # experts/stem/scripts/scienceworld/build_data.py); simplifications teleportAction, openDoors, openContainers,
-# selfWateringFlowerPots. The model acts through the act tool (system frame shared/frames/apertus2-system-sciworld-act.json,
+# selfWateringFlowerPots. The model acts through the act tool (system frame experts/stem/frames/apertus2-system-sciworld-act.json,
 # copied next to the data).
 # Reward: the episode's last score / 100, negative (failed) scores as 0.
 # Validation every 20 steps: AIME 2024 mean@32 and GPQA-Diamond mean@8 (as run 3) plus the ScienceWorld dev set

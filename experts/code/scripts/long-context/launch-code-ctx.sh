@@ -67,7 +67,7 @@ if [[ "${KCP}" == 1 ]]; then
     KCP_COMMIT=$(git -C "${MEGATRON_DIR}" rev-parse rl-kcp)
     mkdir -p ${SCRATCH}/long-context/launch
     export PIN_FILE=${SCRATCH}/long-context/launch/pin-kcp-main
-    sed "s/^MEGATRON_COMMIT=.*/MEGATRON_COMMIT=${KCP_COMMIT}/" "${INFRA}/backends/nemo-rl/apertus2/pin" > "${PIN_FILE}"
+    sed "s/^MEGATRON_COMMIT=.*/MEGATRON_COMMIT=${KCP_COMMIT}/" "${INFRA}/backends/nemo-rl/env/pin" > "${PIN_FILE}"
     # The stack's container spec with flash-linear-attention 0.5.2 (fla.ops.cp) ahead of the image's copy.
     export CONTAINER_SPEC=${SCRATCH}/long-context/launch/edf-kcp-main.toml.template
     # A missing directory would only show inside the job, as the image's older flash-linear-attention without fla.ops.cp.
@@ -75,7 +75,7 @@ if [[ "${KCP}" == 1 ]]; then
     [[ -d "${FLA_DIR}/fla/ops/cp" ]] || {
         echo "ERROR: ${FLA_DIR} has no flash-linear-attention 0.5.2 (fla/ops/cp); set KCP_FLA_DIR" >&2; exit 1; }
     sed "s|:@@MEGATRON_DIR@@:|:@@MEGATRON_DIR@@:${FLA_DIR}:|" \
-        "${INFRA}/backends/nemo-rl/apertus2/edf.toml.template" > "${CONTAINER_SPEC}"
+        "${INFRA}/backends/nemo-rl/env/edf.toml.template" > "${CONTAINER_SPEC}"
     grep -q "fla-0.5.2" "${CONTAINER_SPEC}" || { echo "ERROR: could not add fla-0.5.2 to PYTHONPATH" >&2; exit 1; }
     EXTRA+=(++policy.megatron_cfg.model_overrides.linear_attention_cp_impl=kcp)
 elif (( CP != 1 && CP != 2 && CP != 4 )); then
@@ -114,7 +114,7 @@ CODE_GEN=env.nemo_gym.code_gen.resources_servers.code_gen
 # SANDBOX=<endpoint file>: the unit tests run in rl-infra's sandbox service on a node of our own instead of the
 # pods at CSCS (no Kubernetes). Start the service first, as a job of its own that outlives the run:
 #   SANDBOX_ENDPOINT_FILE=<endpoint file> SANDBOX_WORKERS=192 JOB_TIME=2-00:00:00 \
-#       bash <rl-infra>/backends/nemo-rl/sandbox/start.sh
+#       bash <rl-infra>/experts/code/scripts/sandbox/start.sh
 # The task file is then experts/code/archive/code-gen-osb-sft.yaml without its pod pool (written to launch/), every other setting
 # unchanged; the code_gen server takes the sandbox service when there is no pod pool. SANDBOX_WORKERS (default 192)
 # must be the service's --workers: that many submissions are in flight.
@@ -172,7 +172,7 @@ sed "s|^defaults: .*|defaults: ${RECIPE_DEFAULTS}|" "${RECIPE}" > "${RECIPE_COPY
 export RECIPE=${RECIPE_COPY}
 echo "Recipe: ${RECIPE}"
 export JOB_TIME=${JOB_TIME:-03:00:00}
-# The hang watchdog (backends/nemo-rl/hang_watch.sh) stops a run whose driver log has not changed for 45 minutes,
+# The hang watchdog (backends/nemo-rl/job/hang_watch.sh) stops a run whose driver log has not changed for 45 minutes,
 # or for 2 hours during a validation. A 64K answer takes close to an hour to generate and a 128K one about two, so
 # from 64K on the limits are raised (4 h, and 6 h during a validation); a real hang then costs that long.
 if (( CTX >= 65536 )); then

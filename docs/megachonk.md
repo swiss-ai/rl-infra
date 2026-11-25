@@ -153,7 +153,7 @@ mix), raw row text as the prompt. Validation: AIME 2024 × 32 and GPQA-Diamond �
 | "Disk quota exceeded" | group-wide file limit on scratch | vLLM and FlashInfer caches in home (`sites/hangang.env`) |
 | 10-minute timeout in the first training step | kernels compile stage by stage, about 95 s each | `distributed_timeout_minutes` (new key) |
 | host memory exhausted at the first optimizer step | AdamW state on the host | trainer TP4 and `optimizer_offload_fraction: 0.7` |
-| preflight rejects TP4 | wrong divisibility rule | fixed in `backends/nemo-rl/preflight.sh` |
+| preflight rejects TP4 | wrong divisibility rule | fixed in `backends/nemo-rl/config/preflight.sh` |
 | `make_sequence_length_divisible_by (8) is not a multiple of 32` | CP4 × TP4 needs 32 | set to 32 for 16K |
 | 10-minute wait for a communicator id at the first optimizer step | gradient-norm communicator first created there, stages arrive minutes apart | warm it up at start (`nemo_rl/utils/nccl_warmup.py`); `NRL_NCCL_TIMEOUT_MINUTES` and the Megatron timeout at 60 |
 | driver hangs after setup on 48 nodes | W&B copies the console; 377,000 lines of worker output; the client's backlog grows without bound | `WANDB_CONSOLE=off` in the driver |
@@ -182,7 +182,7 @@ Recipes and experiment files:
 | `shared/debug/score-text.yaml` | debug tool: the trainer's log-probabilities of plain text |
 | `shared/prompts/stem-mix-four-shot.txt` | four worked examples as a prompt prefix for the STEM mix (not run) |
 
-NeMo-RL changes, as patches applied by `setup.sh` (`backends/nemo-rl/apertus2/patches/nemo-rl/`):
+NeMo-RL changes, as patches applied by `setup.sh` (`backends/nemo-rl/patches/nemo-rl/`):
 - `0050`: the `policy.megatron_cfg.distributed_timeout_minutes` key.
 - `0051`: the gradient-norm communicator in the NCCL warm-up.
 
@@ -191,8 +191,8 @@ The runs also use two NeMo-RL changes added with the long-context work: `0040`,
 `0041`, Ray on Slingshot in `ray.sub` (`RAY_NODE_NAME_SUFFIX`, `-hsn0` by default on Hangang
 through `sites/hangang.env`). The clone `~/projects/nemo-rl-apertus2-megachonk` has all four.
 
-Other changes: `backends/nemo-rl/apertus2/driver.sh` (W&B console off, unbuffered stdout),
-`backends/nemo-rl/preflight.sh` (expert-parallel rule), `sites/hangang.env` (vLLM caches in the
+Other changes: `backends/nemo-rl/job/driver.sh` (W&B console off, unbuffered stdout),
+`backends/nemo-rl/config/preflight.sh` (expert-parallel rule), `sites/hangang.env` (vLLM caches in the
 home).
 
 ## Launching
@@ -202,7 +202,7 @@ The model must be staged first (once). The Chonk staging script does the same st
 ```bash
 SRC=/scratch/hanint06/models/megachonk-pretraining-iter_0042000 \
 DST=$SCRATCH/models/apertus2-megachonk-iter42000 CHONK_MODEL_STAGE=copy STAGE_SHARDS=link \
-bash backends/nemo-rl/apertus2/stage_model.sh
+bash backends/nemo-rl/setup/stage_model.sh
 ```
 
 (The folder used so far was staged by hand with the same content; the command above has not been

@@ -1,6 +1,6 @@
-# Knowledge, factuality and QA expert: every dataset, environment and validation set, defined once. TEMPLATE: the
-# datasets below are placeholders. Fill in the TODOs, then delete `template: true` (run.sh refuses to submit a
-# template; DRY_RUN=1 shows it). Layout as experts/stem/base.yaml; this file is the official run (bash run.sh knowledge).
+# Knowledge, factuality and QA expert: every dataset, environment and validation set, defined once. The datasets below
+# are placeholders: fill in the TODOs (run.sh submits no run while a data_path is missing; DRY_RUN=1 shows the
+# config). Layout as experts/stem/base.yaml; this file is the official run (bash run.sh knowledge).
 # Starting point: open factual questions graded by the shared LLM judge (../../shared/judges/llm-judge.yaml) against a
 # reference answer, and multiple choice graded on the option letter in the claim (math_default), as the science
 # knowledge sets of the STEM mix (experts/stem/base.yaml: openqa, mcqa).
@@ -8,7 +8,6 @@
 defaults:
   - ../../shared/judges/llm-judge.yaml
   - ../../shared/judges/servers/gemma-4-26B-A4B-it.yaml
-template: true
 recipe: recipes/chonk-sftv02.yaml
 
 # Thinking level per dataset (the system frame its prompts start with); a run file overrides one key.

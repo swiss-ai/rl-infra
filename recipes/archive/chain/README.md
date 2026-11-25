@@ -1,10 +1,10 @@
 # Chonk GRPO on GSM8K
 
 > The config files of these experiments moved to `recipes/archive/chain/` (the recipes built on them to
-> `recipes/archive/`), and `stage_model.sh` to `backends/nemo-rl/apertus2/`; file names below are unchanged.
+> `recipes/archive/`), and `stage_model.sh` to `backends/nemo-rl/`; file names below are unchanged.
 
 These configs train Apertus 2 Chonk (the long-context checkpoint at iteration 3576) with
-async GRPO on GSM8K, on the Apertus 2 NeMo-RL stack in `backends/nemo-rl/apertus2`. That
+async GRPO on GSM8K, on the Apertus 2 NeMo-RL stack in `backends/nemo-rl`. That
 stack pins the swiss-ai NeMo-RL fork together with the PRs and patches these runs need, and
 runs an image whose UCCL is rebuilt with the fix for the illegal memory accesses in the MoE
 combine (uccl-project/uccl#1085). `run.sh` at the repository root launches them; see the

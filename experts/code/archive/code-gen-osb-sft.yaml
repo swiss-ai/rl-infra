@@ -1,8 +1,8 @@
 # Task file: competitive coding on an SFT checkpoint, on Gym's code_gen, with the unit tests in a pool
 # of OpenSandbox pods at CSCS (Gym patch 0005) instead of a sandbox node of our own. The API key goes in
 # a file of your own (chmod 600); only its path goes in the config:
-#   GYM_DIR=... bash backends/nemo-rl/sandbox/setup.sh          # the harness the pods run
-#   MAX_TRAIN_ROW_BYTES=... MAX_VALIDATION_ROW_BYTES=... bash backends/nemo-rl/sandbox/setup-data.sh
+#   GYM_DIR=... bash experts/code/scripts/sandbox/setup.sh          # the harness the pods run
+#   MAX_TRAIN_ROW_BYTES=... MAX_VALIDATION_ROW_BYTES=... bash experts/code/scripts/sandbox/setup-data.sh
 #   JOB_TIME=1-05:00:00 bash run.sh experts/code/archive/code-gen-osb-sft.yaml \
 #       env.nemo_gym.code_gen.resources_servers.code_gen.opensandbox.api_key_file=$HOME/.opensandbox_token \
 #       checkpointing.checkpoint_must_save_by=01:04:30:00

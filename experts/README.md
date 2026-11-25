@@ -37,8 +37,9 @@ they ran. A variant that wins moves its changes into `base.yaml`; when a run is 
 | Translation | `translation/` | template: translations graded by the shared LLM judge |
 | Lean (formal proofs) | `lean/` | template on the archived Lean 4 run (Gym math_formal_lean) |
 
-A template carries `template: true`, which `run.sh` refuses to submit (`DRY_RUN=1` shows it). The templates of
-chat, code, tool-use and lean take their latest archived run through `defaults` until their `base.yaml` is written.
+`run.sh` submits no run while one of its dataset files is missing (`backends/nemo-rl/config/preflight.sh`), which holds
+back the templates until their datasets exist (`DRY_RUN=1` shows the config). The templates of chat, code,
+tool-use and lean take their latest archived run through `defaults` until their `base.yaml` is written.
 
 What several experts take in lives in `shared/` at the top of the repository:
 - `shared/frames/`: the system frame every prompt of the Apertus 2 message format starts with, as small JSON files:

@@ -2,7 +2,7 @@
 # replica split across 2 nodes (tensor_parallel_size 8). It needs 2 GPUs at least, so tensor_parallel_size 2
 # on the same 2 nodes would give 4 replicas instead of this one; this setup is here to run a judge across
 # nodes. Each prompt draws one of the three judges at random when it is read.
-#   HF_REPO=nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8 CHECK_SCRIPT=download_model.sh bash backends/nemo-rl/apertus2/check_env_job.sh
+#   HF_REPO=nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8 CHECK_SCRIPT=backends/nemo-rl/setup/download_model.sh bash backends/nemo-rl/diagnostics/check_env_job.sh
 #   bash run.sh experts/chat/archive/ultrafeedback-rubric-sft-3judges.yaml
 defaults: ../../../recipes/archive/apertus2-chonk-sft-vllm-adamw-rubric-3judges.yaml
 script: examples/nemo_gym/run_grpo_nemo_gym.py

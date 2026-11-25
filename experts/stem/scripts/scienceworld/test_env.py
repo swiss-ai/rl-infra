@@ -135,7 +135,7 @@ def main():
     from nemo_rl.data.processors import apertus2_sciworld_data_processor
     row = json.loads(open("/home01/hanint06/sciworld/data/sciworld_tool_sample.jsonl").readline())
     row["task_name"] = "x"
-    ts = TaskDataSpec(task_name="x", system_prompt_file=os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../../shared/frames/apertus2-system-sciworld-act.json"))
+    ts = TaskDataSpec(task_name="x", system_prompt_file=os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../frames/apertus2-system-sciworld-act.json"))
     d = apertus2_sciworld_data_processor(row, ts, tok, 4096, 0)
     print("prompt tokens:", d["length"], repr(tok.decode(d["message_log"][0]["token_ids"])[:700]))
     print("REPORT", json.dumps(report, indent=1))

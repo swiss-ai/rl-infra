@@ -56,7 +56,7 @@ bash run.sh experts/chat/archive/ultrafeedback-rubric.yaml grpo.max_num_steps=3 
 The task names its entry `script`, the NeMo Gym one, so `run.sh` also sets up Gym, without touching
 the image: a checkout on `PYTHONPATH`, its own Python overlay, and server venvs built on scratch at
 job start. `env.judge_pool` serves the judge model through Ray next to the trainer and inference
-partitions, and the `rubric_judge` server in `apertus2/patches/gym` fills in the rubrics and calls it.
+partitions, and the `rubric_judge` server in `backends/nemo-rl/patches/gym` fills in the rubrics and calls it.
 The rubrics and their weights are in the task. Validation is AlpacaEval 2.0's prompts, GPT-4 Turbo
 references and judge prompt with the same judge model, reported as
 `validation/alpaca_eval_simple_agent/reward/mean`. Every rollout is saved to `<checkpoint_dir>/rollouts/`.
@@ -64,7 +64,7 @@ The few-shot prompt is written into the data rows by the two `prepare_*` scripts
 `experts/chat/scripts/ultrafeedback-few-shot.txt` means running them again.
 
 To see how loaded the judge is, each replica writes its state to the server's `stats_path` (e.g. `<log_dir>/judge_stats-<model>.jsonl`)
-every few seconds. `python3.12 backends/nemo-rl/apertus2/judge_stats.py <file> [start] [end]` sums it
+every few seconds. `python3.12 shared/judges/judge_stats.py <file> [start] [end]` sums it
 up per replica, for a window in seconds from the start of the run. Requests waiting and `queue_s`
 well above 0 mean the judge's GPUs are full: check `max_num_batched_tokens` in its `vllm_kwargs`, then
 add judge nodes (`num_nodes` of the server in the expert's base.yaml; older task files: `env.judge_pool.num_nodes`), as in
@@ -88,20 +88,20 @@ the top of `experts/chat/archive/ultrafeedback-rubric-sft.yaml`:
 
 ```bash
 bash shared/scripts/stage_judge_model.sh
-HF_REPO=google/gemma-4-26B-A4B-it CHECK_SCRIPT=download_model.sh bash backends/nemo-rl/apertus2/check_env_job.sh
-HF_REPO=nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8 CHECK_SCRIPT=download_model.sh bash backends/nemo-rl/apertus2/check_env_job.sh
+HF_REPO=google/gemma-4-26B-A4B-it CHECK_SCRIPT=backends/nemo-rl/setup/download_model.sh bash backends/nemo-rl/diagnostics/check_env_job.sh
+HF_REPO=nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8 CHECK_SCRIPT=backends/nemo-rl/setup/download_model.sh bash backends/nemo-rl/diagnostics/check_env_job.sh
 bash run.sh experts/chat/archive/ultrafeedback-rubric-sft-3judges.yaml grpo.max_num_steps=3
 ```
 
 The commands of the full runs are in `docs/runs.md`. Nemotron's first start builds its kernels
-into scratch, which `check_judge.sh` does in about 13 minutes on 64 CPUs, after `setup-gym.sh`:
+into scratch, which `experts/chat/scripts/check_rubric_judge.sh` does in about 13 minutes on 64 CPUs, after `setup-gym.sh`:
 
 ```bash
 JOB_TIME=01:00:00 JUDGE_MODEL=$SCRATCH/models/NVIDIA-Nemotron-3-Super-120B-A12B-FP8 JUDGE_GPUS=0,1 \
     JUDGE_VLLM_ARGS="--tensor-parallel-size 2 --dtype auto --kv-cache-dtype fp8 --enable-chunked-prefill --mamba-ssm-cache-dtype float32 --enable-prefix-caching --trust-remote-code" \
     PYDEPS_PKGS="openai==2.44.0|devtools==0.13.0|yappi==1.7.6|pydot==4.0.1|asttokens==3.0.2|executing==2.3.0" \
-    PYDEPS=$SCRATCH/nemo-rl-apertus2/pydeps-check-gym CHECK_SCRIPT=check_judge.sh \
-    bash backends/nemo-rl/apertus2/check_env_job.sh
+    PYDEPS=$SCRATCH/nemo-rl-apertus2/pydeps-check-gym CHECK_SCRIPT=experts/chat/scripts/check_rubric_judge.sh \
+    bash backends/nemo-rl/diagnostics/check_env_job.sh
 ```
 
 The 4 rubrics and their weights are in `rubric_weights`, once per judge (`rubric_judge`,
@@ -113,7 +113,7 @@ task file, and add its agent to `data.train.gym_agent_choices`. Set `cluster.num
 `sft_export` in a recipe of its own (or take a node tier, see below).
 Scores come from the judge's first token, so a judge that thinks first gets a noise score with no
 error. Turn thinking off with `chat_template_kwargs: {enable_thinking: false}`, and run
-`check_judge.sh`, which fails when under 95% of that token's probability is on a verdict. A replica
+`check_rubric_judge.sh`, which fails when under 95% of that token's probability is on a verdict. A replica
 across nodes needs the three settings in the Nemotron block, or vLLM hangs at start-up.
 
 ## Task files, recipes, node tiers and context
@@ -171,9 +171,9 @@ refers to `frames.<dataset>` and run files override those keys.
 
 ## Developing NeMo-RL changes
 
-The NeMo-RL a run uses is the swiss-ai fork at the commit in `backends/nemo-rl/apertus2/pin`, the PRs
-listed there and the patches in `backends/nemo-rl/patches/` and `backends/nemo-rl/apertus2/patches/nemo-rl/`,
-applied in order by `setup.sh` into `~/projects/nemo-rl-apertus2`. A fresh clone of this repository
+The NeMo-RL a run uses is the swiss-ai fork at the commit in `backends/nemo-rl/env/pin`, the PRs
+listed there and the patches in `backends/nemo-rl/patches/ray-sub/` and `backends/nemo-rl/patches/nemo-rl/`,
+applied in order by `backends/nemo-rl/setup/setup.sh` into `~/projects/nemo-rl-apertus2`. A fresh clone of this repository
 needs nothing else. Work on NeMo-RL in a clone of your own and keep that shared one as setup made it:
 
 ```bash
@@ -181,7 +181,7 @@ git -C ~/projects/nemo-rl-apertus2 worktree add ~/projects/nemo-rl-<topic>      
 # commit your change in ~/projects/nemo-rl-<topic>, then test it:
 NEMO_RL_DIR=~/projects/nemo-rl-<topic> bash run.sh experts/<expert>/dev/<name>.yaml grpo.max_num_steps=3
 # when it works, export each commit as the next patch and commit it here, on a branch for main:
-git -C ~/projects/nemo-rl-<topic> format-patch --start-number <next> -o backends/nemo-rl/apertus2/patches/nemo-rl/ <base>..HEAD
+git -C ~/projects/nemo-rl-<topic> format-patch --start-number <next> -o backends/nemo-rl/patches/nemo-rl/ <base>..HEAD
 ```
 
 `setup.sh` applies to an existing clone only the patches whose subject it lacks, so the shared clone
@@ -193,52 +193,39 @@ clone you tested on.
 
 ## How a NeMo-RL run is put together
 
-NeMo-RL ships as an NGC container image (`nvcr.io/nvidia/nemo-rl`) that already contains
-every Python environment it needs: the driver venv and one prebuilt venv per Ray worker
-type (policy training, vLLM generation, ...). Those venvs are built for one specific
-NeMo-RL commit, and NeMo-RL refuses to start if the source it runs does not match it. So
-nothing is pip-installed here. Instead, `backends/nemo-rl/pin` records the commit the
-image was built from, `setup.sh` clones NeMo-RL at exactly that commit, and the container
-environment mounts the clone over `/opt/nemo-rl`, where the image's venvs expect the
-source. Patching NeMo-RL is then just committing on top of the pin in the clone; only a
-dependency change (a new `uv.lock`) needs a new image, or `NRL_FORCE_REBUILD_VENVS=true`.
+The container image (`backends/nemo-rl/env/edf.toml.template`) contains every Python environment NeMo-RL
+needs: the driver venv and one prebuilt venv per Ray worker type (policy training, vLLM generation, ...).
+`backends/nemo-rl/env/pin` records the commits of the swiss-ai NeMo-RL fork, Megatron-LM, Megatron-Bridge, Gym
+and the vLLM model files. `backends/nemo-rl/setup/setup.sh`, which `run.sh` runs at every launch, clones them at
+those commits and applies the patches; the container mounts the NeMo-RL clone over `/opt/nemo-rl`, where the
+image's venvs expect the source. Packages the image lacks go into an overlay on `PYTHONPATH` (`backends/nemo-rl/job/pydeps.sh`).
 
-`backends/nemo-rl/launch.sh` turns a config and a node count into a Slurm job. It hands
-NeMo-RL's own Slurm launcher, `ray.sub` in the clone, the training command, and `ray.sub`
-starts a Ray head on the first node and Ray workers on the others, all inside the
-container. Stock `ray.sub` does not run on Alps, so the clone sits on a local branch
-(`alps`) with one commit on top of the pin, kept here as `backends/nemo-rl/patches/` and
-applied by `setup.sh`. Once all GPUs have joined, the head runs `examples/run_grpo.py` from the clone
-with the given config, and the job's exit code is the training script's.
+`backends/nemo-rl/launch.sh` turns a config and a node count into a Slurm job. It hands NeMo-RL's own Slurm
+launcher, `ray.sub` in the clone, the training command, and `ray.sub` starts a Ray head on the first node and Ray
+workers on the others, all inside the container. Stock `ray.sub` does not run on Alps: the patches in
+`backends/nemo-rl/patches/ray-sub/` (NeMo-RL's `ray.sub`, Copyright NVIDIA, Apache-2.0) add the container-engine (EDF)
+mode, the single-step launch, memory binding, the NUMA watcher and extra pyxis flags (`PYXIS_EXTRA_ARGS`), and
+`setup.sh` applies them before the Apertus 2 ones. Once all GPUs have joined, the head runs `examples/run_grpo.py`
+(or the task's `script:`) from the clone with the run's frozen config, and the job's exit code is the training
+script's.
 
-Configs in `backends/nemo-rl/examples/` inherit from NeMo-RL's own example configs through
-`defaults: /opt/nemo-rl/examples/configs/...` and only state what differs. Overrides on
-the command line (`grpo.max_num_steps=50`) are applied last.
+`backends/nemo-rl/` has `launch.sh`, which run.sh calls, and one folder per part of a launch: `env/` (the stack's
+settings: `stack.env` with the clone paths, image, overlay and outputs, `pin` with the commits, `edf.toml.template`
+with the container), `setup/` (clones at the pin and the patches, the Gym checkout, the model staged on scratch; and
+`download_model.sh`, a Hugging Face download on a compute node), `config/` (what turns the settings into the job's
+configuration: merging and freezing the configs, the container flags, and `preflight.sh`, which checks the result,
+dataset files included, before every submission), `job/` (what runs inside the job: the driver and its package overlay, the restart of a
+failed driver from the latest checkpoint, and the watchdogs that dump stacks when it hangs or log host memory on GPU
+memory), `diagnostics/` (stack tests run by hand, and `check_env_job.sh`, which runs a script as a one-node job) and `patches/`.
 
 ## Setup
 
-```bash
-bash setup.sh                  # clones NeMo-RL, writes ~/.edf/nemo-rl.toml (Alps), stages the image
-```
-
-The cluster is detected and its profile `sites/<SITE>.env` supplies the account, partition,
-filesystems and container runtime; `site.env` (copied from `site.env.example`, optional)
-overrides any of it for you, and `sites/load.sh` documents the order.
-
-## Running
-
-```bash
-PARTITION=preemptable bash backends/nemo-rl/launch.sh \
-    backends/nemo-rl/examples/qwen3-32b-4n4g-fsdp2tp2.yaml 4 qwen3-32b-probe \
-    grpo.max_num_steps=3 checkpointing.enabled=false
-```
-
-The arguments are the config, the number of nodes, a run name, and any overrides;
-`DRY_RUN=1` prints the sbatch command and the container setup instead of submitting. Each
-job writes under `$OUT` (from `site.env`): `slurm/<jobid>-logs/ray-driver.log` is the
-training output, `slurm/<jobid>-<run>.out` is the Slurm-side trace of `ray.sub`,
-`logs/<run>/` holds metrics and `results/<run>/` checkpoints. Vision-language recipes use
-`SCRIPT=examples/run_vlm_grpo.py`.
+There is no separate setup step: `run.sh` runs `backends/nemo-rl/setup/setup.sh` and `stage_model.sh` at every
+launch, and both leave what is already in place. The cluster is detected and its profile `sites/<SITE>.env`
+supplies the account, partition, filesystems and container runtime; `site.env` (copied from `site.env.example`,
+optional) overrides any of it for you, and `sites/load.sh` documents the order. Each job writes under `$OUT`
+(`$SCRATCH/nemo-rl`): `slurm/<jobid>-logs/ray-driver.log` is the training output, `slurm/<jobid>-<run>.out` the
+Slurm-side trace of `ray.sub`, `logs/<run>/` the metrics and `results/<run>/` the checkpoints.
 
 ## Alps specifics baked in
 
@@ -265,21 +252,8 @@ container environment, each with the reasoning next to it in the code:
 | Images, Chonk model | copied to scratch from capstor | hanint02's copies in `/scratch/hanint02`, read in place (the model is linked into scratch) |
 | Network | EDF hooks and `[env]` | the image's libfabric plugin, plus KISTI's `NCCL_PROTO=^LL128 FI_PROVIDER=cxi NCCL_IB_DISABLE=1` (LL128 gives wrong inter-node all-reduce results there) |
 
-Each stack describes its container once, as an EDF template (`edf.toml.template`). On Alps
-`setup.sh` installs it in `~/.edf`; on pyxis sites `backends/nemo-rl/container.sh` turns the same
+The stack describes its container once, as an EDF template (`backends/nemo-rl/env/edf.toml.template`).
+On Alps `launch.sh` renders it into one EDF file per job (`$OUT/edf/`); on pyxis sites `backends/nemo-rl/config/container.sh` turns the same
 file into `ray.sub`'s `CONTAINER`, `MOUNTS` and `PYXIS_EXTRA_ARGS` and exports its `[env]` for
 the job. A new cluster needs a `sites/<name>.env` and, if it cannot be told from its
 filesystems, `SITE=<name>`.
-
-## Status
-
-Dense models train with the PyTorch (DTensor) backend and colocated vLLM: Qwen3-8B-Base
-on one node and Qwen3-32B on four (about 10 minutes per GRPO step with 64 prompts × 32
-generations). Qwen3-32B needs the older v1 DTensor worker (`dtensor_cfg._v2: false`),
-which loads the checkpoint once and broadcasts it instead of loading it on every GPU.
-The Megatron backend's weight refit to vLLM is broken in NeMo-RL v0.7.0 for the MoE/VLM
-models tried (`backends/nemo-rl/examples/`).
-
-The patches in `backends/nemo-rl/patches/` modify NeMo-RL's `ray.sub` (Copyright NVIDIA,
-Apache-2.0); it adds the container-engine (EDF) mode, the single-step launch, memory
-binding, the NUMA watcher and extra pyxis flags (`PYXIS_EXTRA_ARGS`).

@@ -3,7 +3,7 @@
 # container runtime (sites/<SITE>.env: the EDF installed by setup.sh on Alps, pyxis flags on HANGANG).
 #
 # Usage: bash backends/nemo-rl/launch.sh <config> <num_nodes> <run_name> [overrides...]
-#   <config>     a YAML in this repo (e.g. backends/nemo-rl/examples/qwen3-32b-4n4g-fsdp2tp2.yaml),
+#   <config>     a YAML in this repo (run.sh passes the frozen config.yaml of the run),
 #                any other path on a mounted filesystem, or an upstream recipe relative to
 #                the NeMo-RL clone (e.g. examples/configs/grpo_math_1B.yaml)
 #   overrides    passed to the training script, e.g. grpo.max_num_steps=50
@@ -11,7 +11,6 @@
 #   PARTITION, JOB_TIME, ACCOUNT, USE_RESERVATION, EXCLUDE_NODES override the configuration.
 #   DEPENDENCY=afterok:<jobid> starts the job only after another one succeeded.
 #   PREFLIGHT=0 skips the config check (preflight.sh) done before submission.
-#   PIN_FILE, DRIVER_PYTHON select another NeMo-RL source/image stack (see apertus2/launch.sh).
 #   DRY_RUN=1 prints the sbatch command and the container setup instead of submitting.
 #   WANDB_PROJECT (and WANDB_ENTITY), e.g. in site.env, log the run to Weights & Biases under
 #   its run name; the API key is read from WANDB_KEY_FILE (default ~/.wandb_api_key) at job start.
@@ -21,10 +20,13 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$(cd "${HERE}/../.." && pwd)"
+BACKEND_DIR="${HERE}"
+ROOT="$(cd "${BACKEND_DIR}/../.." && pwd)"
 source "${ROOT}/sites/load.sh" && rl_infra_load
+export SCRATCH NEMO_RL_DIR MEGATRON_DIR BRIDGE_DIR VLLM_RUNNER VLLM_APERTUS2 PYDEPS PYDEPS_PKGS PYDEPS_PKGS_PY313 PIN_FILE \
+    CONTAINER_SPEC EDF_NAME DRIVER_PYTHON IMAGE_MASTER IMAGE_WORK
 source "${PIN_FILE}"
-source "${HERE}/container.sh"
+source "${BACKEND_DIR}/config/container.sh"
 
 CONFIG=$1; NODES=$2; RUN=$3; shift 3
 SCRIPT="${SCRIPT:-examples/run_grpo.py}"
@@ -53,7 +55,7 @@ if [[ "${PREFLIGHT:-1}" == 1 ]]; then
     if command -v yq >/dev/null; then
         PREFLIGHT_OUT="$(mktemp)"
         trap 'rm -f "${PREFLIGHT_OUT}"' EXIT
-        if ! NEMO_RL_DIR="${NEMO_RL_DIR}" JOB_TIME="${JOB_TIME}" bash "${HERE}/preflight.sh" "${CONFIG}" "${NODES}" "$@" > "${PREFLIGHT_OUT}" 2>&1; then
+        if ! NEMO_RL_DIR="${NEMO_RL_DIR}" JOB_TIME="${JOB_TIME}" bash "${BACKEND_DIR}/config/preflight.sh" "${CONFIG}" "${NODES}" "$@" > "${PREFLIGHT_OUT}" 2>&1; then
             cat "${PREFLIGHT_OUT}" >&2
             echo "ERROR: preflight failed, not submitting (PREFLIGHT=0 to override)" >&2; exit 1
         fi
@@ -92,7 +94,7 @@ if ! grep -q RAY_SINGLE_SRUN "${NEMO_RL_DIR}/ray.sub"; then
     echo "ERROR: ${NEMO_RL_DIR}/ray.sub lacks the Alps patches (check out ${NEMO_RL_BRANCH})" >&2; exit 1
 fi
 if [[ "${CONTAINER_RUNTIME}" == pyxis ]] && ! grep -q PYXIS_EXTRA_ARGS "${NEMO_RL_DIR}/ray.sub"; then
-    echo "ERROR: ${NEMO_RL_DIR}/ray.sub lacks PYXIS_EXTRA_ARGS (git am backends/nemo-rl/patches/0002-*.patch)" >&2; exit 1
+    echo "ERROR: ${NEMO_RL_DIR}/ray.sub lacks PYXIS_EXTRA_ARGS (git am backends/nemo-rl/patches/ray-sub/0002-*.patch)" >&2; exit 1
 fi
 
 mkdir -p "${OUT}/slurm" "${OUT}/results" "${OUT}/logs"
@@ -125,7 +127,7 @@ if [[ -n "${WANDB_PROJECT:-}" ]]; then
     WANDB_ARGS="logger.wandb_enabled=true logger.wandb.project=${WANDB_PROJECT} logger.wandb.name=${RUN}"
     [[ -n "${WANDB_ENTITY:-}" ]] && WANDB_ARGS+=" ++logger.wandb.entity=${WANDB_ENTITY}"
 fi
-COMMAND="cd /opt/nemo-rl && RAY_DEDUP_LOGS=${RAY_DEDUP_LOGS:-0} DRIVER_RETRIES=${DRIVER_RETRIES:-2} bash ${HERE}/driver_retry.sh \
+COMMAND="cd /opt/nemo-rl && RAY_DEDUP_LOGS=${RAY_DEDUP_LOGS:-0} DRIVER_RETRIES=${DRIVER_RETRIES:-2} bash ${BACKEND_DIR}/job/driver_retry.sh \
 ${DRIVER_PYTHON:-/opt/nemo_rl_venv/bin/python} ${SCRIPT} --config ${CONFIG} \
 cluster.num_nodes=${NODES} cluster.gpus_per_node=${GPUS_PER_NODE} \
 checkpointing.checkpoint_dir=${OUT}/results/${RUN} \
@@ -147,7 +149,7 @@ esac
 # RAY_SINGLE_SRUN=1: head + workers in one srun step (Slingshot network is per step).
 # SRUN_MEM_BIND: keep host memory on the CPU NUMA nodes 0-3, off the GPUs' HBM.
 export GPUS_PER_NODE RAY_SINGLE_SRUN="${RAY_SINGLE_SRUN:-1}" BASE_LOG_DIR="${OUT}/slurm" COMMAND \
-    SRUN_MEM_BIND="${SRUN_MEM_BIND-verbose,mask_mem:0xf}" NUMA_WATCH="${NUMA_WATCH-${HERE}/numa_watch.sh}"
+    SRUN_MEM_BIND="${SRUN_MEM_BIND-verbose,mask_mem:0xf}" NUMA_WATCH="${NUMA_WATCH-${BACKEND_DIR}/job/numa_watch.sh}"
 
 if [[ "${DRY_RUN:-0}" == 1 ]]; then
     echo "== DRY_RUN: site ${SITE}, runtime ${CONTAINER_RUNTIME}; would run in ${OUT}/slurm:"

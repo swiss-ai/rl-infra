@@ -1,9 +1,8 @@
-# Medical expert: every dataset, environment and validation set, defined once. TEMPLATE: the datasets below are
-# placeholders. Fill in the TODOs, then delete `template: true` (run.sh refuses to submit a template; DRY_RUN=1
-# shows it). Layout as experts/stem/base.yaml; this file is the official run (bash run.sh medical).
+# Medical expert: every dataset, environment and validation set, defined once. The datasets below are placeholders:
+# fill in the TODOs (run.sh submits no run while a data_path is missing; DRY_RUN=1 shows the config). Layout as
+# experts/stem/base.yaml; this file is the official run (bash run.sh medical).
 # Starting point: medical multiple choice (e.g. MedQA, MedMCQA) graded on the option letter in the claim frame. For
 # open answers graded by a judge, add the judge to `defaults:` as stem/base.yaml does (shared/judges/llm-judge.yaml and a server file), env.extra_judge_pools.<model>.num_nodes and env.llm_judge.judge_pool, and a dataset with env_name llm_judge.
-template: true
 recipe: recipes/chonk-sftv02.yaml
 
 # Thinking level per dataset (the system frame its prompts start with); a run file overrides one key.

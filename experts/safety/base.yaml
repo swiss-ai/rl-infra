@@ -1,6 +1,6 @@
-# Safety expert: every dataset, environment and validation set, defined once. TEMPLATE: the datasets below are
-# placeholders. Fill in the TODOs, then delete `template: true` (run.sh refuses to submit a template; DRY_RUN=1
-# shows it). Layout as experts/stem/base.yaml; this file is the official run (bash run.sh safety).
+# Safety expert: every dataset, environment and validation set, defined once. The datasets below are placeholders:
+# fill in the TODOs (run.sh submits no run while a data_path is missing; DRY_RUN=1 shows the config). Layout as
+# experts/stem/base.yaml; this file is the official run (bash run.sh safety).
 # Starting point: prompts graded by the shared LLM judge (../../shared/judges/llm-judge.yaml) against a reference answer.
 # TODO: the llm_judge environment asks whether the reply matches the reference; grading harmlessness or refusals
 # needs a judge prompt of its own, or the rubric judge of experts/chat/ (Gym rubric_judge).
@@ -8,7 +8,6 @@
 defaults:
   - ../../shared/judges/llm-judge.yaml
   - ../../shared/judges/servers/gemma-4-26B-A4B-it.yaml
-template: true
 recipe: recipes/chonk-sftv02.yaml
 
 # Thinking level per dataset (the system frame its prompts start with); a run file overrides one key.
