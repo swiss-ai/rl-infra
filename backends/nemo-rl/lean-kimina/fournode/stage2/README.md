@@ -12,6 +12,7 @@ python3 budget.py --nodes 4 --pp 2 4 --detail
 
 ```bash
 python3 budget.py --nodes 4 --pp 2 4 --option bf16-scratch-mv scratch-mv --c2c --detail
+python3 budget.py --nodes 4 --pp 4 --option bf16-scratch-mv --stage-layers 12 10 10 10 --detail
 ```
 
 | Layout | Experts in training | GPU static / peak | Host per node | C2C per GPU per step |
@@ -20,6 +21,12 @@ python3 budget.py --nodes 4 --pp 2 4 --option bf16-scratch-mv scratch-mv --c2c -
 | PP2 EP8, m, v on scratch | fp8, offloaded | 44 / 73-87 GB | 491 GB, does not fit | 4.2 TB host to GPU |
 | PP4 EP4, m, v on scratch | bf16 on the GPU | 46 / 75-89 GB | 429 GB | 15 GB |
 | PP4 EP4, m, v on scratch | fp8, offloaded | 39 / 68-82 GB | 480 GB, does not fit | 8.4 TB host to GPU |
+| **PP4 EP4 12/10/10/10, m, v on scratch (recipe)** | bf16 on the GPU | 47 / 76-90 GB | 435 GB | 15 GB |
+| PP4 EP4 11/11/11/9, m, v on scratch | bf16 on the GPU | 51 / 80-94 GB | 462 GB, does not fit | 15 GB |
+
+The rows without a layer split assume every stage holds the average 9.75 MoE layers; with `--stage-layers` they
+describe the stage with the most MoE layers (Chonk's first 3 layers are dense). A PP4 stage is a whole node, so the
+heaviest stage sets both the GPU and the host figure.
 
 Scratch I/O is 433 GB per node per step in every row. Corrected 2026-11-25: the coarse-grained expert offload (the
 only mode NeMo-RL supports) keeps pinned fp8 copies of every expert in both orientations next to the bf16 ones
@@ -30,8 +37,9 @@ nodes with EP16. Colocated generation frees the gradient buffers (Megatron's `of
 
 ## The pieces
 
-**Expert offloading** already exists in Megatron-LM-MoE (0536034), and Chonk's SFT ran with it (`sft-chonk.sh`:
-`MOE_OFFLOAD=1`). NeMo-RL supports it through `policy.megatron_cfg.model_overrides`.
+**Expert offloading** exists in Megatron-LM-MoE (0536034), and Chonk's SFT ran with it (`sft-chonk.sh`:
+`MOE_OFFLOAD=1`). It is not used: the coarse-grained mode NeMo-RL needs computes the experts in fp8 and keeps extra
+pinned fp8 copies, which overflow host memory (table above). The recipe keeps today's bf16 training instead.
 
 **ScratchAdamW** (`scratch_adam.py`) is a CPU AdamW whose m and v live in files on scratch.
 - It streams them through a few aligned buffers, with readers, update and writers overlapped. A reader takes a buffer
@@ -59,19 +67,19 @@ nodes with EP16. Colocated generation frees the gradient buffers (Megatron's `of
 - Both do nothing without patch 0007 or without `cpu_optimizer_state_dir`.
 
 **Recipe** `recipes/apertus2-chonk-sftv02-18315-vllm-adamw-code-4n-colocated.yaml`: 4 nodes, colocated vLLM
-(synchronous GRPO; NeMo-RL allows colocated vLLM only without async), PP2 EP8, expert offloading, ScratchAdamW with its
-live folder next to the run's `step_<N>` folders. vLLM's memory share (0.75) is a guess until stage 1's sleep/wake data.
+(synchronous GRPO; NeMo-RL allows colocated vLLM only without async), PP4 EP4 with 12/10/10/10 layers per stage, bf16
+experts on the GPU, ScratchAdamW with its live folder next to the run's `step_<N>` folders. vLLM's memory share (0.75) is a guess until stage 1's sleep/wake data.
 
-**Resuming**: moments are tied to the parallel layout (4 nodes, PP2, EP8). The 200-step run's checkpoints are
+**Resuming**: moments are tied to the parallel layout (4 nodes, PP4 12/10/10/10, EP4). The 200-step run's checkpoints are
 `dp_reshardable` with 8 trainer nodes, so their optimizer state cannot move to 4 nodes at all, with or without
 ScratchAdamW. A 4-node run starts from the SFT export, or from such a checkpoint's weights with `load_optim: false`
 (fresh moments).
 
 ## Tests
 
-- `stage2_test.py` (laptop, 22 tests): bit-identity with torch AdamW (single-tensor and fused), restart, layout and
+- `stage2_test.py` (laptop, 23 tests): bit-identity with torch AdamW (single-tensor and fused), restart, layout and
   step mismatches, failed steps, checkpoint links that survive later steps, restore, reset, the dummy step, Megatron's
-  nesting and param groups, deadlock stress, the patch copy, the budget's calibration.
+  nesting and param groups, deadlock stress, the patch copy, the budget's calibration and per-stage split.
 - `gpu/hdo_gpu_test.py` via `gpu/hdo_job.sbatch` (one GH200 node, preemptable, 30 min): the patched
   HybridDeviceOptimizer with bf16 CUDA params, ScratchAdamW against torch's fused AdamW, a resume as Megatron does it
   (dummy step, `load_state_dict`, restore from the links), a fresh start, O_DIRECT and hard links on Lustre, and one
@@ -90,5 +98,6 @@ sbatch --output=$SCRATCH/lean/fournode-stage2/logs/%j-hdo.out $SCRATCH/lean/four
 3. `preflight.sh` on the 4-node recipe (login node), then a **probe job**: 4 nodes, 3-5 GRPO steps of 16k Lean
    rollouts, a checkpoint and a resume. It records GPU memory per rank, host memory per NUMA node, phase times and
    ScratchAdamW's step time.
-4. Later (scratch-all): `moe_offload_main_grad` with the hybrid optimizer using the host-resident expert gradients in
-   place, then the fp32 masters on scratch too.
+4. If the probe shows the heaviest node short of host memory: the fp32 masters on scratch too (another 108 GB per node
+   off the host, 650 GB of scratch I/O per node per step). The GPU side has about 5 GB to spare at the measured peak;
+   the probe's per-rank numbers decide whether that holds.

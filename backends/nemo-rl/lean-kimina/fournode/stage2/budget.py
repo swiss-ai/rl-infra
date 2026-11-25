@@ -33,6 +33,8 @@ HOST_OVERHEAD = 115.0     # measured per trainer node
 VLLM_FP8 = 1.0            # bytes per parameter of vLLM's fp8 weights kept on the host during level-1 sleep
 OPTIONS = ("today", "bf16-scratch-mv", "expert-offload", "scratch-mv", "scratch-all")
 MOE_LAYERS = 39
+DENSE_LAYERS = 3          # Chonk's first three layers have a dense MLP
+EXPERT_PARAMS_PER_LAYER = EXPERT_PARAMS / MOE_LAYERS
 
 
 def layout(nodes, pp):
@@ -46,17 +48,34 @@ def layout(nodes, pp):
             "dense_opt_per_gpu": DENSE_PARAMS / pp / (gpus // pp)}  # the distributed optimizer shards over DP
 
 
-def budget(nodes, pp, option):
+def moe_layers_per_stage(stage_layers):
+    """Layers per pipeline stage (first stage first) -> MoE layers per stage (the first DENSE_LAYERS are dense)."""
+    out, start = [], 0
+    for n in stage_layers:
+        out.append(max(0, min(start + n, DENSE_LAYERS + MOE_LAYERS) - max(start, DENSE_LAYERS)))
+        start += n
+    return out
+
+
+def budget(nodes, pp, option, stage_layers=None):
+    """stage_layers: layers per pipeline stage (e.g. 12 10 10 10); the rows then describe the stage with the most MoE
+    layers (its GPUs, and its nodes: a stage spans 4 * nodes / pp GPUs). Without it every stage holds the average."""
     lay = layout(nodes, pp)
     if lay is None:
         return None
     e, d, dopt = lay["expert_per_gpu"], lay["dense_per_gpu"], lay["dense_opt_per_gpu"]
+    if stage_layers is not None:
+        if len(stage_layers) != pp or sum(stage_layers) != DENSE_LAYERS + MOE_LAYERS:
+            raise ValueError(f"stage_layers {stage_layers}: need {pp} stages summing to {DENSE_LAYERS + MOE_LAYERS}")
+        lay["moe_layers_per_stage"] = moe_layers_per_stage(stage_layers)
+        e = max(lay["moe_layers_per_stage"]) * EXPERT_PARAMS_PER_LAYER / lay["ep"]
+        lay["expert_per_gpu"] = e
     opt_params = e + dopt                            # parameters whose Adam state this GPU's rank owns
     gpu = {"dense bf16 weights": 2 * d, "dense fp32 grads": 4 * d}
     host = {"overhead (measured)": HOST_OVERHEAD,
             "vLLM fp8 weights while asleep": VLLM_FP8 * TOTAL_PARAMS / nodes / GB}
     per_node = 4 / GB                                # x4 GPUs per node, in GB
-    layer_e = e * pp / MOE_LAYERS                    # one MoE layer's local experts on this GPU
+    layer_e = EXPERT_PARAMS_PER_LAYER / lay["ep"]    # one MoE layer's local experts on this GPU
     if option in ("today", "bf16-scratch-mv"):
         gpu["expert bf16 weights"] = 2 * e
         gpu["expert fp32 grads"] = 4 * e
@@ -141,8 +160,11 @@ def main(argv=None):
     ap.add_argument("--option", nargs="*", default=list(OPTIONS))
     ap.add_argument("--detail", action="store_true", help="every item of every row")
     ap.add_argument("--c2c", action="store_true", help="CPU-GPU link traffic per GPU per step (c2c_per_gpu)")
+    ap.add_argument("--stage-layers", type=int, nargs="*", help="layers per pipeline stage, e.g. 12 10 10 10 (rows with "
+                    "that many stages then describe the stage with the most MoE layers)")
     args = ap.parse_args(argv)
-    rows = [b for n in args.nodes for p in args.pp for o in args.option if (b := budget(n, p, o))]
+    rows = [b for n in args.nodes for p in args.pp for o in args.option
+            if (b := budget(n, p, o, args.stage_layers if args.stage_layers and len(args.stage_layers) == p else None))]
     print(table(rows))
     if args.c2c:
         print("\n| nodes | PP | option | microbatches per GPU | C2C H2D per GPU per step | C2C D2H |\n|---|---|---|---|---|---|")

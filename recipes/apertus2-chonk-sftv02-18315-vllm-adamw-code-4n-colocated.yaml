@@ -2,14 +2,18 @@
 # same 16 GPUs, taking turns (backends/nemo-rl/lean-kimina/fournode/, stage 2). NOT YET RUN: the stage-2 probe job
 # is its first test, and stage 1 measures the vLLM memory share and the scratch speed it relies on.
 #
-# What makes it fit (fournode/stage2/budget.py, PP2 EP8):
-#   GPU   expert weights in pinned host memory, fp8 copies streamed per layer (Megatron-LM-MoE's expert
-#         offloading, as Chonk's SFT ran): 42 GB static, 71-85 GB peak per GPU
-#   host  Adam's m and v in files on scratch (ScratchAdamW, Megatron patch 0007 + NeMo-RL patch 0034): about
-#         440 GB per node instead of 650; each step reads and writes about 430 GB per node on scratch
+# Precision is today's: fp32 master weights and Adam moments, bf16 weights and matmuls in training (no fp8 expert
+# offload: its coarse-grained mode, the one NeMo-RL supports, computes experts in fp8 and its extra pinned fp8 copies
+# overflow host memory), fp8 weights in vLLM.
+#
+# What makes it fit (fournode/stage2/budget.py --pp 4 --option bf16-scratch-mv --stage-layers 12 10 10 10):
+#   GPU   PP4 with at most 10 MoE layers per stage: 47 GB static, 76-90 GB peak on the heaviest stage
+#   host  Adam's m and v in files on scratch (ScratchAdamW, Megatron patch 0007 + NeMo-RL patch 0034): 435 GB on the
+#         heaviest node instead of about 650; each step reads and writes about 440 GB per node on scratch
+#   net   each PP4 stage is one node, so the expert all-to-all (EP4) stays on NVLink
 # Checkpoints hard-link the moment files into <step>/policy/weights/optimizer-scratch/; a resume needs the same
-# layout (4 nodes, PP2, EP8). The 200-step run's checkpoints (8 trainer nodes, dp_reshardable) cannot resume here
-# with optimizer state: start from the SFT export, or from their weights with checkpoint load_optim false.
+# layout (4 nodes, PP4 12/10/10/10, EP4). The 200-step run's checkpoints (8 trainer nodes, dp_reshardable) cannot
+# resume here with optimizer state: start from the SFT export, or from their weights with checkpoint load_optim false.
 defaults: apertus2-chonk-sftv02-18315-vllm-adamw-code-12n.yaml
 
 # run.sh reads sft_export and cluster.num_nodes from this file alone, not from its defaults.
@@ -36,15 +40,12 @@ policy:
       # stage 1's sleep/wake measurement.
       gpu_memory_utilization: 0.75
   megatron_cfg:
-    pipeline_model_parallel_size: 2
-    expert_model_parallel_size: 8            # 16 GPUs / PP2
-    model_overrides:
-      moe_use_offloading_experts: true       # bf16 experts in pinned host memory, fp8 copies streamed per layer
-      moe_use_inplace_fp8_param: true
-      moe_offloading_mode: coarse-grained    # NeMo-RL needs coarse-grained (or extra fp8 storage)
-      moe_offloading_num_chunks: 8
-      moe_offloading_num_stages: 2
-      moe_offload_activations: [moe_input, moe_fc1_output]
+    pipeline_model_parallel_size: 4
+    expert_model_parallel_size: 4            # 16 GPUs / PP4: one node per stage
+    # 42 layers, the first 3 dense: 12 (3 dense + 9 MoE, + embedding) / 10 / 10 / 10 (+ output layer). The 11/11/11/9
+    # of the 24-node PP4 config puts 11 MoE layers on a node: 462 GB host, 94 GB GPU peak (budget.py).
+    num_layers_in_first_pipeline_stage: 12
+    num_layers_in_last_pipeline_stage: 10
     optimizer:
       optimizer_cpu_offload: true
       optimizer_offload_fraction: 1.0

@@ -370,3 +370,15 @@ def test_megatron_patch_carries_this_scratch_adam():
     import patch_tool
     assert patch_tool.extract(patch_tool.PATCH.read_text()) == (HERE / "scratch_adam.py").read_text(), \
         "run: python3 patch_tool.py"
+
+
+def test_budget_per_stage_split():
+    """Expert memory follows the MoE layers per stage: the first 3 layers are dense."""
+    assert budget.moe_layers_per_stage([11, 11, 11, 9]) == [8, 11, 11, 9]
+    assert budget.moe_layers_per_stage([12, 10, 10, 10]) == [9, 10, 10, 10]
+    heavy = budget.budget(4, 4, "bf16-scratch-mv", [11, 11, 11, 9])
+    chosen = budget.budget(4, 4, "bf16-scratch-mv", [12, 10, 10, 10])
+    assert not heavy["host_fits"] and round(heavy["gpu_peak"][1]) == 94
+    assert chosen["gpu_fits"] and chosen["host_fits"] and round(chosen["host_total"]) == 435
+    with pytest.raises(ValueError):
+        budget.budget(4, 4, "bf16-scratch-mv", [12, 10, 10])
