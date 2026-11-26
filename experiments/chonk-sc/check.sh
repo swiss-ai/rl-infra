@@ -214,6 +214,29 @@ if [[ " ${RUNS} " == *" s "* || " ${RUNS} " == *" o "* || " ${RUNS} " == *" w "*
         else
             echo "  WARN  ${v}: harbor '${have:-none}', the Gym checkout pins '${want:-?}': delete the venv, the run rebuilds it"
         fi
+        # files the installers wrote but that are gone now (the scratch purge deletes old files inside directories
+        # in use; job 5460614: harbor/agents/installed/pi.py missing, version string still 0.25.0)
+        missing="$(python3 -I - "${v}" <<'PY'
+import sys
+from pathlib import Path
+sp = sorted(Path(sys.argv[1]).glob("lib/python3*/site-packages"))
+gone = []
+for rec in (sorted(sp[0].glob("*.dist-info/RECORD")) if sp else []):
+    for line in rec.read_text(errors="replace").splitlines():
+        rel = line.rsplit(",", 2)[0] if line.count(",") >= 2 else line
+        if not rel or rel.startswith("..") or "__pycache__" in rel or rel.endswith(".pyc"):
+            continue
+        if not (sp[0] / rel).exists():
+            gone.append(rel)
+print(len(gone), *gone[:5])
+PY
+)"
+        if [[ "${missing%% *}" == 0 ]]; then
+            echo "  ok    ${v}: every file of its packages' RECORDs present"
+        else
+            total=$(( total + 1 ))
+            echo "  FAIL  ${v}: ${missing%% *} file(s) of its packages missing (first: ${missing#* }): delete the venv, the run rebuilds it"
+        fi
     done
     [[ -n "${seen}" ]] || echo "  note  no harbor_agent venv yet (the run builds it)"
     [[ -r "${OPENSANDBOX_API_KEY_FILE}" ]] && echo "  ok    key file ${OPENSANDBOX_API_KEY_FILE}" \
