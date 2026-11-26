@@ -109,7 +109,7 @@ if (( ${#DROP[@]} )); then
         "(campaigns /${EXCLUDE_CAMPAIGNS}/, tasks /${EXCLUDE_TASKS}/); training on ${TRAIN}"
 fi
 
-SANDBOXES="${SANDBOXES:-1024}" PROMPTS="${PROMPTS:-128}" AGE="${AGE:-4}"
+SANDBOXES="${SANDBOXES:-2048}" PROMPTS="${PROMPTS:-256}" AGE="${AGE:-4}"
 STEP_ARGS=()
 [[ -z "${STEPS:-}" ]] || STEP_ARGS=(grpo.max_num_steps="${STEPS}")
 # exported before use: in `RUN=x bash run.sh ... $RUN` the argument's $RUN is expanded by the calling shell first
