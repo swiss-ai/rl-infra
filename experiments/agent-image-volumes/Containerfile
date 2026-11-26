@@ -1,0 +1,18 @@
+# A binary as a data-only image, to be mounted read-only into sandbox pods as a Kubernetes image volume.
+# Nothing runs from this image: no OS, no shell, no entrypoint; only the files below.
+# Layout (image root = the mount point):
+#   /<version>/chisel        the binary (static, linux/amd64)
+#   /<version>/LICENSE       upstream licence (MIT, must travel with the binary)
+#   /<version>/SHA256SUMS    checksums of the two files above, for `sha256sum -c` inside the pod
+# Versioned directories let one image carry several versions later, so an update never changes the binary a
+# running training uses. Build with build.sh (it fetches and verifies the inputs).
+FROM scratch
+ARG CHISEL_VERSION
+LABEL org.opencontainers.image.title="chisel" \
+      org.opencontainers.image.version="${CHISEL_VERSION}" \
+      org.opencontainers.image.description="chisel ${CHISEL_VERSION} (linux/amd64) as files for an image volume; mount it, do not run it" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.source="https://github.com/jpillora/chisel"
+COPY --chmod=0555 chisel     /${CHISEL_VERSION}/chisel
+COPY --chmod=0444 LICENSE    /${CHISEL_VERSION}/LICENSE
+COPY --chmod=0444 SHA256SUMS /${CHISEL_VERSION}/SHA256SUMS

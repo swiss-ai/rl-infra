@@ -1,0 +1,33 @@
+# Test pod for the chisel reference image as a Kubernetes image volume (see README.md).
+# Replace <registry>/<project>; set runtimeClassName to the class the OpenSandbox sandbox pods use
+# (or remove the line to test without gVisor first). Expected log ends with "ok: image volume ...".
+#   kubectl apply -f test-pod.yaml && kubectl logs -f agent-bin-image-volume-test
+apiVersion: v1
+kind: Pod
+metadata:
+  name: agent-bin-image-volume-test
+spec:
+  restartPolicy: Never
+  runtimeClassName: gvisor
+  # imagePullSecrets: [{name: <secret>}]   # only if the project is private; it also covers image volumes
+  containers:
+    - name: check
+      image: docker.io/library/busybox:1.36   # any image with a shell; the sandbox task images in practice
+      command: ["sh", "-euc"]
+      args:
+        - |
+          cd /opt/agent-bin/chisel/1.12.0
+          ls -la
+          sha256sum -c SHA256SUMS
+          ./chisel --version
+          if touch /opt/agent-bin/chisel/probe 2>/dev/null; then echo "FAIL: mount is writable"; exit 1; fi
+          echo "ok: image volume mounted read-only, binary runs"
+      volumeMounts:
+        - name: chisel
+          mountPath: /opt/agent-bin/chisel
+          readOnly: true
+  volumes:
+    - name: chisel
+      image:
+        reference: <registry>/<project>/chisel:1.12.0
+        pullPolicy: IfNotPresent
