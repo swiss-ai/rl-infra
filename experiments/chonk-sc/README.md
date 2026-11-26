@@ -355,6 +355,10 @@ Every install clean, every model call `POST /v1/messages`. None had a non-zero g
   12 of 32 at 32K and 19 of 32 at 64K (29 commands echoed without the `cd`), all the rewarded ones at 64K among them.
   Gym patch 0051 sets the undocumented `CLAUDE_CODE_HUMBLE_HAMMOCK=1`, with which Claude Code echoes every tool call
   as the model sent it (probe scenario `rewrites`, `../claude-code-probe/README.md`).
+With 0051 the 64K smoke (job 1061395, 1092 s per step) trained: grad norm 0.114, 21 of 32 sequences valid, mean
+reward 0.14 among them (4 of 8 solved on one task). No echo differed from its call (947 tool calls). Masked: the 8
+FACET trials (agent timeout) and 2 rollouts in which a reply stopped at `max_tokens` after 326 tokens (of 16384) and
+Claude Code re-sent the request with "Output token limit hit. Resume directly ..." appended, which continues no call.
 The v0.1 model often names Claude Code's tools in lowercase (`bash`, `write`), which Claude Code rejects as unknown
 tools; v0.2 does not. The task with `timeout_sec = 120` in its `task.toml` (FACET) times out in all 8 trials.
 
