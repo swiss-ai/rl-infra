@@ -66,7 +66,12 @@ Both profiles behave the same unless noted.
   masked. Two ways out: add both rewrites to 0049's `normalize_to_schema` (still compared under the call id), or
   identify a tool call that has an id by id and name alone in `assistant_fingerprint`; the latter breaks Gym tests
   that keep argument changes under one id apart, so it is a change of design. A `scenario` with such calls belongs
-  here either way.
+  here either way. On the Chonk SFT models the leading `cd` is common (`cd /workspace && ...`): 12 of 32 rollouts
+  were masked at 32K and 19 of 32 at 64K (`../chonk-sc/README.md`, run CV).
+- **Claude Code's own context limit.** It sends no prompt of context - max output - 3000 tokens or more
+  (`CLAUDE_CODE_MAX_CONTEXT_TOKENS`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`), and ends with an assistant message `Prompt is
+  too long` from model `<synthetic>` and `terminal_reason: blocking_limit` (exit 1), before the server would refuse.
+  `CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE` sets the limit in tokens. The stub's prompts are too short to reach it.
 - **Context overflow.** After an empty `max_tokens` reply Claude Code re-sends the request three more times. Each
   re-send appends "Output token limit hit. Resume directly ..." to the first user message, which makes it a new root.
   It then ends with `terminal_reason: api_error`. A 400 "prompt is too long", in Anthropic's shape or vLLM's, ends the

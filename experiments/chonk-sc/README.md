@@ -342,8 +342,19 @@ source, so the settings were checked by their effect with `../claude-code-probe/
 The one-node rung (`AGENT=claude-code bash ../harbor-capture-sc/run.sh`, Qwen3-4B, micro tasks, Santis) ran: 2x2x1
 (job 1060870) and 8x4x3 (job 1061238, 13.7 min, grad norms 1.68, 0.026, 1.46), every model call `POST /v1/messages`
 with 200. **Open**: 5 of the 96 rollouts of the 8x4x3 run were masked, because Claude Code also rewrites `Write`
-and `Bash` echoes in ways 0049 does not cover (`../claude-code-probe/README.md`); left for later. Not run on the
-Chonk SFT model yet.
+and `Bash` echoes in ways 0049 does not cover (`../claude-code-probe/README.md`); left for later.
+Smokes on the SFT models (Santis, 2026-11-26): 16K (job 1061266, v0.1, 2 x 8), 32K (job 1061268, v0.2 at CP 4, 4 x 8;
+it also made the one-off v0.2 conversion, in 8 min) and 64K (job 1061276, CP 8 with KCP, 4 x 8, 1137 s per step).
+Every install clean, every model call `POST /v1/messages`. None had a non-zero gradient, for two reasons:
+- Claude Code refuses to send a prompt of context - max output - 3000 tokens or more and ends with a synthetic
+  "Prompt is too long" (`terminal_reason: blocking_limit`, no request; `CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE` sets the
+  limit). With its first prompt of about 4.8K tokens that leaves about 2.4K tokens at 16K and 8.5K at 32K: 8 of 16
+  and 28 of 32 trials ended there (masked as context overflows at 32K). At 64K 1 of 32 did; 24 ended on their own
+  (up to 97 calls, prompts up to 46K tokens) and 6 scored 1.
+- The echo rewrites mask most long rollouts on these models, which start most commands with `cd /workspace && `:
+  12 of 32 at 32K and 19 of 32 at 64K (29 commands echoed without the `cd`), all the rewarded ones at 64K among them.
+The v0.1 model often names Claude Code's tools in lowercase (`bash`, `write`), which Claude Code rejects as unknown
+tools; v0.2 does not. The task with `timeout_sec = 120` in its `task.toml` (FACET) times out in all 8 trials.
 
 ```bash
 CTX=65536 RUNS=cv bash experiments/chonk-sc/check.sh
