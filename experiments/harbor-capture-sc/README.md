@@ -42,7 +42,7 @@ The previous smoke test (4 sandboxes, ~7 min) is still one command:
 | `terminus-sc.yaml` | task: micro-tasks via `harbor_agent` + Terminus-2, Single-Controller blocks, token capture |
 | `opencode-sc.yaml` | overlay (`AGENT=opencode`): OpenCode (pinned binary in the pod) instead of Terminus-2, model via the tunnel, `sampling_overrides` |
 | `mini-sc.yaml` | overlay (`AGENT=mini`): mini-swe-agent (installed in the pod) instead of Terminus-2, model via the tunnel |
-| `claude-code-sc.yaml` | overlay (`AGENT=claude-code`): Claude Code (release binary uploaded into the pod) instead of Terminus-2, Anthropic Messages via the tunnel, `sampling_overrides`; probed in `../claude-code-probe/`, untested on the cluster |
+| `claude-code-sc.yaml` | overlay (`AGENT=claude-code`): Claude Code (release binary uploaded into the pod) instead of Terminus-2, Anthropic Messages via the tunnel, `sampling_overrides`; probed in `../claude-code-probe/`; 2x2x1 and 8x4x3 ran on Santis (jobs 1060870, 1061238; open: Claude Code rewrites some `Write`/`Bash` echoes, see the probe README) |
 | `tunnel-sc.yaml` | overlay (`TUNNEL=1`): per-sandbox reverse tunnel, sandbox `127.0.0.1:8000` -> `policy_model` |
 | `run.sh` | `AGENT=terminus` (default), `AGENT=mini`, `AGENT=opencode` or `AGENT=claude-code`; calls `run-harbor-osb.sh` |
 | `../../backends/nemo-rl/apertus2/patches/gym/0011-0013` | Kostas Pitas (from `main`'s Harbor 0.25.0 port): Harbor 0.25.0 (separate verifier environments), its job options and exec user, `image_auth_file`. 0014-0031 are ported onto them (`research/reports/2026-11-11-gym-patches-on-harbor-0.25.md` in the workspace, not in this repo) |

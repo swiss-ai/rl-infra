@@ -19,7 +19,7 @@ i.e. vLLM DP4 per node through NVIDIA-NeMo/RL#2517) trained through
 | `run-v.sh`, `run-v-24k.sh` | run V: Terminus-2 on Kostas' verified tasks, Gym entrypoint (not SC), 24k on 20 nodes; `CTX=65536`: long context |
 | `run-agent-v.sh`, `run-agent-v.yaml`, `run-ov.yaml` | run OV: OpenCode in the pod on run V's verified tasks, SC + token capture, 24k on 20 nodes; `CTX=65536`: long context |
 | `run-pv.yaml` | run PV (`run-agent-v.sh AGENT=pi`): the pi coding agent instead of OpenCode; not run on the cluster yet |
-| `run-cv.yaml` | run CV (`run-agent-v.sh AGENT=claude-code`, Gym 0048-0050): Claude Code instead of OpenCode; probed against a stub (`../claude-code-probe/`), not run on the cluster yet |
+| `run-cv.yaml` | run CV (`run-agent-v.sh AGENT=claude-code`, Gym 0048-0050): Claude Code instead of OpenCode; probed against a stub (`../claude-code-probe/`), one-node rung run (Qwen3-4B), not on Chonk yet |
 | `common.sh` | config composition, the long-context profile of runs V and OV, and the clone / Gym checks, shared by the scripts |
 
 Runs A and B: 3 steps, `async_rl` sampler `in_order` with lookahead 0 (synchronous), one chunk per
@@ -339,8 +339,11 @@ sends it as a user message in `<system-reminder>` tags. Check B: the first reque
 2750; `--bare`: 964), which leaves 11706 tokens at 16K with 6144 per turn. Claude Code is ended at `CC_TIMEOUT_SEC` (1740 s; at long context
 `AGENT_CAP - 60`); `CC_PROFILE=bare` swaps its system prompt for `--bare`'s minimal one. Claude Code is closed
 source, so the settings were checked by their effect with `../claude-code-probe/` (results in its README).
-**Untested on the cluster**: the one-node rung first (`AGENT=claude-code bash ../harbor-capture-sc/run.sh`), then a
-smoke run.
+The one-node rung (`AGENT=claude-code bash ../harbor-capture-sc/run.sh`, Qwen3-4B, micro tasks, Santis) ran: 2x2x1
+(job 1060870) and 8x4x3 (job 1061238, 13.7 min, grad norms 1.68, 0.026, 1.46), every model call `POST /v1/messages`
+with 200. **Open**: 5 of the 96 rollouts of the 8x4x3 run were masked, because Claude Code also rewrites `Write`
+and `Bash` echoes in ways 0049 does not cover (`../claude-code-probe/README.md`); left for later. Not run on the
+Chonk SFT model yet.
 
 ```bash
 CTX=65536 RUNS=cv bash experiments/chonk-sc/check.sh

@@ -59,6 +59,14 @@ Both profiles behave the same unless noted.
   required fields echo as sent. An unknown key is answered with a validation-error tool result, and the call echoes
   unchanged. Before Gym 0049 each such echo matched no parent (unresolved: the rollout is masked); with 0049 the
   fingerprint compares arguments against the request's tool schemas, and all scenarios resolve.
+- **Open, to revisit: two more rewrites seen on the cluster.** In the one-node rung's 8x4x3 run (job 1061238, Qwen3-4B,
+  186 tool calls) Claude Code also echoed a `Write` with trailing whitespace stripped from each line of `content` (4
+  calls) and a `Bash` command without its leading `cd / && ` when `/` was its working directory (1). The probe's
+  scripted calls contain neither. Each such echo leaves the next call without a parent, so 5 of 96 rollouts were
+  masked. Two ways out: add both rewrites to 0049's `normalize_to_schema` (still compared under the call id), or
+  identify a tool call that has an id by id and name alone in `assistant_fingerprint`; the latter breaks Gym tests
+  that keep argument changes under one id apart, so it is a change of design. A `scenario` with such calls belongs
+  here either way.
 - **Context overflow.** After an empty `max_tokens` reply Claude Code re-sends the request three more times. Each
   re-send appends "Output token limit hit. Resume directly ..." to the first user message, which makes it a new root.
   It then ends with `terminal_reason: api_error`. A 400 "prompt is too long", in Anthropic's shape or vLLM's, ends the
