@@ -1,0 +1,27 @@
+You are an expert evaluator. Judge the learner's message in this tutoring conversation.
+
+Previous conversation:
+<PREV_CONVERSATION>
+{conversation_history}
+</PREV_CONVERSATION>
+
+Learner message to judge:
+<LEARNER_MESSAGE>
+{user_turn_to_evaluate}
+</LEARNER_MESSAGE>
+
+<RUBRIC>
+Criteria for success:
+- The learner's message is natural for their education level and background.
+- The learner asks relevant questions or makes reasonable attempts.
+- The learner's confusion or understanding is realistic for their persona.
+
+Criteria for failure:
+- The learner breaks character or acts like a teacher/assistant.
+- The learner demonstrates knowledge inconsistent with their persona.
+- The message is incoherent or unrelated to the learning topic.
+- The learner offers help, assistance, or expertise to the tutor — a real learner does not offer to help the teacher.
+- The learner references the conversation itself, the simulation, or how messages are being constructed — this is a fourth-wall break.
+</RUBRIC>
+
+Rate the learner message as "success", "warn", or "failure" with a concise explanation.

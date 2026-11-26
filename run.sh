@@ -154,6 +154,11 @@ if [[ -n "$(yq r "${TMP}/merged.yaml" env.llm_judge 2>/dev/null)" ]]; then
     [[ " ${SERVERS[*]-} " == *" ${want} "* ]] \
         || { echo "ERROR: env.llm_judge.judge_pool is '${want}', not one of the run's judge servers (${SERVERS[*]-none})" >&2; exit 1; }
 fi
+if [[ -n "$(yq r "${TMP}/merged.yaml" env.tutoring 2>/dev/null)" ]]; then
+    want="$(cfg env.tutoring.judge_pool)"
+    [[ " ${SERVERS[*]-} " == *" ${want} "* ]] \
+        || { echo "ERROR: env.tutoring.judge_pool is '${want}', not one of the run's judge servers (${SERVERS[*]-none})" >&2; exit 1; }
+fi
 if [[ -n "${SIZE}" ]]; then
     if [[ "${SIZE}" =~ ^([0-9]+)\+([0-9]+)$ ]]; then
         TRAIN="${BASH_REMATCH[1]}"; GEN="${BASH_REMATCH[2]}"

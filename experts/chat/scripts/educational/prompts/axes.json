@@ -1,0 +1,72 @@
+{
+  "helpfulness": {
+    "description": "Did the assistant help the user accomplish their goal? Consider whether the response addressed the user's actual needs.",
+    "options": {
+      "1": "Very poor — ignored or misunderstood the request",
+      "2": "Poor — partially addressed the request with major gaps",
+      "3": "Adequate — addressed the request but with notable omissions",
+      "4": "Good — addressed the request well with minor gaps",
+      "5": "Excellent — fully addressed the request with relevant detail"
+    }
+  },
+  "accuracy": {
+    "description": "Was the information provided correct and reliable? Check for factual errors, misleading claims, or unsupported assertions.",
+    "options": {
+      "1": "Very poor — significant factual errors or misleading information",
+      "2": "Poor — several inaccuracies or unsupported claims",
+      "3": "Adequate — mostly accurate with some minor errors",
+      "4": "Good — accurate with at most trivial issues",
+      "5": "Excellent — fully accurate and well-supported"
+    }
+  },
+  "coherence": {
+    "description": "Was the response well-structured, natural, and internally consistent? Consider flow, clarity, and logical consistency. A single unintelligible or non-responsive reply should significantly lower the score — two good turns cannot fully compensate for one catastrophic failure.",
+    "options": {
+      "1": "Very poor — incoherent, contradictory, or nonsensical",
+      "2": "Poor — unclear or poorly structured",
+      "3": "Adequate — understandable but with structural issues",
+      "4": "Good — clear and well-structured with minor issues",
+      "5": "Excellent — perfectly clear, natural, and logically consistent"
+    }
+  },
+  "pedagogical_quality": {
+    "description": "Did the response teach effectively at the right level? Consider explanation clarity, scaffolding, encouragement, and adaptation to the learner's level.",
+    "options": {
+      "1": "Very poor — confusing, condescending, or ineffective teaching",
+      "2": "Poor — unclear explanations or wrong level for the learner",
+      "3": "Adequate — understandable but lacks scaffolding or engagement",
+      "4": "Good — clear, appropriately leveled with minor pedagogical gaps",
+      "5": "Excellent — masterful teaching adapted to the learner"
+    }
+  },
+  "response_conciseness": {
+    "description": "Were the assistant's responses appropriately concise for a CHAT interaction? A chat reply should be 1-3 short paragraphs at most. Score HARSHLY using these structural red flags: multiple markdown headers (##), tables, horizontal rules (---), numbered lists with 5+ items, multi-section layouts, or responses that would fill more than half a printed page. When the user's question is broad, the assistant should ask for clarification rather than dump everything it knows.",
+    "options": {
+      "1": "Very poor — responses resemble articles or reports: multiple sections, headers, tables, or wall-of-text paragraphs",
+      "2": "Poor — most responses are multi-paragraph with structured formatting that belong in a document, not chat",
+      "3": "Adequate — some responses are too long or over-formatted, but the assistant shows restraint at times",
+      "4": "Good — most responses are 1-3 short paragraphs, at most one slightly long reply",
+      "5": "Excellent — all responses are short (1-3 sentences typical), focused, plain text, and chat-appropriate"
+    }
+  },
+  "role_adherence": {
+    "description": "Did each participant stay in their role throughout the conversation? The USER should only ask questions, make requests, provide requested details, and react to answers. The ASSISTANT should provide help or information and always respond with a coherent reply that addresses the user.",
+    "options": {
+      "1": "Very poor — clear role inversion: user acts as assistant or vice versa",
+      "2": "Poor — multiple instances of a participant stepping outside their role",
+      "3": "Adequate — minor role blurring but generally correct",
+      "4": "Good — roles maintained with at most a trivial slip",
+      "5": "Excellent — both user and assistant stay cleanly in their roles throughout"
+    }
+  },
+  "personalization": {
+    "description": "Did the assistant adapt the CONTENT of its response to this specific user's disclosed context? Personalization means the response would be substantively different for a different user asking the same question. Only evaluate based on information the user actually disclosed; if the user asked a generic question with no personal context, score 3.",
+    "options": {
+      "1": "Very poor — user shared specific personal context but response ignores it entirely",
+      "2": "Poor — user shared context, response acknowledges it superficially but does not adapt content",
+      "3": "Adequate — user gave little or no distinguishing context; generic response is appropriate",
+      "4": "Good — response uses specific details the user disclosed to tailor its content",
+      "5": "Excellent — response is built around the user's disclosed context"
+    }
+  }
+}

@@ -1,0 +1,1 @@
+You are an expert evaluator of AI assistant conversations. Score each axis carefully with detailed reasoning. ALWAYS write every `reasoning` field in English, regardless of the language the conversation under evaluation was conducted in.
