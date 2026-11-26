@@ -603,7 +603,11 @@ check_gym_agents() {
             # without it an overflow makes Claude Code re-send its request with a resume prompt (one more root each)
             grep -q "_is_context_overflow_placeholder" "${g}/nemo_gym/base_responses_api_model.py" 2>/dev/null \
                 && ok "Gym patch 0051: context overflow answered with 400 prompt is too long on /v1/messages" \
-                || bad "Gym patch 0051 missing (_is_context_overflow_placeholder in nemo_gym/base_responses_api_model.py)" ;;
+                || bad "Gym patch 0051 missing (_is_context_overflow_placeholder in nemo_gym/base_responses_api_model.py)"
+            # without it NeMo-RL's Apertus 2 encoder rejects every request (Claude Code's environment system message)
+            grep -q "late_system_messages_as_user" "${g}/responses_api_models/vllm_model/app.py" 2>/dev/null \
+                && ok "Gym patch 0052: late system messages sent as user messages (vllm_model)" \
+                || bad "Gym patch 0052 missing (late_system_messages_as_user in responses_api_models/vllm_model/app.py)" ;;
         *) bad "check_gym_agents: no checks for agent '$1'" ;;
     esac
     return "${fails}"

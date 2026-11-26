@@ -71,3 +71,12 @@ Both profiles behave the same unless noted.
   (`failure_classes.claude_code_end_flags` skips it).
 - **Terminal id.** The session JSONL's assistant message ids are the served ids, the last one the last served. A
   declared terminal id (old plan's 0046) is possible, but not needed while one chain holds.
+- **Check B** (`to_chat.py` turns `first-request-<profile>.json` into the chat body vllm_model sends; then
+  `EXTRA_REQUESTS=... bash backends/nemo-rl/apertus2/check_apertus2_tools.sh` in the SFT container). The default
+  profile sends its environment section (working directory, platform, shell, OS) as a system message after the first
+  user message, with or without `--exclude-dynamic-system-prompt-sections`. Apertus 2's format rejects it ("system/
+  developer instructions must be leading"), so NeMo-RL could not encode any default-profile request. Gym 0050's
+  `late_system_messages_as_user` (set by `claude-code-sc.yaml`) sends it as a user message in `<system-reminder>` tags.
+  First request in Apertus 2 tokens then: default 4678 (tools 2750), bare 964 (tools 865); 11706 tokens left at 16K
+  with 6144 per turn, 60858 at 64K with 16384; the tool round trip extends the first prompt. `--bare` offers only
+  Bash, Read and Edit, whatever `--tools` lists.

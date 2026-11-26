@@ -460,6 +460,8 @@ else:
             (ok if kw.get("claude_timeout_sec") < av_cap else fail)(
                 f"Claude Code timeout {kw.get('claude_timeout_sec')} < agent cap {av_cap}")
             expect("no OpenCode or pi kwargs", sorted(k for k in kw if k.startswith(("opencode_", "pi_"))), [])
+            expect("late_system_messages_as_user (Gym 0050, Apertus 2 takes system messages only first)",
+                   vm.get("late_system_messages_as_user"), True)
         expect("sampling_overrides = train profile",
                dict(vm.get("sampling_overrides") or {}),
                {"temperature": gen["temperature"], "top_p": gen["top_p"], "max_tokens": gen["max_new_tokens"]})

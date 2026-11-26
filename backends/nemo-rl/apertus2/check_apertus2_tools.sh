@@ -13,7 +13,9 @@
 #       bash backends/nemo-rl/apertus2/check_env_job.sh
 # The SFT EDF sets PYDEPS and PYDEPS_APERTUS2. MODEL (default the run S model), SYSTEM_PROMPT_FILE
 # (default envs/apertus2-system.json, as envs/harbor-osb-sft.yaml) and CONTEXT (default 16384, run S
-# policy.max_total_sequence_length) override.
+# policy.max_total_sequence_length) override. EXTRA_REQUESTS (space-separated paths) adds request files kept
+# outside git, e.g. Claude Code's first request from experiments/claude-code-probe (to_chat.py), which holds its
+# proprietary system prompt.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -38,10 +40,11 @@ tests=0
 NRL_APERTUS2_TOKENIZER="${MODEL}" "${PY}" -m pytest tests/unit/data/test_apertus2_format.py \
     --noconftest -p no:cacheprovider -o addopts="" -q -rs || tests=$?
 
-echo "== OpenCode requests"
+echo "== requests"
 requests=0
+# shellcheck disable=SC2086  # EXTRA_REQUESTS is a list of paths
 "${PY}" "${HERE}/check_apertus2_tools.py" "${MODEL}" "${SYSTEM_PROMPT_FILE}" "${CONTEXT}" \
-    "${HERE}"/check_apertus2_tools/*.json || requests=$?
+    "${HERE}"/check_apertus2_tools/*.json ${EXTRA_REQUESTS:-} || requests=$?
 
 echo "== tests exit ${tests}, requests exit ${requests}"
 (( tests == 0 && requests == 0 ))

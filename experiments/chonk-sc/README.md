@@ -19,7 +19,7 @@ i.e. vLLM DP4 per node through NVIDIA-NeMo/RL#2517) trained through
 | `run-v.sh`, `run-v-24k.sh` | run V: Terminus-2 on Kostas' verified tasks, Gym entrypoint (not SC), 24k on 20 nodes; `CTX=65536`: long context |
 | `run-agent-v.sh`, `run-agent-v.yaml`, `run-ov.yaml` | run OV: OpenCode in the pod on run V's verified tasks, SC + token capture, 24k on 20 nodes; `CTX=65536`: long context |
 | `run-pv.yaml` | run PV (`run-agent-v.sh AGENT=pi`): the pi coding agent instead of OpenCode; not run on the cluster yet |
-| `run-cv.yaml` | run CV (`run-agent-v.sh AGENT=claude-code`): Claude Code instead of OpenCode; probed against a stub (`../claude-code-probe/`), not run on the cluster yet |
+| `run-cv.yaml` | run CV (`run-agent-v.sh AGENT=claude-code`, Gym 0048-0050): Claude Code instead of OpenCode; probed against a stub (`../claude-code-probe/`), not run on the cluster yet |
 | `common.sh` | config composition, the long-context profile of runs V and OV, and the clone / Gym checks, shared by the scripts |
 
 Runs A and B: 3 steps, `async_rl` sampler `in_order` with lookahead 0 (synchronous), one chunk per
@@ -333,7 +333,10 @@ and the task repository's settings and hooks off, with `Bash`, `Read`, `Edit`, `
 Gym patch 0049 is needed with it: the fingerprint compares tool calls against the request's tool schemas (Claude
 Code echoes `Edit` with `replace_all: false` filled in), tool-call arguments that are not a JSON object reach it as
 `{"_ng_unparsed_arguments": ...}`, and the context-overflow placeholder is answered with a 400 "prompt is too long"
-on `/v1/messages`, which ends the episode. Claude Code is ended at `CC_TIMEOUT_SEC` (1740 s; at long context
+on `/v1/messages`, which ends the episode. Gym patch 0050: Claude Code sends its environment section as a system
+message after the first user message, which Apertus 2's format rejects; `vllm_model`'s `late_system_messages_as_user`
+sends it as a user message in `<system-reminder>` tags. Check B: the first request is 4678 Apertus 2 tokens (tools
+2750; `--bare`: 964), which leaves 11706 tokens at 16K with 6144 per turn. Claude Code is ended at `CC_TIMEOUT_SEC` (1740 s; at long context
 `AGENT_CAP - 60`); `CC_PROFILE=bare` swaps its system prompt for `--bare`'s minimal one. Claude Code is closed
 source, so the settings were checked by their effect with `../claude-code-probe/` (results in its README).
 **Untested on the cluster**: the one-node rung first (`AGENT=claude-code bash ../harbor-capture-sc/run.sh`), then a

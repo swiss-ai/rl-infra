@@ -17,6 +17,9 @@
 # tool-call arguments that are not a JSON object reach Claude Code as {"_ng_unparsed_arguments": ...} instead of a
 # 500; and the context-overflow placeholder is answered with Anthropic's 400 "prompt is too long" on /v1/messages,
 # which ends Claude Code's episode (it re-sends the request with a resume prompt after an empty max_tokens reply).
+# Gym patch 0050 (needed with Apertus 2): Claude Code sends its environment section as a system message after the
+# first user message, which Apertus 2's format rejects; vllm_model's late_system_messages_as_user sends it as a user
+# message in <system-reminder> tags (check B: the first request is then 4678 Apertus 2 tokens, 964 with --bare).
 #
 # Env (run-agent-v.sh exports them when set; CC_*, not CLAUDE_CODE_*, which is Claude Code's own namespace):
 #   CC_VERSION      default 2.1.326; another version needs claude_sha256 and the probe again
@@ -60,3 +63,5 @@ env:
             temperature: ${policy.generation.temperature}
             top_p: ${policy.generation.top_p}
             max_tokens: ${policy.generation.max_new_tokens}
+          # Gym 0050: Apertus 2 takes system messages only before the conversation (see above)
+          late_system_messages_as_user: true

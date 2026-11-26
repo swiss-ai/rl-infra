@@ -140,5 +140,5 @@ label) before starting the next run.
   (about 170 MB through the OpenSandbox gateway; Gym 0050 checks its sha256 in the pod). Run CV has done
   64K one-step smokes (job 1061605); a full run is still pending. A mounted binary would avoid the upload
   (see `README.md` "Run CV" and `PORTING.md`).
-- Gym runs at a pinned commit plus 49 patches (`backends/nemo-rl/apertus2/patches/gym/`); the ones of ours are on
+- Gym runs at a pinned commit plus 54 patches (`backends/nemo-rl/apertus2/patches/gym/`); the ones of ours are on
   their way upstream into swiss-ai/nemo-gym.

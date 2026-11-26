@@ -1,0 +1,141 @@
+From b56be3ca0de1e6eac69ea954a44ad426035b0457 Mon Sep 17 00:00:00 2001
+From: Lukas Drescher <lukas.drescher@cscs.ch>
+Date: Thu, 26 Nov 2026 01:06:41 +0100
+Subject: [PATCH] feat(vllm_model): late_system_messages_as_user for chat
+ formats that take instructions only first
+
+Claude Code 2.1.326 (default profile) sends its environment section (working directory, platform, shell, OS) as a
+system message after the first user message. Apertus 2's format rejects it ("system/developer instructions must be
+leading", apertus_common formats/_openai.py), so NeMo-RL could not encode a single Claude Code request (rl-infra
+check B on the request the claude-code-probe recorded).
+
+With late_system_messages_as_user (default false) a system or developer message after the first other message is
+sent as a user message whose text is wrapped in <system-reminder> tags, the way Claude Code marks the context it
+injects into user messages. Leading instructions are untouched. Applied in _preprocess_chat_completion_create_params
+after replace_developer_role_with_system (chat path; not the completions-API path). The rewrite is the same on every
+call, and token capture resolves lineage on the request before it.
+
+Check B with it, Claude Code's first request in Apertus 2 tokens: 4678 (tools 2750) for the default profile, 964 for
+--bare; the tool round trip extends the first prompt. vllm_model tests: 261 passed, 2 failed in TestEndpointFile,
+which fail the same way without this change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ responses_api_models/vllm_model/app.py        | 34 +++++++++++++++++++
+ .../vllm_model/tests/test_app.py              | 34 +++++++++++++++++++
+ 2 files changed, 68 insertions(+)
+
+diff --git a/responses_api_models/vllm_model/app.py b/responses_api_models/vllm_model/app.py
+index 3416bde3..918db67f 100644
+--- a/responses_api_models/vllm_model/app.py
++++ b/responses_api_models/vllm_model/app.py
+@@ -77,6 +77,33 @@ from nemo_gym.token_id_capture.staging.records import (
+ LOG = logging.getLogger("nemo_gym.vllm_model")
+ _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE = "nemo_gym_vllm_propagate_context_error"
+ 
++
++def late_system_messages_as_user(messages: list) -> None:
++    """Send every system or developer message after the first other message as a user message, in place.
++
++    Some chat formats take instructions only before the conversation (Apertus 2 rejects a later one). Claude Code
++    2.1.326 sends its environment section (working directory, platform, shell) as a system message after the first
++    user message. As a user message whose text is wrapped in ``<system-reminder>`` tags, the way Claude Code marks the
++    context it injects into user messages, the model still reads it where it was sent. The rewrite is the same on
++    every call, and token capture resolves lineage on the request before it.
++    """
++    conversation_started = False
++    for message in messages:
++        role = message.get("role")
++        if role not in ("system", "developer"):
++            conversation_started = True
++            continue
++        if not conversation_started:
++            continue
++        content = message.get("content")
++        if isinstance(content, list):
++            content = "\n".join(
++                str(part.get("text", "")) for part in content if isinstance(part, dict) and part.get("type") == "text"
++            )
++        message["role"] = "user"
++        message["content"] = f"<system-reminder>\n{content or ''}\n</system-reminder>"
++
++
+ _TRANSPORT_LOG_CONTEXT_HEADERS = {
+     "run_id": "x-nemo-gym-log-run-id",
+     "adapter": "x-nemo-gym-log-adapter",
+@@ -188,6 +215,10 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
+     # ``uses_reasoning_parser``.
+     preserve_reasoning_in_assistant_content: bool = False
+     replace_developer_role_with_system: bool = False
++    # For chat formats that take instructions only before the conversation (Apertus 2: "system/developer instructions
++    # must be leading"): a system or developer message after the first other message is sent as a user message, its
++    # text wrapped in <system-reminder> tags. Claude Code sends its environment section that way. Chat path only.
++    late_system_messages_as_user: bool = False
+ 
+     # Whether or not the model can generate a reasoning output, and called again to produce additional reasoning output.
+     sequential_reasoning_allowed: bool = True
+@@ -574,6 +605,9 @@ class VLLMModel(SimpleResponsesAPIModel):
+                 if message_dict.get("role") == "developer":
+                     message_dict["role"] = "system"
+ 
++        if self.config.late_system_messages_as_user:
++            late_system_messages_as_user(body_dict["messages"])
++
+         body_dict["model"] = self.config.model
+ 
+         chat_template_kwargs = {}
+diff --git a/responses_api_models/vllm_model/tests/test_app.py b/responses_api_models/vllm_model/tests/test_app.py
+index a7032eda..889a54dc 100644
+--- a/responses_api_models/vllm_model/tests/test_app.py
++++ b/responses_api_models/vllm_model/tests/test_app.py
+@@ -71,6 +71,7 @@ from responses_api_models.vllm_model.app import (
+     _append_transport_io,
+     _transport_images,
+     _transport_log_context,
++    late_system_messages_as_user,
+ )
+ 
+ 
+@@ -111,6 +112,39 @@ def test_preprocess_chat_completion_create_params_strips_strict(monkeypatch: Mon
+     assert "strict" not in body_dict["tools"][0]["function"]
+ 
+ 
++def test_late_system_messages_as_user() -> None:
++    # Claude Code 2.1.326's first request: its system prompt, the user's task, its environment section
++    messages = [
++        {"role": "system", "content": "You are a Claude agent."},
++        {"role": "developer", "content": "Leading instructions stay."},
++        {"role": "user", "content": [{"type": "text", "text": "Fix hello.py"}]},
++        {"role": "system", "content": "# Environment\nPlatform: linux"},
++        {"role": "assistant", "content": "On it."},
++        {"role": "developer", "content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]},
++    ]
++    late_system_messages_as_user(messages)
++    assert [m["role"] for m in messages] == ["system", "developer", "user", "user", "assistant", "user"]
++    assert messages[3]["content"] == "<system-reminder>\n# Environment\nPlatform: linux\n</system-reminder>"
++    assert messages[5]["content"] == "<system-reminder>\na\nb\n</system-reminder>"
++    assert messages[0]["content"] == "You are a Claude agent."
++
++
++def test_preprocess_chat_completion_create_params_moves_late_system_messages_only_when_set(
++    monkeypatch: MonkeyPatch,
++) -> None:
++    def body() -> dict:
++        return {"messages": [{"role": "user", "content": "hi"}, {"role": "system", "content": "env"}]}
++
++    server = TestApp()._setup_server(monkeypatch)
++    assert [m["role"] for m in server._preprocess_chat_completion_create_params(MagicMock(), body())["messages"]] == [
++        "user",
++        "system",
++    ]
++    server.config.late_system_messages_as_user = True
++    messages = server._preprocess_chat_completion_create_params(MagicMock(), body())["messages"]
++    assert messages[1] == {"role": "user", "content": "<system-reminder>\nenv\n</system-reminder>"}
++
++
+ def test_transport_io_writer_keeps_full_payload(monkeypatch: MonkeyPatch, tmp_path) -> None:
+     log_path = tmp_path / "model-io-transport.jsonl"
+     monkeypatch.setenv("NEMO_GYM_VLLM_TRANSPORT_LOG", str(log_path))
+-- 
+2.43.0
+

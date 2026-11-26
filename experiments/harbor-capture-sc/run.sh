@@ -6,7 +6,7 @@
 #   AGENT                  terminus (default), mini (mini-swe-agent in the sandbox, implies TUNNEL=1; Gym
 #                          patch 0018, mini-sc.yaml), opencode (OpenCode in the sandbox, implies TUNNEL=1;
 #                          Gym patches 0024+0029, opencode-sc.yaml) or claude-code (Claude Code in the sandbox,
-#                          implies TUNNEL=1; Gym patches 0048+0049, claude-code-sc.yaml; untested on the cluster)
+#                          implies TUNNEL=1; Gym patches 0048-0050, claude-code-sc.yaml; untested on the cluster)
 #   MSWEA_VERSION          mini only: li-boxuan/mini-swe-agent git ref (default: the commit pinned in mini-sc.yaml)
 #   OPENCODE_VERSION       opencode only: default 1.17.11 (the version whose keys 0026 was checked against)
 #   OPENCODE_TIMEOUT_SEC   opencode only: OpenCode's own time limit, below the agent timeout (default 870)
@@ -71,6 +71,11 @@ case "${AGENT}" in
         # without 0049 Claude Code's echo of an Edit call matches no parent and the rollout is masked
         grep -q "def normalize_to_schema" "${GYM_DIR}/nemo_gym/token_id_capture/fingerprint.py" 2>/dev/null || {
             echo "ERROR: AGENT=claude-code needs Gym patch 0049 (Messages under capture) in ${GYM_DIR}; re-run setup-gym.sh as above" >&2
+            exit 1
+        }
+        # claude-code-sc.yaml sets vllm_model's late_system_messages_as_user (0050)
+        grep -q late_system_messages_as_user "${GYM_DIR}/responses_api_models/vllm_model/app.py" 2>/dev/null || {
+            echo "ERROR: AGENT=claude-code needs Gym patch 0050 (late system messages) in ${GYM_DIR}; re-run setup-gym.sh as above" >&2
             exit 1
         }
         # the agent calls the model from inside the sandbox: only through the tunnel

@@ -78,10 +78,14 @@ def main() -> int:
         print(tokenizer.decode(ids, skip_special_tokens=False))
         print("---- end of rendered prompt")
 
-        follow = copy.deepcopy(messages) + copy.deepcopy(ROUND_TRIP)
-        if "bash" not in names:
+        # the harness's own name of its shell tool (OpenCode: bash, Claude Code: Bash)
+        bash = next((name for name in names if name.lower() == "bash"), None)
+        if bash is None:
             print("round trip: skipped (no bash tool)")
             continue
+        round_trip = copy.deepcopy(ROUND_TRIP)
+        round_trip[0]["tool_calls"][0]["function"]["name"] = bash
+        follow = copy.deepcopy(messages) + round_trip
         try:
             follow_ids = encode(model, system_prompt, follow, tools)
         except Exception:
