@@ -266,6 +266,7 @@ def run_one(binary: Path, scenario: str, profile: str) -> dict:
             claude_profile=profile,
             claude_debug=True,
             max_turns=2 if scenario == "maxturns" else 20,
+            claude_env=json.loads(os.environ.get("PROBE_CLAUDE_ENV") or "{}"),
             model_info={"max_input_tokens": 65536, "max_output_tokens": 16384},
             responses_create_params={"max_output_tokens": 16384},
         )

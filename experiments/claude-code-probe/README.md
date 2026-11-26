@@ -12,6 +12,8 @@ CC_DIR=$SCRATCH/claude-code CC_PLATFORM=linux-arm64 bash backends/nemo-rl/apertu
 #   uv venv --python 3.12 $V && uv pip install --python $V/bin/python -e "$GYM[dev,sandbox]" \
 #       "harbor @ git+https://github.com/laude-institute/harbor.git@v0.25.0" pytest pytest-asyncio
 $V/bin/python experiments/claude-code-probe/probe.py $GYM $SCRATCH/claude-code $SCRATCH/claude-code-probe/out [scenario ...]
+# extra environment for Claude Code, merged into the adapter's (its claude_env), e.g. to try a variable:
+#   PROBE_CLAUDE_ENV='{"NAME": "value"}' $V/bin/python experiments/claude-code-probe/probe.py ...
 ```
 
 - **The stub** answers like `base_responses_api_model.messages()`. Each reply is built as a Responses result and turned
@@ -33,6 +35,7 @@ $V/bin/python experiments/claude-code-probe/probe.py $GYM $SCRATCH/claude-code $
 | `thinking` | the same, each reply with a thinking block | whether thinking is echoed (consistently) |
 | `tools` | each offered tool once, required fields only | which echoes differ from what the model sent |
 | `quirks` | an unknown key, numbers as strings, an explicit default | how Claude Code echoes inputs it validated |
+| `rewrites` | `cd <cwd> && ls`, a Write with trailing whitespace, an Edit without `replace_all` | the cluster's echo rewrites (off with Gym 0051) |
 | `badargs` | `{"_ng_unparsed_arguments": ...}` (0049's stand-in for non-JSON arguments) | that Claude Code takes it as a normal turn |
 | `longoutput` | 30k characters of tool output, then two more calls | whether earlier tool results are rewritten |
 | `maxtokens` | an empty reply with `stop_reason: max_tokens` (Gym's context-overflow placeholder) | what follows |
@@ -59,15 +62,18 @@ Both profiles behave the same unless noted.
   required fields echo as sent. An unknown key is answered with a validation-error tool result, and the call echoes
   unchanged. Before Gym 0049 each such echo matched no parent (unresolved: the rollout is masked); with 0049 the
   fingerprint compares arguments against the request's tool schemas, and all scenarios resolve.
-- **Open, to revisit: two more rewrites seen on the cluster.** In the one-node rung's 8x4x3 run (job 1061238, Qwen3-4B,
-  186 tool calls) Claude Code also echoed a `Write` with trailing whitespace stripped from each line of `content` (4
-  calls) and a `Bash` command without its leading `cd / && ` when `/` was its working directory (1). The probe's
-  scripted calls contain neither. Each such echo leaves the next call without a parent, so 5 of 96 rollouts were
-  masked. Two ways out: add both rewrites to 0049's `normalize_to_schema` (still compared under the call id), or
-  identify a tool call that has an id by id and name alone in `assistant_fingerprint`; the latter breaks Gym tests
-  that keep argument changes under one id apart, so it is a change of design. A `scenario` with such calls belongs
-  here either way. On the Chonk SFT models the leading `cd` is common (`cd /workspace && ...`): 12 of 32 rollouts
-  were masked at 32K and 19 of 32 at 64K (`../chonk-sc/README.md`, run CV).
+- **More rewrites, seen on the cluster; Gym 0051 turns them all off.** In the one-node rung's 8x4x3 run (job
+  1061238, Qwen3-4B, 186 tool calls) Claude Code also echoed a `Write` with trailing whitespace stripped from each
+  line of `content` (4 calls) and a `Bash` command without its leading `cd / && ` when `/` was its working directory
+  (1): 5 of 96 rollouts masked. On the Chonk SFT models, which start most commands with `cd /workspace && `, it was
+  12 of 32 at 32K and 19 of 32 at 64K (`../chonk-sc/README.md`, run CV). Scenario `rewrites` has these cases. The
+  binary keeps copies of the inputs as received and echoes them instead when the undocumented
+  `CLAUDE_CODE_HUMBLE_HAMMOCK` is set (also a per-model `echoWireToolInputs`, behind the gate `tengu_foamy_spring`,
+  which is on without feature flags). With it (`PROBE_CLAUDE_ENV='{"CLAUDE_CODE_HUMBLE_HAMMOCK": "1"}'`) every
+  echo is the call as served, `rewrites` and `quirks` included (string numbers, key order); without it `rewrites`
+  leaves 2 calls unresolved (1 under `--bare`, which has no Write). All other scenarios, the system prompt and the
+  tool list are the same either way, and so are the files the tools write. Gym 0051 sets it in the adapter; 0049's
+  schema normalization stays as a fallback. Check `rewrites` on every version bump: the variable is internal.
 - **Claude Code's own context limit.** It sends no prompt of context - max output - 3000 tokens or more
   (`CLAUDE_CODE_MAX_CONTEXT_TOKENS`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`), and ends with an assistant message `Prompt is
   too long` from model `<synthetic>` and `terminal_reason: blocking_limit` (exit 1), before the server would refuse.

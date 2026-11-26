@@ -41,6 +41,7 @@ Without our launchers, the Gym tree is: `git checkout <GYM_COMMIT>`, then `git a
 | Claude Code adapter (uploaded release binary, capture-safe settings, failure classes from `agent/claude-code.txt`) | 0050 | `harbor_agent_kwargs.claude_*` |
 | Anthropic Messages under capture: tool calls compared against the request's tool schemas, unparseable tool arguments served, context overflow answered with a 400 | 0051 | |
 | Late system messages sent as user messages, for chat formats that take instructions only first (Apertus 2) | 0052 | `vllm_model.late_system_messages_as_user` |
+| Claude Code echoes tool calls as the model sent them (`CLAUDE_CODE_HUMBLE_HAMMOCK=1`, undocumented) | 0053 | `claude_env` to override |
 
 Several are open PRs against swiss-ai/nemo-gym; rl-infra drops a patch once its PR is merged.
 
@@ -149,7 +150,7 @@ are not supported. Our tasks also set `[verifier] environment_mode = "separate"`
   `pi-sc.yaml`, `run-pv.yaml`) is the complete set of these changes for one agent; for a new agent,
   check its source for every model call besides the main loop (titles, summaries, retries) and every rewrite of
   earlier messages, since each one masks the rollout under capture. For a closed-source agent, measure instead:
-  `AGENT=claude-code` (run CV, Gym 0048-0050) was checked with `../claude-code-probe/`, which runs the adapter's
+  `AGENT=claude-code` (run CV, Gym 0048-0051) was checked with `../claude-code-probe/`, which runs the adapter's
   command against a stub of the model server and resolves every request with Gym's own lineage functions. It found
   what reading would have missed: tool calls echoed as the agent parsed them, and a resume loop after an empty reply;
   check B on the recorded request then found a system message Apertus 2 cannot encode.

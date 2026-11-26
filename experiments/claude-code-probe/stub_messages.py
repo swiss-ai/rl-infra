@@ -128,6 +128,16 @@ SCENARIOS: dict[str, Callable[[int, str, dict], Reply]] = {
             [_text("Done.")],
         ][min(k, 4)]
     ),
+    # what Claude Code 2.1.326 rewrote in its echoes on the cluster (rl-infra jobs 1061238, 1061276): a command that
+    # starts with `cd <its cwd> && `, a written file with trailing whitespace, an Edit that leaves out replace_all
+    "rewrites": lambda k, wd, st: Reply(
+        [
+            [_call("Bash", {"command": f"cd {wd} && ls", "description": "List"})],
+            [_call("Write", {"file_path": f"{wd}/fib.py", "content": "def f(n):  \n    a, b = 0, 1\n    \n    return a\n"})],
+            [_call("Edit", {"file_path": f"{wd}/hello.py", "old_string": "Hello", "new_string": "Hi"})],
+            [_text("Done.")],
+        ][min(k, 3)]
+    ),
     # the second main-loop call is answered 400 "prompt is too long", as Anthropic's API answers a context overflow:
     # does Claude Code end cleanly (one call, no retry, no compaction)?
     "toolong": lambda k, wd, st: (

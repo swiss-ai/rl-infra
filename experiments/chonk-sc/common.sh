@@ -607,7 +607,13 @@ check_gym_agents() {
             # without it NeMo-RL's Apertus 2 encoder rejects every request (Claude Code's environment system message)
             grep -q "late_system_messages_as_user" "${g}/responses_api_models/vllm_model/app.py" 2>/dev/null \
                 && ok "Gym patch 0052: late system messages sent as user messages (vllm_model)" \
-                || bad "Gym patch 0052 missing (late_system_messages_as_user in responses_api_models/vllm_model/app.py)" ;;
+                || bad "Gym patch 0052 missing (late_system_messages_as_user in responses_api_models/vllm_model/app.py)"
+            # without it Claude Code echoes a command without its leading `cd <cwd> && ` (and other rewrites): the next
+            # call matches no parent and the rollout is masked (19 of 32 at 64K, job 1061276)
+            grep -q "CLAUDE_CODE_HUMBLE_HAMMOCK" \
+                "${g}/responses_api_agents/harbor_agent/custom_agents/claude_code_nemo_gym.py" 2>/dev/null \
+                && ok "Gym patch 0053: Claude Code echoes tool calls as the model sent them" \
+                || bad "Gym patch 0053 missing (CLAUDE_CODE_HUMBLE_HAMMOCK in custom_agents/claude_code_nemo_gym.py)" ;;
         *) bad "check_gym_agents: no checks for agent '$1'" ;;
     esac
     return "${fails}"
