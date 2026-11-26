@@ -214,14 +214,18 @@ if [[ " ${RUNS} " == *" s "* || " ${RUNS} " == *" o "* || " ${RUNS} " == *" w "*
         else
             echo "  WARN  ${v}: harbor '${have:-none}', the Gym checkout pins '${want:-?}': delete the venv, the run rebuilds it"
         fi
-        # files the installers wrote but that are gone now (the scratch purge deletes old files inside directories
-        # in use; job 5460614: harbor/agents/installed/pi.py missing, version string still 0.25.0)
+        # files the installers wrote but that are gone now (the scratch purge deletes files not read for a while, also
+        # inside directories in use; Daint 2026-11-25 19:03: harbor/agents/installed/pi.py and the dist-info RECORD gone)
         missing="$(python3 -I - "${v}" <<'PY'
 import sys
 from pathlib import Path
 sp = sorted(Path(sys.argv[1]).glob("lib/python3*/site-packages"))
 gone = []
-for rec in (sorted(sp[0].glob("*.dist-info/RECORD")) if sp else []):
+for dist in (sorted(sp[0].glob("*.dist-info")) if sp else []):
+    rec = dist / "RECORD"
+    if not rec.is_file():  # the purge took the RECORD too (Daint 2026-11-25 19:03): nothing left to compare against
+        gone.append(f"{dist.name}/RECORD")
+        continue
     for line in rec.read_text(errors="replace").splitlines():
         rel = line.rsplit(",", 2)[0] if line.count(",") >= 2 else line
         if not rel or rel.startswith("..") or "__pycache__" in rel or rel.endswith(".pyc"):
