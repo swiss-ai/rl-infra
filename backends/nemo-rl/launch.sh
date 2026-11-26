@@ -159,6 +159,14 @@ if [[ "${DRY_RUN:-0}" == 1 ]]; then
     exit 0
 fi
 
+# Submitted from inside an allocation (salloc, an interactive srun shell), the environment carries that step's
+# SLURM_* settings; sbatch passes them on and every srun in the job takes them as defaults. The
+# SLURM_CPU_BIND=mask_cpu:0x1 of a 1-CPU interactive step pinned the Ray head, raylet, driver and all 288 workers
+# of a node to CPU 0 (jobs 1060861, 1060869: ray.init never returned, workers never registered). Submit without
+# them, as from a login node; SLURM_CONF (where the Slurm config lives) stays.
+for v in $(compgen -e | grep '^SLURM_' || true); do
+    [[ "${v}" == SLURM_CONF ]] || unset "${v}"
+done
 # ray.sub writes logs and helper files into the submit dir, so submit from scratch.
 cd "${OUT}/slurm"
 submitted="$(sbatch "${SBATCH_FLAGS[@]}" "${NEMO_RL_DIR}/ray.sub")"
