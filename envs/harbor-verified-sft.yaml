@@ -180,7 +180,7 @@ env:
           # concurrency: ${mul:${grpo.num_prompts_per_step},${grpo.num_generations_per_prompt}}
           # About the ~300 sandboxes the cluster runs at once (it starts about 1.2 pods per second); a
           # higher cap only adds sandboxes waiting to start, which time out after 600 s and are recreated.
-          concurrency: 2048
+          concurrency: 1800
           harbor_datasets:
             # The alias is the left half of every row's instance_id.
             verified:

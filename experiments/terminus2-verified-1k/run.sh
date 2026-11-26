@@ -7,7 +7,7 @@
 # and the run logged to Weights & Biases. README.md next to this file has the details and the risks.
 #   bash experiments/terminus2-verified-1k/run.sh [overrides...]     DRY_RUN=1: the job without submitting it
 # Env (defaults in brackets):
-#   SANDBOXES [1024], PROMPTS [128] (x 8 rollouts; the batch follows), AGE [4], STEPS [the task file's 20],
+#   PROMPTS [128] (x 8 rollouts; the batch follows), AGE [4], STEPS [the task file's 20],
 #   RUN [t2-verified-1k-<date>], JOB_TIME [12:00:00], PARTITION [normal: Daint has no preemptable queue],
 #   T2V1K_WANDB_PROJECT [rl-swe-scalingtest; a WANDB_PROJECT in the environment is ignored], WANDB_ENTITY [apertus],
 #   the key from WANDB_API_KEY (environment) or, when that is unset, from WANDB_KEY_FILE [~/.w_and_b_key; read at
@@ -109,7 +109,7 @@ if (( ${#DROP[@]} )); then
         "(campaigns /${EXCLUDE_CAMPAIGNS}/, tasks /${EXCLUDE_TASKS}/); training on ${TRAIN}"
 fi
 
-SANDBOXES="${SANDBOXES:-2048}" PROMPTS="${PROMPTS:-256}" AGE="${AGE:-4}"
+PROMPTS="${PROMPTS:-256}" AGE="${AGE:-4}"
 STEP_ARGS=()
 [[ -z "${STEPS:-}" ]] || STEP_ARGS=(grpo.max_num_steps="${STEPS}")
 # exported before use: in `RUN=x bash run.sh ... $RUN` the argument's $RUN is expanded by the calling shell first
@@ -119,7 +119,7 @@ export APERTUS_COMMON_URL="${APERTUS_COMMON_URL:-git@github.com:swiss-ai/apertus
 JOBS="${SCRATCH}/harbor-jobs/${RUN}"
 mkdir -p "${JOBS}"
 RECIPE="${RECIPE:-${ROOT}/recipes/apertus2-chonk-sft19374-alps-vllm-adamw-tools.yaml}"
-echo "== run ${RUN}: ${PROMPTS} x 8 = $(( PROMPTS * 8 )) rollouts per step, at most ${SANDBOXES} sandboxes," \
+echo "== run ${RUN}: ${PROMPTS} x 8 = $(( PROMPTS * 8 )) rollouts per step" \
      "max_trajectory_age_steps ${AGE}, steps ${STEPS:-from the task file}, W&B ${WANDB_PROJECT:-off}${WANDB_ENTITY:+ (${WANDB_ENTITY})}"
 echo "== recipe ${RECIPE}; clone ${NEMO_RL_DIR}; EDF ${EDF_NAME}; Harbor trial dirs in ${JOBS}"
 
@@ -131,7 +131,6 @@ exec bash "${ROOT}/run.sh" "${ROOT}/envs/harbor-verified-sft.yaml" \
     env.nemo_gym.sandbox.opensandbox.connection.api_key_file="${KEY}" \
     env.nemo_gym.sandbox.opensandbox.attribution.run="${RUN}" \
     env.nemo_gym.harbor_agent.responses_api_agents.harbor_agent.harbor_jobs_dir="${JOBS}" \
-    env.nemo_gym.harbor_agent.responses_api_agents.harbor_agent.concurrency="${SANDBOXES}" \
     grpo.num_prompts_per_step="${PROMPTS}" policy.train_global_batch_size="$(( PROMPTS * 8 ))" \
     grpo.async_grpo.max_trajectory_age_steps="${AGE}" \
     ${STEP_ARGS[@]+"${STEP_ARGS[@]}"} \
