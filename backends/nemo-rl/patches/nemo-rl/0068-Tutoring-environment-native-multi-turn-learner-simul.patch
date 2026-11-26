@@ -1,0 +1,1440 @@
+From 83832b9ce68b4fec6275539e88d82aea7acdd76e Mon Sep 17 00:00:00 2001
+From: rl-infra <rl-infra@localhost>
+Date: Thu, 26 Nov 2026 14:04:55 +0100
+Subject: [PATCH] Tutoring environment: native multi-turn learner simulation in
+ the Apertus 2 format
+
+A native multi-turn environment (env name tutoring) adapted from NVIDIA NeMo UserSim
+(Apache-2.0, general_educational probe) for the Apertus 2 message format. Each episode
+reads the policy's reply frame (thinking dropped), calls the configured judge/learner
+pool concurrently (async Ray actor with max_concurrency=1000) using append-only quoted
+dialogue history and trailing role anchor/frustration, runs deterministic and LLM
+learner-gate checks with retries, checks early stop from min_turns, enforces a
+min_remaining_tokens margin so near-full dialogues trigger the final judge instead of
+overflowing rollouts.py with reward 0, and scores completed dialogues on UserSim's axes
+(multi-sample structured JSON average or deterministic first-token logprobs). Exhausted
+gates, pool errors, and unparseable judge calls set mask_sample=True.
+
+Adds processor apertus2_tutoring_data_processor (with optional per-row SystemPrompt
+behavior injection) and unit tests with a fake OpenAI server.
+---
+ nemo_rl/data/processors.py                    |  52 +
+ nemo_rl/distributed/actor_environments.py     |   1 +
+ nemo_rl/environments/tutoring_environment.py  | 909 ++++++++++++++++++
+ nemo_rl/environments/utils.py                 |   3 +
+ .../environments/test_tutoring_environment.py | 391 ++++++++
+ 5 files changed, 1356 insertions(+)
+ create mode 100644 nemo_rl/environments/tutoring_environment.py
+ create mode 100644 tests/unit/environments/test_tutoring_environment.py
+
+diff --git a/nemo_rl/data/processors.py b/nemo_rl/data/processors.py
+index d738d87da..a1619a2a3 100644
+--- a/nemo_rl/data/processors.py
++++ b/nemo_rl/data/processors.py
+@@ -732,6 +732,57 @@ def apertus2_sciworld_data_processor(
+     }
+ 
+ 
++def apertus2_tutoring_data_processor(
++    datum_dict: dict[str, Any],
++    task_data_spec: TaskDataSpec,
++    tokenizer: TokenizerType,
++    max_seq_length: int,
++    idx: int,
++) -> DatumSpec:
++    """A multi-turn learner simulation opening prompt in the Apertus 2 message format.
++
++    The row's user message holds the precomputed learner opener; ``tutoring`` carries
++    the learner system prompt, persona/behavioral metadata, and optional reference answer
++    or per-row ``behavior`` override (injected into the Apertus 2 system frame).
++    """
++    spec = dict(datum_dict["tutoring"])
++    user_text = (
++        datum_dict["messages"][0]["content"]
++        if datum_dict.get("messages")
++        else spec["opener"]
++    )
++    assert task_data_spec.system_prompt, (
++        "Apertus 2 needs system_prompt_file: a JSON file with the system frame."
++    )
++    frame = json.loads(task_data_spec.system_prompt)
++    if spec.get("behavior"):
++        frame["behavior"] = spec["behavior"]
++    token_ids = torch.tensor(
++        encode_prompt(
++            tokenizer.name_or_path,
++            system_prompt=json.dumps(frame),
++            user_text=user_text,
++        ),
++        dtype=torch.long,
++    )
++    message_log: LLMMessageLogType = [
++        {"role": "user", "content": user_text, "token_ids": token_ids}
++    ]
++    length = len(token_ids)
++    loss_multiplier = 1.0
++    if length >= max_seq_length:
++        message_log[0]["token_ids"] = token_ids[: min(4, max_seq_length)]
++        loss_multiplier = 0.0
++    return {
++        "message_log": message_log,
++        "length": length,
++        "extra_env_info": {"tutoring": spec, "prompt_tokens": int(length)},
++        "loss_multiplier": loss_multiplier,
++        "idx": idx,
++        "task_name": datum_dict["task_name"],
++    }
++
++
+ def vlm_hf_data_processor(
+     datum_dict: dict[str, Any],
+     task_data_spec: TaskDataSpec,
+@@ -1131,6 +1182,7 @@ PROCESSOR_REGISTRY: Dict[str, TaskDataProcessFnCallable] = cast(
+         "default": math_hf_data_processor,
+         "apertus2_math_data_processor": apertus2_math_data_processor,
+         "apertus2_sciworld_data_processor": apertus2_sciworld_data_processor,
++        "apertus2_tutoring_data_processor": apertus2_tutoring_data_processor,
+         "helpsteer3_data_processor": helpsteer3_data_processor,
+         "kd_data_processor": kd_data_processor,
+         "math_data_processor": math_data_processor,
+diff --git a/nemo_rl/distributed/actor_environments.py b/nemo_rl/distributed/actor_environments.py
+index fe778fbe6..eb6039868 100644
+--- a/nemo_rl/distributed/actor_environments.py
++++ b/nemo_rl/distributed/actor_environments.py
+@@ -79,6 +79,7 @@ ACTOR_ENVIRONMENTS: dict[str, list[str] | None] = {
+     "nemo_rl.environments.code_jaccard_environment.CodeJaccardEnvironment": None,
+     "nemo_rl.environments.games.sliding_puzzle.SlidingPuzzleEnv": None,
+     "nemo_rl.environments.scienceworld_environment.ScienceWorldEnvironment": None,
++    "nemo_rl.environments.tutoring_environment.TutoringEnvironment": None,
+     # AsyncTrajectoryCollector needs the vLLM environment to handle exceptions
+     # from VllmGenerationWorker.
+     "nemo_rl.algorithms.async_utils.AsyncTrajectoryCollector": ["vllm"],
+diff --git a/nemo_rl/environments/tutoring_environment.py b/nemo_rl/environments/tutoring_environment.py
+new file mode 100644
+index 000000000..f55db234c
+--- /dev/null
++++ b/nemo_rl/environments/tutoring_environment.py
+@@ -0,0 +1,909 @@
++# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""Native multi-turn learner simulation environment for the Apertus 2 message format.
++
++Adapted from NVIDIA NeMo UserSim (Apache-2.0, ``general_educational`` probe). A data row
++carries a persona-grounded learner system prompt and a precomputed opening user message so
++every rollout in a GRPO prompt group starts from the same tokens. On each policy turn:
++
++1. Extract the policy's reply frame (thinking dropped). Cut-off or empty replies terminate
++   with reward 0 (not masked).
++2. Query the configured judge/learner vLLM pool (``judge_pool_address``) using append-only
++   quoted dialogue history + trailing role anchor and patience-scaled frustration so KV
++   prefix caching stays effective across turns and role reversal is avoided.
++3. Validate the learner turn with deterministic checks + the ``learner_gate`` judge
++   (retrying up to ``gate_retries`` times; exhausted retries or pool errors set
++   ``mask_sample=True`` so GRPO drops the sample from both loss and group baseline).
++4. From ``min_turns`` onward, check early stop when the learner message contains no
++   question mark. Also enforce ``min_remaining_tokens`` so episodes nearing
++   ``max_total_sequence_length`` terminate cleanly and run the final judge instead of
++   overflowing ``rollouts.py`` with reward 0.
++5. When continuing, encode the learner message as an Apertus 2 ``User`` input frame
++   (``token_ids`` via ``apertus-common``) and return reward 0. When done, score the whole
++   dialogue on UserSim's axes (averaged over ``judge_samples`` structured calls or
++   deterministic first-token logprobs) and return the weighted normalized reward in [0, 1].
++"""
++
++from __future__ import annotations
++
++import asyncio
++import itertools
++import json
++import math
++import os
++import random
++import re
++import time
++from typing import Any, NotRequired, TypedDict
++
++import aiohttp
++import ray
++import torch
++
++from nemo_rl.data.apertus2_format import Apertus2Output
++from nemo_rl.data.interfaces import LLMMessageLogType
++from nemo_rl.distributed.batched_data_dict import BatchedDataDict
++from nemo_rl.environments.interfaces import EnvironmentInterface, EnvironmentReturn
++from nemo_rl.environments.judge_pool import judge_pool_address
++
++END_REASONS = (
++    "satisfied",
++    "max_turns",
++    "context_margin",
++    "cut_off",
++    "gate_failed",
++    "pool_error",
++    "judge_failed",
++)
++
++_INTERACTION_STYLE_PARAMS: dict[str, tuple[float, float]] = {
++    "confrontational": (2.0, 2.0),
++    "frustrated": (1.0, 1.5),
++    "impatient": (0.0, 1.5),
++    "neutral": (0.0, 1.0),
++    "cooperative": (0.0, 0.3),
++}
++
++_FOURTH_WALL_PHRASES = (
++    "as an ai",
++    "as a language model",
++    "in this simulation",
++    "roleplay",
++    "role-play",
++    "stay in character",
++    "first message",
++    "start the conversation",
++)
++
++_REFUSAL_ECHO_PHRASES = (
++    "i'm sorry, but i can't",
++    "i\u2019m sorry, but i can\u2019t",
++    "sorry, but i can't",
++    "sorry, but i\u2019t",
++    "i can't help with that",
++    "i can\u2019t help with that",
++    "i can't assist with that",
++    "i cannot help with that",
++    "i cannot assist with that",
++    "i'm unable to help",
++)
++
++# Question mark in Latin, full-width CJK, or Arabic script.
++_QUESTION_MARK = re.compile(r"[?？؟]")
++
++# Deterministic multi-turn hygiene patterns aligned with sft-data-apertus2 filters.
++_TEMPLATE_TOKEN_RE = re.compile(
++    r"<\|im_end\|>|<\|im_start\|>|<\|eot_id\|>|<end_of_conversation>|</s>"
++)
++_OTHER_MODEL_RE = re.compile(
++    r"\b(?:deepseek|qwen|alibaba\s+cloud|gemma|google\s+deepmind)\b", re.I
++)
++_NON_LATIN_RE = re.compile(
++    r"[\u0400-\u04ff\u0600-\u06ff\u3040-\u30ff\u4e00-\u9fff\uac00-\ud7af]"
++)
++
++_GATE_SCHEMA: dict[str, Any] = {
++    "type": "object",
++    "properties": {
++        "explanation": {"type": "string", "maxLength": 400},
++        "rating": {"type": "string", "enum": ["success", "warn", "failure"]},
++    },
++    "required": ["explanation", "rating"],
++    "additionalProperties": False,
++}
++
++
++class TutoringEnvConfig(TypedDict):
++    """``env.<name>`` for the native multi-turn tutoring/learner simulation environment."""
++
++    # "judge" for env.judge_pool, "judge_<name>" for an entry of env.extra_judge_pools.
++    judge_pool: str
++    # Apertus 2 tokenizer path, used to encode user turns as input frames and track tokens.
++    tokenizer_path: str
++    # Directory containing the prompt text files and axes.json.
++    prompts_dir: str
++    # Maximum policy turns per episode.
++    max_turns: int
++    # Earliest policy turn at which early-stop checking is allowed.
++    min_turns: int
++    # Policy turn from which the wrap-up role anchor is used.
++    wrapup_from_turn: int
++    # Remaining token safety margin under max_total_sequence_length before forcing the final judge.
++    min_remaining_tokens: NotRequired[int]
++    max_total_sequence_length: NotRequired[int]
++    # Whether to run the learner-quality gate on every generated learner turn.
++    learner_gate: NotRequired[bool]
++    gate_retries: NotRequired[int]
++    structured_gate: NotRequired[bool]
++    # Axis weights, e.g. {"helpfulness": 1, "accuracy": 1, "coherence": 1, "pedagogical_quality": 1}.
++    axes: dict[str, float]
++    # "structured_mean" (default: average `judge_samples` structured JSON calls) or "logprob".
++    judge_mode: NotRequired[str]
++    judge_samples: NotRequired[int]
++    max_reasoning_chars: NotRequired[int]
++    # Must match the judge pool's configured temperature/top_p (NeMo-RL's server enforces equality).
++    temperature: NotRequired[float]
++    top_p: NotRequired[float]
++    max_tokens_learner: NotRequired[int]
++    max_tokens_judge: NotRequired[int]
++    chat_template_kwargs: NotRequired[dict[str, Any] | None]
++    max_concurrent_calls: NotRequired[int]
++    timeout_s: NotRequired[float]
++    retries: NotRequired[int]
++    pool_wait_s: NotRequired[float]
++    mask_failures: NotRequired[bool]
++    log_every: NotRequired[int]
++    # Optional direct URLs/model for unit tests without a Ray KV judge pool.
++    pool_urls: NotRequired[list[str] | None]
++    pool_model: NotRequired[str | None]
++
++
++class TutoringMetadata(TypedDict):
++    """A row's ``extra_env_info``; ``episode``, ``frame_metrics``, and ``mask_sample`` are set by step()."""
++
++    tutoring: dict[str, Any]
++    prompt_tokens: NotRequired[int]
++    episode: NotRequired[dict[str, Any]]
++    frame_metrics: NotRequired[dict[str, float]]
++    mask_sample: NotRequired[bool]
++
++
++def compute_frustration_level(
++    style: str,
++    turn_idx: int,
++    assistant_failures: int,
++    patience: float,
++    max_turns: int = 8,
++) -> int:
++    """Compute learner frustration level (0..3) from interaction style, turn index, and patience."""
++    base, rate = _INTERACTION_STYLE_PARAMS.get(style, (0.0, 1.0))
++    frustration = base
++    if assistant_failures >= 2:
++        frustration += assistant_failures * rate
++    mid_threshold = max(1, int(max_turns * 0.4))
++    late_threshold = max(2, int(max_turns * 0.7))
++    if turn_idx >= mid_threshold and patience < 0.5:
++        frustration += 0.5
++    if turn_idx >= late_threshold:
++        frustration += 0.5
++    return min(3, max(0, int(frustration)))
++
++
++def quick_learner_reject_reason(text: str) -> str | None:
++    """Cheap deterministic check catching empty replies, fourth-wall breaks, and refusal echoes."""
++    if not text or not text.strip():
++        return "empty learner message"
++    lower = " ".join(text.lower().split())
++    if any(phrase in lower for phrase in _FOURTH_WALL_PHRASES):
++        return "fourth-wall break or meta-reference to the simulation"
++    if any(phrase in lower for phrase in _REFUSAL_ECHO_PHRASES):
++        return "sounds like an assistant refusal rather than a learner"
++    return None
++
++
++def parse_gate_response(text: str) -> tuple[str, str, bool]:
++    """Parse learner-gate output from JSON structured output or XML tags."""
++    try:
++        obj = json.loads(text)
++        if isinstance(obj, dict) and obj.get("rating") in ("success", "warn", "failure"):
++            return str(obj.get("explanation", "")).strip(), str(obj["rating"]), True
++    except (json.JSONDecodeError, TypeError):
++        pass
++    m_rat = re.search(r"<rating>\s*(success|warn|failure)\s*</rating>", text, re.I)
++    m_exp = re.search(r"<explanation>\s*(.*?)\s*</explanation>", text, re.S | re.I)
++    if m_rat:
++        return (m_exp.group(1).strip() if m_exp else ""), m_rat.group(1).lower(), True
++    return text.strip()[:300], "failure", False
++
++
++def build_judge_schema(axes: list[str], max_reasoning_chars: int = 300) -> dict[str, Any]:
++    """vLLM structured-output JSON schema for whole-dialogue multi-axis scoring."""
++    props = {
++        axis: {
++            "type": "object",
++            "properties": {
++                "reasoning": {"type": "string", "maxLength": max_reasoning_chars},
++                "score": {"type": "integer", "minimum": 1, "maximum": 5},
++            },
++            "required": ["reasoning", "score"],
++            "additionalProperties": False,
++        }
++        for axis in axes
++    }
++    return {
++        "type": "object",
++        "properties": props,
++        "required": list(axes),
++        "additionalProperties": False,
++    }
++
++
++def parse_trajectory_judge_json(
++    text: str, axes: list[str]
++) -> dict[str, float] | None:
++    """Extract {axis: float_score in [1, 5]} from a JSON trajectory-judge completion."""
++    try:
++        obj = json.loads(text)
++    except (json.JSONDecodeError, TypeError):
++        return None
++    if not isinstance(obj, dict):
++        return None
++    scores: dict[str, float] = {}
++    for axis in axes:
++        entry = obj.get(axis)
++        if not isinstance(entry, dict) or "score" not in entry:
++            return None
++        try:
++            val = float(entry["score"])
++        except (TypeError, ValueError):
++            return None
++        if not (1.0 <= val <= 5.0):
++            return None
++        scores[axis] = val
++    return scores
++
++
++def expected_score_from_logprobs(top_logprobs: list[dict[str, Any]]) -> float | None:
++    """Deterministic expected score in [1, 5] from first-token logprobs over digits '1'..'5'."""
++    mass: dict[int, float] = {}
++    for entry in top_logprobs:
++        tok = str(entry.get("token", "")).strip()
++        if tok in ("1", "2", "3", "4", "5"):
++            k = int(tok)
++            mass[k] = mass.get(k, 0.0) + math.exp(float(entry["logprob"]))
++    total = sum(mass.values())
++    if total <= 0.0:
++        return None
++    return sum(k * p for k, p in mass.items()) / total
++
++
++def weighted_reward(
++    axis_scores: dict[str, float], axis_weights: dict[str, float]
++) -> float:
++    """Map 1..5 axis scores to a weighted reward in [0, 1]."""
++    num = 0.0
++    den = 0.0
++    for axis, weight in axis_weights.items():
++        w = float(weight)
++        if w <= 0.0 or axis not in axis_scores:
++            continue
++        num += w * ((axis_scores[axis] - 1.0) / 4.0)
++        den += w
++    return num / den if den > 0.0 else 0.0
++
++
++def _has_repetition_loop(text: str) -> bool:
++    """Detect repeated non-trivial lines or paragraphs inside a single assistant turn."""
++    lines = [ln.strip() for ln in text.splitlines() if len(ln.strip()) >= 25]
++    if len(lines) < 4:
++        return False
++    counts: dict[str, int] = {}
++    for ln in lines:
++        counts[ln] = counts.get(ln, 0) + 1
++        if counts[ln] >= 4:
++            return True
++    return False
++
++
++def compute_hygiene_flags(
++    assistant_replies: list[str],
++    assistant_thinks: list[str],
++    locale: str = "en_US",
++) -> dict[str, float]:
++    """Lightweight deterministic multi-turn hygiene counters aligned with sft-data-apertus2."""
++    all_text = "\n".join(assistant_replies + assistant_thinks)
++    is_en = locale.startswith("en_")
++    non_latin_think = (
++        any(bool(_NON_LATIN_RE.search(t)) for t in assistant_thinks) if is_en else False
++    )
++    return {
++        "repetition": float(any(_has_repetition_loop(r) for r in assistant_replies)),
++        "template_token": float(bool(_TEMPLATE_TOKEN_RE.search(all_text))),
++        "other_model": float(bool(_OTHER_MODEL_RE.search(all_text))),
++        "non_latin_think": float(non_latin_think),
++    }
++
++
++def _render_dialogue(dialogue: list[dict[str, str]]) -> str:
++    lines = []
++    for turn in dialogue:
++        speaker = "USER" if turn["role"] == "user" else "ASSISTANT"
++        lines.append(f"{speaker}: {turn['content']}")
++    return "\n\n".join(lines)
++
++
++def _render_rubric(axes_def: dict[str, Any], axes: list[str]) -> str:
++    blocks = []
++    for name in axes:
++        entry = axes_def[name]
++        lines = [f"{name}: {entry['description']}"]
++        for score_key, anchor in sorted(entry["options"].items(), key=lambda kv: int(kv[0])):
++            lines.append(f"  {score_key}: {anchor}")
++        blocks.append("\n".join(lines))
++    return "\n\n".join(blocks)
++
++
++def _extract_last_assistant(
++    conversation: LLMMessageLogType,
++) -> tuple[str, str, bool, str]:
++    """Return (reply_text, think_text, truncated, raw_content) for the latest assistant message."""
++    for message in reversed(conversation):
++        if message.get("role") != "assistant":
++            continue
++        raw_content = str(message.get("content") or "")
++        output: Apertus2Output | None = message.get("apertus2_output")
++        if output is not None:
++            reply = (output.reply or "").strip()
++            think = (getattr(output, "think", None) or "").strip()
++            return reply, think, bool(output.truncated or output.error is not None), raw_content
++        return raw_content.strip(), "", False, raw_content
++    return "", "", True, ""
++
++
++@ray.remote(max_restarts=-1, max_task_retries=-1, max_concurrency=1000)  # pragma: no cover
++class TutoringEnvironment(EnvironmentInterface[TutoringMetadata]):
++    """Async native multi-turn learner simulation environment; see module docstring."""
++
++    def __init__(self, cfg: TutoringEnvConfig) -> None:
++        self.cfg = cfg
++        self._axes_weights: dict[str, float] = {
++            k: float(v) for k, v in cfg["axes"].items() if float(v) > 0
++        }
++        assert self._axes_weights, "env.tutoring.axes must contain at least one positive weight"
++        self._axis_names = list(self._axes_weights.keys())
++
++        prompts_dir = cfg["prompts_dir"]
++        self._prompts = self._load_prompts(prompts_dir)
++        self._axes_def = self._load_axes(prompts_dir)
++        missing = [a for a in self._axis_names if a not in self._axes_def]
++        assert not missing, f"Unknown tutoring judge axes {missing}; defined in axes.json: {sorted(self._axes_def)}"
++        self._rubric_text = _render_rubric(self._axes_def, self._axis_names)
++        self._judge_schema = build_judge_schema(
++            self._axis_names, max_reasoning_chars=int(cfg.get("max_reasoning_chars", 300))
++        )
++
++        self._urls: list[str] | None = None
++        self._model: str | None = None
++        self._url_cycle = None
++        self._session: aiohttp.ClientSession | None = None
++        self._semaphore: asyncio.Semaphore | None = None
++        self._ready: asyncio.Task[None] | None = None
++
++        self._episodes_done = 0
++        self._episodes_masked = 0
++        self._pool_calls = 0
++        self._pool_errors = 0
++
++    @staticmethod
++    def _load_prompts(prompts_dir: str) -> dict[str, str]:
++        names = (
++            "learner_followup",
++            "role_anchor",
++            "role_anchor_wrapup",
++            "learner_gate",
++            "learner_retry",
++            "early_stop",
++            "frustration_1",
++            "frustration_2",
++            "frustration_3",
++            "trajectory_judge_system",
++            "trajectory_judge_user",
++        )
++        loaded: dict[str, str] = {}
++        for name in names:
++            path = os.path.join(prompts_dir, f"{name}.txt")
++            with open(path, "r", encoding="utf-8") as f:
++                loaded[name] = f.read().strip()
++        return loaded
++
++    @staticmethod
++    def _load_axes(prompts_dir: str) -> dict[str, Any]:
++        path = os.path.join(prompts_dir, "axes.json")
++        with open(path, "r", encoding="utf-8") as f:
++            return json.load(f)
++
++    async def _ensure_ready(self) -> None:
++        if self._ready is None:
++            self._ready = asyncio.get_running_loop().create_task(self._connect())
++        await self._ready
++
++    async def _connect(self) -> None:
++        pool_urls = self.cfg.get("pool_urls")
++        if pool_urls:
++            urls = list(pool_urls)
++            model = self.cfg.get("pool_model") or "mock-model"
++        else:
++            urls, model = await asyncio.to_thread(
++                judge_pool_address,
++                self.cfg["judge_pool"],
++                float(self.cfg.get("pool_wait_s", 3600.0)),
++            )
++        self._urls, self._model = urls, model
++        self._url_cycle = itertools.cycle(random.sample(urls, len(urls)))
++        self._semaphore = asyncio.Semaphore(int(self.cfg.get("max_concurrent_calls", 1024)))
++        connector = aiohttp.TCPConnector(limit=0)
++        self._session = aiohttp.ClientSession(
++            connector=connector,
++            timeout=aiohttp.ClientTimeout(total=float(self.cfg.get("timeout_s", 300.0))),
++        )
++        print(
++            f"[tutoring] connected to {len(urls)} pool server(s) of {model}",
++            flush=True,
++        )
++
++    def _encode_user_turn(self, text: str) -> list[int]:
++        from apertus_common import User
++        from nemo_rl.data.apertus2_format import _get_encoding
++
++        return list(_get_encoding(self.cfg["tokenizer_path"]).encode_items([User(payload=text)]))
++
++    def _count_text_tokens(self, text: str) -> int:
++        if not text:
++            return 0
++        try:
++            from nemo_rl.data.apertus2_format import _get_encoding
++
++            enc = _get_encoding(self.cfg["tokenizer_path"])
++            tok = getattr(enc, "tokenizer", None)
++            if tok is not None:
++                return len(tok.encode(text, add_special_tokens=False))
++        except Exception:  # noqa: BLE001
++            pass
++        return max(1, len(text) // 4)
++
++    async def _post_chat(self, body: dict[str, Any]) -> dict[str, Any] | None:
++        assert self._semaphore is not None and self._session is not None and self._url_cycle is not None
++        retries = int(self.cfg.get("retries", 2))
++        req = dict(body)
++        req.setdefault("model", self._model)
++        req.setdefault("temperature", float(self.cfg.get("temperature", 1.0)))
++        req.setdefault("top_p", float(self.cfg.get("top_p", 1.0)))
++        req.setdefault("return_tokens_as_token_ids", False)
++        if self.cfg.get("chat_template_kwargs"):
++            req.setdefault("chat_template_kwargs", dict(self.cfg["chat_template_kwargs"]))
++
++        async with self._semaphore:
++            self._pool_calls += 1
++            for attempt in range(retries + 1):
++                url = next(self._url_cycle).rstrip("/") + "/chat/completions"
++                try:
++                    async with self._session.post(url, json=req) as response:
++                        response.raise_for_status()
++                        return await response.json()
++                except (asyncio.TimeoutError, aiohttp.ClientError, ValueError):
++                    if attempt == retries:
++                        self._pool_errors += 1
++                        return None
++                    await asyncio.sleep(min(1.0 * (attempt + 1), 5.0))
++        return None
++
++    async def _generate_learner_turn(
++        self,
++        spec: dict[str, Any],
++        dialogue: list[dict[str, str]],
++        turn_idx: int,
++    ) -> tuple[str | None, int, str | None]:
++        """Generate a gated learner reply. Returns (message_or_None, retries_used, failure_reason)."""
++        max_turns = int(self.cfg["max_turns"])
++        wrapup_from = int(self.cfg["wrapup_from_turn"])
++        use_gate = bool(self.cfg.get("learner_gate", True))
++        gate_retries = int(self.cfg.get("gate_retries", 2))
++        structured_gate = bool(self.cfg.get("structured_gate", True))
++        max_tokens = int(self.cfg.get("max_tokens_learner", 300))
++
++        frustration = compute_frustration_level(
++            str(spec.get("interaction_style", "neutral")),
++            turn_idx,
++            0,
++            float(spec.get("patience", 0.5)),
++            max_turns=max_turns,
++        )
++        frustration_block = (
++            "\n\n" + self._prompts[f"frustration_{frustration}"]
++            if frustration > 0
++            else ""
++        )
++        anchor = (
++            self._prompts["role_anchor_wrapup"]
++            if turn_idx >= wrapup_from
++            else self._prompts["role_anchor"]
++        )
++        chat_history = _render_dialogue(dialogue)
++        followup_user = self._prompts["learner_followup"].format(
++            language=spec.get("language", "English"),
++            chat_history=chat_history,
++            role_anchor=anchor,
++            frustration_block=frustration_block,
++        )
++        messages: list[dict[str, str]] = [
++            {"role": "system", "content": spec["learner_system"]},
++            {"role": "user", "content": followup_user},
++        ]
++
++        retries_used = 0
++        for attempt in range(gate_retries + 1):
++            resp = await self._post_chat({"messages": messages, "max_tokens": max_tokens})
++            if resp is None:
++                return None, retries_used, "pool_error"
++            draft = (resp["choices"][0]["message"].get("content") or "").strip()
++
++            reason = quick_learner_reject_reason(draft)
++            passed = reason is None
++            if passed and use_gate:
++                gate_prompt = self._prompts["learner_gate"].format(
++                    conversation_history=chat_history,
++                    user_turn_to_evaluate=draft,
++                )
++                gate_body: dict[str, Any] = {
++                    "messages": [
++                        {"role": "system", "content": "You are an expert judge."},
++                        {"role": "user", "content": gate_prompt},
++                    ],
++                    "max_tokens": 256,
++                }
++                if structured_gate:
++                    gate_body["structured_outputs"] = {"json": _GATE_SCHEMA}
++                gate_resp = await self._post_chat(gate_body)
++                if gate_resp is None:
++                    return None, retries_used, "pool_error"
++                gate_text = gate_resp["choices"][0]["message"].get("content") or ""
++                expl, rating, parsed_ok = parse_gate_response(gate_text)
++                passed = parsed_ok and rating in ("success", "warn")
++                reason = expl or "failed learner gate"
++
++            if passed:
++                return draft, retries_used, None
++
++            if attempt < gate_retries:
++                retries_used += 1
++                messages.append({"role": "assistant", "content": draft})
++                messages.append(
++                    {
++                        "role": "user",
++                        "content": self._prompts["learner_retry"].format(
++                            reason=(reason or "broke character")[:400]
++                        ),
++                    }
++                )
++        return None, retries_used, "gate_failed"
++
++    async def _check_early_stop(self, learner_msg: str) -> bool | None:
++        """Return True if learner ended the conversation, False if continuing, None on pool error."""
++        if _QUESTION_MARK.search(learner_msg or ""):
++            return False
++        prompt = self._prompts["early_stop"].format(follow_up=learner_msg)
++        resp = await self._post_chat(
++            {
++                "messages": [{"role": "user", "content": prompt}],
++                "max_tokens": 4,
++                "structured_outputs": {"choice": ["yes", "no"]},
++            }
++        )
++        if resp is None:
++            return None
++        ans = (resp["choices"][0]["message"].get("content") or "").strip().lower()
++        return ans.startswith("yes")
++
++    async def _judge_dialogue(
++        self, spec: dict[str, Any], dialogue: list[dict[str, str]]
++    ) -> dict[str, float] | None:
++        """Score the whole dialogue on the configured axes."""
++        mode = self.cfg.get("judge_mode", "structured_mean")
++        reference_block = ""
++        if spec.get("kind") == "problem" and spec.get("answer"):
++            reference_block = (
++                f"Reference answer for accuracy grading only (the learner did not see this):\n"
++                f"<REFERENCE_ANSWER>\n{spec['answer']}\n</REFERENCE_ANSWER>\n\n"
++            )
++        conv_text = _render_dialogue(dialogue)
++
++        if mode == "logprob":
++            return await self._judge_dialogue_logprob(spec, conv_text, reference_block)
++
++        user_prompt = self._prompts["trajectory_judge_user"].format(
++            persona=spec.get("persona_text") or spec.get("persona_name") or "Learner",
++            language=spec.get("language", "English"),
++            locale=spec.get("locale", "en_US"),
++            reference_block=reference_block,
++            conversation=conv_text,
++            rubric=self._rubric_text,
++        )
++        body = {
++            "messages": [
++                {"role": "system", "content": self._prompts["trajectory_judge_system"]},
++                {"role": "user", "content": user_prompt},
++            ],
++            "max_tokens": int(self.cfg.get("max_tokens_judge", 1024)),
++            "structured_outputs": {"json": self._judge_schema},
++        }
++        n_samples = max(1, int(self.cfg.get("judge_samples", 3)))
++        responses = await asyncio.gather(*(self._post_chat(body) for _ in range(n_samples)))
++        parsed_list: list[dict[str, float]] = []
++        for resp in responses:
++            if resp is None:
++                continue
++            text = resp["choices"][0]["message"].get("content") or ""
++            parsed = parse_trajectory_judge_json(text, self._axis_names)
++            if parsed is not None:
++                parsed_list.append(parsed)
++        if not parsed_list:
++            return None
++        return {
++            axis: sum(p[axis] for p in parsed_list) / len(parsed_list)
++            for axis in self._axis_names
++        }
++
++    async def _judge_dialogue_logprob(
++        self, spec: dict[str, Any], conv_text: str, reference_block: str
++    ) -> dict[str, float] | None:
++        """Deterministic expected-score judge via first-token logprobs over 1..5 per axis."""
++
++        async def score_one(axis: str) -> tuple[str, float | None]:
++            rubric = _render_rubric(self._axes_def, [axis])
++            prompt = (
++                self._prompts["trajectory_judge_user"].format(
++                    persona=spec.get("persona_text") or spec.get("persona_name") or "Learner",
++                    language=spec.get("language", "English"),
++                    locale=spec.get("locale", "en_US"),
++                    reference_block=reference_block,
++                    conversation=conv_text,
++                    rubric=rubric,
++                )
++                + f"\n\nRespond with ONLY a single digit (1, 2, 3, 4, or 5) for `{axis}`."
++            )
++            resp = await self._post_chat(
++                {
++                    "messages": [
++                        {"role": "system", "content": self._prompts["trajectory_judge_system"]},
++                        {"role": "user", "content": prompt},
++                    ],
++                    "max_tokens": 4,
++                    "logprobs": True,
++                    "top_logprobs": 20,
++                    "structured_outputs": {"choice": ["1", "2", "3", "4", "5"]},
++                }
++            )
++            if resp is None:
++                return axis, None
++            choice = resp["choices"][0]
++            content_lp = (choice.get("logprobs") or {}).get("content") or []
++            if content_lp:
++                val = expected_score_from_logprobs(content_lp[0].get("top_logprobs") or [])
++                if val is not None:
++                    return axis, val
++            raw = (choice["message"].get("content") or "").strip()
++            if raw in ("1", "2", "3", "4", "5"):
++                return axis, float(raw)
++            return axis, None
++
++        results = await asyncio.gather(*(score_one(axis) for axis in self._axis_names))
++        if any(val is None for _, val in results):
++            return None
++        return {axis: float(val) for axis, val in results if val is not None}
++
++    def _build_metrics(
++        self,
++        spec: dict[str, Any],
++        episode: dict[str, Any],
++        reward: float,
++        masked: bool,
++    ) -> dict[str, float]:
++        end = episode.get("end")
++        turns = int(episode["turns"])
++        replies = [m["content"] for m in episode["dialogue"] if m["role"] == "assistant"]
++        thinks = list(episode.get("assistant_thinks") or [])
++        metrics: dict[str, float] = {
++            "tut_turns": float(turns),
++            "tut_reached_max_turns": float(turns >= int(self.cfg["max_turns"])),
++            "tut_early_stop": float(bool(episode.get("early_stopped"))),
++            "tut_gate_retries": float(episode.get("gate_retries", 0)),
++            "tut_gate_failed": float(end == "gate_failed"),
++            "tut_masked": float(masked),
++            "tut_reward": float(reward),
++            "tut_reply_chars": (
++                sum(len(r) for r in replies) / len(replies) if replies else 0.0
++            ),
++            "tut_think_chars": (
++                sum(len(t) for t in thinks) / len(thinks) if thinks else 0.0
++            ),
++            f"tut_reward_by_turns/{turns}": float(reward),
++        }
++        if episode.get("early_stopped"):
++            metrics["tut_early_stop_turn"] = float(turns)
++        for reason in END_REASONS:
++            metrics[f"tut_end/{reason}"] = float(end == reason)
++        for axis, score in (episode.get("axis_scores") or {}).items():
++            metrics[f"tut_axis/{axis}"] = float(score)
++        for k, v in compute_hygiene_flags(
++            replies, thinks, locale=str(spec.get("locale", "en_US"))
++        ).items():
++            metrics[f"tut_hygiene/{k}"] = v
++        if not masked:
++            kind = str(spec.get("kind", "unknown"))
++            style = str(spec.get("interaction_style", "unknown"))
++            disclosure = str(spec.get("disclosure_style", "unknown"))
++            metrics[f"tut_kind_reward/{kind}"] = float(reward)
++            metrics[f"tut_style_reward/{style}"] = float(reward)
++            metrics[f"tut_disclosure_reward/{disclosure}"] = float(reward)
++        return metrics
++
++    async def _step_one(
++        self,
++        conversation: LLMMessageLogType,
++        meta: TutoringMetadata,
++    ) -> tuple[dict[str, Any], TutoringMetadata, float, bool]:
++        spec = meta["tutoring"]
++        episode = dict(
++            meta.get("episode")
++            or {
++                "turns": 0,
++                "dialogue": [{"role": "user", "content": spec["opener"]}],
++                "assistant_thinks": [],
++                "total_tokens": int(meta.get("prompt_tokens", 0)),
++                "gate_retries": 0,
++                "early_stopped": False,
++                "end": None,
++                "axis_scores": {},
++            }
++        )
++        episode["dialogue"] = list(episode["dialogue"])
++        episode["assistant_thinks"] = list(episode["assistant_thinks"])
++
++        reply, think, truncated, raw_content = _extract_last_assistant(conversation)
++        episode["turns"] += 1
++        episode["total_tokens"] += self._count_text_tokens(raw_content)
++
++        max_turns = int(self.cfg["max_turns"])
++        min_turns = int(self.cfg["min_turns"])
++        max_seq = int(self.cfg.get("max_total_sequence_length", 32768))
++        min_rem = int(self.cfg.get("min_remaining_tokens", 4096))
++        mask_failures = bool(self.cfg.get("mask_failures", True))
++
++        end: str | None = None
++        masked = False
++        reward = 0.0
++        obs: dict[str, Any] = {"role": "user", "content": ""}
++
++        if truncated or not reply:
++            end = "cut_off"
++        else:
++            episode["dialogue"].append({"role": "assistant", "content": reply})
++            episode["assistant_thinks"].append(think)
++
++            if episode["turns"] >= max_turns:
++                end = "max_turns"
++            elif max_seq - episode["total_tokens"] < min_rem:
++                end = "context_margin"
++            else:
++                learner_msg, retries_used, fail_reason = await self._generate_learner_turn(
++                    spec, episode["dialogue"], episode["turns"]
++                )
++                episode["gate_retries"] += retries_used
++                if learner_msg is None:
++                    end = fail_reason or "pool_error"
++                    masked = mask_failures
++                else:
++                    episode["dialogue"].append({"role": "user", "content": learner_msg})
++                    if episode["turns"] >= min_turns:
++                        stopped = await self._check_early_stop(learner_msg)
++                        if stopped is None:
++                            end = "pool_error"
++                            masked = mask_failures
++                        elif stopped:
++                            episode["early_stopped"] = True
++                            end = "satisfied"
++
++                    if end is None:
++                        obs_token_ids = self._encode_user_turn(learner_msg)
++                        episode["total_tokens"] += len(obs_token_ids)
++                        if max_seq - episode["total_tokens"] < min_rem:
++                            end = "context_margin"
++                        else:
++                            obs = {
++                                "role": "user",
++                                "content": learner_msg,
++                                "token_ids": obs_token_ids,
++                            }
++
++        if end in ("satisfied", "max_turns", "context_margin"):
++            axis_scores = await self._judge_dialogue(spec, episode["dialogue"])
++            if axis_scores is None:
++                end = "judge_failed"
++                masked = mask_failures
++                reward = 0.0
++            else:
++                episode["axis_scores"] = axis_scores
++                reward = weighted_reward(axis_scores, self._axes_weights)
++
++        terminated = end is not None
++        episode["end"] = end
++        new_meta: TutoringMetadata = {
++            **meta,
++            "episode": episode,
++            "mask_sample": masked,
++        }
++        if terminated:
++            self._episodes_done += 1
++            if masked:
++                self._episodes_masked += 1
++            new_meta["frame_metrics"] = self._build_metrics(spec, episode, reward, masked)
++            log_every = int(self.cfg.get("log_every", 256))
++            if log_every > 0 and self._episodes_done % log_every == 0:
++                print(
++                    f"[tutoring] episodes={self._episodes_done} masked={self._episodes_masked} "
++                    f"pool_calls={self._pool_calls} pool_errors={self._pool_errors}",
++                    flush=True,
++                )
++        return obs, new_meta, reward, terminated
++
++    async def step(
++        self,
++        message_log_batch: list[LLMMessageLogType],
++        metadata: list[TutoringMetadata],
++        return_extracted_answer: bool = False,
++    ) -> EnvironmentReturn[TutoringMetadata]:
++        await self._ensure_ready()
++        results = await asyncio.gather(
++            *(
++                self._step_one(conv, meta)
++                for conv, meta in zip(message_log_batch, metadata)
++            )
++        )
++        observations = [r[0] for r in results]
++        new_metadata = [r[1] for r in results]
++        rewards = torch.tensor([r[2] for r in results], dtype=torch.float32)
++        terminateds = torch.tensor([r[3] for r in results], dtype=torch.bool)
++        return EnvironmentReturn(
++            observations=observations,
++            metadata=new_metadata,
++            next_stop_strings=[None] * len(message_log_batch),
++            rewards=rewards,
++            terminateds=terminateds,
++            answers=None,
++        )
++
++    def global_post_process_and_metrics(
++        self, batch: BatchedDataDict[Any]
++    ) -> tuple[BatchedDataDict[Any], dict[str, float | int]]:
++        return batch, {
++            "tutoring_episodes_done": self._episodes_done,
++            "tutoring_episodes_masked": self._episodes_masked,
++            "tutoring_pool_calls": self._pool_calls,
++            "tutoring_pool_errors": self._pool_errors,
++        }
++
++    async def shutdown(self) -> None:
++        if self._session is not None:
++            await self._session.close()
++            self._session = None
+diff --git a/nemo_rl/environments/utils.py b/nemo_rl/environments/utils.py
+index ec60dd574..a5e178a80 100644
+--- a/nemo_rl/environments/utils.py
++++ b/nemo_rl/environments/utils.py
+@@ -70,6 +70,9 @@ ENV_REGISTRY: Dict[str, EnvRegistryEntry] = {
+     "scienceworld": {
+         "actor_class_fqn": "nemo_rl.environments.scienceworld_environment.ScienceWorldEnvironment",
+     },
++    "tutoring": {
++        "actor_class_fqn": "nemo_rl.environments.tutoring_environment.TutoringEnvironment",
++    },
+ }
+ 
+ 
+diff --git a/tests/unit/environments/test_tutoring_environment.py b/tests/unit/environments/test_tutoring_environment.py
+new file mode 100644
+index 000000000..03c672619
+--- /dev/null
++++ b/tests/unit/environments/test_tutoring_environment.py
+@@ -0,0 +1,391 @@
++# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""Unit tests for TutoringEnvironment with a fake async OpenAI-compatible server."""
++
++from __future__ import annotations
++
++import asyncio
++import json
++import math
++import types
++from pathlib import Path
++from typing import Any
++
++import pytest
++from aiohttp import web
++
++from nemo_rl.data.apertus2_format import Apertus2Output
++from nemo_rl.environments.tutoring_environment import (
++    TutoringEnvironment,
++    compute_frustration_level,
++    compute_hygiene_flags,
++    expected_score_from_logprobs,
++    parse_gate_response,
++    parse_trajectory_judge_json,
++    quick_learner_reject_reason,
++    weighted_reward,
++)
++
++# Unwrap @ray.remote so tests run in-process without starting Ray.
++TutoringEnvCls = TutoringEnvironment.__ray_metadata__.modified_class
++
++_MINIMAL_AXES = {
++    "helpfulness": {
++        "description": "Did the assistant help?",
++        "options": {"1": "Bad", "2": "Poor", "3": "Ok", "4": "Good", "5": "Great"},
++    },
++    "accuracy": {
++        "description": "Was it accurate?",
++        "options": {"1": "Bad", "2": "Poor", "3": "Ok", "4": "Good", "5": "Great"},
++    },
++    "coherence": {
++        "description": "Was it coherent?",
++        "options": {"1": "Bad", "2": "Poor", "3": "Ok", "4": "Good", "5": "Great"},
++    },
++    "pedagogical_quality": {
++        "description": "Did it teach well?",
++        "options": {"1": "Bad", "2": "Poor", "3": "Ok", "4": "Good", "5": "Great"},
++    },
++}
++
++
++def _write_prompts_dir(tmp_path: Path) -> str:
++    d = tmp_path / "prompts"
++    d.mkdir()
++    files = {
++        "learner_followup.txt": (
++            "Write next USER message in {language}.\n\n"
++            "<CHAT_HISTORY>\n{chat_history}\n</CHAT_HISTORY>\n\n"
++            "{role_anchor}{frustration_block}\n\nNow write one USER message."
++        ),
++        "role_anchor.txt": "[ANCHOR_MID]",
++        "role_anchor_wrapup.txt": "[ANCHOR_WRAPUP]",
++        "learner_gate.txt": "History:\n{conversation_history}\nMsg:\n{user_turn_to_evaluate}",
++        "learner_retry.txt": "Retry because: {reason}",
++        "early_stop.txt": "Does this end?\n{follow_up}",
++        "frustration_1.txt": "[FRUST_1]",
++        "frustration_2.txt": "[FRUST_2]",
++        "frustration_3.txt": "[FRUST_3]",
++        "trajectory_judge_system.txt": "You are a judge.",
++        "trajectory_judge_user.txt": (
++            "Persona:{persona}\nLang:{language}({locale})\n"
++            "{reference_block}<CONVERSATION>\n{conversation}\n</CONVERSATION>\n{rubric}"
++        ),
++    }
++    for name, content in files.items():
++        (d / name).write_text(content, encoding="utf-8")
++    (d / "axes.json").write_text(json.dumps(_MINIMAL_AXES), encoding="utf-8")
++    return str(d)
++
++
++def _sample_meta(kind: str = "problem", prompt_tokens: int = 100) -> dict[str, Any]:
++    return {
++        "tutoring": {
++            "kind": kind,
++            "problem": "Solve 2x + 4 = 10.",
++            "answer": "3",
++            "subject": None if kind == "problem" else "algebra",
++            "locale": "en_US",
++            "language": "English",
++            "persona_name": "Alex",
++            "persona_text": "Alex, high school student",
++            "learner_system": "You are Alex, a learner.",
++            "interaction_style": "neutral",
++            "disclosure_style": "incremental",
++            "patience": 0.5,
++            "opener": "Can you help me solve 2x + 4 = 10?",
++        },
++        "prompt_tokens": prompt_tokens,
++    }
++
++
++def _assistant_msg(reply: str, think: str = "thinking", truncated: bool = False) -> list[dict[str, Any]]:
++    return [
++        {
++            "role": "assistant",
++            "content": f"<|out|>think<|hdr|>{think}<|/out|><|out|>reply<|hdr|>{reply}<|/out|><|wait|>",
++            "apertus2_output": Apertus2Output(
++                think=think,
++                reply=reply,
++                claim=None,
++                calls=[],
++                error=None,
++                truncated=truncated,
++            ),
++        }
++    ]
++
++
++class _FakePoolServer:
++    def __init__(self, handler) -> None:
++        self._handler = handler
++        self.requests: list[dict[str, Any]] = []
++        self._runner: web.AppRunner | None = None
++        self.base_url = ""
++
++    async def __aenter__(self) -> "_FakePoolServer":
++        app = web.Application()
++
++        async def chat_completions(request: web.Request) -> web.Response:
++            body = await request.json()
++            self.requests.append(body)
++            status, payload = self._handler(body, len(self.requests))
++            return web.json_response(payload, status=status)
++
++        app.router.add_post("/v1/chat/completions", chat_completions)
++        self._runner = web.AppRunner(app)
++        await self._runner.setup()
++        site = web.TCPSite(self._runner, "127.0.0.1", 0)
++        await site.start()
++        port = site._server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
++        self.base_url = f"http://127.0.0.1:{port}/v1"
++        return self
++
++    async def __aexit__(self, *exc: Any) -> None:
++        if self._runner is not None:
++            await self._runner.cleanup()
++
++
++def _ok_completion(content: str, logprobs: list[dict[str, Any]] | None = None) -> tuple[int, dict[str, Any]]:
++    choice: dict[str, Any] = {"message": {"role": "assistant", "content": content}}
++    if logprobs is not None:
++        choice["logprobs"] = {"content": [{"top_logprobs": logprobs}]}
++    return 200, {"choices": [choice]}
++
++
++def _patch_encoding(monkeypatch: pytest.MonkeyPatch, env: Any) -> None:
++    monkeypatch.setattr(env, "_encode_user_turn", lambda text: [101] * max(1, len(text.split())))
++    monkeypatch.setattr(env, "_count_text_tokens", lambda text: max(1, len(text.split())))
++
++
++def test_pure_helpers() -> None:
++    assert compute_frustration_level("cooperative", 1, 0, 0.8, max_turns=8) == 0
++    assert compute_frustration_level("confrontational", 7, 0, 0.2, max_turns=8) == 3
++    assert quick_learner_reject_reason("As an AI, I cannot") is not None
++    assert quick_learner_reject_reason("I'm sorry, but I can't help with that.") is not None
++    assert quick_learner_reject_reason("Wait, why do we subtract 4 first?") is None
++
++    expl, rating, ok = parse_gate_response(json.dumps({"explanation": "good", "rating": "success"}))
++    assert (expl, rating, ok) == ("good", "success", True)
++    _, rating_xml, ok_xml = parse_gate_response("<explanation>bad</explanation><rating>failure</rating>")
++    assert (rating_xml, ok_xml) == ("failure", True)
++
++    scores = parse_trajectory_judge_json(
++        json.dumps({"helpfulness": {"reasoning": "ok", "score": 5}, "accuracy": {"reasoning": "ok", "score": 3}}),
++        ["helpfulness", "accuracy"],
++    )
++    assert scores == {"helpfulness": 5.0, "accuracy": 3.0}
++    assert math.isclose(weighted_reward(scores, {"helpfulness": 1, "accuracy": 1}), 0.75)
++
++    lp = expected_score_from_logprobs(
++        [{"token": "3", "logprob": math.log(0.25)}, {"token": "5", "logprob": math.log(0.75)}]
++    )
++    assert lp is not None and math.isclose(lp, 4.5, rel_tol=1e-5)
++
++    hyg = compute_hygiene_flags(
++        ["Line repeated over and over again here\n" * 4 + "As Gemma I say <|im_end|>"],
++        ["checking 幂函数 here"],
++        locale="en_US",
++    )
++    assert hyg == {"repetition": 1.0, "template_token": 1.0, "other_model": 1.0, "non_latin_think": 1.0}
++
++
++def test_multi_turn_early_stop_and_judge_averaging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
++    prompts_dir = _write_prompts_dir(tmp_path)
++    judge_scores_seq = [
++        {"helpfulness": 4, "accuracy": 5, "coherence": 4, "pedagogical_quality": 4},
++        {"helpfulness": 5, "accuracy": 5, "coherence": 4, "pedagogical_quality": 5},
++        {"helpfulness": 3, "accuracy": 5, "coherence": 4, "pedagogical_quality": 3},
++    ]
++    judge_idx = {"i": 0}
++    learner_turn = {"n": 0}
++
++    def handler(body: dict[str, Any], _count: int) -> tuple[int, dict[str, Any]]:
++        sys_msg = body["messages"][0]["content"]
++        user_msg = body["messages"][-1]["content"]
++        if "expert judge" in sys_msg:
++            return _ok_completion(json.dumps({"explanation": "in character", "rating": "success"}))
++        if user_msg.startswith("Does this end?"):
++            return _ok_completion("yes")
++        if sys_msg == "You are a judge.":
++            sc = judge_scores_seq[judge_idx["i"] % len(judge_scores_seq)]
++            judge_idx["i"] += 1
++            return _ok_completion(json.dumps({k: {"reasoning": "ok", "score": v} for k, v in sc.items()}))
++        learner_turn["n"] += 1
++        if learner_turn["n"] < 3:
++            return _ok_completion("Wait, why subtract 4 first?")
++        return _ok_completion("Thanks, that makes total sense now.")
++
++    async def run() -> None:
++        async with _FakePoolServer(handler) as srv:
++            env = TutoringEnvCls(
++                {
++                    "judge_pool": "judge_mock",
++                    "tokenizer_path": "mock",
++                    "prompts_dir": prompts_dir,
++                    "max_turns": 8,
++                    "min_turns": 3,
++                    "wrapup_from_turn": 2,
++                    "axes": {"helpfulness": 1, "accuracy": 1, "coherence": 1, "pedagogical_quality": 1},
++                    "judge_samples": 3,
++                    "pool_urls": [srv.base_url],
++                    "pool_model": "mock-gemma",
++                }
++            )
++            _patch_encoding(monkeypatch, env)
++            meta = _sample_meta()
++            # Turn 1: continues, uses mid anchor
++            out1 = await env.step([_assistant_msg("Subtract 4 from both sides.")], [meta])
++            assert not out1.terminateds[0].item()
++            assert out1.rewards[0].item() == 0.0
++            assert out1.observations[0]["token_ids"]
++            # Turn 2: continues, wrap-up anchor active (>= wrapup_from_turn=2), "?" skips early stop
++            out2 = await env.step([_assistant_msg("Because 2x+4-4 leaves 2x=6.")], out1.metadata)
++            assert not out2.terminateds[0].item()
++            # Turn 3: no "?" -> early stop "yes" -> 3-sample judge average
++            out3 = await env.step([_assistant_msg("Then divide by 2 to get x=3.")], out2.metadata)
++            assert out3.terminateds[0].item()
++            assert not out3.metadata[0]["mask_sample"]
++            # Mean scores: helpfulness=4, accuracy=5, coherence=4, pedagogical_quality=4 -> mean (0.75+1+0.75+0.75)/4 = 0.8125
++            assert math.isclose(out3.rewards[0].item(), 0.8125, rel_tol=1e-5)
++            fm = out3.metadata[0]["frame_metrics"]
++            assert fm["tut_end/satisfied"] == 1.0
++            assert fm["tut_early_stop_turn"] == 3.0
++            # Verify wrap-up anchor appeared on turn 2+
++            learner_reqs = [r for r in srv.requests if r["messages"][0]["content"] == "You are Alex, a learner."]
++            assert "[ANCHOR_MID]" in learner_reqs[0]["messages"][1]["content"]
++            assert "[ANCHOR_WRAPUP]" in learner_reqs[1]["messages"][1]["content"]
++            await env.shutdown()
++
++    asyncio.run(run())
++
++
++def test_gate_retry_and_mask_on_exhaustion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
++    prompts_dir = _write_prompts_dir(tmp_path)
++
++    def handler(body: dict[str, Any], _count: int) -> tuple[int, dict[str, Any]]:
++        sys_msg = body["messages"][0]["content"]
++        if "expert judge" in sys_msg:
++            return _ok_completion(json.dumps({"explanation": "acted like teacher", "rating": "failure"}))
++        return _ok_completion("Let me teach you algebra.")
++
++    async def run() -> None:
++        async with _FakePoolServer(handler) as srv:
++            env = TutoringEnvCls(
++                {
++                    "judge_pool": "judge_mock",
++                    "tokenizer_path": "mock",
++                    "prompts_dir": prompts_dir,
++                    "max_turns": 8,
++                    "min_turns": 3,
++                    "wrapup_from_turn": 6,
++                    "gate_retries": 2,
++                    "axes": {"helpfulness": 1},
++                    "pool_urls": [srv.base_url],
++                    "pool_model": "mock-gemma",
++                }
++            )
++            _patch_encoding(monkeypatch, env)
++            out = await env.step([_assistant_msg("Subtract 4.")], [_sample_meta()])
++            assert out.terminateds[0].item()
++            assert out.rewards[0].item() == 0.0
++            assert out.metadata[0]["mask_sample"] is True
++            assert out.metadata[0]["frame_metrics"]["tut_gate_retries"] == 2.0
++            assert out.metadata[0]["frame_metrics"]["tut_end/gate_failed"] == 1.0
++            await env.shutdown()
++
++    asyncio.run(run())
++
++
++def test_cutoff_not_masked_and_context_margin_judged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
++    prompts_dir = _write_prompts_dir(tmp_path)
++
++    def handler(body: dict[str, Any], _count: int) -> tuple[int, dict[str, Any]]:
++        if body["messages"][0]["content"] == "You are a judge.":
++            return _ok_completion(json.dumps({"helpfulness": {"reasoning": "ok", "score": 5}}))
++        return _ok_completion("unused")
++
++    async def run() -> None:
++        async with _FakePoolServer(handler) as srv:
++            env = TutoringEnvCls(
++                {
++                    "judge_pool": "judge_mock",
++                    "tokenizer_path": "mock",
++                    "prompts_dir": prompts_dir,
++                    "max_turns": 8,
++                    "min_turns": 3,
++                    "wrapup_from_turn": 6,
++                    "max_total_sequence_length": 500,
++                    "min_remaining_tokens": 200,
++                    "judge_samples": 1,
++                    "axes": {"helpfulness": 1},
++                    "pool_urls": [srv.base_url],
++                    "pool_model": "mock-gemma",
++                }
++            )
++            _patch_encoding(monkeypatch, env)
++            # 1) Policy cut off -> reward 0, NOT masked
++            out_cut = await env.step([_assistant_msg("Halfway...", truncated=True)], [_sample_meta()])
++            assert out_cut.terminateds[0].item()
++            assert out_cut.rewards[0].item() == 0.0
++            assert out_cut.metadata[0]["mask_sample"] is False
++            assert out_cut.metadata[0]["frame_metrics"]["tut_end/cut_off"] == 1.0
++
++            # 2) Context margin reached (prompt_tokens=350 -> remaining < 200) -> triggers final judge cleanly
++            out_ctx = await env.step([_assistant_msg("Full clear answer.")], [_sample_meta(prompt_tokens=350)])
++            assert out_ctx.terminateds[0].item()
++            assert out_ctx.rewards[0].item() == 1.0
++            assert out_ctx.metadata[0]["mask_sample"] is False
++            assert out_ctx.metadata[0]["frame_metrics"]["tut_end/context_margin"] == 1.0
++            await env.shutdown()
++
++    asyncio.run(run())
++
++
++def test_logprob_judge_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
++    prompts_dir = _write_prompts_dir(tmp_path)
++
++    def handler(body: dict[str, Any], _count: int) -> tuple[int, dict[str, Any]]:
++        return _ok_completion(
++            "4",
++            logprobs=[
++                {"token": "3", "logprob": math.log(0.5)},
++                {"token": "5", "logprob": math.log(0.5)},
++            ],
++        )
++
++    async def run() -> None:
++        async with _FakePoolServer(handler) as srv:
++            env = TutoringEnvCls(
++                {
++                    "judge_pool": "judge_mock",
++                    "tokenizer_path": "mock",
++                    "prompts_dir": prompts_dir,
++                    "max_turns": 1,
++                    "min_turns": 1,
++                    "wrapup_from_turn": 1,
++                    "judge_mode": "logprob",
++                    "axes": {"helpfulness": 1, "accuracy": 1},
++                    "pool_urls": [srv.base_url],
++                    "pool_model": "mock-gemma",
++                }
++            )
++            _patch_encoding(monkeypatch, env)
++            out = await env.step([_assistant_msg("x = 3.")], [_sample_meta()])
++            assert out.terminateds[0].item()
++            # Expected score = 4.0 -> (4 - 1) / 4 = 0.75
++            assert math.isclose(out.rewards[0].item(), 0.75, rel_tol=1e-5)
++            await env.shutdown()
++
++    asyncio.run(run())
+-- 
+2.54.0 (Apple Git-157)
+

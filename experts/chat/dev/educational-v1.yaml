@@ -1,0 +1,113 @@
+# Multi-turn educational learner simulation in the chat expert (v1: NVIDIA User Sim general_educational, English only).
+# Stand-alone dev task (experts/chat/base.yaml still delegates to archive/ultrafeedback-rubric-sft.yaml).
+# Uses the same Chonk SFT v0.2 recipe as the restructure branch while v0.3 SFT is still running;
+# once v0.3 is exported, run with RECIPE=recipes/chonk-sftv03.yaml (or update `recipe:` below).
+#
+# Data prep (login node + served Gemma 4 endpoint):
+#   python3.12 experts/chat/scripts/educational/prepare_educational.py \
+#       ${RL_DATA_DIR}/chat-rl/educational --sft-data-dir ../sft-data-apertus2 --benchmarks-root <benchmarks_apertus2>
+#   python3.12 experts/chat/scripts/educational/make_openers.py \
+#       ${RL_DATA_DIR}/chat-rl/educational/train_specs.jsonl ${RL_DATA_DIR}/chat-rl/educational/train.jsonl \
+#       --base-url http://<host>:8000/v1 --model ${SCRATCH}/models/gemma-4-26B-A4B-it
+#   python3.12 experts/chat/scripts/educational/make_openers.py \
+#       ${RL_DATA_DIR}/chat-rl/educational/val_specs.jsonl ${RL_DATA_DIR}/chat-rl/educational/val.jsonl \
+#       --base-url http://<host>:8000/v1 --model ${SCRATCH}/models/gemma-4-26B-A4B-it
+#
+# Launch:
+#   DRY_RUN=1 bash run.sh experts/chat/dev/educational-v1.yaml
+#   DEBUG=1   bash run.sh experts/chat/dev/educational-v1.yaml
+#   bash run.sh experts/chat/dev/educational-v1.yaml
+defaults:
+  - ../../../shared/judges/servers/gemma-4-26B-A4B-it.yaml
+recipe: recipes/chonk-sftv02.yaml
+# 8 trainer + 4 vLLM (+ 2 Gemma judge nodes below = 14 nodes total).
+size: lite
+# CP 4 on Chonk (no KCP); 16384 is too tight with prior thinking kept across 8 turns.
+context: 32768
+
+policy:
+  # Matches 64 prompts x 8 rollouts = 512 samples per step (one optimizer step per GRPO step).
+  train_global_batch_size: 512
+  generation:
+    # run.sh overwrites max_new_tokens with `context`; thinking_token_budget (patch 0026) caps each turn's
+    # think frame so multi-turn episodes leave room for replies across up to 8 turns.
+    thinking_token_budget: 2048
+
+grpo:
+  max_num_steps: 100
+  max_num_epochs: 1
+  num_prompts_per_step: 64
+  num_generations_per_prompt: 8
+  max_rollout_turns: 8
+  val_batch_size: 430
+  max_val_samples: 430
+
+data:
+  _override_: true
+  max_input_seq_length: 4096
+  shuffle: true
+  num_workers: 1
+  train:
+    - dataset_name: ResponseDataset
+      data_path: ${oc.env:RL_DATA_DIR}/chat-rl/educational/train.jsonl
+      processor: apertus2_tutoring_data_processor
+      env_name: tutoring
+  validation:
+    - dataset_name: ResponseDataset
+      data_path: ${oc.env:RL_DATA_DIR}/chat-rl/educational/val.jsonl
+      processor: apertus2_tutoring_data_processor
+      env_name: tutoring
+    - dataset_name: DAPOMathAIME2024
+      split: test
+      processor: apertus2_math_data_processor
+      env_name: math
+  default:
+    prompt_file: null
+    system_prompt_file: ${oc.env:RL_INFRA_DIR}/shared/frames/apertus2-system-high.json
+    processor: apertus2_tutoring_data_processor
+    env_name: tutoring
+
+env:
+  extra_judge_pools:
+    gemma-4-26B-A4B-it:
+      num_nodes: 2
+      generation:
+        vllm_cfg:
+          # 8192 in the shared server file is too short for a full 8-turn dialogue judge prompt.
+          max_model_len: 16384
+  math:
+    reward_frame: claim
+  tutoring:
+    judge_pool: judge_gemma-4-26B-A4B-it
+    tokenizer_path: ${policy.model_name}
+    prompts_dir: ${oc.env:RL_INFRA_DIR}/experts/chat/scripts/educational/prompts
+    max_turns: 8
+    min_turns: 3
+    wrapup_from_turn: 6
+    # Force final trajectory judge before rollouts.py overflows max_total_sequence_length.
+    min_remaining_tokens: 4096
+    max_total_sequence_length: ${policy.max_total_sequence_length}
+    learner_gate: true
+    gate_retries: 2
+    structured_gate: true
+    axes:
+      helpfulness: 1.0
+      accuracy: 1.0
+      coherence: 1.0
+      pedagogical_quality: 1.0
+    # Average 3 structured judge samples at temperature 1.0 (alternative: judge_mode: logprob).
+    judge_mode: structured_mean
+    judge_samples: 3
+    max_reasoning_chars: 300
+    temperature: 1.0
+    top_p: 1.0
+    max_tokens_learner: 300
+    max_tokens_judge: 1024
+    chat_template_kwargs:
+      enable_thinking: false
+    max_concurrent_calls: 1024
+    timeout_s: 300
+    retries: 2
+    pool_wait_s: 3600
+    mask_failures: true
+    log_every: 256
