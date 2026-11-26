@@ -237,6 +237,16 @@ PY
             total=$(( total + 1 ))
             echo "  FAIL  ${v}: ${missing%% *} file(s) of its packages missing (first: ${missing#* }): delete the venv, the run rebuilds it"
         fi
+        # the Harbor modules our adapters import (job 5460614: no installed/pi.py although RECORD and version looked fine)
+        need="opencode"; [[ " ${RUNS} " == *" pv "* ]] && need+=" pi"
+        for m in ${need}; do
+            if compgen -G "${v}/lib/python3*/site-packages/harbor/agents/installed/${m}.py" > /dev/null; then
+                echo "  ok    ${v}: harbor/agents/installed/${m}.py"
+            else
+                total=$(( total + 1 ))
+                echo "  FAIL  ${v}: no harbor/agents/installed/${m}.py (our adapter imports it): delete the venv, the run rebuilds it"
+            fi
+        done
     done
     [[ -n "${seen}" ]] || echo "  note  no harbor_agent venv yet (the run builds it)"
     [[ -r "${OPENSANDBOX_API_KEY_FILE}" ]] && echo "  ok    key file ${OPENSANDBOX_API_KEY_FILE}" \
