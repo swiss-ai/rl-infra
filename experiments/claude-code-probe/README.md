@@ -84,6 +84,10 @@ Both profiles behave the same unless noted.
   episode at once (`terminal_reason: prompt_too_long`, exit 1). Gym 0049 answers the overflow placeholder on
   `/v1/messages` with that 400. `propagate_context_overflow_errors` would do the same, but there the failed call
   poisons the rollout under capture, while OpenCode and pi commit the placeholder.
+  On the cluster the same re-send follows every reply that NeMo-RL finishes as `length` because it holds neither text
+  nor a usable call (its Apertus 2 output parser; about 3% of calls at 64K): Claude Code drops the reply and appends
+  the resume text to the last tool result, so the reply is a dead branch. Gym 0052 makes that re-send resolve when
+  the dropped reply was reasoning alone (before, it matched both the dropped call and its parent).
 - **Errors and limits.** 529: no retry (`CLAUDE_CODE_MAX_RETRIES=0`), exit 1. `--max-turns 2`: two calls, then
   `result` `error_max_turns`, exit 1, no extra call. The stream-json `result` event carries `terminal_reason`,
   `is_error` and the text; an API error also appears as an assistant message with model `<synthetic>`

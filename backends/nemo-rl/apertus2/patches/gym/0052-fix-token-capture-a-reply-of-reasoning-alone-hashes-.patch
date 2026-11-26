@@ -1,0 +1,241 @@
+From 6ab0e09c8f52d4564ae03edf09156b7e23638f6f Mon Sep 17 00:00:00 2001
+From: Lukas Drescher <lukas.drescher@cscs.ch>
+Date: Thu, 26 Nov 2026 11:50:33 +0100
+Subject: [PATCH] fix(token-capture): a reply of reasoning alone hashes the
+ empty-turn marker
+
+A standalone reasoning item neither opened nor closed a turn, so a reply that is only reasoning added nothing
+to its call's continuation fingerprint: it equalled the request's, which is the parent's continuation. When a
+harness drops such a reply and sends the request again, the new request matches both calls and resolves as
+ambiguous, and every later call of the rollout is poisoned.
+
+Seen with Claude Code 2.1.326 on Apertus 2 (rl-infra job 1061395, two of 32 rollouts): the policy ended a turn
+inside its reasoning, NeMo-RL finished the reply as `length` (no reply and no usable call), and Claude Code
+answered max_tokens by dropping it and re-sending the request with "Output token limit hit. Resume directly"
+added. An empty text reply already hashed the empty-turn marker and resolved to the earlier call.
+
+A reasoning item now opens a turn (and still closes none, and hashes nothing), so a reasoning-only reply
+hashes the empty-turn marker; reasoning before text or a call is excluded as before. FINGERPRINT_VERSION 7.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ nemo_gym/token_id_capture/fingerprint.py      |  12 +-
+ ...test_token_capture_reasoning_only_reply.py | 155 ++++++++++++++++++
+ .../test_token_capture_schema_echo.py         |   2 +-
+ 3 files changed, 165 insertions(+), 4 deletions(-)
+ create mode 100644 tests/unit_tests/test_token_capture_reasoning_only_reply.py
+
+diff --git a/nemo_gym/token_id_capture/fingerprint.py b/nemo_gym/token_id_capture/fingerprint.py
+index 462d3134..1bdccc4d 100644
+--- a/nemo_gym/token_id_capture/fingerprint.py
++++ b/nemo_gym/token_id_capture/fingerprint.py
+@@ -44,7 +44,8 @@ import orjson
+ # Increment when fingerprint canonicalization or hash layout changes.
+ # Resolvers ignore entries stamped with a different version.
+ # 6: tool arguments normalized against the request's tool schemas; non-object JSON arguments hash the marker.
+-FINGERPRINT_VERSION = 6
++# 7: a standalone reasoning item opens a turn, so a reply of reasoning alone hashes the empty-turn marker.
++FINGERPRINT_VERSION = 7
+ 
+ _FINGERPRINT_DOMAIN = b"nemo-gym-lineage"
+ _CONTEXT_DOMAIN = b"nemo-gym-lineage-context"
+@@ -75,7 +76,7 @@ def assistant_fingerprint(messages: list[dict]) -> str:
+     Dialect-specific tool-call shapes normalize to the same hash input.
+ 
+     A turn is a run of consecutive model-authored items.
+-    A turn with no text and no tool call (an empty reply) hashes an explicit marker.
++    A turn with no text and no tool call (an empty reply, or a reply of reasoning alone) hashes an explicit marker.
+     Without it, the call that produced an empty reply would share its parent's fingerprint.
+     The next request would then match both calls and resolve as ambiguous.
+     Non-empty turns hash exactly as before, so their fingerprints do not change.
+@@ -101,7 +102,12 @@ def assistant_fingerprint(messages: list[dict]) -> str:
+             raise ValueError(f"request item is not an object: {type(message).__name__}")
+         if not _is_assistant_authored(message):
+             if message.get("type") == "reasoning":
+-                # Excluded like reasoning content; it neither opens nor closes a turn.
++                # Excluded like reasoning content and closes no turn. It opens one, though: a reply of reasoning
++                # alone then hashes the empty-turn marker, as an empty reply does, instead of its request's
++                # fingerprint. Otherwise a harness that drops such a reply and sends its request again (Claude Code
++                # after a reply that finished as `length`) continues both that call and its parent: ambiguous.
++                if run_hashed is None:
++                    run_hashed = False
+                 continue
+             if run_hashed is False:
+                 _update_field(hasher, b"\x05", "")
+diff --git a/tests/unit_tests/test_token_capture_reasoning_only_reply.py b/tests/unit_tests/test_token_capture_reasoning_only_reply.py
+new file mode 100644
+index 00000000..f097f0a1
+--- /dev/null
++++ b/tests/unit_tests/test_token_capture_reasoning_only_reply.py
+@@ -0,0 +1,155 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""A reply of reasoning alone does not share its request's fingerprint.
++
++Observed with Claude Code 2.1.326 on Apertus 2 (rl-infra job 1061395, two of 32 rollouts): the policy ended a
++turn inside its reasoning, so the reply was one reasoning item and the server finished it as ``length``. Claude
++Code answers ``max_tokens`` by dropping the reply and sending the request again with "Output token limit hit.
++Resume directly ..." added after the last tool result. Reasoning is not hashed, so the dropped call's
++continuation fingerprint equalled its request's, which is its parent's continuation: the resent request matched
++both calls, resolved as ambiguous, and every later call of the rollout was poisoned. An empty text reply already
++hashed the empty-turn marker and resolved; a standalone reasoning item now opens a turn as well.
++"""
++
++from __future__ import annotations
++
++import pytest
++
++from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, assistant_fingerprint
++from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
++from nemo_gym.token_id_capture.records import ParentResolutionStatus
++from nemo_gym.token_id_capture.staging.digest import EMPTY_EXTRAS_DIGEST, compute_chain_hash, hash_token_ids
++from nemo_gym.token_id_capture.staging.records import CallRecord, CaptureLedgerCommit
++
++
++USER = {"role": "user", "content": "Fix the failing test in /workspace."}
++REASONING = {"type": "reasoning", "summary": [{"type": "summary_text", "text": "Let me look at the repository."}]}
++CALL = {"type": "function_call", "call_id": "chatcmpl-tool-1", "name": "Bash", "arguments": '{"command": "ls"}'}
++RESULT = {"type": "function_call_output", "call_id": "chatcmpl-tool-1", "output": "setup.py\nsrc\ntests"}
++# the reply that ended inside its reasoning (a tool call written as JSON in the thinking)
++REASONING_ONLY = {
++    "type": "reasoning",
++    "summary": [{"type": "summary_text", "text": 'I will edit it: {"file_path": "src/a.py", "old_string": "x"}'}],
++}
++RESUME = {"role": "user", "content": "Output token limit hit. Resume directly - no apology, no recap."}
++EMPTY_REPLY = {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": ""}]}
++
++
++class _Ledger:
++    """Commit calls into a ledger as the external-staging commit hook does (see test_token_capture_invalid_tool_echo)."""
++
++    def __init__(self, store, rollout_id: str = "r1") -> None:
++        self.store, self.rollout_id = store, rollout_id
++        self.tokens: list[int] = []
++        self.chain_hash: str | None = None
++        self.staging_chain: list[str] = []
++        self.calls: list[str] = []
++
++    async def commit(self, request_items: list[dict], response_items: list[dict], parent: str | None) -> str:
++        call_id = f"c{len(self.calls) + 1}"
++        prev_len = len(self.tokens)
++        delta = list(range(prev_len + 1000, prev_len + 1010))
++        self.tokens += delta
++        self.chain_hash = compute_chain_hash(self.chain_hash, delta)
++        staging_key = f"{self.rollout_id}/{call_id}"
++        self.staging_chain = self.staging_chain + [staging_key]
++        record = CallRecord(
++            model_call_id=call_id,
++            parent_call_id=parent,
++            staging_key=staging_key,
++            weight_version=1,
++            prev_len=prev_len,
++            delta_len=len(delta),
++            cum_len=len(self.tokens),
++            digest="a" * 64,
++            extras_digest=EMPTY_EXTRAS_DIGEST,
++            mode="text" if parent is None else "token_in",
++            response_id=f"chatcmpl-{call_id}",
++            admitted_at=1.0,
++            chain_hash=self.chain_hash,
++            cumulative_hash=hash_token_ids(self.tokens),
++            fingerprint_version=FINGERPRINT_VERSION,
++        )
++        await self.store.record(
++            CaptureLedgerCommit(
++                rollout_id=self.rollout_id,
++                record=record,
++                staging_chain=tuple(self.staging_chain),
++                request_items=request_items,
++                response_items=response_items,
++            )
++        )
++        self.calls.append(call_id)
++        return call_id
++
++
++@pytest.fixture(params=["file", "memory"])
++def store(request, tmp_path):
++    return FileLineageStore(tmp_path) if request.param == "file" else InMemoryLineageStore()
++
++
++async def _serve(store, second_reply: list[dict]) -> _Ledger:
++    """Call 1 runs `ls`; call 2, on its result, is answered with ``second_reply``."""
++    ledger = _Ledger(store)
++    first = await ledger.commit([USER], [REASONING, CALL], parent=None)
++    await ledger.commit([USER, REASONING, CALL, RESULT], second_reply, parent=first)
++    return ledger
++
++
++# --- fingerprint level -------------------------------------------------------
++
++
++def test_a_reply_of_reasoning_alone_changes_the_fingerprint():
++    request = [USER, REASONING, CALL, RESULT]
++    assert assistant_fingerprint(request + [REASONING_ONLY]) != assistant_fingerprint(request)
++
++
++def test_it_hashes_as_an_empty_reply():
++    request = [USER, REASONING, CALL, RESULT]
++    assert assistant_fingerprint(request + [REASONING_ONLY]) == assistant_fingerprint(request + [EMPTY_REPLY])
++
++
++def test_reasoning_before_a_call_is_still_excluded():
++    assert assistant_fingerprint([USER, REASONING, CALL]) == assistant_fingerprint([USER, CALL])
++
++
++def test_an_echo_that_keeps_the_reasoning_only_turn_matches_it():
++    served = assistant_fingerprint([USER, REASONING, CALL, RESULT, REASONING_ONLY])
++    echoed = assistant_fingerprint([USER, REASONING, CALL, RESULT, REASONING_ONLY, RESUME])
++    assert served == echoed
++
++
++# --- resolver level ------------------------------------------------------------
++
++
++async def test_the_resent_request_resolves_to_the_call_before_the_dropped_reply(store):
++    ledger = await _serve(store, [REASONING_ONLY])
++    resolution = await store.resolve("r1", [USER, REASONING, CALL, RESULT, RESUME])
++    assert resolution.status == ParentResolutionStatus.RESOLVED, resolution.reason
++    assert resolution.match.model_call_id == ledger.calls[0]
++
++
++async def test_a_history_that_keeps_the_reasoning_only_reply_continues_it(store):
++    ledger = await _serve(store, [REASONING_ONLY])
++    resolution = await store.resolve("r1", [USER, REASONING, CALL, RESULT, REASONING_ONLY, RESUME])
++    assert resolution.status == ParentResolutionStatus.RESOLVED, resolution.reason
++    assert resolution.match.model_call_id == ledger.calls[1]
++
++
++async def test_control_an_empty_text_reply_resolved_before(store):
++    ledger = await _serve(store, [EMPTY_REPLY])
++    resolution = await store.resolve("r1", [USER, REASONING, CALL, RESULT, RESUME])
++    assert resolution.status == ParentResolutionStatus.RESOLVED, resolution.reason
++    assert resolution.match.model_call_id == ledger.calls[0]
+diff --git a/tests/unit_tests/test_token_capture_schema_echo.py b/tests/unit_tests/test_token_capture_schema_echo.py
+index cb1e91d4..0bf251b9 100644
+--- a/tests/unit_tests/test_token_capture_schema_echo.py
++++ b/tests/unit_tests/test_token_capture_schema_echo.py
+@@ -113,7 +113,7 @@ EDIT = {"file_path": "/app/hello.py", "old_string": "Hello", "new_string": "Hi"}
+ 
+ 
+ def test_fingerprint_version_is_bumped() -> None:
+-    assert FINGERPRINT_VERSION == 6
++    assert FINGERPRINT_VERSION == 7
+ 
+ 
+ def test_an_echo_with_the_schema_default_filled_in_continues_the_served_call() -> None:
+-- 
+2.43.0
+

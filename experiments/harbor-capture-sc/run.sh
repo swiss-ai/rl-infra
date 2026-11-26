@@ -6,7 +6,7 @@
 #   AGENT                  terminus (default), mini (mini-swe-agent in the sandbox, implies TUNNEL=1; Gym
 #                          patch 0018, mini-sc.yaml), opencode (OpenCode in the sandbox, implies TUNNEL=1;
 #                          Gym patches 0024+0029, opencode-sc.yaml) or claude-code (Claude Code in the sandbox,
-#                          implies TUNNEL=1; Gym patches 0048-0051, claude-code-sc.yaml)
+#                          implies TUNNEL=1; Gym patches 0048-0052, claude-code-sc.yaml)
 #   MSWEA_VERSION          mini only: li-boxuan/mini-swe-agent git ref (default: the commit pinned in mini-sc.yaml)
 #   OPENCODE_VERSION       opencode only: default 1.17.11 (the version whose keys 0026 was checked against)
 #   OPENCODE_TIMEOUT_SEC   opencode only: OpenCode's own time limit, below the agent timeout (default 870)
@@ -82,6 +82,11 @@ case "${AGENT}" in
         grep -q CLAUDE_CODE_HUMBLE_HAMMOCK \
             "${GYM_DIR}/responses_api_agents/harbor_agent/custom_agents/claude_code_nemo_gym.py" 2>/dev/null || {
             echo "ERROR: AGENT=claude-code needs Gym patch 0051 (verbatim tool-call echoes) in ${GYM_DIR}; re-run setup-gym.sh as above" >&2
+            exit 1
+        }
+        # without 0052 a reply of reasoning alone that Claude Code drops and re-sends leaves the next call two parents
+        grep -qE "^FINGERPRINT_VERSION = ([7-9]|[1-9][0-9]+)$" "${GYM_DIR}/nemo_gym/token_id_capture/fingerprint.py" 2>/dev/null || {
+            echo "ERROR: AGENT=claude-code needs Gym patch 0052 (reasoning-only replies) in ${GYM_DIR}; re-run setup-gym.sh as above" >&2
             exit 1
         }
         # the agent calls the model from inside the sandbox: only through the tunnel

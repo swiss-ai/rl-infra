@@ -186,4 +186,12 @@ AGENT_END="${OPENCODE_TIMEOUT_SEC:-1740}"
 [[ "${LONG_CTX}" != 1 ]] || echo "== long context: SFT ${SFT_CKPT}, thinking ${THINKING}, CP ${CP} KCP ${KCP}, cap ${CAP:-none}," \
      "${MAX_NEW:-6144} tokens per turn, ${MAX_TURNS:-30} turns, agent cap ${AGENT_CAP:-1800} s, ${AGENT} ends at ${AGENT_END} s," \
      "TTL ${TTL:-3600} s, mask agent timeout ${MASK_AGENT_TIMEOUT}, mask overflow ${MASK_OVERFLOW}, recipe copy ${AGENT_V_RECIPE}"
+# Claude Code sends no prompt of CTX - MAX_NEW - 3000 tokens or more (its blocking limit, terminal_reason
+# blocking_limit), and its own first prompt is about 4.8K Apertus 2 tokens: below 64K most episodes end there
+# (smokes on Santis: 8 of 16 trials at 16K, 28 of 32 at 32K, 1 of 32 at 64K).
+if [[ "${AGENT}" == claude-code ]] && (( CTX < 65536 )); then
+    echo "== WARNING: Claude Code stops before a prompt of ${CTX} - ${MAX_NEW:-6144} - 3000 tokens; with its first" \
+         "prompt of about 4.8K tokens that leaves about $(( CTX - ${MAX_NEW:-6144} - 3000 - 4800 )) tokens per episode." \
+         "Run CV trains at CTX=65536 (README.md, run CV)." >&2
+fi
 exec bash "${ROOT}/run-harbor-osb.sh" "${AGENT_V_ARGS[@]}" "$@"

@@ -613,7 +613,12 @@ check_gym_agents() {
             grep -q "CLAUDE_CODE_HUMBLE_HAMMOCK" \
                 "${g}/responses_api_agents/harbor_agent/custom_agents/claude_code_nemo_gym.py" 2>/dev/null \
                 && ok "Gym patch 0053: Claude Code echoes tool calls as the model sent them" \
-                || bad "Gym patch 0053 missing (CLAUDE_CODE_HUMBLE_HAMMOCK in custom_agents/claude_code_nemo_gym.py)" ;;
+                || bad "Gym patch 0053 missing (CLAUDE_CODE_HUMBLE_HAMMOCK in custom_agents/claude_code_nemo_gym.py)"
+            # without it a reply of reasoning alone (finished as length) that Claude Code drops and re-sends leaves the
+            # next call with two parents, and the rollout is masked (2 of 32 at 64K, job 1061395)
+            grep -qE "^FINGERPRINT_VERSION = ([7-9]|[1-9][0-9]+)$" "${g}/nemo_gym/token_id_capture/fingerprint.py" 2>/dev/null \
+                && ok "Gym patch 0054: a reply of reasoning alone hashes the empty-turn marker" \
+                || bad "Gym patch 0054 missing (FINGERPRINT_VERSION 7 in nemo_gym/token_id_capture/fingerprint.py)" ;;
         *) bad "check_gym_agents: no checks for agent '$1'" ;;
     esac
     return "${fails}"
