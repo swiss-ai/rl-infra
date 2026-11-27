@@ -19,7 +19,7 @@ i.e. vLLM DP4 per node through NVIDIA-NeMo/RL#2517) trained through
 | `run-v.sh`, `run-v-24k.sh` | run V: Terminus-2 on Kostas' verified tasks, Gym entrypoint (not SC), 24k on 20 nodes; `CTX=65536`: long context |
 | `run-agent-v.sh`, `run-agent-v.yaml`, `run-ov.yaml` | run OV: OpenCode in the pod on run V's verified tasks, SC + token capture, 24k on 20 nodes; `CTX=65536`: long context |
 | `run-pv.yaml` | run PV (`run-agent-v.sh AGENT=pi`): the pi coding agent instead of OpenCode; not run on the cluster yet |
-| `run-cv.yaml` | run CV (`run-agent-v.sh AGENT=claude-code`, Gym 0050-0054): Claude Code instead of OpenCode; probed against a stub (`../claude-code-probe/`), one-node rung and 64K smokes (Qwen3-4B / Chonk SFT); no full run yet |
+| `run-cv.yaml` | run CV (`run-agent-v.sh AGENT=claude-code`, Gym 0050-0055): Claude Code instead of OpenCode; probed against a stub (`../claude-code-probe/`), one-node rung and 64K smokes (Qwen3-4B / Chonk SFT); no full run yet |
 | `common.sh` | config composition, the long-context profile of runs V and OV, and the clone / Gym checks, shared by the scripts |
 
 Runs A and B: 3 steps, `async_rl` sampler `in_order` with lookahead 0 (synchronous), one chunk per
@@ -365,6 +365,13 @@ ended a turn inside its reasoning, or wrote nothing after it). Claude Code drops
 request, so the reply becomes a dead branch. After an empty text reply the re-sent request resolved to the call
 before; after a reply of reasoning alone it matched both calls (ambiguous), because reasoning is not hashed. Gym
 patch 0054: a reasoning item opens a turn, so such a reply hashes the empty-turn marker like an empty one.
+patch 0055: a reply with no visible text and no tool call is not a terminal call; terminal selection prefers the
+non-empty continuation, so the dropped empty reply and the re-sent request are no longer two terminal leaves.
+With 0054 the live 64K smoke (job 1061605, 2026-11-26, 20 nodes, 1 step) trained: grad norm 0.086, 19 of 32
+sequences valid, mean reward 0.105. 20 rollouts ended `ok`; 6 were FACET agent timeouts and 6 infra (3 uploads of
+`claude.gz` hit the 300 s write timeout, 2 sandboxes were not ready, 1 tunnel did not connect); 3 were rejected as
+`ambiguous_terminal`. The live run therefore confirms the `unresolved_parent` fix, but terminal selection is not
+yet clean (the next step tracks it separately).
 `run-agent-v.sh` warns when `AGENT=claude-code` runs below `CTX=65536`.
 The v0.1 model often names Claude Code's tools in lowercase (`bash`, `write`), which Claude Code rejects as unknown
 tools; v0.2 does not. The task with `timeout_sec = 120` in its `task.toml` (FACET) times out in all 8 trials.

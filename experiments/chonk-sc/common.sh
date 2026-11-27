@@ -618,7 +618,11 @@ check_gym_agents() {
             # next call with two parents, and the rollout is masked (2 of 32 at 64K, job 1061395)
             grep -qE "^FINGERPRINT_VERSION = ([7-9]|[1-9][0-9]+)$" "${g}/nemo_gym/token_id_capture/fingerprint.py" 2>/dev/null \
                 && ok "Gym patch 0054: a reply of reasoning alone hashes the empty-turn marker" \
-                || bad "Gym patch 0054 missing (FINGERPRINT_VERSION 7 in nemo_gym/token_id_capture/fingerprint.py)" ;;
+                || bad "Gym patch 0054 missing (FINGERPRINT_VERSION 7 in nemo_gym/token_id_capture/fingerprint.py)"
+            # without it a dropped empty reply stays a childless sibling of the continuation: ambiguous_terminal
+            grep -q "empty_reply" "${g}/nemo_gym/token_id_capture/staging/records.py" 2>/dev/null \
+                && ok "Gym patch 0055: an empty reply is not a terminal call" \
+                || bad "Gym patch 0055 missing (empty_reply in nemo_gym/token_id_capture/staging/records.py)" ;;
         *) bad "check_gym_agents: no checks for agent '$1'" ;;
     esac
     return "${fails}"

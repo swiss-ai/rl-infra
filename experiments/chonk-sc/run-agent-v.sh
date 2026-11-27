@@ -5,9 +5,9 @@
 #   AGENT=opencode  run OV: OpenCode 1.17.11 (as runs O / R2), the binary Breithorn mounts into each pod (Gym 0047)
 #   AGENT=pi        run PV: the pi coding agent 1.5.2 (Gym 0048), the release tree Breithorn mounts into each pod
 #                   (Gym 0049); untested on the cluster
-#   AGENT=claude-code  run CV: Claude Code 2.1.326 (Gym 0050-0054; probed with experiments/claude-code-probe), the
-#                   release binary fetched once (fetch-claude-code.sh) and uploaded gzipped into each pod; untested
-#                   on the cluster
+#   AGENT=claude-code  run CV: Claude Code 2.1.326 (Gym 0050-0055; probed with experiments/claude-code-probe), the
+#                   release binary fetched once (fetch-claude-code.sh) and uploaded gzipped into each pod; 64K
+#                   smokes trained (jobs 1061395, 1061605), a full run is still pending
 # (another agent = a new AGENT value: common.sh agent_v_tag / agent_v_agent / agent_v_overlays / check_gym_agents,
 # its overlay run-<tag>.yaml, check.py)
 # The agent calls the model through the per-pod chisel tunnel (pod 127.0.0.1:8000 -> policy_model), and the token

@@ -92,7 +92,7 @@ CTX=65536 AGENT=opencode bash experiments/chonk-sc/run-agent-v.sh               
 CTX=65536 RUNS=pv bash experiments/chonk-sc/check.sh
 SMOKE=1 CTX=65536 AGENT=pi bash experiments/chonk-sc/run-agent-v.sh
 
-# run CV (Claude Code instead of OpenCode; probed against a stub, not run on the cluster yet, README.md "Run CV")
+# run CV (Claude Code instead of OpenCode; probed against a stub and 64K smoke-tested, full run pending, README.md "Run CV")
 CTX=65536 RUNS=cv bash experiments/chonk-sc/check.sh
 SMOKE=1 CTX=65536 AGENT=claude-code bash experiments/chonk-sc/run-agent-v.sh
 
@@ -140,5 +140,5 @@ label) before starting the next run.
   (about 170 MB through the OpenSandbox gateway; Gym 0050 checks its sha256 in the pod). Run CV has done
   64K one-step smokes (job 1061605); a full run is still pending. A mounted binary would avoid the upload
   (see `README.md` "Run CV" and `PORTING.md`).
-- Gym runs at a pinned commit plus 54 patches (`backends/nemo-rl/apertus2/patches/gym/`); the ones of ours are on
+- Gym runs at a pinned commit plus 55 patches (`backends/nemo-rl/apertus2/patches/gym/`); the ones of ours are on
   their way upstream into swiss-ai/nemo-gym.

@@ -1,0 +1,249 @@
+From 6446cce14c8c6574a42975134ec54f8a07dc8e5b Mon Sep 17 00:00:00 2001
+From: rl-infra <rl-infra@localhost>
+Date: Fri, 27 Nov 2026 19:04:48 +0100
+Subject: [PATCH] fix(token-capture): an empty reply is not a terminal call
+
+A harness that drops a reply with no visible text and no tool call (Claude
+Code after a max_tokens reply) and re-sends the request leaves the dropped
+call as a childless sibling of the continuation. Terminal selection then
+finds two leaves and rejects the rollout as ambiguous_terminal.
+
+Record empty_reply on the CallRecord (from the normalized response items,
+so reasoning-only and empty-text replies count) and make terminal selection
+prefer a non-empty sibling when no candidate has children. Two non-empty
+siblings remain ambiguous, as before.
+---
+ nemo_gym/token_id_capture/lineage.py          |  3 ++
+ nemo_gym/token_id_capture/records.py          | 30 +++++++++++++
+ nemo_gym/token_id_capture/staging/records.py  |  4 ++
+ nemo_gym/token_id_capture/staging/terminal.py |  9 +++-
+ responses_api_models/vllm_model/app.py        |  2 +
+ .../test_token_capture_empty_reply.py         | 43 +++++++++++++++++++
+ .../test_token_capture_staging_terminal.py    | 23 ++++++++++
+ 7 files changed, 113 insertions(+), 1 deletion(-)
+ create mode 100644 tests/unit_tests/test_token_capture_empty_reply.py
+
+diff --git a/nemo_gym/token_id_capture/lineage.py b/nemo_gym/token_id_capture/lineage.py
+index d1e12283..a33f25d2 100644
+--- a/nemo_gym/token_id_capture/lineage.py
++++ b/nemo_gym/token_id_capture/lineage.py
+@@ -87,6 +87,7 @@ _CUSTODY_FIELDS = (
+     "output_fingerprint",
+     "continuation_fingerprint",
+     "fingerprint_version",
++    "empty_reply",
+ )
+ 
+ 
+@@ -114,6 +115,7 @@ def _custody_columns(record: CallRecord, staging_chain: tuple[str, ...] | list[s
+         "output_fingerprint": record.output_fingerprint or None,
+         "continuation_fingerprint": record.continuation_fingerprint or None,
+         "fingerprint_version": record.fingerprint_version,
++        "empty_reply": record.empty_reply,
+     }
+ 
+ 
+@@ -186,6 +188,7 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
+                     output_fingerprint=row.get("output_fingerprint") or None,
+                     continuation_fingerprint=row.get("continuation_fingerprint") or None,
+                     fingerprint_version=int(row.get("fingerprint_version") or 0),
++                    empty_reply=bool(row.get("empty_reply", False)),
+                 )
+             )
+     manifest = RolloutManifest(rollout_id=rollout_id, records=records, failures=failures)
+diff --git a/nemo_gym/token_id_capture/records.py b/nemo_gym/token_id_capture/records.py
+index 09dd072a..3e7acc84 100644
+--- a/nemo_gym/token_id_capture/records.py
++++ b/nemo_gym/token_id_capture/records.py
+@@ -300,6 +300,36 @@ def response_to_output_items(payload: dict) -> list[dict]:
+     return items
+ 
+ 
++def response_items_have_output(items: list[dict]) -> bool:
++    """Whether normalized response items carry visible text or a tool call.
++
++    A reply of reasoning alone, or one whose only text block is empty, is an
++    empty turn: a harness that drops it and sends its request again leaves the
++    dropped call as a dead sibling of the continuation. Terminal selection uses
++    this to prefer the sibling that actually produced output.
++    """
++    for item in items or []:
++        if not isinstance(item, dict):
++            continue
++        item_type = item.get("type")
++        if item_type in {"function_call", "custom_tool_call", "computer_call"}:
++            return True
++        if item_type != "message":
++            continue
++        content = item.get("content")
++        if isinstance(content, str) and content.strip():
++            return True
++        for block in content or []:
++            if not isinstance(block, dict):
++                continue
++            block_type = block.get("type")
++            if block_type in {"tool_use", "function_call", "custom_tool_call", "computer_call"}:
++                return True
++            if block_type in {"output_text", "text"} and str(block.get("text") or "").strip():
++                return True
++    return False
++
++
+ def strip_token_fields(items: list[dict]) -> tuple[list[dict], int | None]:
+     """Drop the token arrays from output items, keeping the content.
+ 
+diff --git a/nemo_gym/token_id_capture/staging/records.py b/nemo_gym/token_id_capture/staging/records.py
+index dae68325..7142fabb 100644
+--- a/nemo_gym/token_id_capture/staging/records.py
++++ b/nemo_gym/token_id_capture/staging/records.py
+@@ -311,6 +311,10 @@ class CallRecord(_DigestWireModel):
+     # Canonicalization version of the fingerprints above; 0 means none were
+     # recorded. Attribution ignores fingerprints from a different version.
+     fingerprint_version: NonNegativeInt = 0
++    # True when the call's reply carried no visible text and no tool call (an
++    # empty or reasoning-only turn). Terminal selection prefers a non-empty
++    # sibling when a harness dropped such a reply and re-sent the request.
++    empty_reply: bool = False
+ 
+     @model_validator(mode="after")
+     def _validate_lengths(self) -> Self:
+diff --git a/nemo_gym/token_id_capture/staging/terminal.py b/nemo_gym/token_id_capture/staging/terminal.py
+index bc66fe73..7488860e 100644
+--- a/nemo_gym/token_id_capture/staging/terminal.py
++++ b/nemo_gym/token_id_capture/staging/terminal.py
+@@ -99,7 +99,14 @@ def select_terminal_call(records: Sequence[CallRecord]) -> TerminalSelection:
+ 
+     def survivors(candidates: list[CallRecord]) -> list[CallRecord]:
+         extended = [record for record in candidates if children.get(record.model_call_id)]
+-        return extended or candidates
++        if extended:
++            return extended
++        # A harness that drops an empty reply and re-sends the request leaves the
++        # empty call as a childless sibling of the continuation. Prefer the
++        # sibling that produced visible text or a tool call; two non-empty
++        # siblings remain ambiguous.
++        non_empty = [record for record in candidates if not record.empty_reply]
++        return non_empty or candidates
+ 
+     root_pool = survivors(roots)
+     node = min(root_pool, key=key)
+diff --git a/responses_api_models/vllm_model/app.py b/responses_api_models/vllm_model/app.py
+index 918db67f..f8a1b461 100644
+--- a/responses_api_models/vllm_model/app.py
++++ b/responses_api_models/vllm_model/app.py
+@@ -61,6 +61,7 @@ from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, assistant
+ from nemo_gym.token_id_capture.protocols import CaptureLedger
+ from nemo_gym.token_id_capture.records import (
+     TOKEN_FIELDS,
++    response_items_have_output,
+     response_to_output_items,
+     strip_token_fields,
+ )
+@@ -1216,6 +1217,7 @@ class VLLMModel(SimpleResponsesAPIModel):
+                 output_fingerprint=output_fingerprint,
+                 continuation_fingerprint=continuation_fingerprint,
+                 fingerprint_version=FINGERPRINT_VERSION,
++                empty_reply=not response_items_have_output(response_items),
+             )
+             commit = CaptureLedgerCommit(
+                 rollout_id=context.rollout_id,
+diff --git a/tests/unit_tests/test_token_capture_empty_reply.py b/tests/unit_tests/test_token_capture_empty_reply.py
+new file mode 100644
+index 00000000..709b5675
+--- /dev/null
++++ b/tests/unit_tests/test_token_capture_empty_reply.py
+@@ -0,0 +1,43 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++"""An empty reply is not a terminal answer; its continuation sibling is."""
++
++from nemo_gym.token_id_capture.records import response_items_have_output
++
++
++def test_reasoning_only_reply_is_empty():
++    assert not response_items_have_output(
++        [{"type": "reasoning", "summary": [{"type": "summary_text", "text": "thinking"}]}]
++    )
++
++
++def test_empty_text_reply_is_empty():
++    assert not response_items_have_output(
++        [{"type": "message", "role": "assistant", "content": [{"type": "text", "text": ""}]}]
++    )
++
++
++def test_visible_text_is_output():
++    assert response_items_have_output(
++        [{"type": "message", "role": "assistant", "content": [{"type": "text", "text": "Done."}]}]
++    )
++
++
++def test_tool_call_is_output():
++    assert response_items_have_output(
++        [{"type": "message", "role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Bash"}]}]
++    )
++    assert response_items_have_output([{"type": "function_call", "name": "Bash", "arguments": "{}"}])
+diff --git a/tests/unit_tests/test_token_capture_staging_terminal.py b/tests/unit_tests/test_token_capture_staging_terminal.py
+index 2d2ed502..cf2ff09f 100644
+--- a/tests/unit_tests/test_token_capture_staging_terminal.py
++++ b/tests/unit_tests/test_token_capture_staging_terminal.py
+@@ -19,6 +19,7 @@ def _row(
+     parent_call_id: str | None = None,
+     prev_len: int = 0,
+     admitted_at: float | None = None,
++    empty_reply: bool = False,
+ ) -> CallRecord:
+     return CallRecord(
+         model_call_id=model_call_id,
+@@ -35,6 +36,7 @@ def _row(
+         cumulative_hash=DIGEST,
+         response_id=f"chatcmpl-{model_call_id}",
+         admitted_at=admitted_at,
++        empty_reply=empty_reply,
+     )
+ 
+ 
+@@ -81,6 +83,27 @@ def test_two_abandoned_siblings_under_the_last_fork_are_ambiguous():
+     assert select_terminal_call(rows) == TerminalSelection(None, "ambiguous_terminal")
+ 
+ 
++def test_empty_reply_sibling_loses_to_the_continuation():
++    # Claude Code after an empty max_tokens reply: it drops the reply and re-sends
++    # the request, which leaves both calls under the same parent. The empty call
++    # is not a terminal answer; the continuation is.
++    rows = [
++        _row("c1", admitted_at=100.0),
++        _row("c2-empty", parent_call_id="c1", prev_len=10, admitted_at=101.0, empty_reply=True),
++        _row("c3-continue", parent_call_id="c1", prev_len=10, admitted_at=102.0),
++    ]
++    assert select_terminal_call(rows) == TerminalSelection("c3-continue", "selected")
++
++
++def test_two_non_empty_siblings_stay_ambiguous():
++    rows = [
++        _row("c1", admitted_at=100.0),
++        _row("c2-a", parent_call_id="c1", prev_len=10, admitted_at=101.0),
++        _row("c2-b", parent_call_id="c1", prev_len=10, admitted_at=102.0),
++    ]
++    assert select_terminal_call(rows) == TerminalSelection(None, "ambiguous_terminal")
++
++
+ def test_two_roots_earliest_admission_wins():
+     main = _chain("m1", "m2", start_at=100.0)
+     aux = _chain("a1", "a2", start_at=200.0)
+-- 
+2.43.0
+
