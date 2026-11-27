@@ -212,7 +212,7 @@ env:
               # the trial waits for the start timeout: memory_mib 3072 vs. the 2 GiB tasks, 2026-11-27.
               resource_requests:
                 cpu: 0.5
-                memory_mib: 3072
+                memory_mib: 2500
                 disk_gib: 0.5
             # A pod lives at most this long, also when a run dies; above the two caps below.
             sandbox_ttl_s: 3600
