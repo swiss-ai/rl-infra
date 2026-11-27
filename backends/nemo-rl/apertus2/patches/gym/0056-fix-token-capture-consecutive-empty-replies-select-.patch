@@ -1,0 +1,59 @@
+From 5c12b364ee64be1adf4aca8e61ca89b5c01f3936 Mon Sep 17 00:00:00 2001
+From: rl-infra <rl-infra@localhost>
+Date: Fri, 27 Nov 2026 23:09:04 +0100
+Subject: [PATCH] fix(token-capture): consecutive empty replies select the
+ latest terminal
+
+Claude Code can re-send after several empty max_tokens replies; if no
+non-empty sibling exists, terminal selection saw childless empty leaves and
+rejected the rollout as ambiguous_terminal. Pick the latest empty leaf so
+the rollout stays linearizable instead of being masked; two non-empty
+siblings remain ambiguous.
+---
+ nemo_gym/token_id_capture/staging/terminal.py        |  7 +++++++
+ .../test_token_capture_staging_terminal.py           | 12 ++++++++++++
+ 2 files changed, 19 insertions(+)
+
+diff --git a/nemo_gym/token_id_capture/staging/terminal.py b/nemo_gym/token_id_capture/staging/terminal.py
+index 7488860e..2dd27b06 100644
+--- a/nemo_gym/token_id_capture/staging/terminal.py
++++ b/nemo_gym/token_id_capture/staging/terminal.py
+@@ -116,5 +116,12 @@ def select_terminal_call(records: Sequence[CallRecord]) -> TerminalSelection:
+             return TerminalSelection(node.model_call_id, SELECTED)
+         pool = survivors(candidates)
+         if len(pool) > 1:
++            # A harness that kept re-sending after replies with no visible output
++            # can leave several childless empty leaves. None is a meaningful
++            # terminal answer; pick the latest so the rollout stays linearizable
++            # instead of being masked.
++            if all(record.empty_reply and not children.get(record.model_call_id) for record in pool):
++                node = max(pool, key=key)
++                return TerminalSelection(node.model_call_id, SELECTED)
+             return TerminalSelection(None, AMBIGUOUS_TERMINAL)
+         node = pool[0]
+diff --git a/tests/unit_tests/test_token_capture_staging_terminal.py b/tests/unit_tests/test_token_capture_staging_terminal.py
+index cf2ff09f..2ed8fc5f 100644
+--- a/tests/unit_tests/test_token_capture_staging_terminal.py
++++ b/tests/unit_tests/test_token_capture_staging_terminal.py
+@@ -104,6 +104,18 @@ def test_two_non_empty_siblings_stay_ambiguous():
+     assert select_terminal_call(rows) == TerminalSelection(None, "ambiguous_terminal")
+ 
+ 
++def test_consecutive_empty_replies_select_the_latest():
++    # Claude Code can re-send several times after empty max_tokens replies; the
++    # harness leaves only childless empty leaves. Pick the latest instead of
++    # masking the rollout.
++    rows = [
++        _row("c1", admitted_at=100.0),
++        _row("c2-empty", parent_call_id="c1", prev_len=10, admitted_at=101.0, empty_reply=True),
++        _row("c3-empty", parent_call_id="c1", prev_len=10, admitted_at=102.0, empty_reply=True),
++    ]
++    assert select_terminal_call(rows) == TerminalSelection("c3-empty", "selected")
++
++
+ def test_two_roots_earliest_admission_wins():
+     main = _chain("m1", "m2", start_at=100.0)
+     aux = _chain("a1", "a2", start_at=200.0)
+-- 
+2.43.0
+

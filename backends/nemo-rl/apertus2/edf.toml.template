@@ -56,4 +56,9 @@ UV_CACHE_DIR = "@@UV_CACHE_DIR@@"
 TORCH_EXTENSIONS_DIR = "@@SCRATCH@@/.cache/torch_extensions"
 TRITON_CACHE_DIR = "/tmp/triton-nemo-rl-apertus2"
 TORCHINDUCTOR_CACHE_DIR = "/tmp/nemo_rl_jit/torchinductor"
+# FlashInfer's FP8 block-scale GEMM JIT-compiles TensorRT-LLM DeepGEMM kernels, by default into
+# $HOME/.tensorrt_llm, with no lock across nodes: on a cold cache every vLLM rank compiles the same
+# kernels and renames them into place, and on NFS a rank reading a cubin another node just replaced
+# fails with "Stale file handle" (job 1060572, Santis). Node-local, as Triton's and Inductor's.
+TRTLLM_DG_CACHE_DIR = "/tmp/trtllm-dg-nemo-rl-apertus2"
 MEGATRON_CONFIG_LOCK_DIR = "/tmp/megatron-config-locks"

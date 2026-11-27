@@ -44,6 +44,7 @@ Without our launchers, the Gym tree is: `git checkout <GYM_COMMIT>`, then `git a
 | Claude Code echoes tool calls as the model sent them (`CLAUDE_CODE_HUMBLE_HAMMOCK=1`, undocumented) | 0053 | `claude_env` to override |
 | A reply of reasoning alone hashes the empty-turn marker, so a harness that drops it and re-sends the request keeps one parent | 0054 | |
 | An empty reply (no visible text, no tool call) is not a terminal call; terminal selection prefers the non-empty continuation | 0055 | `CallRecord.empty_reply` |
+| Consecutive empty replies: when every terminal candidate is empty, pick the latest instead of masking the rollout | 0056 | |
 
 Several are open PRs against swiss-ai/nemo-gym; rl-infra drops a patch once its PR is merged.
 
@@ -152,7 +153,7 @@ are not supported. Our tasks also set `[verifier] environment_mode = "separate"`
   `pi-sc.yaml`, `run-pv.yaml`) is the complete set of these changes for one agent; for a new agent,
   check its source for every model call besides the main loop (titles, summaries, retries) and every rewrite of
   earlier messages, since each one masks the rollout under capture. For a closed-source agent, measure instead:
-  `AGENT=claude-code` (run CV, Gym 0050-0055) was checked with `../claude-code-probe/`, which runs the adapter's
+  `AGENT=claude-code` (run CV, Gym 0050-0056) was checked with `../claude-code-probe/`, which runs the adapter's
   command against a stub of the model server and resolves every request with Gym's own lineage functions. It found
   what reading would have missed: tool calls echoed as the agent parsed them, and a resume loop after an empty reply;
   check B on the recorded request then found a system message Apertus 2 cannot encode.

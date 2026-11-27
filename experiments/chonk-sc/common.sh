@@ -622,7 +622,11 @@ check_gym_agents() {
             # without it a dropped empty reply stays a childless sibling of the continuation: ambiguous_terminal
             grep -q "empty_reply" "${g}/nemo_gym/token_id_capture/staging/records.py" 2>/dev/null \
                 && ok "Gym patch 0055: an empty reply is not a terminal call" \
-                || bad "Gym patch 0055 missing (empty_reply in nemo_gym/token_id_capture/staging/records.py)" ;;
+                || bad "Gym patch 0055 missing (empty_reply in nemo_gym/token_id_capture/staging/records.py)"
+            # without it consecutive empty replies leave several empty leaves: ambiguous_terminal
+            grep -q "childless empty leaves" "${g}/nemo_gym/token_id_capture/staging/terminal.py" 2>/dev/null \
+                && ok "Gym patch 0056: consecutive empty replies select the latest terminal" \
+                || bad "Gym patch 0056 missing (empty-leaf selection in nemo_gym/token_id_capture/staging/terminal.py)" ;;
         *) bad "check_gym_agents: no checks for agent '$1'" ;;
     esac
     return "${fails}"

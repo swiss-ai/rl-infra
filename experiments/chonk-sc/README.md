@@ -19,7 +19,7 @@ i.e. vLLM DP4 per node through NVIDIA-NeMo/RL#2517) trained through
 | `run-v.sh`, `run-v-24k.sh` | run V: Terminus-2 on Kostas' verified tasks, Gym entrypoint (not SC), 24k on 20 nodes; `CTX=65536`: long context |
 | `run-agent-v.sh`, `run-agent-v.yaml`, `run-ov.yaml` | run OV: OpenCode in the pod on run V's verified tasks, SC + token capture, 24k on 20 nodes; `CTX=65536`: long context |
 | `run-pv.yaml` | run PV (`run-agent-v.sh AGENT=pi`): the pi coding agent instead of OpenCode; not run on the cluster yet |
-| `run-cv.yaml` | run CV (`run-agent-v.sh AGENT=claude-code`, Gym 0050-0055): Claude Code instead of OpenCode; probed against a stub (`../claude-code-probe/`), one-node rung, 64K smokes and a 10-step 64K run (job 1064832, trained) |
+| `run-cv.yaml` | run CV (`run-agent-v.sh AGENT=claude-code`, Gym 0050-0056): Claude Code instead of OpenCode; probed against a stub (`../claude-code-probe/`), one-node rung, 64K smokes and a 10-step 64K run (job 1064832, trained) |
 | `common.sh` | config composition, the long-context profile of runs V and OV, and the clone / Gym checks, shared by the scripts |
 
 Runs A and B: 3 steps, `async_rl` sampler `in_order` with lookahead 0 (synchronous), one chunk per
@@ -380,9 +380,10 @@ grad norms 0.059, 0.070, 0.047, 0.054, 0.083, 0.0, 0.104, 0.118, 0.091, 0.128 (s
 every group, so the gradient was 0); valid sequences 33, 45, 54, 57, 54, 43, 41, 53, 54, 45 of 64; mean reward
 among valid 0.15, 0.13, 0.07, 0.26, 0.17, 0.19, 0.13, 0.45, 0.26, 0.40. Of 640 rollouts: 491 `ok` (108 scored 1),
 86 agent timeouts, 61 context overflows, 2 infra; 3 `ambiguous_terminal`, 2 `unresolved_parent` and 8
-`no_records` (one prompt in step 1). The remaining ambiguous/unresolved cases are chains of consecutive empty
-`max_tokens` replies, where 0055 has no non-empty sibling to prefer; a 0056 could cap consecutive empty replies
-or pick the latest empty leaf. Checkpointing was off, so this run validates training, not a saved model.
+`no_records` (one prompt in step 1). The ambiguous cases are chains of consecutive empty `max_tokens` replies,
+where 0055 had no non-empty sibling to prefer; Gym 0056 now picks the latest empty leaf when every terminal
+candidate is empty, so the next runs should remove them. The 2 `unresolved_parent` cases are separate and still
+to be identified. Checkpointing was off, so this run validates training, not a saved model.
 `run-agent-v.sh` warns when `AGENT=claude-code` runs below `CTX=65536`.
 The v0.1 model often names Claude Code's tools in lowercase (`bash`, `write`), which Claude Code rejects as unknown
 tools; v0.2 does not. The task with `timeout_sec = 120` in its `task.toml` (FACET) times out in all 8 trials.
