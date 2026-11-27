@@ -1,3 +1,9 @@
+From 966564a6cb097bbc03dd3c63ecec8754bb242a97 Mon Sep 17 00:00:00 2001
+From: Konstantinos Pitas <kostasp210@gmail.com>
+Date: Sat, 14 Nov 2026 18:02:23 +0900
+Subject: [PATCH 38/39] harbor_agent: name a local task directly instead of
+ scanning its dataset
+
 harbor_agent: a trial on a local dataset names its task directly (JobConfig.tasks) instead of a
 DatasetConfig filtered by task_names. Harbor 0.25.0 builds such a DatasetConfig by reading and
 validating the task.toml of every task in the directory, then filters, once per trial: on the
@@ -6,9 +12,17 @@ minutes for its 64 trials before asking for a single sandbox (512 trials per tra
 wait far longer). The task path and source come out the same as from the DatasetConfig.
 Registry datasets keep the DatasetConfig.
 
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ responses_api_agents/harbor_agent/app.py      | 31 ++++++++++++++-----
+ .../harbor_agent/tests/test_app.py            | 18 +++++++++++
+ 2 files changed, 41 insertions(+), 8 deletions(-)
+
+diff --git a/responses_api_agents/harbor_agent/app.py b/responses_api_agents/harbor_agent/app.py
+index 890e42e4b..8ac7d0779 100644
 --- a/responses_api_agents/harbor_agent/app.py
 +++ b/responses_api_agents/harbor_agent/app.py
-@@ -474,6 +474,7 @@
+@@ -546,6 +546,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
          from harbor.models.trial.config import (
              AgentConfig,
              EnvironmentConfig,
@@ -16,7 +30,7 @@ Registry datasets keep the DatasetConfig.
              VerifierConfig,
          )
  
-@@ -549,16 +550,29 @@
+@@ -624,16 +625,29 @@ class HarborAgent(SimpleResponsesAPIAgent):
          # DatasetConfig and flattened OrchestratorConfig onto JobConfig.
          # Leaving registry_url unset selects the default harbor registry,
          # which is what RemoteRegistryInfo() used to supply.
@@ -53,7 +67,7 @@ Registry datasets keep the DatasetConfig.
              )
  
          job_config = JobConfig(
-@@ -572,7 +586,8 @@
+@@ -647,7 +661,8 @@ class HarborAgent(SimpleResponsesAPIAgent):
              environment=environment_config,
              verifier=verifier_config,
              agents=[agent_config],
@@ -63,9 +77,11 @@ Registry datasets keep the DatasetConfig.
          )
  
          return job_config.model_dump(mode="json")
+diff --git a/responses_api_agents/harbor_agent/tests/test_app.py b/responses_api_agents/harbor_agent/tests/test_app.py
+index 0140f0d7f..58ab732d1 100644
 --- a/responses_api_agents/harbor_agent/tests/test_app.py
 +++ b/responses_api_agents/harbor_agent/tests/test_app.py
-@@ -535,6 +535,24 @@
+@@ -710,6 +710,24 @@ class TestApp:
          assert config["datasets"][0]["version"] == "2.0"
          assert config["datasets"][0]["task_names"] == ["fix-git"]
  
@@ -90,3 +106,6 @@ Registry datasets keep the DatasetConfig.
      def test_build_job_config_harbor_no_delete(self) -> None:
          pytest.importorskip("harbor")
          server = _make_server(harbor_no_delete=True, harbor_environment_type="docker")
+-- 
+2.56.0
+

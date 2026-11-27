@@ -24,9 +24,12 @@ set -euo pipefail
 STORE="$1"
 HARBOR_ROOT="$2"
 ENVS="$(cd "$(dirname "$0")" && pwd)"
+# python3.12 where it exists (HANGANG); Alps login nodes have python3.14 only. PYTHON overrides.
+PY="${PYTHON:-$(command -v python3.12 || command -v python3.13 || command -v python3.14 || true)}"
+[[ -n "${PY}" ]] || { echo "ERROR: no python3.12, 3.13 or 3.14 on PATH; set PYTHON" >&2; exit 1; }
 
 # shellcheck disable=SC2086  # COLLECT_ARGS is a list of flags.
-python3.12 "${ENVS}/collect_harbor_verified_tasks.py" \
+"${PY}" "${ENVS}/collect_harbor_verified_tasks.py" \
     --verified-dir "${STORE}" \
     --out-dir "${HARBOR_ROOT}/tasks" \
     --limit "${LIMIT:-0}" \
@@ -35,7 +38,7 @@ python3.12 "${ENVS}/collect_harbor_verified_tasks.py" \
 # --limit 0 is "no limit" to the collector but a hard cap to the split, so the split gets the count.
 NUM_TASKS="$(find "${HARBOR_ROOT}/tasks" -mindepth 1 -maxdepth 1 -type d ! -name '.*' | wc -l)"
 
-python3.12 "${ENVS}/prepare_harbor_osb_dataset.py" \
+"${PY}" "${ENVS}/prepare_harbor_osb_dataset.py" \
     --tasks-dir "${HARBOR_ROOT}/tasks" \
     --output-dir "${HARBOR_ROOT}" \
     --alias verified \

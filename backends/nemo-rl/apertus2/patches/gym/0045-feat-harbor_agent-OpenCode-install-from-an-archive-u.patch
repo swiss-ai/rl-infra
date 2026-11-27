@@ -1,0 +1,343 @@
+From b40c2385ca5f84895a1ad5ac75e95b23f98fba62 Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Mon, 23 Nov 2026 06:57:56 +0000
+Subject: [PATCH 45/45] feat(harbor_agent): OpenCode install from an archive
+ uploaded by the adapter
+
+opencode_install: upload takes the release archive from opencode_archive_dir/<version>/<asset>
+on the node (fetched once per run), checks its sha256 once per process, uploads it into each
+sandbox and runs the same install script with the download skipped. The sandbox then needs
+neither internet nor python3, curl or wget, only tar; the uploaded archive is removed after the
+install (sandbox files live in node memory on diskless nodes). binary (download in the pod)
+stays the default.
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ .../custom_agents/opencode_nemo_gym.py        | 40 ++++++++-
+ .../install-opencode-binary.sh.j2             | 60 ++++++++-----
+ .../custom_agents/test_opencode_nemo_gym.py   | 85 ++++++++++++++++++-
+ 3 files changed, 162 insertions(+), 23 deletions(-)
+
+diff --git a/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py
+index 2bf903d51..b8ad4e5fa 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py
+@@ -40,6 +40,8 @@ non-zero exit, as on Harbor 0.1.x) and Harbor's ATIF conversion of `opencode.txt
+ """
+ 
+ import copy
++import functools
++import hashlib
+ import json
+ import re
+ import shlex
+@@ -73,9 +75,13 @@ KNOWN_ARCHIVE_SHA256 = {
+         "36064327d5a3fba662264f5726f517eafa26d1aefb0d59bc95e66bddccf3497b"
+     ),
+ }
+-INSTALL_METHODS = ("binary", "npm")
++# binary: the pod downloads the release archive; upload: the adapter uploads it from opencode_archive_dir
++# (fetched once per run on the cluster), so the pod needs no internet and no download tool
++INSTALL_METHODS = ("binary", "upload", "npm")
+ BINARY_INSTALL_TEMPLATE = Path(__file__).parent / "opencode_pod" / "install-opencode-binary.sh.j2"
+ BINARY_INSTALL_DIR = "/usr/local/bin"
++# where opencode_install: upload puts the release archive in the pod (the install script removes it)
++POD_ARCHIVE = "/installed-agent/opencode.tar.gz"
+ # Harbor 0.25 installs OpenCode with npm under nvm and sources it before running (opencode.py:913)
+ NVM_PREFIX = "[ -f ~/.nvm/nvm.sh ] && . ~/.nvm/nvm.sh; "
+ 
+@@ -111,6 +117,27 @@ def deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+     return merged
+ 
+ 
++@functools.lru_cache(maxsize=8)
++def _file_sha256(path: str, size: int, mtime_ns: int) -> str:
++    digest = hashlib.sha256()
++    with open(path, "rb") as f:
++        for chunk in iter(lambda: f.read(1 << 20), b""):
++            digest.update(chunk)
++    return digest.hexdigest()
++
++
++def verified_archive(path: Path, sha256: str) -> Path:
++    """`path` if it is a file with that sha256. Hashed once per process (and size and mtime): every trial
++    builds an adapter, and the archive does not change during a run."""
++    if not path.is_file():
++        raise FileNotFoundError(f"OpenCode archive {path} not found (opencode_archive_dir/<version>/<asset>)")
++    stat = path.stat()
++    actual = _file_sha256(str(path), stat.st_size, stat.st_mtime_ns)
++    if actual != sha256:
++        raise ValueError(f"OpenCode archive {path}: sha256 {actual}, expected {sha256}")
++    return path
++
++
+ class OpenCodeNemoGym(OpenCode):
+     @classmethod
+     def preflight(cls, kwargs: dict[str, Any] | None = None, env: Mapping[str, str] | None = None) -> None:
+@@ -131,6 +158,7 @@ class OpenCodeNemoGym(OpenCode):
+         opencode_install: str = "binary",
+         opencode_sha256: str | None = None,
+         opencode_asset: str = DEFAULT_ASSET,
++        opencode_archive_dir: str | None = None,
+         opencode_workdir: str | None = None,
+         **kwargs: Any,
+     ) -> None:
+@@ -163,6 +191,13 @@ class OpenCodeNemoGym(OpenCode):
+         self._asset = opencode_asset
+         self._workdir = opencode_workdir
+         self._sha256 = opencode_sha256 or KNOWN_ARCHIVE_SHA256.get((self._version, opencode_asset))
++        self._archive: Path | None = None
++        if opencode_install == "upload":
++            if not opencode_archive_dir:
++                raise ValueError("opencode_install 'upload' needs opencode_archive_dir (with <version>/<asset>)")
++            if not self._sha256:
++                raise ValueError(f"opencode_install 'upload' of OpenCode {self._version} needs opencode_sha256")
++            self._archive = verified_archive(Path(opencode_archive_dir) / self._version / opencode_asset, self._sha256)
+ 
+     @staticmethod
+     def name() -> str:
+@@ -177,6 +212,7 @@ class OpenCodeNemoGym(OpenCode):
+             "url": shlex.quote(RELEASE_URL.format(version=self._version, asset=self._asset)),
+             "sha256": shlex.quote(self._sha256 or ""),
+             "install_dir": shlex.quote(BINARY_INSTALL_DIR),
++            "archive": shlex.quote(POD_ARCHIVE if self._archive is not None else ""),
+         }
+ 
+     async def install(self, environment: BaseEnvironment) -> None:
+@@ -184,6 +220,8 @@ class OpenCodeNemoGym(OpenCode):
+             # Harbor's: system packages, Node (nvm, or the packaged one on musl), `npm i -g opencode-ai@<v>`
+             await super().install(environment)
+             return
++        if self._archive is not None:
++            await environment.upload_file(source_path=self._archive, target_path=POD_ARCHIVE)
+         # as root: it writes to BINARY_INSTALL_DIR
+         await install_from_template(self, environment, BINARY_INSTALL_TEMPLATE, self.install_variables())
+ 
+diff --git a/responses_api_agents/harbor_agent/custom_agents/opencode_pod/install-opencode-binary.sh.j2 b/responses_api_agents/harbor_agent/custom_agents/opencode_pod/install-opencode-binary.sh.j2
+index 34c6283e3..4a964d1d2 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/opencode_pod/install-opencode-binary.sh.j2
++++ b/responses_api_agents/harbor_agent/custom_agents/opencode_pod/install-opencode-binary.sh.j2
+@@ -1,15 +1,27 @@
+ #!/bin/bash
+ # Installs the standalone OpenCode binary (Bun-compiled, no Node/npm) from its GitHub release.
+-# Rendered by OpenCodeNemoGym (opencode_install: binary); url, sha256 and install_dir arrive
+-# shell-quoted. Downloads with the first of python3, curl, wget that works (task images such as
+-# python:3.12-slim have no curl, old ones have a python3 < 3.8); needs tar, and sha256sum after curl/wget.
++# Rendered by OpenCodeNemoGym; url, sha256, install_dir and archive arrive shell-quoted.
++# opencode_install: binary (archive empty): downloads with the first of python3, curl, wget that works
++# (task images such as python:3.12-slim have no curl, old ones have a python3 < 3.8); needs tar, and
++# sha256sum after curl/wget.
++# opencode_install: upload: the adapter uploaded the release archive to `archive` (checked against sha256
++# on the node; checked again here when the image has sha256sum); needs only tar. The archive is removed
++# at exit: the sandbox's files live in node memory.
+ set -euo pipefail
+ 
+ version={{ version }}
+ url={{ url }}
+ sha256={{ sha256 }}
+ install_dir={{ install_dir }}
++uploaded={{ archive }}
+ dest="$install_dir/opencode"
++work=""
++
++cleanup() {
++  if [ -n "$work" ]; then rm -rf "$work"; fi
++  if [ -n "$uploaded" ]; then rm -f "$uploaded"; fi
++}
++trap cleanup EXIT
+ 
+ if [ -x "$dest" ] && [ "$("$dest" --version 2>/dev/null || true)" = "$version" ]; then
+   echo "opencode $version already installed at $dest"
+@@ -17,8 +29,7 @@ if [ -x "$dest" ] && [ "$("$dest" --version 2>/dev/null || true)" = "$version" ]
+ fi
+ 
+ work=$(mktemp -d)
+-trap 'rm -rf "$work"' EXIT
+-archive="$work/opencode.tar.gz"
++archive="${uploaded:-$work/opencode.tar.gz}"
+ 
+ # Any Python 3 (task images ship 3.5 and later): no f-strings, no assignment expressions.
+ download_python3() {
+@@ -71,25 +82,36 @@ download_wget() {
+   wget -q --tries=3 -O "$archive" "$url" && check_sha256
+ }
+ 
+-tried=""
+-downloaded=""
+-for tool in python3 curl wget; do
+-  command -v "$tool" >/dev/null 2>&1 || continue
+-  tried="$tried $tool"
+-  rm -f "$archive"
+-  if "download_$tool"; then
+-    downloaded="$tool"
+-    break
+-  fi
+-  echo "download with $tool failed" >&2
+-done
+-if [ -z "$downloaded" ]; then
++download() {
++  local tried="" tool
++  for tool in python3 curl wget; do
++    command -v "$tool" >/dev/null 2>&1 || continue
++    tried="$tried $tool"
++    rm -f "$archive"
++    if "download_$tool"; then
++      return 0
++    fi
++    echo "download with $tool failed" >&2
++  done
+   if [ -z "$tried" ]; then
+     echo "installing opencode needs python3, curl or wget in the task image" >&2
+   else
+     echo "download of $url failed with:$tried" >&2
+   fi
+-  exit 1
++  return 1
++}
++
++if [ -n "$uploaded" ]; then
++  if [ -n "$sha256" ] && command -v sha256sum >/dev/null 2>&1; then
++    actual=$(sha256sum "$archive")
++    if [ "${actual%% *}" != "$sha256" ]; then
++      echo "sha256 mismatch for the uploaded $archive: expected $sha256" >&2
++      exit 1
++    fi
++  fi
++  echo "using the uploaded $archive"
++else
++  download || exit 1
+ fi
+ 
+ tar -xzf "$archive" -C "$work" opencode
+diff --git a/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
+index 6eed78f9b..328c160d5 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
+@@ -297,6 +297,7 @@ def test_default_install_is_the_pinned_binary(tmp_path: Path) -> None:
+         "url": "https://github.com/anomalyco/opencode/releases/download/v1.17.11/opencode-linux-x64-baseline.tar.gz",
+         "sha256": "36064327d5a3fba662264f5726f517eafa26d1aefb0d59bc95e66bddccf3497b",
+         "install_dir": "/usr/local/bin",
++        "archive": "''",
+     }
+ 
+ 
+@@ -322,7 +323,7 @@ class _Env:
+         return ExecResult(stdout="out", stderr=None, return_code=self.return_code)
+ 
+     async def upload_file(self, source_path, target_path):
+-        self.uploads.append((Path(source_path).read_text(), target_path))
++        self.uploads.append((Path(source_path).read_bytes(), target_path))
+ 
+ 
+ @pytest.mark.asyncio
+@@ -332,7 +333,7 @@ async def test_binary_install_renders_and_runs_the_script_as_root(tmp_path: Path
+     await agent.install(env)
+     ((script, target),) = env.uploads
+     assert target == "/installed-agent/install.sh"
+-    assert script == Environment().from_string(mod.BINARY_INSTALL_TEMPLATE.read_text()).render(
++    assert script.decode() == Environment().from_string(mod.BINARY_INSTALL_TEMPLATE.read_text()).render(
+         **agent.install_variables()
+     )
+     assert env.calls == [
+@@ -488,12 +489,13 @@ needs_path_tools = pytest.mark.skipif(
+ )
+ 
+ 
+-def _run_install_with_path(tmp_path: Path, bin_dir: Path, url: str, sha256: str):
++def _run_install_with_path(tmp_path: Path, bin_dir: Path, url: str, sha256: str, archive: str = ""):
+     variables = {
+         **_agent(tmp_path).install_variables(),
+         "url": shlex.quote(url),
+         "sha256": shlex.quote(sha256),
+         "install_dir": shlex.quote(str(tmp_path / "bin")),
++        "archive": shlex.quote(archive),
+     }
+     script = tmp_path / "install.sh"
+     script.write_text(Environment().from_string(mod.BINARY_INSTALL_TEMPLATE.read_text()).render(**variables))
+@@ -528,6 +530,83 @@ def test_install_script_without_any_download_tool_says_what_it_needs(tmp_path: P
+     assert "needs python3, curl or wget" in result.stderr
+ 
+ 
++# --- upload: the release archive comes from the node (opencode_archive_dir), not from GitHub -------
++
++
++def _archive_dir(tmp_path: Path, version: str = "1.17.11") -> tuple[Path, bytes, str]:
++    """An opencode_archive_dir with a fake release archive at <dir>/<version>/<asset>: (dir, bytes, sha256)."""
++    _, digest = _release(tmp_path, version)
++    data = (tmp_path / "release" / "opencode.tar.gz").read_bytes()
++    archive_dir = tmp_path / "opencode"
++    (archive_dir / version).mkdir(parents=True)
++    (archive_dir / version / mod.DEFAULT_ASSET).write_bytes(data)
++    return archive_dir, data, digest
++
++
++@pytest.mark.asyncio
++async def test_upload_install_uploads_the_archive_then_runs_the_script(tmp_path: Path) -> None:
++    archive_dir, data, digest = _archive_dir(tmp_path)
++    agent = _agent(tmp_path, opencode_install="upload", opencode_archive_dir=str(archive_dir), opencode_sha256=digest)
++    assert agent.install_variables()["archive"] == shlex.quote(mod.POD_ARCHIVE)
++    env = _Env()
++    await agent.install(env)
++    script = Environment().from_string(mod.BINARY_INSTALL_TEMPLATE.read_text()).render(**agent.install_variables())
++    assert env.uploads == [(data, mod.POD_ARCHIVE), (script.encode(), "/installed-agent/install.sh")]
++    assert env.calls[-1]["command"] == "bash /installed-agent/install.sh"
++
++
++def test_upload_install_refuses_an_archive_with_another_digest(tmp_path: Path) -> None:
++    archive_dir, _, _ = _archive_dir(tmp_path)  # the fake archive is not the pinned 1.17.11 release
++    with pytest.raises(ValueError, match="sha256"):
++        _agent(tmp_path, opencode_install="upload", opencode_archive_dir=str(archive_dir))
++
++
++def test_upload_install_needs_an_archive_dir(tmp_path: Path) -> None:
++    with pytest.raises(ValueError, match="opencode_archive_dir"):
++        _agent(tmp_path, opencode_install="upload")
++
++
++def test_upload_install_needs_the_archive(tmp_path: Path) -> None:
++    with pytest.raises(FileNotFoundError, match=mod.DEFAULT_ASSET):
++        _agent(tmp_path, opencode_install="upload", opencode_archive_dir=str(tmp_path))
++
++
++def test_upload_install_needs_a_digest(tmp_path: Path) -> None:
++    archive_dir, _, _ = _archive_dir(tmp_path, version="1.18.1")
++    with pytest.raises(ValueError, match="opencode_sha256"):
++        _agent(tmp_path, opencode_install="upload", opencode_archive_dir=str(archive_dir), version="1.18.1")
++
++
++def _uploaded(tmp_path: Path) -> tuple[Path, str]:
++    """A fake release archive where the pod would have it after the upload, and its sha256."""
++    _, data, digest = _archive_dir(tmp_path)
++    pod_archive = tmp_path / "installed-agent" / "opencode.tar.gz"
++    pod_archive.parent.mkdir()
++    pod_archive.write_bytes(data)
++    return pod_archive, digest
++
++
++# Job 5427428: one Terminal-Lego task image has no python3, curl or wget (8 of 640 trials failed setup).
++@needs_path_tools
++def test_install_script_installs_an_uploaded_archive_without_download_tools(tmp_path: Path) -> None:
++    pod_archive, digest = _uploaded(tmp_path)
++    bin_dir = _tool_dir(tmp_path, {})
++    result = _run_install_with_path(tmp_path, bin_dir, "file:///nonexistent.tar.gz", digest, str(pod_archive))
++    assert result.returncode == 0, result.stderr
++    assert "installed opencode 1.17.11" in result.stdout
++    # the sandbox's files live in node memory: the archive goes once the binary is installed
++    assert not pod_archive.exists()
++
++
++@needs_path_tools
++def test_install_script_checks_the_digest_of_an_uploaded_archive(tmp_path: Path) -> None:
++    pod_archive, _ = _uploaded(tmp_path)
++    result = _run_install_with_path(tmp_path, _tool_dir(tmp_path, {}), "file:///x", "0" * 64, str(pod_archive))
++    assert result.returncode != 0
++    assert "sha256 mismatch" in result.stderr
++    assert not (tmp_path / "bin" / "opencode").exists()
++
++
+ def test_unknown_kwargs_still_fail(tmp_path: Path) -> None:
+     with pytest.raises(ValueError, match="Unknown option 'bogus'"):
+         _agent(tmp_path, bogus=1)
+-- 
+2.56.0
+

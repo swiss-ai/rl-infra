@@ -1,0 +1,14 @@
+# Rollout-heavy layout: the blueprint's 8 trainer nodes (EP32) with 16 vLLM nodes instead of 4, for more
+# concurrent trajectories. Validated on KISTI: 5/5 steps of SWE-Lego at 4096 with 16 x 8 = 128 sandboxes per
+# step (job 1172832, grpo.num_prompts_per_step=16 policy.train_global_batch_size=128).
+# Not validated by the Apertus 2 blueprint.
+defaults: apertus2-chonk-vllm-adamw.yaml
+
+cluster:
+  num_nodes: 24
+
+policy:
+  generation:
+    colocated:
+      resources:
+        num_nodes: 16

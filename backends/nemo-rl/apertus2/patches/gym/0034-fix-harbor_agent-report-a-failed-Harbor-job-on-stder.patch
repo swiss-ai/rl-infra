@@ -1,0 +1,56 @@
+From 47ce26bb9b8614317faed1cfa0502b91b2c5762a Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Fri, 13 Nov 2026 06:30:44 +0000
+Subject: [PATCH 34/34] fix(harbor_agent): report a failed Harbor job on stderr
+ at once
+
+The error of a failed Harbor job went to buffered stdout and was lost when
+the server was killed at shutdown, so jobs 5329860 and 5330618 showed only
+empty rollouts, without a cause. It now goes to stderr, flushed, with the
+exception type.
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ responses_api_agents/harbor_agent/app.py            |  3 ++-
+ responses_api_agents/harbor_agent/tests/test_app.py | 11 +++++++++++
+ 2 files changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/responses_api_agents/harbor_agent/app.py b/responses_api_agents/harbor_agent/app.py
+index 56593d450..66670022a 100644
+--- a/responses_api_agents/harbor_agent/app.py
++++ b/responses_api_agents/harbor_agent/app.py
+@@ -360,7 +360,8 @@ class HarborAgent(SimpleResponsesAPIAgent):
+                 usage = HarborAgentUtils.extract_usage(trial_result, trajectory)
+ 
+             except Exception as e:
+-                print(f"Error running Harbor job: {e}")
++                # stderr, flushed: buffered stdout is lost when the server is killed at shutdown
++                print(f"Error running Harbor job: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+                 trial_result = None
+                 trajectory = None
+                 agent_error_flags = {}
+diff --git a/responses_api_agents/harbor_agent/tests/test_app.py b/responses_api_agents/harbor_agent/tests/test_app.py
+index 7e6aaf664..673cef2e1 100644
+--- a/responses_api_agents/harbor_agent/tests/test_app.py
++++ b/responses_api_agents/harbor_agent/tests/test_app.py
+@@ -447,6 +447,17 @@ class TestApp:
+         assert response.responses_create_params.temperature == 0.3
+         assert response.responses_create_params.input == []
+ 
++    async def test_run_failed_execution_reports_the_error_at_once(self, capsys):
++        # jobs 5329860/5330618: the error went to buffered stdout and was lost when the server was killed, so the
++        # driver log showed empty rollouts without a cause
++        server = _make_server()
++        with _harbor_run_mocks(side_effect=ValueError("Invalid kwargs for agent 'x': Unknown option 'y'.")):
++            await server.run(_make_run_request(instance_id="scientific::fail_task"))
++
++        err = capsys.readouterr().err
++        assert "Error running Harbor job" in err
++        assert "ValueError: Invalid kwargs for agent 'x': Unknown option 'y'." in err
++
+     @pytest.mark.parametrize(
+         "model_name, expected",
+         [
+-- 
+2.56.0
+

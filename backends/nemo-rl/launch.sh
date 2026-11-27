@@ -46,14 +46,16 @@ else
     echo "ERROR: config ${CONFIG} not found (cwd, ${ROOT} or ${NEMO_RL_DIR})" >&2; exit 1
 fi
 
-# Check the config here, before it waits in the queue (PREFLIGHT=0 skips it). Its report
+# Check the config here, before it waits in the queue (PREFLIGHT=0 skips it), with the same cluster.*
+# overrides as the driver below (base configs such as grpo_math_1B.yaml set gpus_per_node: 1). Its report
 # goes to slurm/<jobid>-<run>.preflight.txt; only errors and warnings are printed.
 PREFLIGHT_OUT=""
 if [[ "${PREFLIGHT:-1}" == 1 ]]; then
     if command -v yq >/dev/null; then
         PREFLIGHT_OUT="$(mktemp)"
         trap 'rm -f "${PREFLIGHT_OUT}"' EXIT
-        if ! NEMO_RL_DIR="${NEMO_RL_DIR}" JOB_TIME="${JOB_TIME}" bash "${HERE}/preflight.sh" "${CONFIG}" "${NODES}" "$@" > "${PREFLIGHT_OUT}" 2>&1; then
+        if ! NEMO_RL_DIR="${NEMO_RL_DIR}" JOB_TIME="${JOB_TIME}" bash "${HERE}/preflight.sh" "${CONFIG}" "${NODES}" \
+            cluster.num_nodes="${NODES}" cluster.gpus_per_node=4 "$@" > "${PREFLIGHT_OUT}" 2>&1; then
             cat "${PREFLIGHT_OUT}" >&2
             echo "ERROR: preflight failed, not submitting (PREFLIGHT=0 to override)" >&2; exit 1
         fi
@@ -124,7 +126,8 @@ if [[ -n "${WANDB_PROJECT:-}" ]]; then
     WANDB_ARGS="logger.wandb_enabled=true logger.wandb.project=${WANDB_PROJECT} logger.wandb.name=${RUN}"
     [[ -n "${WANDB_ENTITY:-}" ]] && WANDB_ARGS+=" ++logger.wandb.entity=${WANDB_ENTITY}"
 fi
-COMMAND="cd /opt/nemo-rl && RAY_DEDUP_LOGS=${RAY_DEDUP_LOGS:-0} DRIVER_RETRIES=${DRIVER_RETRIES:-2} bash ${HERE}/driver_retry.sh \
+# DRIVER_WRAPPER: optional command put in front of the driver, e.g. run-harbor-osb.sh's sandbox reaper.
+COMMAND="cd /opt/nemo-rl && RAY_DEDUP_LOGS=${RAY_DEDUP_LOGS:-0} DRIVER_RETRIES=${DRIVER_RETRIES:-2} ${DRIVER_WRAPPER:+${DRIVER_WRAPPER} }bash ${HERE}/driver_retry.sh \
 ${DRIVER_PYTHON:-/opt/nemo_rl_venv/bin/python} ${SCRIPT} --config ${CONFIG} \
 cluster.num_nodes=${NODES} cluster.gpus_per_node=${GPUS_PER_NODE} \
 checkpointing.checkpoint_dir=${OUT}/results/${RUN} \

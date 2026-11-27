@@ -1,0 +1,325 @@
+From 96dadd91af7f0f0971056ce152adbfadad493ab8 Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Sun, 15 Nov 2026 13:38:45 +0000
+Subject: [PATCH 36/36] fix(harbor_agent): Terminus-2 resamples after a
+ truncated reply, keeping the observation
+
+On a reply that hits max_tokens with nothing salvageable, Harbor 0.25's
+Terminus2._query_llm appends the prompt and the truncated reply to the
+chat and asks again with "ERROR!! NONE of the actions you just requested
+were performed ...". NemoGymLLM attaches the token ids of the last
+answered call to the newest assistant message, now the truncated one, and
+the token-in endpoint takes them as the exact prefix and adds only the
+messages after it. The model so got its previous prompt + reply + the
+ERROR and never the prompt, i.e. the output of the commands that did run:
+619 turns in 412 of 1302 trials of job 5356101.
+
+Terminus2NemoGym's _query_llm override (the 0035 counter) now takes the
+two messages back off in the nested call, which only Terminus2's re-ask
+makes, and asks again with the original prompt: a fresh sample of the
+same request. The ids stay on the reply they were generated for, the
+chat and rollout_details hold answered calls only (Chat and NemoGymLLM
+record a call only after the finish_reason check), and
+max_consecutive_truncations still ends the episode. Harbor's salvage path
+is unchanged.
+
+truncation_retry: harbor (default resample) keeps Terminus2's re-ask; the
+kwarg joins SHARED_AGENT_KWARGS, so OpenCode and mini drop it.
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ .../custom_agents/installed_compat.py         |   3 +-
+ .../custom_agents/terminus_2_nemo_gym.py      |  34 +++++-
+ .../test_mini_swe_agent_nemo_gym.py           |   4 +-
+ .../custom_agents/test_opencode_nemo_gym.py   |   3 +-
+ .../custom_agents/test_terminus_2_nemo_gym.py | 113 ++++++++++++++++++
+ 5 files changed, 151 insertions(+), 6 deletions(-)
+
+diff --git a/responses_api_agents/harbor_agent/custom_agents/installed_compat.py b/responses_api_agents/harbor_agent/custom_agents/installed_compat.py
+index b51a6f417..e107f470f 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/installed_compat.py
++++ b/responses_api_agents/harbor_agent/custom_agents/installed_compat.py
+@@ -40,7 +40,7 @@ from jinja2 import Environment
+ from pydantic import BaseModel
+ 
+ 
+-# kwargs that harbor_agent or the shared Terminus-2 harbor_agent_kwargs give to whichever agent runs. The last five
++# kwargs that harbor_agent or the shared Terminus-2 harbor_agent_kwargs give to whichever agent runs. The last six
+ # are Terminus-2 options from Gym's configs/harbor_agent_opensandbox_training.yaml, which every run loads, or from an
+ # env yaml under it; an agent overlay merged on top cannot delete them (OmegaConf), so OpenCode and mini get them too
+ # (job 5330618).
+@@ -55,6 +55,7 @@ SHARED_AGENT_KWARGS = (
+     "trajectory_config",
+     "nemo_model_server_timeout_sec",
+     "max_consecutive_truncations",
++    "truncation_retry",
+ )
+ 
+ 
+diff --git a/responses_api_agents/harbor_agent/custom_agents/terminus_2_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/terminus_2_nemo_gym.py
+index 274464863..b6719eb8f 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/terminus_2_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/terminus_2_nemo_gym.py
+@@ -31,7 +31,7 @@ class TruncationLoopError(RuntimeError):
+ 
+ 
+ class Terminus2NemoGymOptions(Terminus2Options):
+-    """Terminus2's options plus the three this subclass adds.
++    """Terminus2's options plus the ones this subclass adds.
+ 
+     harbor >=0.20 validates agent kwargs against ``options_model`` rather than
+     the constructor signature, and AgentOptions sets ``extra="forbid"``, so a
+@@ -53,6 +53,12 @@ class Terminus2NemoGymOptions(Terminus2Options):
+         description="End the episode after this many consecutive replies that hit the output limit with nothing "
+         "salvageable (Terminus2 re-asks without bound). None: no limit.",
+     )
++    truncation_retry: Literal["resample", "harbor"] = Field(
++        default="resample",
++        description="After a reply that hit the output limit with nothing salvageable: 'resample' asks again with "
++        "the same prompt and history; 'harbor' keeps Terminus2's re-ask, which adds the prompt, the truncated reply "
++        "and an ERROR message to the history (with NemoGymLLM's token ids the model then never sees that prompt).",
++    )
+ 
+ 
+ class Terminus2NemoGym(Terminus2):
+@@ -149,7 +155,7 @@ class Terminus2NemoGym(Terminus2):
+         return self._injected_llm
+ 
+     async def _query_llm(self, chat, prompt, original_instruction="", session=None):
+-        """Terminus2._query_llm with a bound on its re-asks after unsalvageable truncations.
++        """Terminus2._query_llm with a bound on its re-asks after unsalvageable truncations, which resample.
+ 
+         On a reply that hit the output limit with nothing salvageable, Terminus2._query_llm appends it plus
+         "ERROR!! NONE of the actions ..." and calls itself (this method) again, with no limit; jobs 5350472 and
+@@ -158,7 +164,19 @@ class Terminus2NemoGym(Terminus2):
+         placeholder unwinds the chain without an exception (one raised inside it would be retried by each
+         level's @retry), and the outermost call, outside @retry, raises TruncationLoopError, which run() turns
+         into a normal end of the episode, so the verifier still runs.
++
++        Before re-asking, Terminus2 appends the prompt and the truncated reply to the chat and asks with "ERROR!!
++        NONE of the actions you just requested were performed ...". NemoGymLLM attaches the token ids of the last
++        answered call to the newest assistant message, now the truncated one, and the token-in endpoint takes them
++        as the exact prefix and adds only the messages after it: the model got its previous prompt + reply + the
++        ERROR, never the prompt, i.e. the output of the commands that did run (job 5356101, 619 turns in 412 of
++        1302 trials). With truncation_retry "resample" a nested call (only Terminus2's re-ask makes one) takes the
++        two messages back off and asks again with the original prompt: a fresh sample of the same request, so
++        the ids stay on the reply they were generated for. The truncated reply leaves nothing behind: Chat and
++        NemoGymLLM record a call only after the finish_reason check.
+         """
++        if self._truncation_depth > 0 and self.options.truncation_retry == "resample":
++            prompt = self._take_back_truncated_exchange(chat, prompt)
+         limit = self.options.max_consecutive_truncations
+         if limit is not None and self._truncation_depth >= limit:
+             self._truncation_limit_hit = True
+@@ -175,6 +193,18 @@ class Terminus2NemoGym(Terminus2):
+             )
+         return response
+ 
++    def _take_back_truncated_exchange(self, chat, prompt: str) -> str:
++        """Remove the prompt + truncated reply Terminus2 appended before its re-ask; return that prompt."""
++        messages = chat.messages
++        if len(messages) >= 2 and messages[-2].get("role") == "user" and messages[-1].get("role") == "assistant":
++            original_prompt = messages[-2]["content"]
++            del messages[-2:]
++            self.logger.debug("Output length exceeded with nothing salvageable; asking again with the same prompt")
++            return original_prompt
++        # Not what Terminus2 0.25 appends: keep its re-ask rather than guess.
++        self.logger.warning("Unexpected chat after a truncated reply; keeping Terminus2's re-ask")
++        return prompt
++
+     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
+         """Override run() to gracefully handle agent errors.
+ 
+diff --git a/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py
+index 721ddb8a1..763f3a24c 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py
+@@ -274,6 +274,6 @@ def test_preflight_accepts_the_training_yaml_kwargs() -> None:
+     cfg = OmegaConf.to_container(OmegaConf.load(path), resolve=False)
+     kwargs = dict(cfg["harbor_agent"]["responses_api_agents"]["harbor_agent"]["harbor_agent_kwargs"])
+     kwargs.update(api_base="http://127.0.0.1:8000/v1", version="8e8a515fdcecf3a8e45c3909f7f196bfe18ca89a")
+-    # a Terminus-2 option an env yaml may set (Terminus2NemoGym's cap on truncation re-asks)
+-    kwargs.update(max_consecutive_truncations=8)
++    # Terminus-2 options an env yaml may set (Terminus2NemoGym's handling of truncated replies)
++    kwargs.update(max_consecutive_truncations=8, truncation_retry="resample")
+     MiniSweAgentNemoGym.preflight(kwargs=kwargs, env={})
+diff --git a/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
+index 3ce78c08e..d8b898c1c 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
+@@ -510,8 +510,9 @@ def _training_yaml_kwargs() -> dict:
+ def _training_yaml_plus_opencode() -> dict:
+     return {
+         **_training_yaml_kwargs(),
+-        # a Terminus-2 option an env yaml may set (Terminus2NemoGym's cap on truncation re-asks)
++        # Terminus-2 options an env yaml may set (Terminus2NemoGym's handling of truncated replies)
+         "max_consecutive_truncations": 8,
++        "truncation_retry": "resample",
+         "api_base": API_BASE,
+         "responses_create_params": {"temperature": 1.0},
+         "temperature": 1.0,
+diff --git a/responses_api_agents/harbor_agent/custom_agents/test_terminus_2_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/test_terminus_2_nemo_gym.py
+index 66244c705..1fb5ccaf1 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/test_terminus_2_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/test_terminus_2_nemo_gym.py
+@@ -12,12 +12,14 @@
+ # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
++import copy
+ from types import SimpleNamespace
+ from unittest.mock import MagicMock
+ 
+ import pytest
+ from harbor.agents.terminus_2.terminus_2 import Terminus2
+ from harbor.llms.base import LLMResponse, OutputLengthExceededError
++from harbor.llms.chat import Chat
+ from harbor.models.agent.context import AgentContext
+ 
+ from responses_api_agents.harbor_agent.custom_agents.llms.nemo_gym_llm import NemoGymLLM
+@@ -86,6 +88,7 @@ class _FakeChat:
+ 
+     def __init__(self, ok=(), salvageable=(), runaway_after=50):
+         self.messages = []
++        self.prompts = []
+         self.calls = 0
+         self.ok = set(ok)
+         self.salvageable = set(salvageable)
+@@ -93,6 +96,7 @@ class _FakeChat:
+ 
+     async def chat(self, prompt, **kwargs):
+         self.calls += 1
++        self.prompts.append(prompt)
+         if self.calls > self.runaway_after:
+             raise _Runaway(f"the agent asked {self.calls} times in a row")
+         if self.calls in self.ok:
+@@ -130,6 +134,9 @@ async def test_unsalvageable_truncations_stop_after_max_consecutive_truncations(
+ 
+     assert type(caught.value).__name__ == "TruncationLoopError"
+     assert chat.calls == calls
++    # each re-ask is a fresh sample of the same prompt; nothing of the truncated replies is left in the chat
++    assert chat.prompts == ["do the task"] * calls
++    assert chat.messages == []
+     # the next turn starts from zero again
+     chat.calls, chat.ok = 0, {1}
+     assert (await agent._query_llm(chat, "next")).content == VALID_REPLY
+@@ -148,6 +155,7 @@ async def test_a_reply_or_a_salvaged_reply_resets_the_count(tmp_path) -> None:
+     with pytest.raises(Exception, match="3 consecutive replies"):
+         await agent._query_llm(chat, "turn 3")
+     assert chat.calls == 9
++    assert chat.prompts == ["turn 1"] * 3 + ["turn 2"] * 3 + ["turn 3"] * 3
+ 
+ 
+ @pytest.mark.asyncio
+@@ -179,3 +187,108 @@ def test_preflight_checks_max_consecutive_truncations() -> None:
+     Terminus2NemoGym.preflight(kwargs={"max_consecutive_truncations": 5}, env={})
+     with pytest.raises(ValueError):
+         Terminus2NemoGym.preflight(kwargs={"max_consecutive_truncations": 0}, env={})
++
++
++def test_preflight_checks_truncation_retry() -> None:
++    Terminus2NemoGym.preflight(kwargs={"truncation_retry": "resample"}, env={})
++    Terminus2NemoGym.preflight(kwargs={"truncation_retry": "harbor"}, env={})
++    with pytest.raises(ValueError):
++        Terminus2NemoGym.preflight(kwargs={"truncation_retry": "error"}, env={})
++
++
++# Job 5356101: after a truncation, Terminus2 appended user(observation) + assistant(truncated reply) and re-asked with
++# "ERROR!! NONE of the actions ...". NemoGymLLM attaches the token ids of the last *answered* call to the newest
++# assistant message, now the truncated one, and the Apertus 2 endpoint takes those ids as the exact prefix and adds only
++# the messages after that message: the model saw its previous prompt + reply + ERROR, never the observation of the
++# commands that did run (619 turns in 412 of 1302 trials). These tests go through the real Chat and NemoGymLLM and
++# check what is sent to the model server.
++REPLY_1 = '{"analysis": "1", "plan": "p", "commands": [], "task_complete": false}'
++REPLY_2 = '{"analysis": "2", "plan": "p", "commands": [], "task_complete": false}'
++
++
++def _completion(content, prompt_ids, generation_ids, finish_reason="stop"):
++    message = {
++        "role": "assistant",
++        "content": content,
++        "prompt_token_ids": prompt_ids,
++        "generation_token_ids": generation_ids,
++        "generation_log_probs": [-0.5] * len(generation_ids),
++    }
++    usage = {"prompt_tokens": len(prompt_ids), "completion_tokens": len(generation_ids)}
++    return {"id": "chatcmpl-1", "choices": [{"message": message, "finish_reason": finish_reason}], "usage": usage}
++
++
++def _server_agent(tmp_path, replies, **kwargs):
++    """Terminus2NemoGym on a real NemoGymLLM whose model server answers ``replies``; returns (agent, requests)."""
++    llm = NemoGymLLM(model_name="test-model", api_base="http://localhost:8000/v1", collect_rollout_details=True)
++    requests = []
++    replies = iter(replies)
++
++    async def post(payload, timeout_sec=None):
++        requests.append(copy.deepcopy(payload))
++        return next(replies)
++
++    llm._post_chat_completions = post
++    agent = Terminus2NemoGym(
++        logs_dir=tmp_path, model_name="test-model", llm=llm, collect_rollout_details=True, **kwargs
++    )
++    return agent, requests
++
++
++@pytest.mark.asyncio
++async def test_after_a_truncation_the_model_is_asked_again_with_the_observation(tmp_path) -> None:
++    agent, requests = _server_agent(
++        tmp_path,
++        [
++            _completion(REPLY_1, [1, 2], [3, 4]),
++            _completion('{"analysis": "a reply that never ends', [1, 2, 3, 4, 5], [8, 8, 8], finish_reason="length"),
++            _completion(REPLY_2, [1, 2, 3, 4, 5], [6, 7]),
++        ],
++    )
++    chat = Chat(agent._llm)
++
++    assert (await agent._query_llm(chat, "do the task")).content == REPLY_1
++    assert (await agent._query_llm(chat, "OBSERVATION")).content == REPLY_2
++
++    truncated_call, next_call = requests[1], requests[2]
++    # the same request again: the observation is the last message and the truncated reply is not in it
++    assert next_call["messages"] == truncated_call["messages"]
++    assert [(m["role"], m["content"]) for m in next_call["messages"]] == [
++        ("user", "do the task"),
++        ("assistant", REPLY_1),
++        ("user", "OBSERVATION"),
++    ]
++    # the token ids are on the reply they were generated for, so the endpoint's prefix + new messages is consistent
++    assert next_call["messages"][1]["prompt_token_ids"] == [1, 2]
++    assert next_call["messages"][1]["generation_token_ids"] == [3, 4]
++    # the chat and the rollout details hold the answered calls only, one entry each
++    assert [(m["role"], m["content"]) for m in chat.messages] == [
++        ("user", "do the task"),
++        ("assistant", REPLY_1),
++        ("user", "OBSERVATION"),
++        ("assistant", REPLY_2),
++    ]
++    assert chat.rollout_details[0]["prompt_token_ids"] == [[1, 2], [1, 2, 3, 4, 5]]
++    assert chat.rollout_details[0]["completion_token_ids"] == [[3, 4], [6, 7]]
++    assert agent._llm._last_completion_token_ids == [6, 7]
++
++
++@pytest.mark.asyncio
++async def test_truncation_retry_harbor_keeps_harbors_error_message(tmp_path) -> None:
++    agent, requests = _server_agent(
++        tmp_path,
++        [
++            _completion(REPLY_1, [1, 2], [3, 4]),
++            _completion('{"analysis": "a reply that never ends', [1, 2, 3, 4, 5], [8, 8, 8], finish_reason="length"),
++            _completion(REPLY_2, [1, 2, 3, 4, 5, 8, 8, 8, 9], [6, 7]),
++        ],
++        truncation_retry="harbor",
++    )
++    chat = Chat(agent._llm)
++
++    await agent._query_llm(chat, "do the task")
++    assert (await agent._query_llm(chat, "OBSERVATION")).content == REPLY_2
++
++    roles = [m["role"] for m in requests[2]["messages"]]
++    assert roles == ["user", "assistant", "user", "assistant", "user"]
++    assert requests[2]["messages"][-1]["content"].startswith("ERROR!! NONE of the actions")
+-- 
+2.56.0
+

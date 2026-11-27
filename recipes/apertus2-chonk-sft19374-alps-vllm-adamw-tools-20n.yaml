@@ -1,0 +1,18 @@
+# apertus2-chonk-sft19374-alps-vllm-adamw-tools.yaml with the trainer doubled: 16 trainer nodes + the same
+# 4 vLLM nodes. Pipeline stages stay at 2; expert parallelism goes from 16 to 32, so each GPU holds 8 of the
+# 256 experts per layer instead of 16, and each 32-GPU stage is one EP group over 8 nodes (as the blueprint's
+# EP32, with its UCCL buffer settings). For sequences past 16k: 24576 ran out of GPU memory on 8 trainer nodes
+# (Daint job 5358015, step 5; peak allocated 69.7 GB per GPU, lowest free 0.1 GB). Not run yet.
+# The Megatron conversion of the checkpoint does not depend on the layout and is reused.
+defaults: apertus2-chonk-sft19374-alps-vllm-adamw-tools.yaml
+
+# run.sh reads these two and cluster.num_nodes from this file itself (yq), not through the defaults
+sft_export: /capstor/store/cscs/swissai/infra01/hf-checkpoints/chonk-lc-16k-v0.1-ep1/iter_0019374
+sft_stage_as: chonk-lc-16k-v0.1-ep1-iter_0019374
+
+cluster:
+  num_nodes: 20
+
+policy:
+  megatron_cfg:
+    expert_model_parallel_size: 32

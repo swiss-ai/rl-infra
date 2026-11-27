@@ -1,0 +1,201 @@
+From c9824a9368fa2fa245042c8444f3220b41117a3b Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Fri, 20 Nov 2026 06:33:25 +0000
+Subject: [PATCH 57/57] fix(grpo): keep masked rows out of the group baseline
+
+grpo_train and async_grpo_train call compute_advantage without valid_mask,
+so the group-relative estimators fall back to an all-ones mask. A row that
+is left out of the loss (mask_sample from the environment, overlong
+filtering, sequence-level logprob error masking) therefore still enters
+its group's baseline and std with its reward, usually 0. With NeMo Gym,
+rollouts that do not finish (agent timeout, infrastructure failure) are
+returned with mask_sample set and reward 0, so every such rollout pulls
+its siblings' leave-one-out baseline down and raises their advantages,
+even though the rollout itself is not trained on.
+
+The SingleController path already passes final_sample_mask as valid_mask,
+and the GRPO, GDPO and Reinforce++ estimators honor it. Pass the training
+sample mask (sample_mask after all filters) as valid_mask on both driver
+paths as well.
+
+Behaviour:
+- No masked row: the mask is all ones, which the estimators treat exactly
+  like no mask, so advantages are bit-identical.
+- A group keeps its other rows; their baseline and std come from the
+  unmasked rows only, as if the masked rollouts had never been sampled.
+- A group with one or zero unmasked rows gets advantage 0 on every row
+  (calculate_baseline_and_std_per_prompt sets baseline = reward), so it
+  adds no policy-gradient signal; no NaN.
+
+Tests: the estimator matches a run on the unmasked rows only (with the
+default leave-one-out baseline and std normalization), groups with one or
+no valid rows get zero advantage, and an all-ones mask equals no mask;
+grpo_train and async_grpo_train pass the sample mask as valid_mask, with
+and without a masked row.
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ nemo_rl/algorithms/grpo.py                    |  7 ++
+ .../algorithms/test_advantage_validity.py     | 71 +++++++++++++++++++
+ .../algorithms/test_grpo_group_identity.py    | 34 +++++++++
+ 3 files changed, 112 insertions(+)
+
+diff --git a/nemo_rl/algorithms/grpo.py b/nemo_rl/algorithms/grpo.py
+index 2a4eb75c5..638ab038e 100644
+--- a/nemo_rl/algorithms/grpo.py
++++ b/nemo_rl/algorithms/grpo.py
+@@ -3818,6 +3818,11 @@ def _grpo_train_impl(
+                         repeated_batch=repeated_batch,
+                         logprobs_policy=train_data["prev_logprobs"],
+                         logprobs_reference=train_data.get("reference_policy_logprobs"),
++                        # Rows left out of the loss (mask_sample, overlong
++                        # filtering, sequence logprob error) must not enter
++                        # their group's baseline either, as on the
++                        # SingleController path.
++                        valid_mask=sample_mask,
+                     )
+                     del prompt_ids_for_adv
+ 
+@@ -5727,6 +5732,8 @@ def async_grpo_train(
+                         prev_logprobs=train_data["prev_logprobs"],
+                         generation_logprobs=train_data["generation_logprobs"],
+                         sample_mask=train_data["sample_mask"],
++                        # Rows left out of the loss stay out of the baseline.
++                        valid_mask=sample_mask,
+                     )
+                     if (
+                         hasattr(adv_estimator, "last_metrics")
+diff --git a/tests/unit/algorithms/test_advantage_validity.py b/tests/unit/algorithms/test_advantage_validity.py
+index 199946694..8263469fb 100644
+--- a/tests/unit/algorithms/test_advantage_validity.py
++++ b/tests/unit/algorithms/test_advantage_validity.py
+@@ -14,6 +14,7 @@
+ 
+ """S4: validity-aware group baselines (token-capture placeholder rows)."""
+ 
++import pytest
+ import torch
+ 
+ from nemo_rl.algorithms.advantage_estimator import (
+@@ -197,3 +198,73 @@ def test_reinforce_pp_none_valid_mask_keeps_legacy_all_valid_behavior():
+         prompt_ids, rewards, mask, valid_mask=torch.ones(4)
+     )
+     assert torch.equal(legacy, explicit)
++
++
++# ── GRPO defaults (leave-one-out baseline, std normalization) ────────────────
++
++
++def _default_estimator() -> GRPOAdvantageEstimator:
++    return GRPOAdvantageEstimator(AdvEstimatorConfig(), loss_config=None)
++
++
++def test_masked_rows_leave_the_leave_one_out_baseline_and_std():
++    """A group's advantages come from its unmasked rows only."""
++    # Group 0: row 3 is masked (an unfinished rollout scored 0).
++    # Group 1: no masked row.
++    prompt_ids = torch.tensor([[0], [0], [0], [0], [1], [1], [1]])
++    rewards = torch.tensor([1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0])
++    valid_mask = torch.tensor([1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0])
++    mask = torch.ones(7, 2)
++
++    adv = _default_estimator().compute_advantage(
++        prompt_ids, rewards, mask, valid_mask=valid_mask
++    )
++
++    # Same as if the masked row had never been generated.
++    keep = valid_mask.bool()
++    expected = _default_estimator().compute_advantage(
++        prompt_ids[keep], rewards[keep], mask[keep]
++    )
++    torch.testing.assert_close(adv[keep], expected)
++    # Leave-one-out over {1, 0, 1}: row 1's baseline is 1, not (1 + 1 + 0) / 3.
++    assert adv[1, 0].item() == pytest.approx(-1.0)
++
++
++def test_group_with_one_valid_row_gets_zero_advantage():
++    """With a single valid row there is no baseline; the group adds no gradient."""
++    prompt_ids = torch.zeros(4, 1, dtype=torch.long)
++    rewards = torch.tensor([1.0, 0.0, 0.0, 0.0])
++    valid_mask = torch.tensor([1.0, 0.0, 0.0, 0.0])
++
++    adv = _default_estimator().compute_advantage(
++        prompt_ids, rewards, torch.ones(4, 2), valid_mask=valid_mask
++    )
++
++    assert torch.equal(adv, torch.zeros(4, 2))
++
++
++def test_group_with_no_valid_row_gets_zero_advantage():
++    prompt_ids = torch.tensor([[0], [0], [1], [1]])
++    rewards = torch.tensor([0.0, 0.0, 1.0, 0.0])
++    valid_mask = torch.tensor([0.0, 0.0, 1.0, 1.0])
++
++    adv = _default_estimator().compute_advantage(
++        prompt_ids, rewards, torch.ones(4, 2), valid_mask=valid_mask
++    )
++
++    assert torch.equal(adv[:2], torch.zeros(2, 2))
++    assert torch.isfinite(adv).all()
++
++
++def test_all_valid_mask_matches_legacy_with_default_config():
++    """No masked row: passing an all-ones valid_mask changes nothing."""
++    prompt_ids = torch.tensor([[0], [0], [0], [0], [1], [1], [2], [2], [2]])
++    rewards = torch.tensor([1.0, 0.0, 1.0, 0.5, 2.0, 2.0, 0.0, 3.0, 1.0])
++    mask = torch.ones(9, 3)
++
++    legacy = _default_estimator().compute_advantage(prompt_ids, rewards, mask)
++    explicit = _default_estimator().compute_advantage(
++        prompt_ids, rewards, mask, valid_mask=torch.ones(9)
++    )
++
++    assert torch.equal(legacy, explicit)
+diff --git a/tests/unit/algorithms/test_grpo_group_identity.py b/tests/unit/algorithms/test_grpo_group_identity.py
+index 687e26d56..1823e18a7 100644
+--- a/tests/unit/algorithms/test_grpo_group_identity.py
++++ b/tests/unit/algorithms/test_grpo_group_identity.py
+@@ -201,6 +201,40 @@ def test_grpo_train_passes_prompt_group_ids_to_advantage_estimator(
+     assert torch.equal(prompt_ids, torch.zeros(1, 1, dtype=torch.long))
+ 
+ 
++@pytest.mark.parametrize("masked", [True, False], ids=["masked", "unmasked"])
++@pytest.mark.parametrize("train_func", [grpo_train, async_grpo_train])
++def test_grpo_train_keeps_masked_rows_out_of_the_group_baseline(
++    mock_grpo_components, train_func, masked, monkeypatch
++):
++    """compute_advantage gets the training sample mask as valid_mask.
++
++    A row with mask_sample set has sample_mask 0, so it must not enter its
++    group's baseline either; without masked rows the mask is all ones, which
++    the estimators treat exactly like no mask.
++    """
++    mock_adv_estimator = MagicMock()
++    mock_adv_estimator.compute_advantage.return_value = torch.zeros(1, 2)
++    monkeypatch.setattr(grpo_mod, "MemoryTracker", MagicMock)
++    monkeypatch.setattr(
++        "nemo_rl.algorithms.grpo._create_advantage_estimator",
++        lambda _cfg: mock_adv_estimator,
++    )
++    apply_mask_sample_filter = grpo_mod._apply_mask_sample_filter
++
++    def mark_rollout(batch):
++        batch["mask_sample"] = torch.tensor([masked])
++        return apply_mask_sample_filter(batch)
++
++    monkeypatch.setattr(grpo_mod, "_apply_mask_sample_filter", mark_rollout)
++
++    _run_single_grpo_train_step(mock_grpo_components, train_func, monkeypatch)
++
++    mock_adv_estimator.compute_advantage.assert_called_once()
++    kwargs = mock_adv_estimator.compute_advantage.call_args.kwargs
++    expected = torch.tensor([0.0 if masked else 1.0])
++    torch.testing.assert_close(kwargs["valid_mask"].float(), expected)
++
++
+ def test_duplicate_prompt_groups_have_independent_advantages():
+     """Equal tokenized prompts sampled twice must not share a baseline."""
+     rewards = torch.tensor([0.0, 2.0, 10.0, 14.0])
+-- 
+2.56.0
+

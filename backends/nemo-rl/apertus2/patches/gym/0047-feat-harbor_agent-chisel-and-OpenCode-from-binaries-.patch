@@ -1,0 +1,624 @@
+From 20deaa3ccf306e47e1b34ebe7f6f64e12eae7ea1 Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Fri, 27 Nov 2026 06:25:38 +0000
+Subject: [PATCH] feat(harbor_agent): chisel and OpenCode from binaries the
+ sandbox platform mounts
+
+The sandbox platform can mount the agent binaries into every pod (on Breithorn: read-only image
+volumes under /opt/rl-tools/<name>/<version>/). Then nothing has to be uploaded per sandbox:
+
+- model_tunnel.pod_install: mounted uses chisel at pod_binary as it is. No upload, no chmod (the
+  mount is read-only), the server log goes to /tmp/.nemo-gym-chisel.log (pod_log), and chisel_dir
+  needs only the node's binary (the client runs on the node: the node's architecture, e.g. arm64 on
+  GH200, while the sandbox's chisel is amd64). Only a missing binary fails the start.
+- opencode_install: mounted with opencode_bin: setup runs a check script instead of an install
+  (only a missing or non-executable binary fails agent setup, failure class infra as for a failed
+  install), and the run calls the binary by that path.
+
+No version is required of a mounted binary; its --version (bounded by timeout 10 where the image
+has it) is logged: for chisel in the tunnel's "up" line (both install modes), for the agent in
+setup/stdout.txt and the agent's logger. installed_compat.check_mounted_binary holds the check for
+any adapter. upload stays the default for both.
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ responses_api_agents/harbor_agent/README.md   |  8 +-
+ .../custom_agents/check-mounted-binary.sh.j2  | 21 ++++
+ .../custom_agents/installed_compat.py         | 19 ++++
+ .../custom_agents/opencode_nemo_gym.py        | 30 +++++-
+ .../custom_agents/test_opencode_nemo_gym.py   | 67 +++++++++++++
+ .../nemo_gym_sandbox/model_tunnel.py          | 75 ++++++++++++---
+ .../harbor_agent/tests/test_model_tunnel.py   | 95 ++++++++++++++++++-
+ 7 files changed, 296 insertions(+), 19 deletions(-)
+ create mode 100644 responses_api_agents/harbor_agent/custom_agents/check-mounted-binary.sh.j2
+
+diff --git a/responses_api_agents/harbor_agent/README.md b/responses_api_agents/harbor_agent/README.md
+index 5d4a1ff5d..2245c3547 100644
+--- a/responses_api_agents/harbor_agent/README.md
++++ b/responses_api_agents/harbor_agent/README.md
+@@ -514,7 +514,7 @@ harbor_agent_import_path: "responses_api_agents.harbor_agent.custom_agents.openc
+ harbor_model_base_url: http://127.0.0.1:8000        # the tunnel's sandbox end
+ harbor_agent_kwargs:
+   version: 1.17.11
+-  opencode_install: upload                          # or binary / npm, see below
++  opencode_install: upload                          # or mounted / binary / npm, see below
+   opencode_archive_dir: /path/to/opencode           # <dir>/<version>/<asset>
+   opencode_timeout_sec: 1740                        # below harbor_agent_max_timeout, so the verifier still runs
+   model_info:
+@@ -531,7 +531,8 @@ harbor_mask_context_overflow: true                  # optional, see "Failure cla
+ | Option | Default | Meaning |
+ |---|---|---|
+ | `version` | `1.17.11` | OpenCode release. The adapter's config keys and flags were checked against this release; another one needs `opencode_sha256` and a re-check. |
+-| `opencode_install` | `binary` | `binary`: the sandbox downloads the release archive from GitHub (needs internet and python3, curl or wget). `upload`: the adapter uploads the archive from `opencode_archive_dir` (no internet, only `tar` in the image). `npm`: Harbor's own install (Node via nvm). |
++| `opencode_install` | `binary` | `binary`: the sandbox downloads the release archive from GitHub (needs internet and python3, curl or wget). `upload`: the adapter uploads the archive from `opencode_archive_dir` (no internet, only `tar` in the image). `npm`: Harbor's own install (Node via nvm). `mounted`: the sandbox already has the binary at `opencode_bin` (e.g. a read-only volume the sandbox platform mounts into every pod); setup only checks that it is there and logs its `--version` (no version required), nothing is installed. |
++| `opencode_bin` | none | For `mounted`: absolute path of the binary in the sandbox; the run calls it by this path. |
+ | `opencode_archive_dir` | none | For `upload`: directory with `<version>/<asset>`. The archive's sha256 is checked once per process, and again in the sandbox if `sha256sum` is there. |
+ | `opencode_asset` | `opencode-linux-x64-baseline.tar.gz` | Release asset (standalone binary for glibc x86_64, no AVX2 needed). |
+ | `opencode_sha256` | built in for 1.17.11 | sha256 of the archive. |
+@@ -559,6 +560,9 @@ environment setup (failure class `infra`). The separate verifier environment get
+ | `connect_timeout_s` | `60` | Bound on the client's first connection. |
+ | `tls_skip_verify` | `false` | Skip certificate checks on the endpoint's TLS. |
+ | `max_retry_count` | `10` | Client reconnects after a drop. |
++| `pod_install` | `upload` | `upload`: copy the sandbox architecture's binary from `chisel_dir` to `pod_binary` at every start. `mounted`: the sandbox already has chisel at `pod_binary` (e.g. a read-only volume); nothing is uploaded, only a missing binary fails the start, and `chisel_dir` needs only the node's binary (the client's: the node's architecture, e.g. arm64, while the sandbox's chisel is amd64). The "up" log line names the sandbox chisel and its `--version`. |
++| `pod_binary` | `/tmp/.nemo-gym-chisel` | chisel's path in the sandbox. |
++| `pod_log` | `<pod_binary>.log` | The sandbox-side server log; `/tmp/.nemo-gym-chisel.log` for `mounted`. |
+ 
+ The image needs only `uname`, `setsid` or `nohup`, and `bash` for the health check.
+ 
+diff --git a/responses_api_agents/harbor_agent/custom_agents/check-mounted-binary.sh.j2 b/responses_api_agents/harbor_agent/custom_agents/check-mounted-binary.sh.j2
+new file mode 100644
+index 000000000..2e2f6893e
+--- /dev/null
++++ b/responses_api_agents/harbor_agent/custom_agents/check-mounted-binary.sh.j2
+@@ -0,0 +1,21 @@
++#!/bin/bash
++# Install method "mounted": the agent's binary is already in the sandbox (e.g. a read-only volume that the
++# sandbox platform mounts into every pod), so nothing is installed. Fails agent setup (an infra failure) only when
++# the binary is missing or not executable; prints its --version for the log (no version is required).
++# Rendered by installed_compat.check_mounted_binary; name and bin arrive shell-quoted.
++set -euo pipefail
++
++name={{ name }}
++bin={{ bin }}
++
++if [ ! -x "$bin" ]; then
++  echo "$name not found or not executable at $bin (install: mounted)" >&2
++  exit 1
++fi
++# bounded where the image has timeout: a binary that hangs on --version must not hold up the setup
++if command -v timeout >/dev/null 2>&1; then
++  version=$(timeout 10 "$bin" --version 2>&1 | head -n 1) || true
++else
++  version=$("$bin" --version 2>&1 | head -n 1) || true
++fi
++echo "using the mounted $name at $bin, --version: $version"
+diff --git a/responses_api_agents/harbor_agent/custom_agents/installed_compat.py b/responses_api_agents/harbor_agent/custom_agents/installed_compat.py
+index cfaf3511a..01b03a64e 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/installed_compat.py
++++ b/responses_api_agents/harbor_agent/custom_agents/installed_compat.py
+@@ -31,6 +31,7 @@ Harbor 0.1.x ignored them. harbor_agent passes the same kwargs to every agent (a
+ """
+ 
+ import inspect
++import shlex
+ from pathlib import Path
+ from typing import Any, Iterable, Mapping
+ 
+@@ -144,3 +145,21 @@ async def install_from_template(
+         (setup_dir / "stderr.txt").write_text(result.stderr)
+     if result.return_code != 0:
+         raise RuntimeError(f"Agent setup failed with exit code {result.return_code}. See logs in {setup_dir}")
++
++
++MOUNTED_CHECK_TEMPLATE = Path(__file__).parent / "check-mounted-binary.sh.j2"
++
++
++async def check_mounted_binary(agent: BaseAgent, environment: BaseEnvironment, name: str, path: str) -> None:
++    """Install method "mounted": check the binary the sandbox already has at ``path`` instead of installing.
++
++    Only a missing or non-executable binary fails agent setup, like a failed install (same logs under
++    ``<agent logs>/setup/``, same failure class). No version is required: the first line of its ``--version``
++    goes to ``setup/stdout.txt`` and to the agent's logger. Nothing is written into the sandbox but the check
++    script, so a read-only mount works.
++    """
++    variables = {"name": shlex.quote(name), "bin": shlex.quote(path)}
++    await install_from_template(agent, environment, MOUNTED_CHECK_TEMPLATE, variables)
++    stdout = agent.logs_dir / "setup" / "stdout.txt"
++    line = stdout.read_text(errors="replace").strip().splitlines()[-1:] if stdout.exists() else []
++    agent.logger.info("%s", line[0] if line else f"using the mounted {name} at {path} (no --version output)")
+diff --git a/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py
+index b8ad4e5fa..4d73e202d 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py
+@@ -37,6 +37,10 @@ ATIF trajectory; for training the tokens come from model-server capture, not fro
+ 
+ On Harbor 0.25 the run goes through `installed_compat` (one recorded command, no failure on a
+ non-zero exit, as on Harbor 0.1.x) and Harbor's ATIF conversion of `opencode.txt` stays off.
++
++`opencode_install: mounted` installs nothing: the sandbox already has the binary at `opencode_bin`
++(e.g. a read-only volume the sandbox platform mounts into every pod); setup checks that it is there and
++logs its `--version`, and the run calls it by that path.
+ """
+ 
+ import copy
+@@ -55,6 +59,7 @@ from harbor.models.agent.context import AgentContext
+ 
+ from responses_api_agents.harbor_agent.custom_agents.installed_compat import (
+     ExecInput,
++    check_mounted_binary,
+     drop_shared_kwargs,
+     install_from_template,
+     kwargs_for_harbor_options,
+@@ -76,8 +81,9 @@ KNOWN_ARCHIVE_SHA256 = {
+     ),
+ }
+ # binary: the pod downloads the release archive; upload: the adapter uploads it from opencode_archive_dir
+-# (fetched once per run on the cluster), so the pod needs no internet and no download tool
+-INSTALL_METHODS = ("binary", "upload", "npm")
++# (fetched once per run on the cluster), so the pod needs no internet and no download tool; mounted: the
++# sandbox already has the binary at opencode_bin (setup only checks that it is there, logs its --version)
++INSTALL_METHODS = ("binary", "upload", "npm", "mounted")
+ BINARY_INSTALL_TEMPLATE = Path(__file__).parent / "opencode_pod" / "install-opencode-binary.sh.j2"
+ BINARY_INSTALL_DIR = "/usr/local/bin"
+ # where opencode_install: upload puts the release archive in the pod (the install script removes it)
+@@ -160,6 +166,7 @@ class OpenCodeNemoGym(OpenCode):
+         opencode_asset: str = DEFAULT_ASSET,
+         opencode_archive_dir: str | None = None,
+         opencode_workdir: str | None = None,
++        opencode_bin: str | None = None,
+         **kwargs: Any,
+     ) -> None:
+         # Harbor's base keeps `version` (the OpenCode release, or the npm version for "npm").
+@@ -178,6 +185,10 @@ class OpenCodeNemoGym(OpenCode):
+             raise ValueError("opencode_sha256 must be 64 lowercase hex digits")
+         if opencode_workdir is not None and not str(opencode_workdir).startswith("/"):
+             raise ValueError(f"opencode_workdir must be an absolute path, got {opencode_workdir!r}")
++        if opencode_install == "mounted" and not str(opencode_bin or "").startswith("/"):
++            raise ValueError(
++                f"opencode_install 'mounted' needs opencode_bin as an absolute path, got {opencode_bin!r}"
++            )
+         self._api_base = api_base
+         self._api_key = api_key
+         # Kept for reference; sampling values reach vLLM through vllm_model.sampling_overrides.
+@@ -190,6 +201,8 @@ class OpenCodeNemoGym(OpenCode):
+         self._install_method = opencode_install
+         self._asset = opencode_asset
+         self._workdir = opencode_workdir
++        # the command the run starts: on PATH after binary/upload/npm, the mounted path otherwise
++        self._opencode_bin = str(opencode_bin) if opencode_install == "mounted" else "opencode"
+         self._sha256 = opencode_sha256 or KNOWN_ARCHIVE_SHA256.get((self._version, opencode_asset))
+         self._archive: Path | None = None
+         if opencode_install == "upload":
+@@ -220,6 +233,9 @@ class OpenCodeNemoGym(OpenCode):
+             # Harbor's: system packages, Node (nvm, or the packaged one on musl), `npm i -g opencode-ai@<v>`
+             await super().install(environment)
+             return
++        if self._install_method == "mounted":
++            await check_mounted_binary(self, environment, "opencode", self._opencode_bin)
++            return
+         if self._archive is not None:
+             await environment.upload_file(source_path=self._archive, target_path=POD_ARCHIVE)
+         # as root: it writes to BINARY_INSTALL_DIR
+@@ -345,7 +361,15 @@ class OpenCodeNemoGym(OpenCode):
+         if self._timeout_sec is not None:
+             # Ends OpenCode before Harbor's agent timeout so the command's return code is recorded.
+             argv += ["timeout", "-k", str(TIMEOUT_KILL_AFTER_SEC), str(self._timeout_sec)]
+-        argv += ["opencode", "--model", self._opencode_model(), "run", "--format=json", "--title", SESSION_TITLE]
++        argv += [
++            self._opencode_bin,
++            "--model",
++            self._opencode_model(),
++            "run",
++            "--format=json",
++            "--title",
++            SESSION_TITLE,
++        ]
+         if self._debug:
+             argv += ["--print-logs", "--log-level", "DEBUG"]  # global options (index.ts:53-61)
+         # "--": an instruction starting with "-" stays the message (cli/cmd/run.ts:256, 271).
+diff --git a/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
+index 328c160d5..f23985560 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
+@@ -15,6 +15,7 @@
+ import hashlib
+ import io
+ import json
++import logging
+ import os
+ import shlex
+ import shutil
+@@ -348,6 +349,70 @@ async def test_failed_binary_install_fails_setup(tmp_path: Path) -> None:
+         await _agent(tmp_path).install(_Env(return_code=1))
+ 
+ 
++MOUNTED_BIN = "/opt/rl-tools/opencode/1.17.11/opencode"
++
++
++@pytest.mark.asyncio
++async def test_mounted_install_only_checks_the_binary(tmp_path: Path, caplog) -> None:
++    from responses_api_agents.harbor_agent.custom_agents import installed_compat
++
++    agent = _agent(tmp_path, opencode_install="mounted", opencode_bin=MOUNTED_BIN)
++    env = _Env()
++    with caplog.at_level(logging.INFO):
++        await agent.install(env)
++    # the check script's last output line (here the fake env's "out") goes to the agent's log
++    assert any(r.getMessage() == "out" for r in caplog.records)
++    # nothing but the check script goes into the sandbox
++    ((script, target),) = env.uploads
++    assert target == "/installed-agent/install.sh"
++    assert script.decode() == Environment().from_string(installed_compat.MOUNTED_CHECK_TEMPLATE.read_text()).render(
++        name="opencode", bin=MOUNTED_BIN
++    )
++    assert [c["command"] for c in env.calls] == ["bash /installed-agent/install.sh"]
++    (cmd,) = agent.create_run_agent_commands("x")
++    assert f"{mod.PIPEFAIL_IF_SUPPORTED}{MOUNTED_BIN} --model nemogym/" in cmd.command
++    # the default install still runs `opencode` from PATH
++    (cmd,) = _agent(tmp_path).create_run_agent_commands("x")
++    assert f"{mod.PIPEFAIL_IF_SUPPORTED}opencode --model" in cmd.command
++
++
++@pytest.mark.asyncio
++async def test_failed_mounted_check_fails_setup(tmp_path: Path) -> None:
++    agent = _agent(tmp_path, opencode_install="mounted", opencode_bin=MOUNTED_BIN)
++    with pytest.raises(RuntimeError, match="exit code 1"):
++        await agent.install(_Env(return_code=1))
++
++
++def _run_mounted_check(tmp_path: Path, binary: Path):
++    from responses_api_agents.harbor_agent.custom_agents import installed_compat
++
++    script = tmp_path / "check.sh"
++    script.write_text(
++        Environment()
++        .from_string(installed_compat.MOUNTED_CHECK_TEMPLATE.read_text())
++        .render(name="opencode", bin=shlex.quote(str(binary)))
++    )
++    return subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=30)
++
++
++@needs_bash
++def test_mounted_check_script(tmp_path: Path) -> None:
++    mount = tmp_path / "rl-tools" / "opencode" / "1.17.11"
++    mount.mkdir(parents=True)
++    binary = mount / "opencode"
++    binary.write_text("#!/bin/sh\necho 1.18.0\n")  # any version: none is required
++    binary.chmod(0o555)
++    mount.chmod(0o555)  # read-only, as the image volume
++    try:
++        ok = _run_mounted_check(tmp_path, binary)
++        assert ok.returncode == 0, ok.stderr
++        assert ok.stdout.strip() == f"using the mounted opencode at {binary}, --version: 1.18.0"
++    finally:
++        mount.chmod(0o755)
++    missing = _run_mounted_check(tmp_path, tmp_path / "nothing")
++    assert missing.returncode == 1 and "not found or not executable" in missing.stderr
++
++
+ @pytest.mark.asyncio
+ async def test_npm_install_is_harbors(tmp_path: Path) -> None:
+     agent = _agent(tmp_path, opencode_install="npm", version="1.18.1")
+@@ -365,6 +430,8 @@ async def test_npm_install_is_harbors(tmp_path: Path) -> None:
+         ({"opencode_install": "docker"}, "opencode_install"),
+         ({"version": "1.17.11; rm -rf /"}, "version"),
+         ({"opencode_sha256": "XYZ"}, "opencode_sha256"),
++        ({"opencode_install": "mounted"}, "opencode_bin"),
++        ({"opencode_install": "mounted", "opencode_bin": "opencode"}, "opencode_bin"),
+     ],
+ )
+ def test_rejects_bad_install_kwargs(tmp_path: Path, kwargs: dict, match: str) -> None:
+diff --git a/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/model_tunnel.py b/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/model_tunnel.py
+index ad2f1e5ee..43ee3b92a 100644
+--- a/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/model_tunnel.py
++++ b/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/model_tunnel.py
+@@ -22,10 +22,15 @@ WebSockets). The node opens the tunnel, the sandbox uses it:
+     on node:     chisel client  ->  <target> (the model server host:port)
+ 
+ `chisel <https://github.com/jpillora/chisel>`_ binaries are not shipped: ``chisel_dir`` must
+-hold ``chisel_<version>_linux_<arch>`` for the node and for the sandbox architecture (amd64,
+-arm64), as released (gunzipped). The sandbox copy is uploaded at every start, so the task image
+-needs no internet and no preinstalled tool, only ``uname``, ``setsid``/``nohup`` and, for the
+-health check, ``bash``.
++hold ``chisel_<version>_linux_<arch>`` for the node and, with ``pod_install: upload`` (the
++default), for the sandbox architecture (amd64, arm64), as released (gunzipped). The sandbox copy
++is uploaded at every start, so the task image needs no internet and no preinstalled tool, only
++``uname``, ``setsid``/``nohup`` and, for the health check, ``bash``. With ``pod_install: mounted``
++the sandbox already has chisel at ``pod_binary`` (e.g. a read-only volume the sandbox platform
++mounts into every pod): nothing is uploaded, and ``chisel_dir`` needs only the node's binary (the
++client runs on the node, so its architecture is the node's, e.g. arm64 on a GH200 node, while the
++sandbox's chisel is amd64). Either way the start reports the sandbox chisel's ``--version`` in the
++"up" log line.
+ """
+ 
+ import asyncio
+@@ -42,6 +47,11 @@ from typing import Any, Mapping, Optional
+ 
+ _ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
+ _CONNECTED_MARKER = "Connected (Latency"
++POD_INSTALL_METHODS = ("upload", "mounted")
++# the server log when pod_binary sits on a read-only mount (pod_install: mounted)
++MOUNTED_LOG = "/tmp/.nemo-gym-chisel.log"
++# server_start_script's first output line: the sandbox chisel's --version
++VERSION_PREFIX = "chisel --version: "
+ 
+ 
+ @dataclass(frozen=True)
+@@ -58,6 +68,11 @@ class ModelTunnelConfig:
+         2xx before the trial starts (e.g. ``/health`` of a Gym server).
+     tls_skip_verify: skip certificate checks on the endpoint's TLS.
+     max_retry_count: client reconnect attempts after a drop.
++    pod_binary: chisel's path in the sandbox.
++    pod_install: ``upload`` (copy chisel_dir's binary for the sandbox's architecture to ``pod_binary``
++        at every start) or ``mounted`` (``pod_binary`` is already in the sandbox, e.g. on a read-only
++        volume; only its absence fails the start).
++    pod_log: the sandbox-side server log; default ``<pod_binary>.log``, or MOUNTED_LOG when mounted.
+     """
+ 
+     chisel_dir: str
+@@ -70,6 +85,8 @@ class ModelTunnelConfig:
+     tls_skip_verify: bool = False
+     max_retry_count: int = 10
+     pod_binary: str = "/tmp/.nemo-gym-chisel"
++    pod_install: str = "upload"
++    pod_log: Optional[str] = None
+ 
+     @classmethod
+     def from_mapping(cls, raw: Mapping[str, Any]) -> "ModelTunnelConfig":
+@@ -79,11 +96,22 @@ class ModelTunnelConfig:
+             raise ValueError(f"Unknown model_tunnel keys {unknown}; known: {sorted(known)}")
+         if not raw.get("chisel_dir"):
+             raise ValueError("model_tunnel.chisel_dir is required")
+-        return cls(**dict(raw))
++        cfg = cls(**dict(raw))
++        if cfg.pod_install not in POD_INSTALL_METHODS:
++            raise ValueError(f"model_tunnel.pod_install must be one of {POD_INSTALL_METHODS}, got {cfg.pod_install!r}")
++        if cfg.pod_install == "mounted" and not cfg.pod_binary.startswith("/"):
++            raise ValueError(f"model_tunnel.pod_binary must be an absolute path, got {cfg.pod_binary!r}")
++        return cfg
+ 
+     def binary(self, arch: str) -> Path:
+         return Path(self.chisel_dir) / f"chisel_{self.chisel_version}_linux_{arch}"
+ 
++    @property
++    def log_path(self) -> str:
++        if self.pod_log:
++            return self.pod_log
++        return MOUNTED_LOG if self.pod_install == "mounted" else self.pod_binary + ".log"
++
+ 
+ def server_start_script(cfg: ModelTunnelConfig, wait_s: float = 15.0) -> str:
+     """sh: start the chisel server detached and return only once it listens (or fail with its log).
+@@ -91,13 +119,26 @@ def server_start_script(cfg: ModelTunnelConfig, wait_s: float = 15.0) -> str:
+     The command must not return before the server has left the exec's process group: the sandbox's
+     exec service may signal that group when the command ends, and a fire-and-forget ``(setsid ... &)``
+     races with that. Waiting for chisel's "Listening on" line also turns a server that dies at start
+-    (bad binary, port taken) into an error here instead of a client timeout later.
++    (bad binary, port taken) into an error here instead of a client timeout later. A mounted binary
++    is not touched (the mount is read-only); it must be executable. The first output line is the
++    binary's ``--version`` (VERSION_PREFIX), for the log.
+     """
+     b = shlex.quote(cfg.pod_binary)
+-    log = shlex.quote(cfg.pod_binary + ".log")
++    log = shlex.quote(cfg.log_path)
+     tries = max(1, int(wait_s / 0.2))
++    if cfg.pod_install == "mounted":
++        prepare = (
++            f"[ -x {b} ] || {{ echo 'chisel not found or not executable at '{b}' (pod_install: mounted)'; exit 1; }}; "
++        )
++    else:
++        prepare = f"chmod +x {b} || exit 1; "
++    # bounded where the image has timeout: a binary that hangs on --version must not hold up the start
++    version = (
++        f"(if command -v timeout >/dev/null 2>&1; then exec timeout 10 {b} --version; else exec {b} --version; fi)"
++    )
++    prepare += f'echo "{VERSION_PREFIX}$({version} 2>&1 | head -n 1)"; '
+     return (
+-        f"chmod +x {b} || exit 1; (setsid nohup {b} server --host 0.0.0.0 --port {cfg.server_port} --reverse "
++        f"{prepare}(setsid nohup {b} server --host 0.0.0.0 --port {cfg.server_port} --reverse "
+         f"> {log} 2>&1 &); "
+         f"i=0; while [ $i -lt {tries} ]; do "
+         f"grep -q 'Listening on' {log} 2>/dev/null && exit 0; i=$((i+1)); sleep 0.2; done; "
+@@ -107,7 +148,7 @@ def server_start_script(cfg: ModelTunnelConfig, wait_s: float = 15.0) -> str:
+ 
+ def pod_diagnostics_script(cfg: ModelTunnelConfig) -> str:
+     """sh: the server log tail and how many chisel server processes run (no ps in slim images)."""
+-    log = shlex.quote(cfg.pod_binary + ".log")
++    log = shlex.quote(cfg.log_path)
+     return (
+         f"tail -n 20 {log}; n=0; for c in /proc/[0-9]*/cmdline; do "
+         "tr '\\0' ' ' < \"$c\" 2>/dev/null | grep -q '[c]hisel server' && n=$((n+1)); done; "
+@@ -139,6 +180,7 @@ class ModelTunnel:
+         self._reader: Optional[asyncio.Task] = None
+         self._connected = asyncio.Event()
+         self._tail: deque[str] = deque(maxlen=40)
++        self._pod_version = "?"
+ 
+     @property
+     def client_log_tail(self) -> list[str]:
+@@ -158,12 +200,15 @@ class ModelTunnel:
+             raise
+         cfg = self._config
+         self._logger.info(
+-            "model_tunnel%s: sandbox 127.0.0.1:%s -> %s up in %.1fs (%s)",
++            "model_tunnel%s: sandbox 127.0.0.1:%s -> %s up in %.1fs (%s; sandbox chisel %s %s, --version %r)",
+             self._label,
+             cfg.pod_port,
+             cfg.target,
+             time.monotonic() - t0,
+             status,
++            cfg.pod_install,
++            cfg.pod_binary,
++            self._pod_version,
+         )
+ 
+     async def _open(self) -> str:
+@@ -179,15 +224,21 @@ class ModelTunnel:
+                 f"model_tunnel: unsupported architecture (node {platform.machine()!r}, sandbox {res.stdout!r})"
+             )
+         node_bin, pod_bin = cfg.binary(node_arch), cfg.binary(pod_arch)
+-        for path in {node_bin, pod_bin}:
++        uploading = cfg.pod_install == "upload"
++        for path in {node_bin, pod_bin} if uploading else {node_bin}:
+             if not path.is_file():
+                 raise FileNotFoundError(f"model_tunnel: chisel binary {path} not found")
+ 
+-        await self._sandbox.upload(pod_bin, cfg.pod_binary)
++        if uploading:
++            await self._sandbox.upload(pod_bin, cfg.pod_binary)
+         # One credential per sandbox: the endpoint is reachable by every holder of the provider API key.
+         # Passed as AUTH (chisel reads it from the environment), so it stays out of argv on both sides.
+         auth = f"nemo-gym:{secrets.token_hex(16)}"
+         res = await self._exec(server_start_script(cfg), env={"AUTH": auth}, timeout_s=60)
++        for line in (res.stdout or "").splitlines():
++            if line.startswith(VERSION_PREFIX):
++                self._pod_version = line[len(VERSION_PREFIX) :].strip()
++                break
+         if res.return_code != 0:
+             raise RuntimeError(
+                 f"model_tunnel{self._label}: chisel server in the sandbox did not come up: "
+diff --git a/responses_api_agents/harbor_agent/tests/test_model_tunnel.py b/responses_api_agents/harbor_agent/tests/test_model_tunnel.py
+index ab6342f0a..d1e4f12ad 100644
+--- a/responses_api_agents/harbor_agent/tests/test_model_tunnel.py
++++ b/responses_api_agents/harbor_agent/tests/test_model_tunnel.py
+@@ -65,8 +65,11 @@ def _fake_chisel(path: Path, record: Path, *, connect: bool = True) -> None:
+ 
+ 
+ class FakeSandbox:
+-    def __init__(self, *, pod_arch: str = "x86_64", health: str = "HTTP/1.1 200 OK", health_rc: int = 0):
++    def __init__(
++        self, *, pod_arch: str = "x86_64", health: str = "HTTP/1.1 200 OK", health_rc: int = 0, start_out: str = ""
++    ):
+         self.pod_arch = pod_arch
++        self.start_out = start_out
+         self.health = health
+         self.health_rc = health_rc
+         self.exec_calls: list[dict] = []
+@@ -78,6 +81,8 @@ class FakeSandbox:
+             return SandboxExecResult(stdout=f"{self.pod_arch}\n", stderr=None, return_code=0)
+         if command.startswith("bash -c"):
+             return SandboxExecResult(stdout=self.health + "\n", stderr=None, return_code=self.health_rc)
++        if " server " in command:
++            return SandboxExecResult(stdout=self.start_out, stderr=None, return_code=0)
+         return SandboxExecResult(stdout="", stderr=None, return_code=0)
+ 
+     async def upload(self, local_path, remote_path: str) -> None:
+@@ -119,6 +124,18 @@ class TestConfig:
+     def test_binary_names_follow_release_assets(self, chisel_dir):
+         assert _config(chisel_dir).binary("arm64") == chisel_dir / "chisel_1.12.0_linux_arm64"
+ 
++    def test_pod_install_and_log_path(self, chisel_dir):
++        with pytest.raises(ValueError, match="pod_install must be one of"):
++            _config(chisel_dir, pod_install="copy")
++        with pytest.raises(ValueError, match="absolute path"):
++            _config(chisel_dir, pod_install="mounted", pod_binary="chisel")
++        assert _config(chisel_dir).log_path == "/tmp/.nemo-gym-chisel.log"
++        assert _config(chisel_dir, pod_binary="/x/c").log_path == "/x/c.log"
++        # a mounted binary sits on a read-only volume: its log goes elsewhere
++        mounted = _config(chisel_dir, pod_install="mounted", pod_binary="/opt/rl-tools/chisel/1.12.0/chisel")
++        assert mounted.log_path == "/tmp/.nemo-gym-chisel.log"
++        assert _config(chisel_dir, pod_install="mounted", pod_binary="/m/c", pod_log="/l").log_path == "/l"
++
+ 
+ class TestOpenClose:
+     @pytest.mark.asyncio
+@@ -159,6 +176,25 @@ class TestOpenClose:
+             await tunnel.close()
+         assert proc.returncode is not None
+ 
++    @pytest.mark.asyncio
++    async def test_mounted_uploads_nothing_and_needs_only_the_node_binary(self, chisel_dir, tmp_path, caplog):
++        _fake_chisel(chisel_dir / f"chisel_1.12.0_linux_{NODE_ARCH}", tmp_path / "c.json")
++        pod_arch = "aarch64" if NODE_ARCH == "amd64" else "x86_64"
++        (chisel_dir / f"chisel_1.12.0_linux_{_ARCH[pod_arch]}").unlink()  # the sandbox's copy is not needed
++        sandbox = FakeSandbox(pod_arch=pod_arch, start_out="chisel --version: 1.11.3\n")
++        cfg = _config(chisel_dir, pod_install="mounted", pod_binary="/opt/rl-tools/chisel/1.12.0/chisel")
++        tunnel = ModelTunnel(sandbox, cfg, logging.getLogger("t"))
++        with caplog.at_level(logging.INFO, logger="t"):
++            await tunnel.open()
++        await tunnel.close()
++        # whatever version the mount has is reported, not checked
++        assert "sandbox chisel mounted /opt/rl-tools/chisel/1.12.0/chisel, --version '1.11.3'" in caplog.text
++        assert sandbox.uploads == {}
++        start = next(c for c in sandbox.exec_calls if " server " in c["command"])
++        assert "chmod" not in start["command"]
++        assert "/opt/rl-tools/chisel/1.12.0/chisel server" in start["command"]
++        assert "> /tmp/.nemo-gym-chisel.log" in start["command"]
++
+     @pytest.mark.asyncio
+     async def test_client_that_never_connects_fails_with_its_output(self, chisel_dir, tmp_path):
+         _fake_chisel(chisel_dir / f"chisel_1.12.0_linux_{NODE_ARCH}", tmp_path / "c.json", connect=False)
+@@ -302,7 +338,11 @@ class TestPodScripts:
+         # chisel prints "Listening on" after a moment; the exec service may SIGKILL the command's
+         # process group as soon as the command returns (job 5245999: no server behind the proxy).
+         binary = tmp_path / ".nemo-gym-chisel"  # its cmdline must keep "<binary> server": no exec
+-        cfg = _fake_server(binary, 'sleep 0.5; echo "server: Listening on http://0.0.0.0:$5"; sleep 30\n')
++        cfg = _fake_server(
++            binary,
++            '[ "$1" = --version ] && { echo 1.12.0; exit 0; }\n'
++            'sleep 0.5; echo "server: Listening on http://0.0.0.0:$5"; sleep 30\n',
++        )
+         proc = subprocess.Popen(
+             ["sh", "-c", server_start_script(cfg)], start_new_session=True, stdout=subprocess.PIPE, text=True
+         )
+@@ -332,6 +372,57 @@ class TestPodScripts:
+         assert res.returncode == 1
+         assert "not listening after 1s" in res.stdout and "address already in use" in res.stdout
+ 
++    @staticmethod
++    def _mounted(tmp_path: Path, version_line: str) -> ModelTunnelConfig:
++        """A fake chisel in a read-only directory, as on the sandbox platform's volume."""
++        mount = tmp_path / "rl-tools" / "chisel" / "1.12.0"
++        mount.mkdir(parents=True)
++        binary = mount / "chisel"
++        binary.write_text(
++            "#!/bin/bash\n"
++            f'if [ "$1" = --version ]; then echo "{version_line}"; exit 0; fi\n'
++            'sleep 0.2; echo "server: Listening on http://0.0.0.0:$5"; sleep 30\n'
++        )
++        binary.chmod(0o555)
++        mount.chmod(0o555)
++        return ModelTunnelConfig(
++            chisel_dir=str(tmp_path),
++            pod_binary=str(binary),
++            pod_install="mounted",
++            pod_log=str(tmp_path / "server.log"),
++        )
++
++    def test_mounted_server_starts_from_a_read_only_directory(self, tmp_path):
++        cfg = self._mounted(tmp_path, "1.12.0")
++        try:
++            res = subprocess.run(
++                ["sh", "-c", server_start_script(cfg, wait_s=5)], capture_output=True, text=True, timeout=20
++            )
++            assert res.returncode == 0, res.stdout + res.stderr
++            assert "Listening on" in (tmp_path / "server.log").read_text()
++        finally:
++            for pid in _running(Path(cfg.pod_binary)):
++                os.kill(pid, signal.SIGKILL)
++            Path(cfg.pod_binary).parent.chmod(0o755)
++
++    def test_mounted_server_of_another_version_starts_and_reports_it(self, tmp_path):
++        cfg = self._mounted(tmp_path, "1.11.3")
++        try:
++            res = subprocess.run(
++                ["sh", "-c", server_start_script(cfg, wait_s=5)], capture_output=True, text=True, timeout=20
++            )
++            assert res.returncode == 0, res.stdout + res.stderr
++            assert res.stdout.splitlines()[0] == "chisel --version: 1.11.3"
++        finally:
++            for pid in _running(Path(cfg.pod_binary)):
++                os.kill(pid, signal.SIGKILL)
++            Path(cfg.pod_binary).parent.chmod(0o755)
++
++    def test_mounted_server_fails_without_binary(self, tmp_path):
++        cfg = ModelTunnelConfig(chisel_dir=str(tmp_path), pod_binary=str(tmp_path / "missing"), pod_install="mounted")
++        res = subprocess.run(["sh", "-c", server_start_script(cfg, wait_s=1)], capture_output=True, text=True)
++        assert res.returncode == 1 and "chisel not found or not executable" in res.stdout
++
+     def test_server_start_fails_without_binary(self, tmp_path):
+         cfg = ModelTunnelConfig(chisel_dir=str(tmp_path), pod_binary=str(tmp_path / "missing"))
+         res = subprocess.run(["sh", "-c", server_start_script(cfg, wait_s=1)], capture_output=True, timeout=20)
+-- 
+2.56.0
+

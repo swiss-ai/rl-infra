@@ -22,7 +22,7 @@
 # once, or, if SSH to GitHub works, prefix the launch with
 #   GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:swiss-ai/apertus-common.git.insteadOf \
 #       GIT_CONFIG_VALUE_0=https://github.com/swiss-ai/apertus-common.git
-# The pods of a run carry the labels user=rl-infra and run=<run name> and live at most sandbox_ttl_s;
+# The pods of a run carry the labels user=$USER (NEMO_GYM_USER, run.sh; rl-infra without it) and run=<run name> and live at most sandbox_ttl_s;
 # to delete the ones a run leaves behind, see experiments/runs.md.
 defaults: ../recipes/apertus2-chonk-sft19374-vllm-adamw-tools.yaml
 script: examples/nemo_gym/run_grpo_nemo_gym.py
@@ -157,10 +157,16 @@ env:
           # Reach sandboxes through the ingress gateway, not through the OpenSandbox server, which
           # answered "no available server" at about 190 sandboxes. opensandbox.yaml sets true.
           use_server_proxy: false
-        # Labels on every pod. The driver sees neither $USER nor Slurm's variables in the container, so
-        # the run name tells a run's pods apart.
+        # Give up a sandbox create 1200 s after its first attempt (Gym patch 0040; no new attempt after that,
+        # the one in flight finishes). Job 5365870 (registry outage): every attempt waited the server's 600 s
+        # pod-ready limit, and with retries: 10 one create held its group ~6900 s. At 600 s per attempt: at
+        # most 2 attempts, ~20 min. opensandbox.yaml keeps retries: 10 for fast failures.
+        create:
+          deadline_s: 1200
+        # Labels on every pod. The driver does not see $USER in the container: run.sh exports it as
+        # NEMO_GYM_USER (rl-infra when unset); the run name tells a run's pods apart.
         attribution:
-          user: rl-infra
+          user: ${oc.env:NEMO_GYM_USER,rl-infra}
           workload: harbor-verified
           run: ${logger.wandb.name}
     harbor_agent:
@@ -181,6 +187,16 @@ env:
             # The history carries each reply without its thinking: Gym's schema refuses an assistant message
             # with reasoning_content (HTTP 422, job 1209869).
             interleaved_thinking: false
+            # After this many replies in a row that hit max_new_tokens, the episode ends and the verifier runs
+            # (Gym patch 0035; Terminus-2 re-asks without limit: 320x, then a recursion error, jobs 5350472/5355345).
+            max_consecutive_truncations: 8
+            # Such a reply is asked again with the same prompt (Gym patch 0036). "harbor": Terminus-2's re-ask,
+            # after which the model never saw the last observation (619 turns in 412 trials, job 5356101).
+            truncation_retry: resample
+            # A reply cut by the context ceiling (not by max_new_tokens) ends the episode as a context overflow and
+            # the verifier runs (Gym patch 0037); "resample" sent the same prompt into the same ceiling 8 times
+            # (72 of 73 truncation loops, job 5359900).
+            context_limit_truncation: overflow
             model_info:
               # Terminus-2's context limit: the whole trajectory, as in policy.max_total_sequence_length.
               max_input_tokens: ${policy.max_total_sequence_length}
@@ -194,6 +210,9 @@ env:
               # The task images are in a private registry project and the OpenSandbox cluster has no
               # pull secret for it (Gym patch 0013 reads username:password from this file).
               image_auth_file: ${registry_cred_file}
+              # Only images from this registry get the credentials (Gym patch 0031); without it the
+              # OpenSandbox server builds a pull secret for whatever registry an image names.
+              image_auth_registry: rl-registry.swissai.svc.cscs.ch
             # A pod lives at most this long, also when a run dies; above the two caps below.
             sandbox_ttl_s: 3600
           # Caps, not overrides: these tasks declare 3000 s for both, and a step lasts as long as its
@@ -203,6 +222,9 @@ env:
           # The start timeout (task.toml's build_timeout_sec) also covers a pod's wait in the cluster's
           # queue; Terminal-Lego-15k allows 120 s, which queueing alone exceeds (Gym patch 0015).
           harbor_environment_build_timeout_multiplier: 5.0
+          # Mask rollouts whose failure class is infra (sandbox never started, verifier pod lost, ...): their
+          # reward says nothing about the model. Gym's default (patch 0041), written out so the config dump shows it.
+          harbor_mask_infra: true
           # Harbor's trial directories (trajectories, test output) next to the weights. The harbor_agent
           # server reads them back, so they must be on a shared filesystem.
           harbor_jobs_dir: ${checkpointing.checkpoint_dir}/harbor-jobs

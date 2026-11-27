@@ -1,0 +1,194 @@
+From 4d852db0e2874775b208b37f581a613166ccff16 Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Wed, 11 Nov 2026 15:36:02 +0000
+Subject: [PATCH] fix(harbor_agent): Harbor 0.25 preflight accepts our agents'
+ own kwargs
+
+Harbor 0.25's Job.create validates every agent config's kwargs against the
+agent's options_model before any trial exists (job.py _preflight_agents ->
+agents/base.py preflight -> parse_options). OpenCodeNemoGym and
+MiniSweAgentNemoGym take their own kwargs (api_base, opencode_*, ...) and
+the shared ones in __init__ and pass only the rest to Harbor, but the
+preflight saw all of them: each was an "Unknown option", Job.create raised,
+no trial ran, and every rollout came back without output (job 5329860:
+16/16 rollout_failed:no_records, 0 model calls).
+
+preflight now hands Harbor only what __init__ passes on
+(kwargs_for_harbor_options: minus the class's own __init__ parameters and
+the shared kwargs), so a really unknown option still fails.
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ .../custom_agents/installed_compat.py         | 17 ++++++++++++
+ .../custom_agents/mini_swe_agent_nemo_gym.py  |  8 +++++-
+ .../custom_agents/opencode_nemo_gym.py        |  8 +++++-
+ .../test_mini_swe_agent_nemo_gym.py           | 20 ++++++++++++++
+ .../custom_agents/test_opencode_nemo_gym.py   | 26 +++++++++++++++++++
+ 5 files changed, 77 insertions(+), 2 deletions(-)
+
+diff --git a/responses_api_agents/harbor_agent/custom_agents/installed_compat.py b/responses_api_agents/harbor_agent/custom_agents/installed_compat.py
+index a6b4b4720..530123ab1 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/installed_compat.py
++++ b/responses_api_agents/harbor_agent/custom_agents/installed_compat.py
+@@ -30,6 +30,7 @@ Harbor 0.1.x ignored them. harbor_agent passes the same kwargs to every agent (a
+ ``harbor_agent_kwargs`` carry options other agents do not have; see ``drop_shared_kwargs``.
+ """
+ 
++import inspect
+ from pathlib import Path
+ from typing import Any, Iterable, Mapping
+ 
+@@ -49,6 +50,22 @@ def drop_shared_kwargs(kwargs: dict[str, Any], keep: Iterable[str] = ()) -> dict
+     return {key: value for key, value in kwargs.items() if key not in unused}
+ 
+ 
++def kwargs_for_harbor_options(agent_cls: type, kwargs: dict[str, Any] | None) -> dict[str, Any]:
++    """``kwargs`` without the ones ``agent_cls.__init__`` takes itself and the SHARED_AGENT_KWARGS.
++
++    Harbor 0.25's Job.create validates each agent config's kwargs against the agent's ``options_model``
++    before any trial exists (job.py ``_preflight_agents`` -> agents/base.py ``preflight`` ->
++    ``parse_options``). Our adapters consume their own kwargs in ``__init__`` and pass the rest on, so their
++    ``preflight`` must hand Harbor only that rest; otherwise every one of them is an "Unknown option".
++    """
++    own = {
++        name
++        for name, param in inspect.signature(agent_cls.__init__).parameters.items()
++        if param.kind in (param.KEYWORD_ONLY, param.POSITIONAL_OR_KEYWORD) and name != "self"
++    }
++    return {key: value for key, value in drop_shared_kwargs(dict(kwargs or {})).items() if key not in own}
++
++
+ class ExecInput(BaseModel):
+     """One command of an installed agent's run (Harbor 0.1.x ``harbor.agents.installed.base.ExecInput``)."""
+ 
+diff --git a/responses_api_agents/harbor_agent/custom_agents/mini_swe_agent_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/mini_swe_agent_nemo_gym.py
+index 480bf8360..88f86e45b 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/mini_swe_agent_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/mini_swe_agent_nemo_gym.py
+@@ -37,7 +37,7 @@ token usage) but no longer turns its ``bash`` blocks into tool calls.
+ import json
+ import shlex
+ from pathlib import Path
+-from typing import Any
++from typing import Any, Mapping
+ 
+ from harbor.agents.installed.base import with_prompt_template
+ from harbor.agents.installed.mini_swe_agent import MiniSweAgent
+@@ -47,6 +47,7 @@ from harbor.models.agent.context import AgentContext
+ from responses_api_agents.harbor_agent.custom_agents.installed_compat import (
+     ExecInput,
+     drop_shared_kwargs,
++    kwargs_for_harbor_options,
+     run_commands,
+ )
+ 
+@@ -65,6 +66,11 @@ SAMPLING_KEYS = {"temperature": "temperature", "top_p": "top_p", "max_output_tok
+ 
+ 
+ class MiniSweAgentNemoGym(MiniSweAgent):
++    @classmethod
++    def preflight(cls, kwargs: dict[str, Any] | None = None, env: Mapping[str, str] | None = None) -> None:
++        # Harbor 0.25 checks the config's kwargs before any trial (Job.create); ours are taken by __init__
++        super().preflight(kwargs=kwargs_for_harbor_options(cls, kwargs), env=env)
++
+     def __init__(
+         self,
+         *args: Any,
+diff --git a/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py
+index 61e4d5cfe..2bf903d51 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py
+@@ -44,7 +44,7 @@ import json
+ import re
+ import shlex
+ from pathlib import Path
+-from typing import Any
++from typing import Any, Mapping
+ 
+ from harbor.agents.installed.base import with_prompt_template
+ from harbor.agents.installed.opencode import OpenCode
+@@ -55,6 +55,7 @@ from responses_api_agents.harbor_agent.custom_agents.installed_compat import (
+     ExecInput,
+     drop_shared_kwargs,
+     install_from_template,
++    kwargs_for_harbor_options,
+     run_commands,
+ )
+ 
+@@ -111,6 +112,11 @@ def deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+ 
+ 
+ class OpenCodeNemoGym(OpenCode):
++    @classmethod
++    def preflight(cls, kwargs: dict[str, Any] | None = None, env: Mapping[str, str] | None = None) -> None:
++        # Harbor 0.25 checks the config's kwargs before any trial (Job.create); ours are taken by __init__
++        super().preflight(kwargs=kwargs_for_harbor_options(cls, kwargs), env=env)
++
+     def __init__(
+         self,
+         *args: Any,
+diff --git a/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py
+index 763f7c2a8..f0d673f1a 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py
+@@ -244,3 +244,23 @@ def test_run_command_in_bash_loads_the_model_class(tmp_path: Path) -> None:
+     assert third == {"limit": "CallLimitReached: Model call limit reached (2)."}
+     assert result["cost"] == 0.0
+     assert (logs / "agent" / "mini-swe-agent.txt").read_text() == res.stdout
++
++
++# Harbor 0.25's Job.create validates the config's kwargs with cls.preflight before any trial exists
++# (harbor job.py _preflight_agents); see the OpenCode test of the same name (job 5329860).
++def test_preflight_accepts_the_kwargs_harbor_agent_passes() -> None:
++    kwargs = {
++        "api_base": "http://127.0.0.1:8000/v1",
++        "responses_create_params": {"temperature": 1.0},
++        "temperature": 1.0,
++        "max_turns": 50,
++        "interleaved_thinking": True,
++        "model_info": {"max_input_tokens": 16384},
++        "version": "8e8a515fdcecf3a8e45c3909f7f196bfe18ca89a",
++    }
++    MiniSweAgentNemoGym.preflight(kwargs=kwargs, env={})
++
++
++def test_preflight_still_rejects_an_unknown_option() -> None:
++    with pytest.raises(ValueError, match="Unknown option 'not_an_option'"):
++        MiniSweAgentNemoGym.preflight(kwargs={"api_base": "http://127.0.0.1:8000/v1", "not_an_option": 1}, env={})
+diff --git a/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
+index dff7aa247..1cc472c5a 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
+@@ -468,3 +468,29 @@ def test_writes_no_atif_trajectory(tmp_path: Path) -> None:
+     _agent(tmp_path).populate_context_post_run(context)
+     assert not (tmp_path / "trajectory.json").exists()
+     assert context.is_empty()
++
++
++# Harbor 0.25's Job.create runs AgentFactory.run_preflight -> cls.preflight -> cls.parse_options on the
++# config's kwargs before any trial exists (harbor job.py _preflight_agents). Job 5329860: every kwarg was
++# "Unknown option" there, so no trial ran and every rollout came back empty.
++def test_preflight_accepts_the_kwargs_harbor_agent_passes() -> None:
++    kwargs = {
++        "api_base": API_BASE,
++        "responses_create_params": {"temperature": 1.0},
++        "temperature": 1.0,
++        "max_turns": 50,
++        "interleaved_thinking": True,
++        "model_info": {"max_input_tokens": 16384},
++        "opencode_config": {"share": "disabled"},
++        "opencode_install": "binary",
++        "opencode_timeout_sec": 870,
++        "opencode_debug": False,
++        "opencode_workdir": "/app",
++        "version": "1.17.11",
++    }
++    OpenCodeNemoGym.preflight(kwargs=kwargs, env={})
++
++
++def test_preflight_still_rejects_an_unknown_option() -> None:
++    with pytest.raises(ValueError, match="Unknown option 'not_an_option'"):
++        OpenCodeNemoGym.preflight(kwargs={"api_base": API_BASE, "not_an_option": 1}, env={})
+-- 
+2.56.0
+

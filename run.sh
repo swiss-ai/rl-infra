@@ -23,6 +23,8 @@ source "${ROOT}/sites/load.sh" && rl_infra_load "${APERTUS2_DIR}/env"
 export ACCOUNT PARTITION="${PARTITION:-${RUN_PARTITION:-${DEFAULT_PARTITION}}}" JOB_TIME="${JOB_TIME:-05:00:00}" SCRATCH
 # HOME inside the container is not yours; task files find your files under ${oc.env:RL_USER_HOME}.
 export RL_USER_HOME="${HOME}"
+# The pods' user label (task files: ${oc.env:NEMO_GYM_USER,rl-infra}); run-harbor-osb.sh exports the same.
+export NEMO_GYM_USER="${NEMO_GYM_USER:-${USER}}"
 mkdir -p "${OUT}/configs"
 # pydeps.sh replaces an overlay when its list changes, and running jobs import from it, so a task
 # with a script gets an overlay of its own.
@@ -43,7 +45,11 @@ if [[ -n "${SFT_EXPORT}" ]]; then
     source "${PIN_FILE}"
     export PYDEPS_APERTUS2="${SCRATCH}/nemo-rl-apertus2/apertus-common-${APERTUS_COMMON_COMMIT:0:9}"
     export PYDEPS="${PYDEPS}-apertus2"
-    export SRC="${SCRATCH}/${SFT_EXPORT}" DST="${SCRATCH}/models/$(basename "${SFT_EXPORT}")"
+    # sft_export is relative to SCRATCH (HANGANG) or absolute (Alps: the exports on /capstor); the
+    # staged copy is named after it unless the recipe's sft_stage_as names it (an export dir iter_0019374).
+    [[ "${SFT_EXPORT}" == /* ]] && SRC="${SFT_EXPORT}" || SRC="${SCRATCH}/${SFT_EXPORT}"
+    STAGE_AS="$(yq r "${RECIPE}" sft_stage_as)"
+    export SRC DST="${SCRATCH}/models/${STAGE_AS:-$(basename "${SFT_EXPORT}")}"
     # An export that already carries the modeling code (MODELING_SOURCE) is linked whole and only read;
     # stage_model.sh checks its hfconverter commit and auto_map.
     if [[ -f "${SRC}/MODELING_SOURCE" ]]; then

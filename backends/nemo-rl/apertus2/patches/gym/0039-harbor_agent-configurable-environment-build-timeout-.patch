@@ -1,3 +1,9 @@
+From b8c6405038528c67ca32e42bcea9910f9aa79d2e Mon Sep 17 00:00:00 2001
+From: Konstantinos Pitas <kostasp210@gmail.com>
+Date: Sat, 14 Nov 2026 18:02:24 +0900
+Subject: [PATCH 39/39] harbor_agent: configurable environment build timeout
+ multiplier
+
 harbor_agent: harbor_environment_build_timeout_multiplier sets Harbor's
 environment_build_timeout_multiplier, the multiplier of the environment start timeout alone
 (task.toml's [environment] build_timeout_sec). A pod that waits in the sandbox cluster's queue
@@ -6,9 +12,19 @@ sandboxes requested at once (job 1276171), 50 of their trials failed with
 EnvironmentStartTimeoutError. harbor_timeout_multiplier would stretch the agent and verifier
 timeouts too. None keeps Harbor's behaviour (harbor_timeout_multiplier applies).
 
+Ported onto the rl-infra Gym stack: the config field goes after harbor_timeout_multiplier, before our harbor_mask_agent_timeout.
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ responses_api_agents/harbor_agent/app.py      |  6 +++++
+ .../harbor_agent/tests/test_app.py            | 22 +++++++++++++++++++
+ 2 files changed, 28 insertions(+)
+
+diff --git a/responses_api_agents/harbor_agent/app.py b/responses_api_agents/harbor_agent/app.py
+index 8ac7d0779..5ebb29db4 100644
 --- a/responses_api_agents/harbor_agent/app.py
 +++ b/responses_api_agents/harbor_agent/app.py
-@@ -105,6 +105,11 @@
+@@ -107,6 +107,11 @@ class HarborAgentConfig(BaseResponsesAPIAgentConfig):
      harbor_verifier_max_timeout: Optional[int] = None
      # Multiplier applied to all Harbor timeouts after override/cap. None = 1.0.
      harbor_timeout_multiplier: Optional[float] = None
@@ -17,10 +33,10 @@ timeouts too. None keeps Harbor's behaviour (harbor_timeout_multiplier applies).
 +    # it. A pod that waits in the cluster's queue counts against that timeout,
 +    # and some tasks allow only 120 s. None = harbor_timeout_multiplier.
 +    harbor_environment_build_timeout_multiplier: Optional[float] = None
- 
-     # --- Job output ---
-     # Directory where Harbor writes job results and trial artifacts.
-@@ -581,6 +586,7 @@
+     # Also mask rollouts whose agent hit its timeout (AgentTimeoutError), even when the verifier
+     # ran. Off by default: such a rollout then trains with the verifier's reward.
+     harbor_mask_agent_timeout: bool = False
+@@ -656,6 +661,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
              timeout_multiplier=(
                  self.config.harbor_timeout_multiplier if self.config.harbor_timeout_multiplier is not None else 1.0
              ),
@@ -28,9 +44,11 @@ timeouts too. None keeps Harbor's behaviour (harbor_timeout_multiplier applies).
              n_concurrent_trials=1,
              quiet=True,
              environment=environment_config,
+diff --git a/responses_api_agents/harbor_agent/tests/test_app.py b/responses_api_agents/harbor_agent/tests/test_app.py
+index 58ab732d1..d492038e2 100644
 --- a/responses_api_agents/harbor_agent/tests/test_app.py
 +++ b/responses_api_agents/harbor_agent/tests/test_app.py
-@@ -553,6 +553,28 @@
+@@ -728,6 +728,28 @@ class TestApp:
          assert config["tasks"][0]["path"] == "/tmp/test_dataset/test_task_123"
          assert config["tasks"][0]["source"] == "test_dataset"
  
@@ -59,3 +77,6 @@ timeouts too. None keeps Harbor's behaviour (harbor_timeout_multiplier applies).
      def test_build_job_config_harbor_no_delete(self) -> None:
          pytest.importorskip("harbor")
          server = _make_server(harbor_no_delete=True, harbor_environment_type="docker")
+-- 
+2.56.0
+

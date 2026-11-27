@@ -1,0 +1,214 @@
+#!/bin/bash
+# Step 0 for the Chonk Single-Controller runs: static checks on the login node, no GPU, no sbatch.
+#   bash experiments/chonk-sc/check.sh [overrides...]      (overrides as you would pass to run-a/-b/-s.sh)
+#
+#   (b) the merged NeMo-RL clone ($NEMO_RL_DIR): pinned PRs merged, NVIDIA-NeMo/RL#2517 removed the
+#       async_engine assert for vLLM EP != TP, f196's refit/membership/token-capture code survived
+#       the -Xtheirs merge (grep markers, see common.sh)
+#   (c) runs B and S: the Gym checkout carries the current patches/gym set, incl. 0014 + 0015
+#   (a) composes the run A, B and S configs exactly as run-a.sh / run-b.sh / run-s.sh will, then resolves and
+#       validates them with the clone's own NeMo-RL code (check.py: load_config, the launcher's
+#       overrides, MasterConfig, validate_single_controller_config, setup's config-only checks)
+#       and prints the resolved values that matter; with yq, also launch.sh's preflight.sh.
+# Exits non-zero on any failure.
+#
+# Env: RUNS ("a b s", default; "o" = run S with AGENT=opencode, check it without the smoke overrides; "w" = o with TASKS=swe-lego, on its own;
+# "ov" = run-agent-v.sh AGENT=opencode on the verified tasks, on its own (RUNS=ov), with
+# run-agent-v.sh's env (SMOKE, STEPS, PROMPTS, SANDBOXES, CTX, GATEWAY_PROXY, MODEL_CALLS, HARBOR_ROOT, the long-context
+# knobs of common.sh: CTX=65536 checks the 64K profile, ...) and its command-line overrides; credential files are only
+# tested for presence), CHECK_PYTHON (a Python >= 3.12 with omegaconf, hydra-core, pydantic;
+# default: a venv in $SCRATCH/chonk-sc-check/venv, created on first use with pip from PyPI),
+# HARBOR_ROOT (default $SCRATCH/osb/harbor_micro). Packages the config code imports but the venv
+# lacks (torch, ray, vllm, ...) are stubbed by check.py and listed; for a check without stubs run
+# it in the job image instead (README.md, "Step 0").
+set -uo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "${HERE}/../.." && pwd)"
+APERTUS2_DIR="${ROOT}/backends/nemo-rl/apertus2"
+source "${ROOT}/sites/load.sh" && rl_infra_load "${APERTUS2_DIR}/env" || exit 1
+source "${HERE}/common.sh"
+RUNS="${RUNS:-a b s}"
+WORK="${SCRATCH}/chonk-sc-check"
+mkdir -p "${WORK}"
+# what the driver resolves ${oc.env:...} against: driver.sh exports RL_INFRA_DIR,
+# run-harbor-osb.sh the Harbor paths and the registry placeholders
+export SCRATCH RL_INFRA_DIR="${ROOT}"
+# run W reads the SWE-Lego tasks (run-s.sh TASKS=swe-lego); check it on its own (RUNS=w)
+if [[ " ${RUNS} " == *" w "* ]]; then export HARBOR_ROOT="${HARBOR_ROOT:-${SCRATCH}/osb/swe_lego_v05}"; fi
+# run OV reads the verified tasks (run-agent-v.sh); check it on its own (RUNS=ov)
+AV_RUNS=0
+if [[ " ${RUNS} " == *" ov "* ]]; then
+    AV_RUNS=1
+    agent_v_defaults || exit 1    # HARBOR_ROOT ($SCRATCH/osb/harbor_verified), CTX, STEPS, PROMPTS, ... (exported)
+    long_ctx_summary
+    # check.py reads the long-context knobs and the staged checkpoint's directory
+    export ${LONG_CTX_KNOBS} SFT_MODEL_DIR
+    # the launcher's run name and paths (run-agent-v.sh): pod label, Harbor jobs dir, filtered rows
+    export NEMO_GYM_RUN_ID="${NEMO_GYM_RUN_ID:-chonk-sc-check-av}" RL_USER_HOME="${HOME}"
+    export AGENT_V_JOBS="${SCRATCH}/harbor-jobs/${NEMO_GYM_RUN_ID}"
+    export AGENT_V_TRAIN="${HARBOR_ROOT}/train-filtered-agent-v.jsonl"
+fi
+export HARBOR_ROOT="${HARBOR_ROOT:-${SCRATCH}/osb/harbor_micro}"
+export HARBOR_TASKS_DIR="${HARBOR_TASKS_DIR:-${HARBOR_ROOT}/tasks}"
+export RL_REGISTRY_USERNAME="${RL_REGISTRY_USERNAME:-anonymous}" RL_REGISTRY_PASSWORD="${RL_REGISTRY_PASSWORD:-unused}"
+# run S: run-s.sh exports the path (never read here)
+export RL_REGISTRY_CRED_FILE="$(realpath -m "${RL_REGISTRY_CRED_FILE:-${HOME}/.rl_registry_cred}")"
+# run S: what run-s.sh and run-harbor-osb.sh export (paths and labels only; the key is never read here)
+export OPENSANDBOX_API_KEY_FILE="${OPENSANDBOX_API_KEY_FILE:-${HOME}/.opensandbox_token}"
+export NEMO_GYM_USER="${NEMO_GYM_USER:-${USER}}" NEMO_GYM_WORKLOAD="${NEMO_GYM_WORKLOAD:-chonk-harbor-sft-sc}"
+export NEMO_GYM_RUN_ID="${NEMO_GYM_RUN_ID:-chonk-sc-check-s}"
+# run O (run S with AGENT=opencode): what run-s.sh exports for tunnel-sc.yaml
+export CHISEL_DIR="${CHISEL_DIR:-${SCRATCH}/chisel}"
+total=0
+
+echo "== (b) NeMo-RL clone"
+check_nemo_rl_clone; total=$((total + $?))
+
+if [[ " ${RUNS} " == *" b "* || " ${RUNS} " == *" s "* || " ${RUNS} " == *" o "* || " ${RUNS} " == *" w "* || "${AV_RUNS}" == 1 ]]; then
+    echo "== (c) Gym checkout for runs B and S (token capture)"
+    check_gym_capture; total=$((total + $?))
+fi
+for run in ${RUNS}; do
+    case "${run}" in
+        ov) echo "== (c) Gym checkout for run ${run^^} (the agent in the pod, tunnel)"
+            check_gym_agents "$(agent_v_agent "${run}")"; total=$((total + $?)) ;;
+    esac
+done
+
+echo "== (a) composed configs"
+pick_python() {
+    if [[ -n "${CHECK_PYTHON:-}" ]]; then echo "${CHECK_PYTHON}"; return 0; fi
+    local venv="${WORK}/venv" base="" c
+    if check_python_usable "${venv}/bin/python"; then
+        echo "${venv}/bin/python"; return 0
+    fi
+    # missing, or a scratch purge left the package directories without their files (common.sh check_python_usable)
+    [[ ! -e "${venv}" ]] || echo "   ${venv} is incomplete (scratch purge?): rebuilding it" >&2
+    # login nodes: python3.14 (the system python3 is older)
+    for c in python3.14 python3.13 python3.12 python3; do
+        command -v "${c}" >/dev/null || continue
+        "${c}" -c 'import sys; sys.exit(sys.version_info < (3, 12))' 2>/dev/null && { base="$(command -v "${c}")"; break; }
+    done
+    [[ -n "${base}" ]] || { echo "ERROR: no Python >= 3.12 on PATH (the image runs NeMo-RL on 3.12); set CHECK_PYTHON, e.g. a uv-managed one, or run step 0 in the image (README.md)" >&2; return 1; }
+    echo "   creating ${venv} with ${base} (omegaconf, hydra-core, pydantic at the versions of NeMo-RL's uv.lock)" >&2
+    rm -rf "${venv}"
+    "${base}" -m venv "${venv}" >&2 && "${venv}/bin/pip" install -q --disable-pip-version-check \
+        omegaconf==2.3.1 hydra-core==1.3.2 pydantic==2.13.5 pyyaml >&2 \
+        || { echo "ERROR: could not build ${venv}" >&2; return 1; }
+    echo "${venv}/bin/python"
+}
+if ! PY="$(pick_python)"; then
+    total=$((total + 1))
+else
+    echo "   python: ${PY} ($("${PY}" -c 'import sys, pydantic; print(sys.version.split()[0], "pydantic", pydantic.VERSION)'))"
+    NODES="$(command -v yq >/dev/null && yq r "${CHONK_RECIPE}" cluster.num_nodes || echo 12)"
+    for run in ${RUNS}; do
+        cfg="${WORK}/run-${run}.yaml"
+        compose_cfg "${run}" "${cfg}"
+        name="chonk-sc-check-${run}"
+        # OV: the recipe's own node count (20 at 24k) and run-agent-v.sh's overrides before the user's
+        RUN_ARGS=()
+        nodes="${NODES}"
+        if [[ "${run}" == ov ]]; then
+            nodes="$(awk '/^cluster:/{c=1; next} c && /^[^ ]/{c=0} c && $1 == "num_nodes:" {print $2}' "${AGENT_V_RECIPE}")"
+            agent_v_args "${AGENT_V_TRAIN}" "${RL_REGISTRY_CRED_FILE}" "${AGENT_V_JOBS}" || { total=$((total + 1)); continue; }
+            RUN_ARGS=("${AGENT_V_ARGS[@]}")
+        fi
+        echo "-- run ${run^^}: ${cfg}"
+        sed 's/^/   | /' "${cfg}"
+        # the overrides launch.sh appends to the driver command
+        ( cd "${WORK}" && "${PY}" -I "${HERE}/check.py" "${NEMO_RL_DIR}" "${cfg}" "${run}" \
+            cluster.num_nodes="${nodes}" cluster.gpus_per_node=4 \
+            checkpointing.checkpoint_dir="${OUT}/results/${name}" logger.log_dir="${OUT}/logs/${name}" \
+            ${RUN_ARGS[@]+"${RUN_ARGS[@]}"} "$@" )
+        total=$((total + $?))
+        if command -v yq >/dev/null; then
+            echo "   preflight.sh (as launch.sh runs it before sbatch):"
+            # as launch.sh: the driver's cluster.* overrides first, the run launcher's JOB_TIME default
+            case "${run}" in a) jt=01:30:00 ;; b) jt=02:30:00 ;; w) jt=04:00:00 ;; ov) jt=08:00:00 ;; *) jt=03:00:00 ;; esac
+            NEMO_RL_DIR="${NEMO_RL_DIR}" JOB_TIME="${JOB_TIME:-${jt}}" \
+                bash "${ROOT}/backends/nemo-rl/preflight.sh" "${cfg}" "${nodes}" \
+                cluster.num_nodes="${nodes}" cluster.gpus_per_node=4 ${RUN_ARGS[@]+"${RUN_ARGS[@]}"} "$@" | sed 's/^/   | /'
+            (( PIPESTATUS[0] == 0 )) || total=$((total + 1))
+        else
+            echo "   note  yq not found: preflight.sh skipped (launch.sh runs it at submission)"
+        fi
+    done
+fi
+
+echo "== inputs on scratch (warnings only)"
+model="${SCRATCH}/models/apertus2-chonk-lc-iter3576"
+[[ -d "${model}" ]] && echo "  ok    model ${model}" || echo "  WARN  model ${model} missing (run.sh, i.e. run A, stages it; run B does not)"
+if [[ " ${RUNS} " == *" b "* || " ${RUNS} " == *" s "* || " ${RUNS} " == *" o "* || " ${RUNS} " == *" w "* || "${AV_RUNS}" == 1 ]]; then
+    for f in "${HARBOR_ROOT}/train.jsonl" "${HARBOR_ROOT}/validation.jsonl" "${HARBOR_TASKS_DIR}"; do
+        [[ -e "${f}" ]] && echo "  ok    ${f}" || echo "  WARN  ${f} missing (runs B and S need it)"
+    done
+fi
+if [[ "${AV_RUNS}" == 1 ]]; then
+    # run OV (run-agent-v.sh): it prepares the tasks on first use and fetches chisel itself; files are only
+    # tested, never read
+    [[ -s "${HARBOR_ROOT}/train.jsonl" ]] || {
+        store="${VERIFIED_STORE:-/capstor/store/cscs/swissai/infra01/datasets/swe_and_agentic_gym_datasets/harbor_verified_tasks}"
+        [[ -d "${store}" ]] && echo "  note  run-agent-v.sh will prepare the tasks from ${store} into ${HARBOR_ROOT} (~1.4 GB)" \
+            || echo "  WARN  no prepared tasks in ${HARBOR_ROOT} and no task store ${store} (VERIFIED_STORE)"; }
+    [[ -s "${AGENT_V_TRAIN}" ]] && echo "  ok    filtered rows ${AGENT_V_TRAIN}: $(wc -l < "${AGENT_V_TRAIN}")" \
+        || echo "  note  ${AGENT_V_TRAIN} not written yet (run-agent-v.sh writes it)"
+    echo "  note  chisel and the agent in the pods: Breithorn's read-only mounts under /opt/rl-tools (each pod checks they are there and logs their --version)"
+    # the client runs on the node (GH200: linux arm64); the pods' chisel is mounted
+    f="${CHISEL_DIR}/chisel_${CHISEL_VERSION:-1.12.0}_linux_arm64"
+    [[ -x "${f}" ]] && echo "  ok    chisel client for the node ${f}" || echo "  note  ${f} missing (run-agent-v.sh fetches it)"
+    [[ -r "${RL_REGISTRY_CRED_FILE}" && -s "${RL_REGISTRY_CRED_FILE}" ]] && echo "  ok    registry credentials file ${RL_REGISTRY_CRED_FILE} (not read)" \
+        || echo "  WARN  no registry credentials file ${RL_REGISTRY_CRED_FILE} (the verified images are private)"
+    # long context: the KCP inputs (common.sh kcp_setup; experiments/long-context/setup-kcp.sh) and how the launchers
+    # will stage the export (MODELING_SOURCE: linked whole, stage_model.sh checks its hfconverter commit)
+    if [[ "${KCP}" == 1 ]]; then
+        kdir="${KCP_MEGATRON_DIR:-${PROJECTS_DIR}/megatron-lm-moe-apertus2-kcp}" kfla="${KCP_FLA_DIR:-${PROJECTS_DIR}/fla-0.5.2}"
+        git -C "${kdir}" rev-parse --verify -q rl-kcp >/dev/null 2>&1 && echo "  ok    KCP Megatron ${kdir} (branch rl-kcp)" \
+            || echo "  WARN  KCP=1 but ${kdir} has no branch rl-kcp: run experiments/long-context/setup-kcp.sh (README.md)"
+        [[ -d "${kfla}/fla/ops/cp" ]] && echo "  ok    flash-linear-attention 0.5.2 ${kfla}" \
+            || echo "  WARN  KCP=1 but ${kfla} has no fla/ops/cp: run experiments/long-context/setup-kcp.sh (README.md)"
+    fi
+    if [[ -r "${SFT_MODEL_SRC}/config.json" ]]; then
+        [[ -f "${SFT_MODEL_SRC}/MODELING_SOURCE" ]] \
+            && echo "  note  ${SFT_MODEL_SRC} carries modeling code ($(head -c 80 "${SFT_MODEL_SRC}/MODELING_SOURCE")): staged as a link" \
+            || echo "  note  ${SFT_MODEL_SRC} has no MODELING_SOURCE: staged as a copy of its small files with linked shards"
+    fi
+fi
+if [[ " ${RUNS} " == *" s "* || " ${RUNS} " == *" o "* || " ${RUNS} " == *" w "* || "${AV_RUNS}" == 1 ]]; then
+    [[ -r "${SFT_MODEL_SRC}/config.json" && -r "${SFT_MODEL_SRC}/model.safetensors.index.json" ]] \
+        && echo "  ok    SFT export ${SFT_MODEL_SRC}: $(find "${SFT_MODEL_SRC}/" -maxdepth 1 -name '*.safetensors' | wc -l) shards" \
+        || echo "  WARN  SFT export ${SFT_MODEL_SRC}: no readable config.json + model.safetensors.index.json (run S needs it)"
+    [[ -f "${SFT_MODEL_DIR}/MODELING_SOURCE" ]] && echo "  ok    staged ${SFT_MODEL_DIR}" \
+        || echo "  note  ${SFT_MODEL_DIR} not staged yet (run-s.sh stages it)"
+    # what a filesystem outage can leave behind (Alps, 2026-11-13) and a presence check misses: shard links
+    # that no longer resolve, and a harbor_agent venv an interrupted build left without Harbor, which Gym
+    # reuses anyway (skip_venv_if_present, cli/setup_command.py: bin/python + bin/activate suffice)
+    if [[ -d "${SFT_MODEL_DIR}" ]]; then
+        broken="$(find "${SFT_MODEL_DIR}/" -maxdepth 1 -xtype l | wc -l)"
+        (( broken == 0 )) && echo "  ok    staged links resolve" \
+            || echo "  WARN  ${broken} broken link(s) in ${SFT_MODEL_DIR}: delete the directory, run-s.sh stages it again"
+    fi
+    want="$(sed -nE 's/^harbor @ .*@v([0-9.]+).*/\1/p' \
+        "${NEMO_RL_DIR}/3rdparty/Gym-workspace/Gym/responses_api_agents/harbor_agent/requirements.txt" 2>/dev/null)"
+    seen=""
+    # the venv root is set twice (run-harbor-osb.sh: $HARBOR_ROOT/venvs, the EDF: GYM_VENV_DIR); check both
+    for vroot in "${GYM_VENV_DIR:-${SCRATCH}/nemo-rl-apertus2/gym-venvs}" "${NEMO_GYM_VENV_DIR:-${HARBOR_ROOT}/venvs}"; do
+        v="${vroot}/responses_api_agents/harbor_agent/.venv"
+        [[ -e "${v}" && " ${seen} " != *" ${v} "* ]] || continue
+        seen+=" ${v}"
+        have="$(find "${v}"/lib/python3*/site-packages -maxdepth 1 -name 'harbor-*.dist-info' 2>/dev/null \
+            | sed -E 's#.*/harbor-(.*)\.dist-info$#\1#' | head -1)"
+        if [[ -n "${have}" && "${have}" == "${want}" ]]; then
+            echo "  ok    ${v}: harbor ${have}"
+        else
+            echo "  WARN  ${v}: harbor '${have:-none}', the Gym checkout pins '${want:-?}': delete the venv, the run rebuilds it"
+        fi
+    done
+    [[ -n "${seen}" ]] || echo "  note  no harbor_agent venv yet (the run builds it)"
+    [[ -r "${OPENSANDBOX_API_KEY_FILE}" ]] && echo "  ok    key file ${OPENSANDBOX_API_KEY_FILE}" \
+        || echo "  WARN  no OpenSandbox key file ${OPENSANDBOX_API_KEY_FILE} (run S reads it)"
+fi
+
+if (( total )); then echo "== step 0: ${total} failure(s)"; exit 1; fi
+echo "== step 0: all checks passed"

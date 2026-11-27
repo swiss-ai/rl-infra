@@ -1,0 +1,14 @@
+# The 12-node recipe cut to 6 nodes for plumbing runs: 4 trainer nodes (EP16) + 2 vLLM nodes.
+# Not validated by the Apertus 2 blueprint, which only ran 12 nodes (8 + 4, EP32).
+defaults: apertus2-chonk-vllm-adamw.yaml
+
+cluster:
+  num_nodes: 6
+
+policy:
+  generation:
+    colocated:
+      resources:
+        num_nodes: 2
+  megatron_cfg:
+    expert_model_parallel_size: 16

@@ -1,0 +1,303 @@
+From 1045ea22ffc35d68521c40febe28fe5f235a2457 Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Sun, 15 Nov 2026 06:24:14 +0000
+Subject: [PATCH 35/35] fix(harbor_agent): Terminus-2 ends the episode after 8
+ consecutive truncations
+
+On a reply that hits max_tokens with nothing salvageable (always, with the
+json parser), Harbor 0.25's Terminus2._query_llm appends it plus "ERROR!!
+NONE of the actions ..." and calls itself again, with no limit. In jobs
+5350472 and 5355345, 3 trials each looped 320 times until Python's
+recursion limit, ran 620-1125 s, came back without a reward and held up
+the step.
+
+Terminus2NemoGym counts the nesting of _query_llm, which only recurses on
+such a reply, and at max_consecutive_truncations (default 8, None: no
+limit) makes no further model call: a placeholder unwinds the chain
+without an exception (each level's @retry would retry one), and the
+outermost call raises TruncationLoopError. run() already turns that into
+a normal return, so Harbor runs the verifier and the rollout gets a real
+reward, as when the context overflows.
+
+Default 8: in those two jobs (512 trials) 95% of truncation runs had 1-3
+replies, no trial with a run of 6 or more got a reward above 0, and every
+run of 10 or more ended in reward 0, a recursion error or a timeout.
+
+The kwarg joins SHARED_AGENT_KWARGS, so OpenCode and mini drop it when an
+env yaml sets it.
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ .../custom_agents/installed_compat.py         |   8 +-
+ .../custom_agents/terminus_2_nemo_gym.py      |  43 ++++++-
+ .../test_mini_swe_agent_nemo_gym.py           |   2 +
+ .../custom_agents/test_opencode_nemo_gym.py   |   2 +
+ .../custom_agents/test_terminus_2_nemo_gym.py | 115 ++++++++++++++++++
+ 5 files changed, 165 insertions(+), 5 deletions(-)
+
+diff --git a/responses_api_agents/harbor_agent/custom_agents/installed_compat.py b/responses_api_agents/harbor_agent/custom_agents/installed_compat.py
+index be09bbc40..b51a6f417 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/installed_compat.py
++++ b/responses_api_agents/harbor_agent/custom_agents/installed_compat.py
+@@ -40,9 +40,10 @@ from jinja2 import Environment
+ from pydantic import BaseModel
+ 
+ 
+-# kwargs that harbor_agent or the shared Terminus-2 harbor_agent_kwargs give to whichever agent runs. The last four
+-# are Terminus-2 options from Gym's configs/harbor_agent_opensandbox_training.yaml, which every run loads; an agent
+-# overlay merged on top cannot delete them (OmegaConf), so OpenCode and mini get them too (job 5330618).
++# kwargs that harbor_agent or the shared Terminus-2 harbor_agent_kwargs give to whichever agent runs. The last five
++# are Terminus-2 options from Gym's configs/harbor_agent_opensandbox_training.yaml, which every run loads, or from an
++# env yaml under it; an agent overlay merged on top cannot delete them (OmegaConf), so OpenCode and mini get them too
++# (job 5330618).
+ SHARED_AGENT_KWARGS = (
+     "responses_create_params",
+     "temperature",
+@@ -53,6 +54,7 @@ SHARED_AGENT_KWARGS = (
+     "collect_rollout_details",
+     "trajectory_config",
+     "nemo_model_server_timeout_sec",
++    "max_consecutive_truncations",
+ )
+ 
+ 
+diff --git a/responses_api_agents/harbor_agent/custom_agents/terminus_2_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/terminus_2_nemo_gym.py
+index 91c24d84c..274464863 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/terminus_2_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/terminus_2_nemo_gym.py
+@@ -18,7 +18,7 @@ from typing import Any, Literal
+ 
+ from harbor.agents.terminus_2.terminus_2 import Terminus2, Terminus2Options
+ from harbor.environments.base import BaseEnvironment
+-from harbor.llms.base import BaseLLM
++from harbor.llms.base import BaseLLM, LLMResponse
+ from harbor.models.agent.context import AgentContext
+ from pydantic import Field
+ 
+@@ -26,8 +26,12 @@ from responses_api_agents.harbor_agent.custom_agents.llms.nemo_gym_llm import Ne
+ from responses_api_agents.harbor_agent.custom_envs.singularity.singularity import MemoryLimitExceededError
+ 
+ 
++class TruncationLoopError(RuntimeError):
++    """Too many consecutive replies hit the output limit with nothing salvageable; ends the episode."""
++
++
+ class Terminus2NemoGymOptions(Terminus2Options):
+-    """Terminus2's options plus the two this subclass adds.
++    """Terminus2's options plus the three this subclass adds.
+ 
+     harbor >=0.20 validates agent kwargs against ``options_model`` rather than
+     the constructor signature, and AgentOptions sets ``extra="forbid"``, so a
+@@ -43,6 +47,12 @@ class Terminus2NemoGymOptions(Terminus2Options):
+         default=120.0,
+         description="Per-request timeout for the NeMo Gym model server.",
+     )
++    max_consecutive_truncations: int | None = Field(
++        default=8,
++        ge=1,
++        description="End the episode after this many consecutive replies that hit the output limit with nothing "
++        "salvageable (Terminus2 re-asks without bound). None: no limit.",
++    )
+ 
+ 
+ class Terminus2NemoGym(Terminus2):
+@@ -101,6 +111,8 @@ class Terminus2NemoGym(Terminus2):
+         # builds its own backend by calling self._init_llm() from __init__.
+         # Stash the instance first so the override below can hand it back.
+         self._injected_llm = llm
++        self._truncation_depth = 0
++        self._truncation_limit_hit = False
+ 
+         super().__init__(
+             logs_dir=logs_dir,
+@@ -136,6 +148,33 @@ class Terminus2NemoGym(Terminus2):
+         """
+         return self._injected_llm
+ 
++    async def _query_llm(self, chat, prompt, original_instruction="", session=None):
++        """Terminus2._query_llm with a bound on its re-asks after unsalvageable truncations.
++
++        On a reply that hit the output limit with nothing salvageable, Terminus2._query_llm appends it plus
++        "ERROR!! NONE of the actions ..." and calls itself (this method) again, with no limit; jobs 5350472 and
++        5355345 looped ~320 times until Python's recursion limit. That is the only place it recurses, so the
++        nesting depth here is the number of consecutive such replies. At the limit no model call is made: a
++        placeholder unwinds the chain without an exception (one raised inside it would be retried by each
++        level's @retry), and the outermost call, outside @retry, raises TruncationLoopError, which run() turns
++        into a normal end of the episode, so the verifier still runs.
++        """
++        limit = self.options.max_consecutive_truncations
++        if limit is not None and self._truncation_depth >= limit:
++            self._truncation_limit_hit = True
++            return LLMResponse(content="")
++        self._truncation_depth += 1
++        try:
++            response = await super()._query_llm(chat, prompt, original_instruction, session)
++        finally:
++            self._truncation_depth -= 1
++        if self._truncation_depth == 0 and self._truncation_limit_hit:
++            self._truncation_limit_hit = False
++            raise TruncationLoopError(
++                f"{limit} consecutive replies hit the output limit with nothing salvageable; ending the episode"
++            )
++        return response
++
+     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
+         """Override run() to gracefully handle agent errors.
+ 
+diff --git a/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py
+index e971a616b..721ddb8a1 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/test_mini_swe_agent_nemo_gym.py
+@@ -274,4 +274,6 @@ def test_preflight_accepts_the_training_yaml_kwargs() -> None:
+     cfg = OmegaConf.to_container(OmegaConf.load(path), resolve=False)
+     kwargs = dict(cfg["harbor_agent"]["responses_api_agents"]["harbor_agent"]["harbor_agent_kwargs"])
+     kwargs.update(api_base="http://127.0.0.1:8000/v1", version="8e8a515fdcecf3a8e45c3909f7f196bfe18ca89a")
++    # a Terminus-2 option an env yaml may set (Terminus2NemoGym's cap on truncation re-asks)
++    kwargs.update(max_consecutive_truncations=8)
+     MiniSweAgentNemoGym.preflight(kwargs=kwargs, env={})
+diff --git a/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
+index 817687e2b..3ce78c08e 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/test_opencode_nemo_gym.py
+@@ -510,6 +510,8 @@ def _training_yaml_kwargs() -> dict:
+ def _training_yaml_plus_opencode() -> dict:
+     return {
+         **_training_yaml_kwargs(),
++        # a Terminus-2 option an env yaml may set (Terminus2NemoGym's cap on truncation re-asks)
++        "max_consecutive_truncations": 8,
+         "api_base": API_BASE,
+         "responses_create_params": {"temperature": 1.0},
+         "temperature": 1.0,
+diff --git a/responses_api_agents/harbor_agent/custom_agents/test_terminus_2_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/test_terminus_2_nemo_gym.py
+index 47305a358..66244c705 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/test_terminus_2_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/test_terminus_2_nemo_gym.py
+@@ -15,6 +15,11 @@
+ from types import SimpleNamespace
+ from unittest.mock import MagicMock
+ 
++import pytest
++from harbor.agents.terminus_2.terminus_2 import Terminus2
++from harbor.llms.base import LLMResponse, OutputLengthExceededError
++from harbor.models.agent.context import AgentContext
++
+ from responses_api_agents.harbor_agent.custom_agents.llms.nemo_gym_llm import NemoGymLLM
+ from responses_api_agents.harbor_agent.custom_agents.terminus_2_nemo_gym import Terminus2NemoGym
+ 
+@@ -64,3 +69,113 @@ def test_attach_routed_experts_skips_steps_without_rollout_details():
+ 
+     assert metrics.extra == {}
+     agent._dump_trajectory.assert_not_called()
++
++
++# Jobs 5350472 and 5355345: a reply that hit max_tokens with nothing salvageable makes Harbor's Terminus2._query_llm
++# append it plus "ERROR!! NONE of the actions ..." and call itself again, with no depth limit. Three trials per job
++# looped ~320 times until Python's recursion limit and came back without a reward.
++VALID_REPLY = '{"analysis": "a", "plan": "p", "commands": [], "task_complete": false}'
++
++
++class _Runaway(BaseException):
++    """Ends a test whose agent never stops asking (BaseException: Harbor's @retry does not retry it)."""
++
++
++class _FakeChat:
++    """Chat whose replies hit max_tokens with nothing salvageable, except calls listed in ``ok`` / ``salvageable``."""
++
++    def __init__(self, ok=(), salvageable=(), runaway_after=50):
++        self.messages = []
++        self.calls = 0
++        self.ok = set(ok)
++        self.salvageable = set(salvageable)
++        self.runaway_after = runaway_after
++
++    async def chat(self, prompt, **kwargs):
++        self.calls += 1
++        if self.calls > self.runaway_after:
++            raise _Runaway(f"the agent asked {self.calls} times in a row")
++        if self.calls in self.ok:
++            return LLMResponse(content=VALID_REPLY)
++        text = "SALVAGEABLE" if self.calls in self.salvageable else '{"analysis": "a reply that never ends'
++        raise OutputLengthExceededError("hit max_tokens", truncated_response=text)
++
++    def reset_response_chain(self):
++        pass
++
++
++class _SalvagingParser:
++    """Stands in for Harbor's XML parser, the only one with salvage_truncated_response."""
++
++    def salvage_truncated_response(self, truncated_response):
++        return (LLMResponse(content=VALID_REPLY) if truncated_response == "SALVAGEABLE" else None), False
++
++    def parse_response(self, response):
++        return SimpleNamespace(warning=None)
++
++
++def _agent(tmp_path, **kwargs) -> Terminus2NemoGym:
++    llm = NemoGymLLM(model_name="test-model", api_base="http://localhost:8000/v1")
++    return Terminus2NemoGym(logs_dir=tmp_path, model_name="test-model", llm=llm, **kwargs)
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("kwargs, calls", [({}, 8), ({"max_consecutive_truncations": 3}, 3)])
++async def test_unsalvageable_truncations_stop_after_max_consecutive_truncations(tmp_path, kwargs, calls) -> None:
++    agent = _agent(tmp_path, **kwargs)
++    chat = _FakeChat()
++
++    with pytest.raises(Exception, match=f"{calls} consecutive replies") as caught:
++        await agent._query_llm(chat, "do the task")
++
++    assert type(caught.value).__name__ == "TruncationLoopError"
++    assert chat.calls == calls
++    # the next turn starts from zero again
++    chat.calls, chat.ok = 0, {1}
++    assert (await agent._query_llm(chat, "next")).content == VALID_REPLY
++
++
++@pytest.mark.asyncio
++async def test_a_reply_or_a_salvaged_reply_resets_the_count(tmp_path) -> None:
++    agent = _agent(tmp_path, max_consecutive_truncations=3)
++    agent._parser = _SalvagingParser()
++    # turn 1: 2 truncations, then a reply; turn 2: 2 truncations, then a salvageable one; turn 3: 3 truncations
++    chat = _FakeChat(ok={3}, salvageable={6})
++
++    assert (await agent._query_llm(chat, "turn 1")).content == VALID_REPLY
++    assert (await agent._query_llm(chat, "turn 2")).content == VALID_REPLY
++    assert chat.calls == 6
++    with pytest.raises(Exception, match="3 consecutive replies"):
++        await agent._query_llm(chat, "turn 3")
++    assert chat.calls == 9
++
++
++@pytest.mark.asyncio
++async def test_none_keeps_harbors_unbounded_retries(tmp_path) -> None:
++    agent = _agent(tmp_path, max_consecutive_truncations=None)
++    with pytest.raises(_Runaway):
++        await agent._query_llm(_FakeChat(runaway_after=20), "do the task")
++
++
++@pytest.mark.asyncio
++async def test_the_episode_ends_normally_so_the_verifier_runs(tmp_path, monkeypatch) -> None:
++    # Harbor's trial runs the verifier only when agent.run returns (or raises AgentTimeoutError /
++    # NonZeroAgentExitCodeError); run() turns TruncationLoopError into a normal return, as on max_turns.
++    chat = _FakeChat()
++
++    async def one_turn(self, instruction, environment, context):
++        await self._query_llm(chat, instruction)
++
++    monkeypatch.setattr(Terminus2, "run", one_turn)
++    agent = _agent(tmp_path, max_consecutive_truncations=2)
++
++    await agent.run("do the task", environment=MagicMock(), context=AgentContext())
++
++    assert chat.calls == 2
++    assert (tmp_path / "agent_error_flags.json").exists()
++
++
++def test_preflight_checks_max_consecutive_truncations() -> None:
++    Terminus2NemoGym.preflight(kwargs={"max_consecutive_truncations": 5}, env={})
++    with pytest.raises(ValueError):
++        Terminus2NemoGym.preflight(kwargs={"max_consecutive_truncations": 0}, env={})
+-- 
+2.56.0
+

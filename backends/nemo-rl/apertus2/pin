@@ -42,6 +42,8 @@ GYM_URL=https://github.com/swiss-ai/nemo-gym.git
 GYM_COMMIT=267305e2a7bf88153e8ebbca1029ecc1e0f67b25
 # The Apertus 2 message format, for tasks on checkpoints trained on it. The commit that tokenized the
 # SFT data. The repository is private, so setup.sh clones it on the login node and jobs install it from there.
-APERTUS_COMMON_URL=https://github.com/swiss-ai/apertus-common.git
+# An APERTUS_COMMON_URL set beforehand wins, e.g. git@github.com:swiss-ai/apertus-common.git where only
+# an SSH key has access (experiments/chonk-sc/run-s.sh does that).
+: "${APERTUS_COMMON_URL:=https://github.com/swiss-ai/apertus-common.git}"
 APERTUS_COMMON_COMMIT=494c2be79080aa8fbcd46409b96560f72707cd69
 APERTUS_COMMON_REF=main

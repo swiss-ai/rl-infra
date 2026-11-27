@@ -1,0 +1,100 @@
+#!/bin/bash
+# Run V: smoke test of Kostas' verified Harbor tasks on Alps (../../envs/harbor-verified-sft.yaml). It covers
+# what the micro runs cannot: verifier pods of their own ([verifier] environment_mode = "separate", Gym patches
+# 0011-0012) and task images pulled from rl-registry with the credentials file (0013, 0031). Terminus-2, Gym
+# entrypoint through ../../run.sh as in experiments/runs.md "SFT, Harbor verified tasks" (HANGANG job 1254979),
+# not the Single Controller. One step of 8 x 8 trials, no validation, no checkpoint.
+#   bash experiments/chonk-sc/run-v.sh [overrides...]        DRY_RUN=1 shows the job without submitting it
+# First use: extracts the tasks into HARBOR_ROOT (~1.4 GB, ~80k files; envs/prepare_harbor_verified_tasks.sh).
+# (TASK_STORE, not STORE: Alps exports STORE and sites/alps.env builds the image paths from it.)
+# Env: VERIFIED_STORE (default the capstor store HANGANG mirrors), HARBOR_ROOT ($SCRATCH/osb/harbor_verified),
+# COLLECT_ARGS (default --include-unverified when the store has no tasks.csv, as on HANGANG), RUN, JOB_TIME
+# (02:00:00), PARTITION (normal), DRIVER_RETRIES (0), RL_REGISTRY_CRED_FILE (~/.rl_registry_cred), OPENSANDBOX_API_KEY_FILE (~/.opensandbox_token),
+# APERTUS_COMMON_URL (SSH, as run-s.sh), EXCLUDE_CAMPAIGNS (regex, default swe-rebench-v2\.1-rl; empty = all),
+# EXCLUDE_TASKS (regex on the task part after `<campaign>__`, default the 5 tasks whose verifier timed out in
+# job 5356101; empty = none), RECIPE (default recipes/apertus2-chonk-sft19374-alps-vllm-adamw-tools.yaml),
+# REGISTRY_CHECK (1: the first task's images must be pullable before submitting; pod: plus one test pod; 0: skip).
+# Harbor trial dirs: $SCRATCH/harbor-jobs/<RUN>.
+# At most SANDBOXES (64) pods on Breithorn, to leave room for the other tenants: harbor_agent concurrency is one
+# semaphore around the whole trial, and with [verifier] environment_mode = "separate" Harbor stops the agent pod
+# before it starts the verifier pod (harbor/trial/single_step.py), so one pod per trial. PROMPTS (8) prompts x 8
+# rollouts per step, train_global_batch_size to match (as jobs 5356101-5359900). main's 2026-11-14 defaults in
+# envs/harbor-verified-sft.yaml (concurrency 200, 64 x 8 = 512 per step, for HANGANG) would hold 200 pods.
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "${HERE}/../.." && pwd)"
+
+TASK_STORE="${VERIFIED_STORE:-/capstor/store/cscs/swissai/infra01/datasets/swe_and_agentic_gym_datasets/harbor_verified_tasks}"
+HARBOR_ROOT="${HARBOR_ROOT:-${SCRATCH}/osb/harbor_verified}"
+# absolute paths: HOME inside the container is not yours; the files themselves are never read here
+CRED="$(realpath -m "${RL_REGISTRY_CRED_FILE:-${HOME}/.rl_registry_cred}")"
+KEY="$(realpath -m "${OPENSANDBOX_API_KEY_FILE:-${HOME}/.opensandbox_token}")"
+[[ -r "${CRED}" ]] || { echo "ERROR: no registry credentials file ${CRED} (username:password, chmod 600)" >&2; exit 1; }
+[[ -r "${KEY}" ]] || { echo "ERROR: no OpenSandbox key file ${KEY}" >&2; exit 1; }
+
+if [[ ! -s "${HARBOR_ROOT}/train.jsonl" ]]; then
+    [[ -d "${TASK_STORE}" ]] || { echo "ERROR: no task store ${TASK_STORE}; set VERIFIED_STORE" >&2; exit 1; }
+    if [[ -z "${COLLECT_ARGS+x}" ]] && ! compgen -G "${TASK_STORE}/*/tasks.csv" > /dev/null; then
+        echo "note: no <campaign>/tasks.csv in ${TASK_STORE}: taking every task (--include-unverified), as on HANGANG"
+        export COLLECT_ARGS=--include-unverified
+    fi
+    echo "== preparing the verified tasks in ${HARBOR_ROOT}"
+    bash "${ROOT}/envs/prepare_harbor_verified_tasks.sh" "${TASK_STORE}" "${HARBOR_ROOT}"
+fi
+echo "== tasks: $(wc -l < "${HARBOR_ROOT}/train.jsonl") train, $(wc -l < "${HARBOR_ROOT}/validation.jsonl") validation rows in ${HARBOR_ROOT}"
+
+# Campaigns left out of training (regex on the campaign name). swe-rebench-v2.1-rl: its pods took up to
+# 1492 s to start and 10 of 24 hit the 1800 s start timeout (job 5350472), and a step waits for its
+# slowest group. Rows look like {"instance_id": "verified::<campaign>__<task>", ...} (json.dumps).
+EXCLUDE_CAMPAIGNS="${EXCLUDE_CAMPAIGNS-swe-rebench-v2\.1-rl}"
+# Single tasks left out (regex on the task part, the instance_id after `verified::<campaign>__`, matched to
+# its end). Their verifier failed in most of their 8 trials in job 5356101 (all 32 VerifierTimeoutError at
+# the 1200 s cap of 1302 trials; the modin ones partly because the verifier pod stopped answering), and
+# a step waits for its slowest group.
+EXCLUDE_TASKS="${EXCLUDE_TASKS-gui-cs__terminal-gui-4860|ml-explore__mlx-3604|floci-io__floci-1932|modin-project__modin-(6369|7193)}"
+TRAIN="${HARBOR_ROOT}/train.jsonl"
+DROP=()
+[[ -z "${EXCLUDE_CAMPAIGNS}" ]] || DROP+=(-e "\"instance_id\": \"verified::[^\"]*(${EXCLUDE_CAMPAIGNS})__")
+[[ -z "${EXCLUDE_TASKS}" ]] || DROP+=(-e "\"instance_id\": \"verified::[^\"]*__(${EXCLUDE_TASKS})\"")
+if (( ${#DROP[@]} )); then
+    TRAIN="${HARBOR_ROOT}/train-filtered.jsonl"
+    grep -vE "${DROP[@]}" "${HARBOR_ROOT}/train.jsonl" > "${TRAIN}.tmp" || true
+    [[ -s "${TRAIN}.tmp" ]] || {
+        echo "ERROR: EXCLUDE_CAMPAIGNS='${EXCLUDE_CAMPAIGNS}' EXCLUDE_TASKS='${EXCLUDE_TASKS}' leave no training rows" >&2
+        rm -f "${TRAIN}.tmp"; exit 1; }
+    mv -f "${TRAIN}.tmp" "${TRAIN}"
+    echo "== left out $(( $(wc -l < "${HARBOR_ROOT}/train.jsonl") - $(wc -l < "${TRAIN}") )) rows" \
+        "(campaigns /${EXCLUDE_CAMPAIGNS}/, tasks /${EXCLUDE_TASKS}/); training on ${TRAIN}"
+fi
+
+# fail before setup and the queue wait when Breithorn cannot pull the task images (job 5374114: every pod
+# Pending, 10.7 node-hours for nothing); REGISTRY_CHECK=0 skips it, =pod also starts one test pod
+bash "${ROOT}/experiments/osb-reach/registry_precheck.sh" "${TRAIN}" "${HARBOR_ROOT}" || exit 1
+
+# exported before use: in `RUN=x bash run.sh ... $RUN` the argument's $RUN is expanded by the calling shell first
+export RUN="${RUN:-sft19374-harbor-verified-$(date +%Y%m%d-%H%M%S)}"
+export JOB_TIME="${JOB_TIME:-02:00:00}"
+# as run-s.sh: run.sh's default is sites/alps.env's RUN_PARTITION=preemptable, which exists on Clariden only
+# (Daint: normal); one attempt, so a failed smoke test leaves one set of trial dirs
+export PARTITION="${PARTITION:-normal}" DRIVER_RETRIES="${DRIVER_RETRIES:-0}"
+export APERTUS_COMMON_URL="${APERTUS_COMMON_URL:-git@github.com:swiss-ai/apertus-common.git}"
+JOBS="${SCRATCH}/harbor-jobs/${RUN}"
+SANDBOXES="${SANDBOXES:-64}" PROMPTS="${PROMPTS:-8}"
+mkdir -p "${JOBS}"
+echo "== run ${RUN}; Harbor trial dirs in ${JOBS}; at most ${SANDBOXES} sandboxes, ${PROMPTS} x 8 rollouts per step"
+
+RECIPE="${RECIPE:-${ROOT}/recipes/apertus2-chonk-sft19374-alps-vllm-adamw-tools.yaml}"
+echo "== recipe ${RECIPE}"
+RECIPE="${RECIPE}" \
+exec bash "${ROOT}/run.sh" "${ROOT}/envs/harbor-verified-sft.yaml" \
+    grpo.max_num_steps=1 grpo.val_at_start=false grpo.val_at_end=false grpo.val_period=0 \
+    checkpointing.enabled=false \
+    harbor_data_dir="${HARBOR_ROOT}" \
+    data.train.data_path="${TRAIN}" \
+    registry_cred_file="${CRED}" \
+    env.nemo_gym.sandbox.opensandbox.connection.api_key_file="${KEY}" \
+    env.nemo_gym.sandbox.opensandbox.attribution.run="${RUN}" \
+    env.nemo_gym.harbor_agent.responses_api_agents.harbor_agent.harbor_jobs_dir="${JOBS}" \
+    env.nemo_gym.harbor_agent.responses_api_agents.harbor_agent.concurrency="${SANDBOXES}" \
+    grpo.num_prompts_per_step="${PROMPTS}" policy.train_global_batch_size="$(( PROMPTS * 8 ))" \
+    "$@"

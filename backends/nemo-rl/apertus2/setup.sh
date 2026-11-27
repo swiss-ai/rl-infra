@@ -80,7 +80,12 @@ checkout_at() {   # <url> <dir> <commit> <ref the commit is reachable from>
     local url="$1" dir="$2" commit="$3" ref="$4"
     [[ "$(git -C "${dir}" rev-parse HEAD 2>/dev/null)" == "${commit}" ]] && return 0
     echo "== $(basename "${dir}") at ${commit:0:9}"
-    [[ -d "${dir}/.git" ]] || git clone --filter=blob:none --no-checkout "${url}" "${dir}"
+    # an existing checkout follows the URL too (e.g. switched from HTTPS to SSH)
+    if [[ -d "${dir}/.git" ]]; then
+        git -C "${dir}" remote set-url origin "${url}"
+    else
+        git clone --filter=blob:none --no-checkout "${url}" "${dir}"
+    fi
     git -C "${dir}" cat-file -e "${commit}^{commit}" 2>/dev/null || git -C "${dir}" fetch origin "${ref}"
     git -C "${dir}" checkout --detach "${commit}"
 }
@@ -146,7 +151,10 @@ export ENROOT_CACHE_PATH="${SCRATCH}/tmp/enroot/cache" ENROOT_DATA_PATH="${SCRAT
 ENROOT_TMP_BASE="${ENROOT_TMP_BASE:-/tmp}"
 stage_image() {   # <ref> <master> <work>
     local ref="$1" master="$2" work="$3" tmp
-    if [[ ! -s "${master}" ]]; then
+    if [[ ! -s "${master}" && -s "${work}" ]]; then
+        # e.g. STORE points somewhere without the masters: use the working copy, do not re-import
+        echo "WARNING: image master '${master}' missing; using ${work} as is (scratch is purged: keep a persistent copy and point the *_IMAGE_MASTER setting at it)" >&2
+    elif [[ ! -s "${master}" ]]; then
         [[ -n "${ref}" && -n "${master}" ]] \
             || { echo "ERROR: image master '${master}' missing and no registry to import it from on ${SITE}" >&2; return 1; }
         echo "== importing ${ref}"
@@ -157,7 +165,9 @@ stage_image() {   # <ref> <master> <work>
         rm -rf "${ENROOT_TEMP_PATH}"
         mv "${tmp}" "${work}"
         echo "== saving master ${master}"
-        cp "${work}" "${master}.tmp.$$" && mv "${master}.tmp.$$" "${master}"
+        mkdir -p "$(dirname "${master}")"
+        cp "${work}" "${master}.tmp.$$" && mv "${master}.tmp.$$" "${master}" \
+            || { rm -f "${master}.tmp.$$"; echo "WARNING: could not save master ${master}; ${work} is the only copy" >&2; }
     elif [[ ! -s "${work}" ]]; then
         echo "== staging ${work} from master"
         mkdir -p "$(dirname "${work}")"
@@ -168,9 +178,20 @@ stage_image() {   # <ref> <master> <work>
         echo "== image present: ${work}"
     fi
 }
+IMAGE_WORK_DIR="$(dirname "${IMAGE_WORK}")"
+if [ -d "${IMAGE_WORK_DIR}" ]
+then
+	:
+elif [ ! -e "${IMAGE_WORK_DIR}" ]
+then
+	mkdir -p "${IMAGE_WORK_DIR}"
+else
+	echo "== Image work path '${IMAGE_WORK_DIR}' already exists and is not a folder." >&2
+	exit 1
+fi
 # Striped for many-node opens; not where the image is a shared master used in place.
-[[ "${IMAGE_WORK}" == "${IMAGE_MASTER}" ]] || lfs setstripe -c 16 -S 4M "$(dirname "${IMAGE_WORK}")" 2>/dev/null || true
-if [[ -s "${IMAGE_MASTER}" ]]; then
+[[ "${IMAGE_WORK}" == "${IMAGE_MASTER}" ]] || lfs setstripe -c 16 -S 4M "${IMAGE_WORK_DIR}" 2>/dev/null || true
+if [[ -s "${IMAGE_MASTER}" || -s "${IMAGE_WORK}" ]]; then
     stage_image "" "${IMAGE_MASTER}" "${IMAGE_WORK}"
 else
     # The image jobs run is built from the JFrog one, not imported.
