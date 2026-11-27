@@ -220,25 +220,6 @@ agent_v_agent() {
     esac
 }
 
-# agent_binaries_env: where the sandboxes get chisel and the in-pod agent (Gym 0047). AGENT_BINARIES=mounted
-# (default): Breithorn mounts them read-only into every new sandbox (the images/agent-bin image volumes, user
-# 2026-11-27) at AGENT_BIN_ROOT/<name>/<version>/ (/opt/rl-tools); nothing is uploaded, setup checks each version.
-# AGENT_BINARIES=upload: as before (chisel uploaded at every start, Gym 0016; OpenCode's archive per trial, Gym 0045).
-# Exports what tunnel-sc.yaml and run-ov.yaml read (sbatch passes them into the job): CHISEL_POD_INSTALL,
-# CHISEL_POD_BINARY, OPENCODE_INSTALL, OPENCODE_BIN. The node's chisel (arm64) comes from CHISEL_DIR either way.
-agent_binaries_env() {
-    export AGENT_BINARIES="${AGENT_BINARIES:-mounted}" AGENT_BIN_ROOT="${AGENT_BIN_ROOT:-/opt/rl-tools}"
-    export CHISEL_VERSION="${CHISEL_VERSION:-1.12.0}"
-    local opencode_version="${OPENCODE_VERSION:-1.17.11}"
-    case "${AGENT_BINARIES}" in
-        mounted) export CHISEL_POD_INSTALL=mounted OPENCODE_INSTALL=mounted \
-                        CHISEL_POD_BINARY="${AGENT_BIN_ROOT}/chisel/${CHISEL_VERSION}/chisel" ;;
-        upload)  export CHISEL_POD_INSTALL=upload OPENCODE_INSTALL=upload CHISEL_POD_BINARY=/tmp/.nemo-gym-chisel ;;
-        *) echo "agent_binaries_env: AGENT_BINARIES must be mounted or upload, not '${AGENT_BINARIES}'" >&2; return 1 ;;
-    esac
-    export OPENCODE_BIN="${AGENT_BIN_ROOT}/opencode/${opencode_version}/opencode"
-}
-
 # agent_v_defaults: run-agent-v.sh's knobs with their defaults (check.sh RUNS=ov checks the same values).
 # CTX 24576 = run V's 24k layout (20 nodes: 16 trainer EP32 + 4 vLLM, trainer data-parallel size 32);
 # CTX 16384 = the 12-node layout (8 trainer EP16, data-parallel size 16); CTX > 24576 = the long-context profile
@@ -559,13 +540,11 @@ check_gym_agents() {
     grep -q server_start_script "${g}/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/model_tunnel.py" 2>/dev/null \
         && ok "Gym patches 0016/0017: per-pod model tunnel (chisel), server started through exec" \
         || bad "Gym patches 0016/0017 missing (server_start_script in custom_envs/nemo_gym_sandbox/model_tunnel.py)"
-    # 0047: AGENT_BINARIES=mounted (agent_binaries_env) uses the binaries Breithorn mounts into every sandbox
-    if [[ "${AGENT_BINARIES:-mounted}" == mounted ]]; then
-        grep -q POD_INSTALL_METHODS "${g}/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/model_tunnel.py" 2>/dev/null \
-            && grep -q "def check_mounted_binary" "${ca}/installed_compat.py" 2>/dev/null \
-            && ok "Gym patch 0047: chisel and the agent from the binaries mounted into the sandbox (AGENT_BINARIES=mounted)" \
-            || bad "Gym patch 0047 missing (pod_install in model_tunnel.py, check_mounted_binary in installed_compat.py); or AGENT_BINARIES=upload"
-    fi
+    # 0047: tunnel-sc.yaml / opencode-sc.yaml use the binaries Breithorn mounts into every sandbox (/opt/rl-tools)
+    grep -q POD_INSTALL_METHODS "${g}/responses_api_agents/harbor_agent/custom_envs/nemo_gym_sandbox/model_tunnel.py" 2>/dev/null \
+        && grep -q "def check_mounted_binary" "${ca}/installed_compat.py" 2>/dev/null \
+        && ok "Gym patch 0047: chisel and the agent from the binaries mounted into the sandbox (/opt/rl-tools)" \
+        || bad "Gym patch 0047 missing (pod_install in model_tunnel.py, check_mounted_binary in installed_compat.py)"
     case "$1" in
         opencode)
             [[ -f "${ca}/opencode_pod/install-opencode-binary.sh.j2" ]] && grep -q "class OpenCodeNemoGym" "${ca}/opencode_nemo_gym.py" 2>/dev/null \
@@ -578,7 +557,7 @@ check_gym_agents() {
             grep -q download_wget "${ca}/opencode_pod/install-opencode-binary.sh.j2" 2>/dev/null \
                 && ok "Gym patch 0044: OpenCode install with any python3, curl or wget; setup failures are infra" \
                 || bad "Gym patch 0044 missing (download_wget in opencode_pod/install-opencode-binary.sh.j2)"
-            # 0045: with AGENT_BINARIES=upload run-ov.yaml sets opencode_install: upload (the archive from OPENCODE_DIR)
+            # 0045: opencode_install: upload (not used by our overlays since 0047; other clusters)
             grep -q POD_ARCHIVE "${ca}/opencode_nemo_gym.py" 2>/dev/null \
                 && ok "Gym patch 0045: OpenCode archive uploaded by the adapter (opencode_install: upload)" \
                 || bad "Gym patch 0045 missing (POD_ARCHIVE in custom_agents/opencode_nemo_gym.py)" ;;

@@ -2,8 +2,7 @@
 # In-pod agent runs on run V's verified Harbor tasks (../../envs/harbor-verified-sft.yaml, Kostas' tasks from
 # several campaigns, separate verifier pods, images from rl-registry) with an agent inside each pod instead of
 # Terminus-2:
-#   AGENT=opencode  run OV: OpenCode 1.17.11 (as runs O / R2), the binary Breithorn mounts into each pod (Gym 0047;
-#                   AGENT_BINARIES=upload: the release archive fetched once, fetch-opencode.sh, and uploaded, Gym 0045)
+#   AGENT=opencode  run OV: OpenCode 1.17.11 (as runs O / R2), the binary Breithorn mounts into each pod (Gym 0047)
 # (another agent = a new AGENT value: common.sh agent_v_tag / agent_v_agent / agent_v_overlays / check_gym_agents,
 # its overlay run-<tag>.yaml, check.py)
 # The agent calls the model through the per-pod chisel tunnel (pod 127.0.0.1:8000 -> policy_model), and the token
@@ -30,9 +29,7 @@
 # OpenSandbox server proxy, the path the tunnel was tested on in runs S/O: use it if the gymtunnel gateway test
 # fails), MODEL_CALLS (1: Gym model-call capture under $SCRATCH/harbor-jobs/<run>/model-calls; 0 off),
 # OPENCODE_TIMEOUT_SEC (1740; AGENT_CAP - 60 when AGENT_CAP is set), OPENCODE_VERSION, OPENCODE_DEBUG, CHISEL_DIR,
-# OPENCODE_DIR ($SCRATCH/opencode; AGENT_BINARIES=upload only), AGENT_BINARIES (mounted: chisel and the agent from
-# the read-only mounts in every sandbox, AGENT_BIN_ROOT /opt/rl-tools; upload: uploaded per sandbox; common.sh
-# agent_binaries_env)
+# (chisel and the agent in the pods: Breithorn's read-only mounts under /opt/rl-tools, Gym 0047)
 # ($SCRATCH/chisel), the long-context knobs (common.sh: SFT_CKPT, THINKING, CP, KCP, CAP, NCCL_MIN, MAX_NEW, MAX_TURNS,
 # AGENT_CAP, TTL, MASK_AGENT_TIMEOUT, MASK_OVERFLOW, KCP_MEGATRON_DIR, KCP_FLA_DIR, KCP_EDF_NAME, HANG_*),
 # and as run-v.sh: VERIFIED_STORE, HARBOR_ROOT ($SCRATCH/osb/harbor_verified), COLLECT_ARGS, EXCLUDE_CAMPAIGNS,
@@ -52,7 +49,6 @@ source "${HERE}/common.sh"
 [[ -z "${AGENTS:-}" ]] || { echo "ERROR: AGENTS is set; the variable is AGENT" >&2; exit 1; }
 TAG="$(agent_v_tag "${AGENT:-}")" || exit 1
 agent_v_defaults || exit 1
-agent_binaries_env || exit 1
 if [[ -n "${AGENT_V_DP}" ]] && (( (PROMPTS * 8) % AGENT_V_DP )); then
     echo "ERROR: PROMPTS=${PROMPTS} gives a batch of $(( PROMPTS * 8 )), not a multiple of the trainer's data-parallel size ${AGENT_V_DP}" >&2
     exit 1
@@ -148,18 +144,12 @@ done
 for v in OPENCODE_VERSION OPENCODE_TIMEOUT_SEC OPENCODE_DEBUG; do
     [[ -z "${!v:-}" ]] || export "${v}"
 done
-# the node's chisel client (and, for AGENT_BINARIES=upload, the pods' copy)
+# chisel: the client runs on the node (linux arm64, from CHISEL_DIR); the server in each pod is Breithorn's mounted
+# linux amd64 binary (tunnel-sc.yaml). The agent is mounted too: nothing to fetch for the pods.
 export CHISEL_VERSION="${CHISEL_VERSION:-1.12.0}" CHISEL_DIR="${CHISEL_DIR:-${SCRATCH}/chisel}"
 bash "${APERTUS2_DIR}/fetch-chisel.sh"
-if [[ "${AGENT}" == opencode && "${OPENCODE_INSTALL}" == upload ]]; then
-    export OPENCODE_DIR="${OPENCODE_DIR:-${SCRATCH}/opencode}"
-    bash "${APERTUS2_DIR}/fetch-opencode.sh"
-fi
-if [[ "${AGENT_BINARIES}" == mounted ]]; then
-    echo "== binaries in the pods: mounted (chisel ${CHISEL_POD_BINARY}, opencode ${OPENCODE_BIN})"
-else
-    echo "== binaries in the pods: uploaded (chisel from ${CHISEL_DIR}, opencode from ${OPENCODE_DIR:-?})"
-fi
+echo "== chisel client on the node: ${CHISEL_DIR}/chisel_${CHISEL_VERSION}_linux_arm64; in the pods (mounted):" \
+     "/opt/rl-tools/chisel/${CHISEL_VERSION}/chisel, opencode /opt/rl-tools/opencode/${OPENCODE_VERSION:-1.17.11}/opencode"
 
 TASK_COPY="${OUT}/configs/${RUN}-task.yaml"
 verified_task_copy "${TASK_COPY}"

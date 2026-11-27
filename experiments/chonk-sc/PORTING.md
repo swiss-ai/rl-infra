@@ -70,7 +70,7 @@ Configs are OmegaConf files merged in order, later ones win; command-line overri
 4. `../harbor-capture-sc/opencode-sc.yaml`: the OpenCode adapter, `harbor_model_base_url`, `sampling_overrides`
 5. `../harbor-capture-sc/tunnel-sc.yaml`: the per-sandbox tunnel
 6. `run-agent-v.yaml`: rollout and stall timeouts, model-call capture, the Apertus 2 reasoning workaround
-7. `run-ov.yaml`: OpenCode on these tasks (working directory, mounted or upload install, timeout)
+7. `run-ov.yaml`: OpenCode on these tasks (working directory, timeout)
 8. command-line overrides from `common.sh` (`agent_v_args`, with the long-context profile)
 
 An in-sandbox agent needs the Single Controller path: only it turns on Gym's token capture. On the Gym entrypoint
@@ -126,11 +126,11 @@ are not supported. Our tasks also set `[verifier] environment_mode = "separate"`
   model server directly, leave out `tunnel-sc.yaml` and set `harbor_model_base_url` to the address the sandbox
   can reach (untested).
 - **Binaries:** on Breithorn the sandbox platform mounts chisel, OpenCode and pi read-only into every sandbox
-  (image volumes built from `images/agent-bin/` on branch `agent-image-volumes`, at `/opt/rl-tools/<name>/<version>/`); `AGENT_BINARIES=mounted`
-  (the default, Gym 0047, `common.sh agent_binaries_env`) uses them and uploads nothing. Elsewhere set
-  `AGENT_BINARIES=upload` (or mount the same images at `AGENT_BIN_ROOT`): `fetch-chisel.sh` and `fetch-opencode.sh`
-  fetch pinned, sha256-checked releases on a machine with internet into `CHISEL_DIR` / `OPENCODE_DIR`, from where
-  every sandbox gets them by upload. The node's chisel client always comes from `CHISEL_DIR`.
+  (image volumes built from `images/agent-bin/` on branch `agent-image-volumes`, at `/opt/rl-tools/<name>/<version>/`);
+  `tunnel-sc.yaml` and the agent overlays use them (Gym 0047, `pod_install` / `opencode_install`: `mounted`), nothing
+  is uploaded. The chisel client runs on the training node, so `CHISEL_DIR` must hold the node's architecture
+  (linux arm64 on GH200; `fetch-chisel.sh`). A cluster without these mounts: mount the same images, or override
+  those keys with `upload` and the archives that `fetch-chisel.sh` (amd64) and `fetch-opencode.sh` fetch.
 - **Another sandbox backend:** harbor_agent's sandbox environment uses Gym's sandbox providers; the tunnel needs
   the provider's `sandbox.endpoint(port)` to carry WebSockets. Only OpenSandbox has been tried.
 

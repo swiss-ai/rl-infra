@@ -126,8 +126,7 @@ label) before starting the next run.
   hang watchdog then reports an idle driver (stack dumps, no kill before 4 h) although training runs. Harbor failure
   classes are not in TensorBoard on this path (they are on run V's path).
 - **OpenCode and chisel**: Breithorn mounts them read-only into every sandbox (`/opt/rl-tools/<name>/<version>/`,
-  since 2026-11-27); the runs use them (`AGENT_BINARIES=mounted`, Gym 0047) and upload nothing. Not yet run on the
-  cluster. `AGENT_BINARIES=upload` goes back to uploading (52 MB OpenCode archive per sandbox through the OpenSandbox
-  gateway, the 167 MB binary in node memory per sandbox; 32 at a time tested).
+  since 2026-11-27); the runs use them (Gym 0047) and upload nothing; the trial logs show each binary's `--version`.
+  Not yet run on the cluster.
 - Gym runs at a pinned commit plus 47 patches (`backends/nemo-rl/apertus2/patches/gym/`); the ones of ours are on
   their way upstream into swiss-ai/nemo-gym.

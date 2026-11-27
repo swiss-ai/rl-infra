@@ -1,8 +1,9 @@
 #!/bin/bash
 # Fetch chisel (github.com/jpillora/chisel, MIT) for the per-sandbox model tunnel (Gym patch 0016) into
 # CHISEL_DIR, checked against the release's published sha256 (pinned here). Run on a login node (needs
-# internet); idempotent. Both architectures: arm64 for the GH200 nodes (client), amd64 for the
-# OpenSandbox pods on Breithorn (server, uploaded into every sandbox).
+# internet); idempotent. Both architectures: arm64 for the GH200 nodes (client; the training runs need only this,
+# the pods' server is Breithorn's mounted amd64 chisel, Gym 0047), amd64 for model_tunnel.pod_install: upload
+# (the osb-reach tests, other clusters).
 #   CHISEL_DIR=$SCRATCH/chisel bash backends/nemo-rl/apertus2/fetch-chisel.sh
 # Leaves chisel_<version>_linux_{amd64,arm64} in CHISEL_DIR, the layout model_tunnel.chisel_dir expects.
 set -euo pipefail
