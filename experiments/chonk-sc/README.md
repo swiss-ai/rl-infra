@@ -277,10 +277,8 @@ has no counterpart here). Config: task copy + `run-b-harbor-sc.yaml` `run-s-sft.
 `agent_v_overlays`), plus the launcher's overrides (`agent_v_args`). OpenCode runs in the task image's WORKDIR
 (`opencode_workdir` unset: the repository lives in `/testbed`, `/workspace/<repo>`, `/app/<repo>`, `/home/<repo>`, ...
 depending on the task), ended at 1740 s under Harbor's 1800 s cap. OpenCode and chisel come from the read-only mounts
-Breithorn puts into every sandbox (`/opt/rl-tools/<name>/<version>/`, Gym 0047, `AGENT_BINARIES=mounted`, the
-default): nothing is uploaded, setup checks the versions. With `AGENT_BINARIES=upload` OpenCode is installed from the
-release archive that `fetch-opencode.sh` fetches once into `$OPENCODE_DIR` (`$SCRATCH/opencode`) and the adapter
-uploads into each sandbox (Gym 0045, `opencode_install: upload`), so the task image needs only `tar`. Harbor trial dirs and the model-call capture:
+Breithorn puts into every sandbox (`/opt/rl-tools/<name>/<version>/`, Gym 0047): nothing is uploaded, setup only checks
+that they are there and logs their `--version`. The chisel client on the node is `$CHISEL_DIR`'s linux arm64 binary. Harbor trial dirs and the model-call capture:
 `$SCRATCH/harbor-jobs/<run>/` (`model-calls/`). Another in-pod agent is one more `AGENT` value (`common.sh`
 `agent_v_tag`, `agent_v_overlays`, `check_gym_agents`; its `run-<tag>.yaml`; `check.py`).
 
@@ -303,9 +301,7 @@ HTTP 400 context-length answers in `model-calls/`; OpenCode exit 124 (1740 s); r
 Run OV with the [pi coding agent](https://github.com/earendil-works/pi) (v1.5.2) instead of OpenCode: same tasks,
 layout, tunnel, token capture and long-context profile; config `../harbor-capture-sc/pi-sc.yaml` and `run-pv.yaml`
 in place of `opencode-sc.yaml` and `run-ov.yaml`. Gym patch 0048 (`PiNemoGym`): pi runs from the release tree Breithorn
-mounts into every sandbox (`/opt/rl-tools/pi/1.5.2/pi/pi`, Gym 0049, `AGENT_BINARIES=mounted`); with
-`AGENT_BINARIES=upload` the release archive (59 MB) is fetched once into `$PI_DIR` (`$SCRATCH/pi`, `fetch-pi.sh`) and
-uploaded into each sandbox. pi runs with compaction, retries,
+mounts into every sandbox (`/opt/rl-tools/pi/1.5.2/pi/pi`, Gym 0049; setup logs its `--version`). pi runs with compaction, retries,
 timeouts, extensions, MCP and skills off and only `read`, `bash`, `edit`, `write`; `max_turns` is a pi extension that
 blocks the tool calls of the last allowed turn; the failure classes read pi's events in `agent/pi.txt` (in
 `--mode json` pi exits 0 also after an error). pi is ended at `PI_TIMEOUT_SEC` (1740 s; at long context

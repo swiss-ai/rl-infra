@@ -421,8 +421,8 @@ else:
         expect("model URL is the tunnel's pod end", (hcfg.get("harbor_model_base_url"), tun.get("pod_port")),
                ("http://127.0.0.1:8000", 8000))
         expect("chisel dir", tun.get("chisel_dir"), ENV.get("CHISEL_DIR"))
-        expect("chisel in the pod (AGENT_BINARIES, Gym 0047)", (tun.get("pod_install"), tun.get("pod_binary")),
-               (ENV.get("CHISEL_POD_INSTALL"), ENV.get("CHISEL_POD_BINARY")))
+        expect("chisel in the pod: Breithorn's mount (Gym 0047)", (tun.get("pod_install"), tun.get("pod_binary")),
+               ("mounted", f"/opt/rl-tools/chisel/{ENV.get('CHISEL_VERSION') or '1.12.0'}/chisel"))
         expect("harbor_agent_name null", hcfg.get("harbor_agent_name"), None)
         expect("max_turns (MAX_TURNS)", kw.get("max_turns"), av_turns)
         expect("interleaved_thinking", kw.get("interleaved_thinking"), False)
@@ -430,12 +430,9 @@ else:
                (kw["model_info"]["max_input_tokens"], kw["model_info"]["max_output_tokens"]), (av_ctx, av_max_new))
         if EXPECT == "ov":
             expect("agent", hcfg.get("harbor_agent_import_path", "").rsplit(":", 1)[-1], "OpenCodeNemoGym")
-            expect("OpenCode version / install (AGENT_BINARIES: 0047 mounted, 0045 uploaded archive)",
-                   (kw.get("version"), kw.get("opencode_install")), ("1.17.11", ENV.get("OPENCODE_INSTALL")))
-            if kw.get("opencode_install") == "mounted":
-                expect("OpenCode binary in the pod (OPENCODE_BIN)", kw.get("opencode_bin"), ENV.get("OPENCODE_BIN"))
-            else:
-                expect("OpenCode archive dir (OPENCODE_DIR)", kw.get("opencode_archive_dir"), ENV.get("OPENCODE_DIR"))
+            expect("OpenCode version / install / binary (Gym 0047: Breithorn's mount)",
+                   (kw.get("version"), kw.get("opencode_install"), kw.get("opencode_bin")),
+                   ("1.17.11", "mounted", "/opt/rl-tools/opencode/1.17.11/opencode"))
             expect("opencode_workdir unset (the task's WORKDIR, run-ov.yaml)", kw.get("opencode_workdir"), None)
             expect("OpenCode timeout (OPENCODE_TIMEOUT_SEC, default agent cap - 60)", kw.get("opencode_timeout_sec"),
                    int(ENV.get("OPENCODE_TIMEOUT_SEC") or av_cap - 60))
@@ -444,12 +441,8 @@ else:
         if EXPECT == "pv":
             expect("agent", hcfg.get("harbor_agent_import_path", "").rsplit(":", 1)[-1], "PiNemoGym")
             expect("pi version (Gym 0048: settings checked against 1.5.2)", kw.get("version"), "1.5.2")
-            expect("pi install (AGENT_BINARIES: 0049 mounted, 0048 uploaded archive)", kw.get("pi_install"),
-                   ENV.get("PI_INSTALL"))
-            if kw.get("pi_install") == "mounted":
-                expect("pi binary in the pod (PI_BIN)", kw.get("pi_bin"), ENV.get("PI_BIN"))
-            else:
-                expect("pi archive dir (PI_DIR)", kw.get("pi_archive_dir"), ENV.get("PI_DIR"))
+            expect("pi install / binary (Gym 0049: Breithorn's mount)", (kw.get("pi_install"), kw.get("pi_bin")),
+                   ("mounted", "/opt/rl-tools/pi/1.5.2/pi/pi"))
             expect("pi_workdir unset (the task's WORKDIR, run-pv.yaml)", kw.get("pi_workdir"), None)
             expect("pi timeout (PI_TIMEOUT_SEC, default agent cap - 60)", kw.get("pi_timeout_sec"),
                    int(ENV.get("PI_TIMEOUT_SEC") or av_cap - 60))
@@ -501,7 +494,9 @@ else:
             expect("harbor_agent_name null", hcfg.get("harbor_agent_name"), None)
             expect("model URL is the tunnel's pod end", (hcfg.get("harbor_model_base_url"), tun.get("pod_port")),
                    ("http://127.0.0.1:8000", 8000))
-            expect("OpenCode version / install", (kw.get("version"), kw.get("opencode_install")), ("1.17.11", "binary"))
+            expect("OpenCode version / install / binary (Gym 0047: Breithorn's mount)",
+                   (kw.get("version"), kw.get("opencode_install"), kw.get("opencode_bin")),
+                   ("1.17.11", "mounted", "/opt/rl-tools/opencode/1.17.11/opencode"))
             expect("opencode_workdir", kw.get("opencode_workdir"), "/testbed" if swe else "/app")
             expect("OpenCode timeout below the agent timeout", kw.get("opencode_timeout_sec"), 1740 if swe else 870)
             expect("harbor agent / verifier max timeout",

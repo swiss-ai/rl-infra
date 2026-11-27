@@ -60,10 +60,6 @@ export NEMO_GYM_USER="${NEMO_GYM_USER:-${USER}}" NEMO_GYM_WORKLOAD="${NEMO_GYM_W
 export NEMO_GYM_RUN_ID="${NEMO_GYM_RUN_ID:-chonk-sc-check-s}"
 # run O (run S with AGENT=opencode): what run-s.sh exports for tunnel-sc.yaml
 export CHISEL_DIR="${CHISEL_DIR:-${SCRATCH}/chisel}"
-# runs O/OV/PV: mounted or uploaded binaries in the pods (AGENT_BINARIES), as the launchers
-agent_binaries_env || exit 1
-# run OV: where run-agent-v.sh fetches the OpenCode archive (run-ov.yaml opencode_archive_dir); run PV: pi's (pi-sc.yaml)
-export OPENCODE_DIR="${OPENCODE_DIR:-${SCRATCH}/opencode}" PI_DIR="${PI_DIR:-${SCRATCH}/pi}"
 total=0
 
 echo "== (b) NeMo-RL clone"
@@ -158,19 +154,10 @@ if [[ "${AV_RUNS}" == 1 ]]; then
             || echo "  WARN  no prepared tasks in ${HARBOR_ROOT} and no task store ${store} (VERIFIED_STORE)"; }
     [[ -s "${AGENT_V_TRAIN}" ]] && echo "  ok    filtered rows ${AGENT_V_TRAIN}: $(wc -l < "${AGENT_V_TRAIN}")" \
         || echo "  note  ${AGENT_V_TRAIN} not written yet (run-agent-v.sh writes it)"
-    echo "  note  AGENT_BINARIES=${AGENT_BINARIES}: chisel in the pods ${CHISEL_POD_BINARY}$( [[ "${AGENT_BINARIES}" == mounted ]] && echo ", opencode ${OPENCODE_BIN}, pi ${PI_BIN} (mounted by Breithorn; checked in each pod at setup)")"
-    for a in amd64 arm64; do
-        f="${CHISEL_DIR}/chisel_${CHISEL_VERSION:-1.12.0}_linux_${a}"
-        [[ -x "${f}" ]] && echo "  ok    chisel ${f}" || echo "  note  ${f} missing (run-agent-v.sh fetches it)"
-    done
-    if [[ " ${RUNS} " == *" ov "* && "${AGENT_BINARIES}" == upload ]]; then
-        f="${OPENCODE_DIR}/${OPENCODE_VERSION:-1.17.11}/opencode-linux-x64-baseline.tar.gz"
-        [[ -s "${f}" ]] && echo "  ok    OpenCode archive ${f}" || echo "  note  ${f} missing (run-agent-v.sh fetches it)"
-    fi
-    if [[ " ${RUNS} " == *" pv "* && "${AGENT_BINARIES}" == upload ]]; then
-        f="${PI_DIR}/${PI_VERSION:-1.5.2}/pi-linux-x64.tar.gz"
-        [[ -s "${f}" ]] && echo "  ok    pi archive ${f}" || echo "  note  ${f} missing (run-agent-v.sh fetches it)"
-    fi
+    echo "  note  chisel and the agent in the pods: Breithorn's read-only mounts under /opt/rl-tools (each pod checks they are there and logs their --version)"
+    # the client runs on the node (GH200: linux arm64); the pods' chisel is mounted
+    f="${CHISEL_DIR}/chisel_${CHISEL_VERSION:-1.12.0}_linux_arm64"
+    [[ -x "${f}" ]] && echo "  ok    chisel client for the node ${f}" || echo "  note  ${f} missing (run-agent-v.sh fetches it)"
     [[ -r "${RL_REGISTRY_CRED_FILE}" && -s "${RL_REGISTRY_CRED_FILE}" ]] && echo "  ok    registry credentials file ${RL_REGISTRY_CRED_FILE} (not read)" \
         || echo "  WARN  no registry credentials file ${RL_REGISTRY_CRED_FILE} (the verified images are private)"
     # long context: the KCP inputs (common.sh kcp_setup; experiments/long-context/setup-kcp.sh) and how the launchers

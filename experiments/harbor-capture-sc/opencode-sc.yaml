@@ -8,8 +8,9 @@
 #   0023/0024  upstream backport: OpenCode (AI SDK) always streams; under worker-owned capture the
 #              engine call is made non-streaming, committed, and replayed to OpenCode as SSE. No byte
 #              reaches OpenCode before generation ends, so its provider timeouts must stay off (0026).
-#   0026-0028  OpenCodeNemoGym: pinned standalone binary (1.17.11, sha256 built in, downloaded by the
-#              pod from GitHub releases), `opencode run ... </dev/null` (job 5236016 hung reading stdin),
+#   0026-0028  OpenCodeNemoGym: pinned standalone binary (1.17.11; since Gym 0047 the one Breithorn mounts
+#              read-only into every sandbox at /opt/rl-tools/opencode/<version>/opencode, before downloaded by
+#              the pod from GitHub releases), `opencode run ... </dev/null` (job 5236016 hung reading stdin),
 #              no title / compaction / sub-agent calls (each extra conversation masks the rollout),
 #              model limits from model_info. Keys verified against OpenCode v1.17.11; keep that version.
 #   0029       opencode_workdir: OpenCode runs in the task directory (created if missing).
@@ -33,7 +34,9 @@ env:
           # merged with terminus-sc.yaml's kwargs (max_turns -> agent.build.steps)
           harbor_agent_kwargs:
             version: ${oc.env:OPENCODE_VERSION,1.17.11}
-            opencode_install: binary
+            # Gym 0047: the binary Breithorn mounts into every sandbox; setup logs its --version
+            opencode_install: mounted
+            opencode_bin: /opt/rl-tools/opencode/${oc.env:OPENCODE_VERSION,1.17.11}/opencode
             # oc.decode: oc.env returns strings, and bool("false") is True
             opencode_timeout_sec: ${oc.decode:${oc.env:OPENCODE_TIMEOUT_SEC,870}}
             opencode_debug: ${oc.decode:${oc.env:OPENCODE_DEBUG,false}}

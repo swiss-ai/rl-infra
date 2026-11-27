@@ -3,11 +3,9 @@
 # tunnel, sandbox 127.0.0.1:8000 -> policy_model (Gym patches 0016+0017), like opencode-sc.yaml.
 #
 # Gym patch 0048 (PiNemoGym, custom_agents/pi_nemo_gym.py), checked against the pi v1.5.2 source; keep that version:
-#   - install (Gym 0049): mounted (default) = the release tree Breithorn mounts read-only into every sandbox
-#     (/opt/rl-tools/pi/<version>/pi/pi, since 2026-11-27), setup only checks its version; upload
-#     (AGENT_BINARIES=upload, chonk-sc common.sh agent_binaries_env) = the release archive (Bun-compiled binary, no
-#     Node) is uploaded from PI_DIR (fetch-pi.sh) into each sandbox, sha256-checked; only the binary and its
-#     package.json are unpacked (the image needs tar).
+#   - install (Gym 0049): the release tree Breithorn mounts read-only into every sandbox
+#     (/opt/rl-tools/pi/<version>/pi/pi, its package.json next to it; since 2026-11-27); setup only checks that it
+#     is there and logs its --version. (pi_install: upload, the archive from fetch-pi.sh, is for other clusters.)
 #   - capture: no compaction, auto-retry, cache warming, HTTP timeouts, extensions, MCP, skills or project .pi/
 #     files (each extra call or rewritten history masks the rollout); the request carries only model, messages,
 #     tools, stream, stream_options and max_tokens.
@@ -16,9 +14,7 @@
 # Notes: research/reports/2026-11-24-pi-v1.5.2-source-notes.md (alpernates workspace).
 #
 # Env (run-agent-v.sh exports them when set):
-#   PI_VERSION      default 1.5.2; another version needs pi_sha256 and re-checked settings
-#   PI_INSTALL      mounted (default) or upload; PI_BIN the mounted executable (default under AGENT_BIN_ROOT)
-#   PI_DIR          for upload: where fetch-pi.sh put <version>/pi-linux-x64.tar.gz
+#   PI_VERSION      default 1.5.2 (also picks the mount path); another version needs re-checked settings
 #   PI_TIMEOUT_SEC  default 1740 (run-pv.yaml): pi is ended with exit 124 before Harbor's agent timeout, so
 #                   return-code.txt and pi.txt are written and the verifier runs
 
@@ -34,10 +30,8 @@ env:
           # merged with the task file's kwargs (max_turns -> the turn-budget extension)
           harbor_agent_kwargs:
             version: ${oc.env:PI_VERSION,1.5.2}
-            pi_install: ${oc.env:PI_INSTALL,mounted}
-            pi_bin: ${oc.env:PI_BIN,'${oc.env:AGENT_BIN_ROOT,/opt/rl-tools}/pi/${oc.env:PI_VERSION,1.5.2}/pi/pi'}
-            # read for upload only
-            pi_archive_dir: ${oc.env:PI_DIR,null}
+            pi_install: mounted
+            pi_bin: /opt/rl-tools/pi/${oc.env:PI_VERSION,1.5.2}/pi/pi
             # oc.decode: oc.env returns strings
             pi_timeout_sec: ${oc.decode:${oc.env:PI_TIMEOUT_SEC,1740}}
             # the task file gives max_output_tokens = the whole context; pi's maxTokens should be the per-turn

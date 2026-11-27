@@ -1,4 +1,4 @@
-From bd726d63962b2fc4bbc3f202c0c4c916eb6dcaff Mon Sep 17 00:00:00 2001
+From 72f93bf6f0828f391f4d8dfe6879db2d7643ab00 Mon Sep 17 00:00:00 2001
 From: Philip Mueller <claude@philipmueller.ch>
 Date: Tue, 24 Nov 2026 14:36:48 +0000
 Subject: [PATCH] feat(harbor_agent): pi adapter, the standalone release
@@ -51,7 +51,7 @@ Signed-off-by: Philip Mueller <claude@philipmueller.ch>
  create mode 100644 responses_api_agents/harbor_agent/custom_agents/test_pi_nemo_gym.py
 
 diff --git a/responses_api_agents/harbor_agent/README.md b/responses_api_agents/harbor_agent/README.md
-index 02f2b5a56..9ed539854 100644
+index 2245c3547..95402e379 100644
 --- a/responses_api_agents/harbor_agent/README.md
 +++ b/responses_api_agents/harbor_agent/README.md
 @@ -14,7 +14,7 @@ It runs Harbor agents (e.g., `terminus-2`) in Harbor-managed environments and re
@@ -191,7 +191,7 @@ index a068abe61..f2aaa470e 100644
                          flags = {}
                      return (
 diff --git a/responses_api_agents/harbor_agent/custom_agents/installed_compat.py b/responses_api_agents/harbor_agent/custom_agents/installed_compat.py
-index d0f945b58..d048c3992 100644
+index 01b03a64e..390f6f487 100644
 --- a/responses_api_agents/harbor_agent/custom_agents/installed_compat.py
 +++ b/responses_api_agents/harbor_agent/custom_agents/installed_compat.py
 @@ -30,6 +30,9 @@ Harbor 0.1.x ignored them. harbor_agent passes the same kwargs to every agent (a
@@ -257,11 +257,11 @@ index d0f945b58..d048c3992 100644
  # are Terminus-2 options from Gym's configs/harbor_agent_opensandbox_training.yaml, which every run loads, or from an
  # env yaml under it; an agent overlay merged on top cannot delete them (OmegaConf), so OpenCode and mini get them too
 diff --git a/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py
-index 544351222..d3870169b 100644
+index 4d73e202d..0bfb44c88 100644
 --- a/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py
 +++ b/responses_api_agents/harbor_agent/custom_agents/opencode_nemo_gym.py
 @@ -43,9 +43,6 @@ non-zero exit, as on Harbor 0.1.x) and Harbor's ATIF conversion of `opencode.txt
- run calls it by that path.
+ logs its `--version`, and the run calls it by that path.
  """
  
 -import copy
