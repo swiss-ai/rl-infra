@@ -118,6 +118,9 @@ if [[ "${AGENT}" == opencode ]]; then
     for v in OPENCODE_VERSION OPENCODE_TIMEOUT_SEC OPENCODE_DEBUG; do
         [[ -z "${!v:-}" ]] || export "${v}"
     done
+    # chisel in the pod: mounted by Breithorn (default) or uploaded (AGENT_BINARIES=upload); OpenCode stays the
+    # binary install of opencode-sc.yaml here
+    agent_binaries_env || exit 1
     export CHISEL_VERSION="${CHISEL_VERSION:-1.12.0}" CHISEL_DIR="${CHISEL_DIR:-${SCRATCH}/chisel}"
     bash "${APERTUS2_DIR}/fetch-chisel.sh"
     CAPTURE_SC="${ROOT}/experiments/harbor-capture-sc"
