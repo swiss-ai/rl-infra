@@ -1,7 +1,7 @@
 #!/bin/bash
 # Fetch the Claude Code CLI (Anthropic's native release binary, downloads.claude.ai) into CC_DIR once per run,
 # checked against the sha256 pinned here (the checksum in the release's manifest.json), and keep it gzipped. Run on a
-# login node (needs internet); idempotent. Gym patch 0048 (ClaudeCodeNemoGym) uploads the .gz into every sandbox and
+# login node (needs internet); idempotent. Gym patch 0050 (ClaudeCodeNemoGym) uploads the .gz into every sandbox and
 # checks the binary's sha256 there again, so the sandboxes need no internet, curl, Node.js or npm, only gzip.
 #   CC_DIR=$SCRATCH/claude-code bash backends/nemo-rl/apertus2/fetch-claude-code.sh
 #   CC_VERSION (2.1.326), CC_PLATFORM (linux-x64, the pods; linux-arm64 for the probe on Alps login nodes)

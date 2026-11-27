@@ -19,7 +19,7 @@ i.e. vLLM DP4 per node through NVIDIA-NeMo/RL#2517) trained through
 | `run-v.sh`, `run-v-24k.sh` | run V: Terminus-2 on Kostas' verified tasks, Gym entrypoint (not SC), 24k on 20 nodes; `CTX=65536`: long context |
 | `run-agent-v.sh`, `run-agent-v.yaml`, `run-ov.yaml` | run OV: OpenCode in the pod on run V's verified tasks, SC + token capture, 24k on 20 nodes; `CTX=65536`: long context |
 | `run-pv.yaml` | run PV (`run-agent-v.sh AGENT=pi`): the pi coding agent instead of OpenCode; not run on the cluster yet |
-| `run-cv.yaml` | run CV (`run-agent-v.sh AGENT=claude-code`, Gym 0048-0052): Claude Code instead of OpenCode; probed against a stub (`../claude-code-probe/`), one-node rung run (Qwen3-4B), not on Chonk yet |
+| `run-cv.yaml` | run CV (`run-agent-v.sh AGENT=claude-code`, Gym 0050-0054): Claude Code instead of OpenCode; probed against a stub (`../claude-code-probe/`), one-node rung and 64K smokes (Qwen3-4B / Chonk SFT); no full run yet |
 | `common.sh` | config composition, the long-context profile of runs V and OV, and the clone / Gym checks, shared by the scripts |
 
 Runs A and B: 3 steps, `async_rl` sampler `in_order` with lookahead 0 (synchronous), one chunk per
@@ -325,15 +325,15 @@ What to look at in the smoke: `agent/setup/` (install), `agent/command-0/` (retu
 Run OV with Anthropic's Claude Code CLI (2.1.326) instead of OpenCode: same tasks, layout, tunnel, token capture and
 long-context profile; config `../harbor-capture-sc/claude-code-sc.yaml` and `run-cv.yaml` in place of
 `opencode-sc.yaml` and `run-ov.yaml`. Claude Code speaks Anthropic Messages to the Gym model server's `/v1/messages`.
-Gym patch 0048 (`ClaudeCodeNemoGym`): the native release binary is fetched once and gzipped into `$CC_DIR`
+Gym patch 0050 (`ClaudeCodeNemoGym`): the native release binary is fetched once and gzipped into `$CC_DIR`
 (`$SCRATCH/claude-code`, `fetch-claude-code.sh`; about 170 MB per sandbox, the image needs only gzip) and uploaded
 into each sandbox. Claude Code runs with compaction, retries, the non-streaming fallback, sub-agents, web tools, MCP
 and the task repository's settings and hooks off, with `Bash`, `Read`, `Edit`, `Write`, `Glob`, `Grep`.
 `max_turns` is its own `--max-turns`; the failure classes read its stream-json events in `agent/claude-code.txt`.
-Gym patch 0049 is needed with it: the fingerprint compares tool calls against the request's tool schemas (Claude
+Gym patch 0051 is needed with it: the fingerprint compares tool calls against the request's tool schemas (Claude
 Code echoes `Edit` with `replace_all: false` filled in), tool-call arguments that are not a JSON object reach it as
 `{"_ng_unparsed_arguments": ...}`, and the context-overflow placeholder is answered with a 400 "prompt is too long"
-on `/v1/messages`, which ends the episode. Gym patch 0050: Claude Code sends its environment section as a system
+on `/v1/messages`, which ends the episode. Gym patch 0052: Claude Code sends its environment section as a system
 message after the first user message, which Apertus 2's format rejects; `vllm_model`'s `late_system_messages_as_user`
 sends it as a user message in `<system-reminder>` tags. Check B: the first request is 4678 Apertus 2 tokens (tools
 2750; `--bare`: 964), which leaves 11706 tokens at 16K with 6144 per turn. Claude Code is ended at `CC_TIMEOUT_SEC` (1740 s; at long context
@@ -342,7 +342,7 @@ source, so the settings were checked by their effect with `../claude-code-probe/
 The one-node rung (`AGENT=claude-code bash ../harbor-capture-sc/run.sh`, Qwen3-4B, micro tasks, Santis) ran: 2x2x1
 (job 1060870) and 8x4x3 (job 1061238, 13.7 min, grad norms 1.68, 0.026, 1.46), every model call `POST /v1/messages`
 with 200. 5 of the 96 rollouts of the 8x4x3 run were masked, because Claude Code also rewrites `Write` and `Bash`
-echoes in ways 0049 does not cover; Gym 0051 turns its rewriting off (below).
+echoes in ways 0051 does not cover; Gym 0053 turns its rewriting off (below).
 Smokes on the SFT models (Santis, 2026-11-26): 16K (job 1061266, v0.1, 2 x 8), 32K (job 1061268, v0.2 at CP 4, 4 x 8;
 it also made the one-off v0.2 conversion, in 8 min) and 64K (job 1061276, CP 8 with KCP, 4 x 8, 1137 s per step).
 Every install clean, every model call `POST /v1/messages`. None had a non-zero gradient, for two reasons:
@@ -353,9 +353,9 @@ Every install clean, every model call `POST /v1/messages`. None had a non-zero g
   (up to 97 calls, prompts up to 46K tokens) and 6 scored 1.
 - The echo rewrites mask most long rollouts on these models, which start most commands with `cd /workspace && `:
   12 of 32 at 32K and 19 of 32 at 64K (29 commands echoed without the `cd`), all the rewarded ones at 64K among them.
-  Gym patch 0051 sets the undocumented `CLAUDE_CODE_HUMBLE_HAMMOCK=1`, with which Claude Code echoes every tool call
+  Gym patch 0053 sets the undocumented `CLAUDE_CODE_HUMBLE_HAMMOCK=1`, with which Claude Code echoes every tool call
   as the model sent it (probe scenario `rewrites`, `../claude-code-probe/README.md`).
-With 0051 the 64K smoke (job 1061395, 1092 s per step) trained: grad norm 0.114, 21 of 32 sequences valid, mean
+With 0053 the 64K smoke (job 1061395, 1092 s per step) trained: grad norm 0.114, 21 of 32 sequences valid, mean
 reward 0.14 among them (4 of 8 solved on one task). No echo differed from its call (947 tool calls). Masked: the 8
 FACET trials (agent timeout) and 2 rollouts in which a reply stopped at `max_tokens` after 326 tokens (of 16384) and
 Claude Code re-sent the request with "Output token limit hit. Resume directly ..." appended, which continues no call.
@@ -364,7 +364,7 @@ call as `length` (`apply_apertus2_output_to_chat_response_choices`), about 30 pe
 ended a turn inside its reasoning, or wrote nothing after it). Claude Code drops such a reply and re-sends the
 request, so the reply becomes a dead branch. After an empty text reply the re-sent request resolved to the call
 before; after a reply of reasoning alone it matched both calls (ambiguous), because reasoning is not hashed. Gym
-patch 0052: a reasoning item opens a turn, so such a reply hashes the empty-turn marker like an empty one.
+patch 0054: a reasoning item opens a turn, so such a reply hashes the empty-turn marker like an empty one.
 `run-agent-v.sh` warns when `AGENT=claude-code` runs below `CTX=65536`.
 The v0.1 model often names Claude Code's tools in lowercase (`bash`, `write`), which Claude Code rejects as unknown
 tools; v0.2 does not. The task with `timeout_sec = 120` in its `task.toml` (FACET) times out in all 8 trials.

@@ -451,7 +451,7 @@ else:
             expect("no OpenCode kwargs", sorted(k for k in kw if k.startswith("opencode_")), [])
         if EXPECT == "cv":
             expect("agent", hcfg.get("harbor_agent_import_path", "").rsplit(":", 1)[-1], "ClaudeCodeNemoGym")
-            expect("Claude Code version (Gym 0048: probed against 2.1.326)", kw.get("version"), "2.1.326")
+            expect("Claude Code version (Gym 0050: probed against 2.1.326)", kw.get("version"), "2.1.326")
             expect("Claude Code binary dir (CC_DIR)", kw.get("claude_archive_dir"), ENV.get("CC_DIR"))
             expect("Claude Code profile (CC_PROFILE)", kw.get("claude_profile"), ENV.get("CC_PROFILE") or "default")
             expect("claude_workdir unset (the task's WORKDIR, run-cv.yaml)", kw.get("claude_workdir"), None)
@@ -460,7 +460,7 @@ else:
             (ok if kw.get("claude_timeout_sec") < av_cap else fail)(
                 f"Claude Code timeout {kw.get('claude_timeout_sec')} < agent cap {av_cap}")
             expect("no OpenCode or pi kwargs", sorted(k for k in kw if k.startswith(("opencode_", "pi_"))), [])
-            expect("late_system_messages_as_user (Gym 0050, Apertus 2 takes system messages only first)",
+            expect("late_system_messages_as_user (Gym 0052, Apertus 2 takes system messages only first)",
                    vm.get("late_system_messages_as_user"), True)
         expect("sampling_overrides = train profile",
                dict(vm.get("sampling_overrides") or {}),

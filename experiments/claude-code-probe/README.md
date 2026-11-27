@@ -1,6 +1,6 @@
 # Claude Code probe: what the CLI sends, checked as token capture would see it
 
-Claude Code is closed source, so the settings of Gym's `ClaudeCodeNemoGym` (patch 0048) are checked by their effect:
+Claude Code is closed source, so the settings of Gym's `ClaudeCodeNemoGym` (patch 0050) are checked by their effect:
 `probe.py` runs the pinned release with the adapter's own command and environment against `stub_messages.py`, a
 stand-in for a Gym model server's `/v1/messages` route, and checks every request it sends. Login node or any node, no
 GPU, about five minutes. Run it again on every version bump.
@@ -8,7 +8,7 @@ GPU, about five minutes. Run it again on every version bump.
 ```bash
 # the binary for this machine (Alps login and compute nodes are aarch64; the pods take linux-x64)
 CC_DIR=$SCRATCH/claude-code CC_PLATFORM=linux-arm64 bash backends/nemo-rl/apertus2/fetch-claude-code.sh
-# a Python 3.12 with Gym (with 0048/0049 applied) and Harbor 0.25 importable, e.g. a uv venv on scratch:
+# a Python 3.12 with Gym (with 0050/0051 applied) and Harbor 0.25 importable, e.g. a uv venv on scratch:
 #   uv venv --python 3.12 $V && uv pip install --python $V/bin/python -e "$GYM[dev,sandbox]" \
 #       "harbor @ git+https://github.com/laude-institute/harbor.git@v0.25.0" pytest pytest-asyncio
 $V/bin/python experiments/claude-code-probe/probe.py $GYM $SCRATCH/claude-code $SCRATCH/claude-code-probe/out [scenario ...]
@@ -35,8 +35,8 @@ $V/bin/python experiments/claude-code-probe/probe.py $GYM $SCRATCH/claude-code $
 | `thinking` | the same, each reply with a thinking block | whether thinking is echoed (consistently) |
 | `tools` | each offered tool once, required fields only | which echoes differ from what the model sent |
 | `quirks` | an unknown key, numbers as strings, an explicit default | how Claude Code echoes inputs it validated |
-| `rewrites` | `cd <cwd> && ls`, a Write with trailing whitespace, an Edit without `replace_all` | the cluster's echo rewrites (off with Gym 0051) |
-| `badargs` | `{"_ng_unparsed_arguments": ...}` (0049's stand-in for non-JSON arguments) | that Claude Code takes it as a normal turn |
+| `rewrites` | `cd <cwd> && ls`, a Write with trailing whitespace, an Edit without `replace_all` | the cluster's echo rewrites (off with Gym 0053) |
+| `badargs` | `{"_ng_unparsed_arguments": ...}` (0051's stand-in for non-JSON arguments) | that Claude Code takes it as a normal turn |
 | `longoutput` | 30k characters of tool output, then two more calls | whether earlier tool results are rewritten |
 | `maxtokens` | an empty reply with `stop_reason: max_tokens` (Gym's context-overflow placeholder) | what follows |
 | `toolong`, `toolong_vllm` | 400 "prompt is too long" (Anthropic's) / vLLM's own 400 body | whether the episode ends cleanly |
@@ -60,9 +60,9 @@ Both profiles behave the same unless noted.
 - **Echoes are parsed, not verbatim.** `Edit` comes back with `"replace_all": false` (its schema default) added, and
   a `Bash` `timeout` written as `"5000"` comes back as `5000`. Glob, Grep, Read, Bash and Write calls with only their
   required fields echo as sent. An unknown key is answered with a validation-error tool result, and the call echoes
-  unchanged. Before Gym 0049 each such echo matched no parent (unresolved: the rollout is masked); with 0049 the
+  unchanged. Before Gym 0051 each such echo matched no parent (unresolved: the rollout is masked); with 0051 the
   fingerprint compares arguments against the request's tool schemas, and all scenarios resolve.
-- **More rewrites, seen on the cluster; Gym 0051 turns them all off.** In the one-node rung's 8x4x3 run (job
+- **More rewrites, seen on the cluster; Gym 0053 turns them all off.** In the one-node rung's 8x4x3 run (job
   1061238, Qwen3-4B, 186 tool calls) Claude Code also echoed a `Write` with trailing whitespace stripped from each
   line of `content` (4 calls) and a `Bash` command without its leading `cd / && ` when `/` was its working directory
   (1): 5 of 96 rollouts masked. On the Chonk SFT models, which start most commands with `cd /workspace && `, it was
@@ -72,7 +72,7 @@ Both profiles behave the same unless noted.
   which is on without feature flags). With it (`PROBE_CLAUDE_ENV='{"CLAUDE_CODE_HUMBLE_HAMMOCK": "1"}'`) every
   echo is the call as served, `rewrites` and `quirks` included (string numbers, key order); without it `rewrites`
   leaves 2 calls unresolved (1 under `--bare`, which has no Write). All other scenarios, the system prompt and the
-  tool list are the same either way, and so are the files the tools write. Gym 0051 sets it in the adapter; 0049's
+  tool list are the same either way, and so are the files the tools write. Gym 0053 sets it in the adapter; 0051's
   schema normalization stays as a fallback. Check `rewrites` on every version bump: the variable is internal.
 - **Claude Code's own context limit.** It sends no prompt of context - max output - 3000 tokens or more
   (`CLAUDE_CODE_MAX_CONTEXT_TOKENS`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`), and ends with an assistant message `Prompt is
@@ -81,12 +81,12 @@ Both profiles behave the same unless noted.
 - **Context overflow.** After an empty `max_tokens` reply Claude Code re-sends the request three more times. Each
   re-send appends "Output token limit hit. Resume directly ..." to the first user message, which makes it a new root.
   It then ends with `terminal_reason: api_error`. A 400 "prompt is too long", in Anthropic's shape or vLLM's, ends the
-  episode at once (`terminal_reason: prompt_too_long`, exit 1). Gym 0049 answers the overflow placeholder on
+  episode at once (`terminal_reason: prompt_too_long`, exit 1). Gym 0051 answers the overflow placeholder on
   `/v1/messages` with that 400. `propagate_context_overflow_errors` would do the same, but there the failed call
   poisons the rollout under capture, while OpenCode and pi commit the placeholder.
   On the cluster the same re-send follows every reply that NeMo-RL finishes as `length` because it holds neither text
   nor a usable call (its Apertus 2 output parser; about 3% of calls at 64K): Claude Code drops the reply and appends
-  the resume text to the last tool result, so the reply is a dead branch. Gym 0052 makes that re-send resolve when
+  the resume text to the last tool result, so the reply is a dead branch. Gym 0054 makes that re-send resolve when
   the dropped reply was reasoning alone (before, it matched both the dropped call and its parent).
 - **Errors and limits.** 529: no retry (`CLAUDE_CODE_MAX_RETRIES=0`), exit 1. `--max-turns 2`: two calls, then
   `result` `error_max_turns`, exit 1, no extra call. The stream-json `result` event carries `terminal_reason`,
@@ -98,7 +98,7 @@ Both profiles behave the same unless noted.
   `EXTRA_REQUESTS=... bash backends/nemo-rl/apertus2/check_apertus2_tools.sh` in the SFT container). The default
   profile sends its environment section (working directory, platform, shell, OS) as a system message after the first
   user message, with or without `--exclude-dynamic-system-prompt-sections`. Apertus 2's format rejects it ("system/
-  developer instructions must be leading"), so NeMo-RL could not encode any default-profile request. Gym 0050's
+  developer instructions must be leading"), so NeMo-RL could not encode any default-profile request. Gym 0052's
   `late_system_messages_as_user` (set by `claude-code-sc.yaml`) sends it as a user message in `<system-reminder>` tags.
   First request in Apertus 2 tokens then: default 4678 (tools 2750), bare 964 (tools 865); 11706 tokens left at 16K
   with 6144 per turn, 60858 at 64K with 16384; the tool round trip extends the first prompt. `--bare` offers only

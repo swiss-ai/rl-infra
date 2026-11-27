@@ -8,7 +8,7 @@ only the combination in `TESTING.md`; everything else here is untested.
 The Gym side of in-sandbox agents (adapter options, the per-sandbox model tunnel, token capture) is documented in
 Gym's `harbor_agent` README, sections "Agents inside the sandbox (OpenCode, pi, Claude Code, mini-swe-agent)" and "Failure
 classes". After `setup-gym.sh` it is at `$NEMO_RL_DIR/3rdparty/Gym-workspace/Gym/responses_api_agents/harbor_agent/README.md`;
-it comes from Gym patches 0037, 0041-0043 and 0046-0048.
+it comes from Gym patches 0037, 0041-0043 and 0046-0050.
 
 ## The stack
 
@@ -151,7 +151,7 @@ are not supported. Our tasks also set `[verifier] environment_mode = "separate"`
   `pi-sc.yaml`, `run-pv.yaml`) is the complete set of these changes for one agent; for a new agent,
   check its source for every model call besides the main loop (titles, summaries, retries) and every rewrite of
   earlier messages, since each one masks the rollout under capture. For a closed-source agent, measure instead:
-  `AGENT=claude-code` (run CV, Gym 0048-0052) was checked with `../claude-code-probe/`, which runs the adapter's
+  `AGENT=claude-code` (run CV, Gym 0050-0054) was checked with `../claude-code-probe/`, which runs the adapter's
   command against a stub of the model server and resolves every request with Gym's own lineage functions. It found
   what reading would have missed: tool calls echoed as the agent parsed them, and a resume loop after an empty reply;
   check B on the recorded request then found a system message Apertus 2 cannot encode.

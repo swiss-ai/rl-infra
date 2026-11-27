@@ -5,7 +5,7 @@ check B (backends/nemo-rl/apertus2/check_apertus2_tools.sh, EXTRA_REQUESTS).
 
 The path is the model server's: AnthropicConverter (Messages to Responses), then VLLMConverter with the training
 config's flags (vllm_model_for_training.yaml: return_token_id_information, uses_reasoning_parser), then vllm_model's
-late_system_messages_as_user (Gym 0050, set by claude-code-sc.yaml: Apertus 2 takes system messages only first). A
+late_system_messages_as_user (Gym 0052, set by claude-code-sc.yaml: Apertus 2 takes system messages only first). A
 first request has no assistant turn, so vllm_model's rewriting of assistant messages does not apply. `max_tokens` is the per-turn
 limit as the run's sampling_overrides set it (policy.generation.max_new_tokens), since check B checks that the prompt
 plus it fit the context. The output holds Claude Code's system prompt: keep it out of git.

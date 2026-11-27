@@ -13,7 +13,7 @@ no parent and its rollout is masked; on the Chonk SFT models, which start most c
 The undocumented CLAUDE_CODE_HUMBLE_HAMMOCK=1 makes Claude Code echo its copies of the inputs as received
 (read behind the gate tengu_foamy_spring, which is on without feature flags). rl-infra's claude-code-probe,
 scenario `rewrites`: 0 unresolved calls with it, 2 without; every other scenario unchanged, the system prompt
-and tools identical. The fingerprint's schema normalization (0049) stays as a fallback.
+and tools identical. The fingerprint's schema normalization (0051) stays as a fallback.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---

@@ -3,7 +3,7 @@
 # reverse tunnel, sandbox 127.0.0.1:8000 -> policy_model (Gym patches 0016+0017), like opencode-sc.yaml and pi-sc.yaml,
 # over Anthropic Messages: every Gym model server serves /v1/messages, also under the capture prefix.
 #
-# Gym patch 0048 (ClaudeCodeNemoGym, custom_agents/claude_code_nemo_gym.py), probed for Claude Code 2.1.326
+# Gym patch 0050 (ClaudeCodeNemoGym, custom_agents/claude_code_nemo_gym.py), probed for Claude Code 2.1.326
 # (experiments/claude-code-probe); keep that version:
 #   - install: the native release binary, gzipped by fetch-claude-code.sh into CC_DIR, is uploaded into each sandbox
 #     and checked against the release manifest's sha256 there (the image needs gzip; no internet, curl or Node).
@@ -12,12 +12,12 @@
 #     (--system-prompt-snapshot on). The probe saw one chain per rollout and only POST /v1/messages.
 #   - max_turns -> Claude Code's own --max-turns (ends with error_max_turns, no extra call).
 #   - failure classes from agent/claude-code.txt (stream-json; Claude Code exits 1 after an API error).
-# Gym patch 0049 (needed with Claude Code): tool calls echo as Claude Code parsed them (schema defaults filled in,
+# Gym patch 0051 (needed with Claude Code): tool calls echo as Claude Code parsed them (schema defaults filled in,
 # string numbers converted), which the capture's fingerprint now compares against the request's tool schemas;
 # tool-call arguments that are not a JSON object reach Claude Code as {"_ng_unparsed_arguments": ...} instead of a
 # 500; and the context-overflow placeholder is answered with Anthropic's 400 "prompt is too long" on /v1/messages,
 # which ends Claude Code's episode (it re-sends the request with a resume prompt after an empty max_tokens reply).
-# Gym patch 0050 (needed with Apertus 2): Claude Code sends its environment section as a system message after the
+# Gym patch 0052 (needed with Apertus 2): Claude Code sends its environment section as a system message after the
 # first user message, which Apertus 2's format rejects; vllm_model's late_system_messages_as_user sends it as a user
 # message in <system-reminder> tags (check B: the first request is then 4678 Apertus 2 tokens, 964 with --bare).
 #
@@ -63,5 +63,5 @@ env:
             temperature: ${policy.generation.temperature}
             top_p: ${policy.generation.top_p}
             max_tokens: ${policy.generation.max_new_tokens}
-          # Gym 0050: Apertus 2 takes system messages only before the conversation (see above)
+          # Gym 0052: Apertus 2 takes system messages only before the conversation (see above)
           late_system_messages_as_user: true
