@@ -30,6 +30,7 @@ bash run.sh stem      (experts/main.yaml + experts/stem/base.yaml)
 |---|---|---|
 | `run.sh` | run | The entry point: task file in, Slurm job out (rl-infra keys, tiers, context, config copies, setup, launch) |
 | `README.md` | doc | Quick start, task files and tiers, NeMo-RL development, cluster notes |
+| `AGENTS.md`, `CLAUDE.md` | doc | Guidelines for agents and people: where to work, what needs the maintainers, patches, runs, commits (`CLAUDE.md` imports `AGENTS.md`) |
 | `site.env.example` | doc | Template of the personal, gitignored `site.env` (account, scratch, W&B) |
 | `.gitignore` | — | Keeps `site.env` and generated files out of git |
 | `docs/nemo-rl-architecture.md` | doc | How NeMo-RL works inside (driver, workers, refit) |
