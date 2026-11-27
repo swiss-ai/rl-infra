@@ -129,8 +129,9 @@ label) before starting the next run.
 - **Single Controller**: the driver log sometimes lacks the controller's output (seen once, cause unknown); the
   hang watchdog then reports an idle driver (stack dumps, no kill before 4 h) although training runs. Harbor failure
   classes are not in TensorBoard on this path (they are on run V's path).
-- **OpenCode install**: the release archive is fetched once on the login node and uploaded into each sandbox (52 MB
-  per sandbox through the OpenSandbox gateway; 32 at a time tested); the 167 MB binary lives in node memory per
-  sandbox. A shared read-only volume would avoid both (requested from the Breithorn admins).
-- Gym runs at a pinned commit plus 47 patches (`backends/nemo-rl/apertus2/patches/gym/`); the ones of ours are on
+- **OpenCode and chisel**: Breithorn mounts them read-only into every sandbox (`/opt/rl-tools/<name>/<version>/`,
+  since 2026-11-27); the runs use them (`AGENT_BINARIES=mounted`, Gym 0047) and upload nothing. Not yet run on the
+  cluster. `AGENT_BINARIES=upload` goes back to uploading (52 MB OpenCode archive per sandbox through the OpenSandbox
+  gateway, the 167 MB binary in node memory per sandbox; 32 at a time tested).
+- Gym runs at a pinned commit plus 48 patches (`backends/nemo-rl/apertus2/patches/gym/`); the ones of ours are on
   their way upstream into swiss-ai/nemo-gym.

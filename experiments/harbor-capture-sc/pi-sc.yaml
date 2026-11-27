@@ -2,7 +2,7 @@
 # (run-agent-v.sh AGENT=pi, always together with tunnel-sc.yaml). pi calls the model through the per-sandbox reverse
 # tunnel, sandbox 127.0.0.1:8000 -> policy_model (Gym patches 0016+0017), like opencode-sc.yaml.
 #
-# Gym patch 0047 (PiNemoGym, custom_agents/pi_nemo_gym.py), checked against the pi v1.5.2 source; keep that version:
+# Gym patch 0048 (PiNemoGym, custom_agents/pi_nemo_gym.py), checked against the pi v1.5.2 source; keep that version:
 #   - install: the release archive (Bun-compiled binary, no Node) is uploaded from PI_DIR (fetch-pi.sh) into each
 #     sandbox, sha256-checked; only the binary and its package.json are unpacked (the image needs tar).
 #   - capture: no compaction, auto-retry, cache warming, HTTP timeouts, extensions, MCP, skills or project .pi/

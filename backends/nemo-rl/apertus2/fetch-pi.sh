@@ -1,6 +1,6 @@
 #!/bin/bash
 # Fetch the pi release archive (github.com/earendil-works/pi, MIT) into PI_DIR once per run, checked against the
-# release's published sha256 (pinned here). Run on a login node (needs internet); idempotent. Gym patch 0047
+# release's published sha256 (pinned here). Run on a login node (needs internet); idempotent. Gym patch 0048
 # (PiNemoGym) uploads it from there into every sandbox, so the sandboxes need no internet and no Node.
 #   PI_DIR=$SCRATCH/pi bash backends/nemo-rl/apertus2/fetch-pi.sh
 # Leaves PI_DIR/<version>/<asset>, the layout harbor_agent_kwargs.pi_archive_dir expects.

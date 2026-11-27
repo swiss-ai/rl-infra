@@ -8,7 +8,7 @@ only the combination in `TESTING.md`; everything else here is untested.
 The Gym side of in-sandbox agents (adapter options, the per-sandbox model tunnel, token capture) is documented in
 Gym's `harbor_agent` README, sections "Agents inside the sandbox (OpenCode, pi, mini-swe-agent)" and "Failure
 classes". After `setup-gym.sh` it is at `$NEMO_RL_DIR/3rdparty/Gym-workspace/Gym/responses_api_agents/harbor_agent/README.md`;
-it comes from Gym patches 0037, 0041-0043, 0046 and 0047.
+it comes from Gym patches 0037, 0041-0043 and 0046-0048.
 
 ## The stack
 
@@ -36,7 +36,7 @@ Without our launchers, the Gym tree is: `git checkout <GYM_COMMIT>`, then `git a
 | Terminus-2 truncation handling | 0035, 0036, 0042 | `max_consecutive_truncations`, `truncation_retry`, `context_limit_truncation` |
 | Failure class per rollout and masking | 0037, 0041, 0043 (+ 0027) | `harbor_mask_infra`, `harbor_mask_context_overflow`, `harbor_mask_agent_timeout` |
 | Documentation of the above | 0046 | |
-| pi adapter (uploaded release, capture-safe settings, turn budget, failure classes from `agent/pi.txt`) | 0047 | `harbor_agent_kwargs.pi_*` |
+| pi adapter (uploaded release, capture-safe settings, turn budget, failure classes from `agent/pi.txt`) | 0048 | `harbor_agent_kwargs.pi_*` |
 
 Several are open PRs against swiss-ai/nemo-gym; rl-infra drops a patch once its PR is merged.
 
@@ -71,7 +71,7 @@ Configs are OmegaConf files merged in order, later ones win; command-line overri
 4. `../harbor-capture-sc/opencode-sc.yaml`: the OpenCode adapter, `harbor_model_base_url`, `sampling_overrides`
 5. `../harbor-capture-sc/tunnel-sc.yaml`: the per-sandbox tunnel
 6. `run-agent-v.yaml`: rollout and stall timeouts, model-call capture, the Apertus 2 reasoning workaround
-7. `run-ov.yaml`: OpenCode on these tasks (working directory, upload install, timeout)
+7. `run-ov.yaml`: OpenCode on these tasks (working directory, mounted or upload install, timeout)
 8. command-line overrides from `common.sh` (`agent_v_args`, with the long-context profile)
 
 An in-sandbox agent needs the Single Controller path: only it turns on Gym's token capture. On the Gym entrypoint
@@ -108,7 +108,7 @@ are not supported. Our tasks also set `[verifier] environment_mode = "separate"`
    `harbor_environment_build_timeout_multiplier` scales the setup limit. With OpenCode, keep `opencode_timeout_sec`
    below the agent cap so its log and exit status are recorded and the verifier runs.
 4. Images: private images need `image_auth_file` (a `name:password` line) and `image_auth_registry` (the host the
-   credentials are sent to). With OpenCode's `upload` install the image needs only `tar`; the tunnel needs `uname`,
+   credentials are sent to). With OpenCode's `upload` install the image needs only `tar` (`mounted`: nothing); the tunnel needs `uname`,
    `setsid` or `nohup`, and `bash`. OpenCode runs in the image's working directory unless `opencode_workdir` is set.
 5. Before a run, check that the reference solution scores 1 and an empty run scores 0 on a sample of tasks
    (`README.md`, "Run S with OpenCode on SWE-Lego", shows how we did it).
@@ -126,8 +126,12 @@ are not supported. Our tasks also set `[verifier] environment_mode = "separate"`
 - **Network:** Breithorn's pods cannot connect to Daint's nodes, hence the tunnel. Where sandboxes can reach the
   model server directly, leave out `tunnel-sc.yaml` and set `harbor_model_base_url` to the address the sandbox
   can reach (untested).
-- **Binaries:** `fetch-chisel.sh` and `fetch-opencode.sh` fetch pinned, sha256-checked releases on a machine with
-  internet into `CHISEL_DIR` / `OPENCODE_DIR`, from where every sandbox gets them by upload.
+- **Binaries:** on Breithorn the sandbox platform mounts chisel, OpenCode and pi read-only into every sandbox
+  (image volumes built from `images/agent-bin/` on branch `agent-image-volumes`, at `/opt/rl-tools/<name>/<version>/`); `AGENT_BINARIES=mounted`
+  (the default, Gym 0047, `common.sh agent_binaries_env`) uses them and uploads nothing. Elsewhere set
+  `AGENT_BINARIES=upload` (or mount the same images at `AGENT_BIN_ROOT`): `fetch-chisel.sh` and `fetch-opencode.sh`
+  fetch pinned, sha256-checked releases on a machine with internet into `CHISEL_DIR` / `OPENCODE_DIR`, from where
+  every sandbox gets them by upload. The node's chisel client always comes from `CHISEL_DIR`.
 - **Another sandbox backend:** harbor_agent's sandbox environment uses Gym's sandbox providers; the tunnel needs
   the provider's `sandbox.endpoint(port)` to carry WebSockets. Only OpenSandbox has been tried.
 
@@ -136,7 +140,7 @@ are not supported. Our tasks also set `[verifier] environment_mode = "separate"`
 - **In the sandbox:** a Gym adapter like `OpenCodeNemoGym` (point the agent at `api_base`; switch off every model
   call that is not the main loop, or capture masks the rollout; record its log for failure classes). In rl-infra,
   a new `AGENT` value for `run-agent-v.sh`: `common.sh` `agent_v_tag`, `agent_v_agent`, `agent_v_overlays`,
-  `check_gym_agents`, an overlay `run-<tag>.yaml`, and the expected values in `check.py`. `AGENT=pi` (run PV, Gym 0047,
+  `check_gym_agents`, an overlay `run-<tag>.yaml`, and the expected values in `check.py`. `AGENT=pi` (run PV, Gym 0048,
   `pi-sc.yaml`, `run-pv.yaml`, `fetch-pi.sh`) is the complete set of these changes for one agent; for a new agent,
   check its source for every model call besides the main loop (titles, summaries, retries) and every rewrite of
   earlier messages, since each one masks the rollout under capture.

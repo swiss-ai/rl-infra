@@ -60,6 +60,8 @@ export NEMO_GYM_USER="${NEMO_GYM_USER:-${USER}}" NEMO_GYM_WORKLOAD="${NEMO_GYM_W
 export NEMO_GYM_RUN_ID="${NEMO_GYM_RUN_ID:-chonk-sc-check-s}"
 # run O (run S with AGENT=opencode): what run-s.sh exports for tunnel-sc.yaml
 export CHISEL_DIR="${CHISEL_DIR:-${SCRATCH}/chisel}"
+# runs O/OV/PV: mounted or uploaded binaries in the pods (AGENT_BINARIES), as the launchers
+agent_binaries_env || exit 1
 # run OV: where run-agent-v.sh fetches the OpenCode archive (run-ov.yaml opencode_archive_dir); run PV: pi's (pi-sc.yaml)
 export OPENCODE_DIR="${OPENCODE_DIR:-${SCRATCH}/opencode}" PI_DIR="${PI_DIR:-${SCRATCH}/pi}"
 total=0
@@ -156,11 +158,12 @@ if [[ "${AV_RUNS}" == 1 ]]; then
             || echo "  WARN  no prepared tasks in ${HARBOR_ROOT} and no task store ${store} (VERIFIED_STORE)"; }
     [[ -s "${AGENT_V_TRAIN}" ]] && echo "  ok    filtered rows ${AGENT_V_TRAIN}: $(wc -l < "${AGENT_V_TRAIN}")" \
         || echo "  note  ${AGENT_V_TRAIN} not written yet (run-agent-v.sh writes it)"
+    echo "  note  AGENT_BINARIES=${AGENT_BINARIES}: chisel in the pods ${CHISEL_POD_BINARY}$( [[ "${AGENT_BINARIES}" == mounted ]] && echo ", opencode ${OPENCODE_BIN} (mounted by Breithorn; checked in each pod at setup)")"
     for a in amd64 arm64; do
         f="${CHISEL_DIR}/chisel_${CHISEL_VERSION:-1.12.0}_linux_${a}"
         [[ -x "${f}" ]] && echo "  ok    chisel ${f}" || echo "  note  ${f} missing (run-agent-v.sh fetches it)"
     done
-    if [[ " ${RUNS} " == *" ov "* ]]; then
+    if [[ " ${RUNS} " == *" ov "* && "${AGENT_BINARIES}" == upload ]]; then
         f="${OPENCODE_DIR}/${OPENCODE_VERSION:-1.17.11}/opencode-linux-x64-baseline.tar.gz"
         [[ -s "${f}" ]] && echo "  ok    OpenCode archive ${f}" || echo "  note  ${f} missing (run-agent-v.sh fetches it)"
     fi

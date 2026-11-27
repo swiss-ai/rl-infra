@@ -11,6 +11,12 @@
 # Step A (with AGENT=terminus): Terminus-2 still calls the model from the node; the tunnel runs
 # alongside to test its lifecycle at training concurrency. In-pod agents would point at
 # http://127.0.0.1:8000 (step B).
+#
+# chisel in the sandbox (Gym 0047): pod_install mounted (default) uses the binary the platform mounts read-only
+# into every new sandbox (Breithorn since 2026-11-27: the rl-infra images/agent-bin image volumes under
+# /opt/rl-tools/<name>/<version>/), nothing is uploaded and the start checks its version; chisel_dir then only
+# serves the node's binary. AGENT_BINARIES=upload (chonk-sc common.sh agent_binaries_env) goes back to uploading
+# chisel_dir's binary to /tmp/.nemo-gym-chisel at every start.
 
 env:
   nemo_gym:
@@ -26,3 +32,5 @@ env:
               health_path: /health
               # as in osb-reach; the Go client's CA trust for the OpenSandbox domain is not checked yet
               tls_skip_verify: true
+              pod_install: ${oc.env:CHISEL_POD_INSTALL,mounted}
+              pod_binary: ${oc.env:CHISEL_POD_BINARY,'${oc.env:AGENT_BIN_ROOT,/opt/rl-tools}/chisel/${oc.env:CHISEL_VERSION,1.12.0}/chisel'}
