@@ -19,7 +19,7 @@ i.e. vLLM DP4 per node through NVIDIA-NeMo/RL#2517) trained through
 | `run-v.sh`, `run-v-24k.sh` | run V: Terminus-2 on Kostas' verified tasks, Gym entrypoint (not SC), 24k on 20 nodes; `CTX=65536`: long context |
 | `run-agent-v.sh`, `run-agent-v.yaml`, `run-ov.yaml` | run OV: OpenCode in the pod on run V's verified tasks, SC + token capture, 24k on 20 nodes; `CTX=65536`: long context |
 | `run-pv.yaml` | run PV (`run-agent-v.sh AGENT=pi`): the pi coding agent instead of OpenCode; not run on the cluster yet |
-| `run-cv.yaml` | run CV (`run-agent-v.sh AGENT=claude-code`, Gym 0050-0055): Claude Code instead of OpenCode; probed against a stub (`../claude-code-probe/`), one-node rung and 64K smokes (Qwen3-4B / Chonk SFT); no full run yet |
+| `run-cv.yaml` | run CV (`run-agent-v.sh AGENT=claude-code`, Gym 0050-0055): Claude Code instead of OpenCode; probed against a stub (`../claude-code-probe/`), one-node rung, 64K smokes and a 10-step 64K run (job 1064832, trained) |
 | `common.sh` | config composition, the long-context profile of runs V and OV, and the clone / Gym checks, shared by the scripts |
 
 Runs A and B: 3 steps, `async_rl` sampler `in_order` with lookahead 0 (synchronous), one chunk per
@@ -375,6 +375,14 @@ yet clean at that point.
 With 0055 the next 64K smoke (job 1064831, 2026-11-27, 20 nodes, 1 step) trained: grad norm 0.082, 24 of 32
 sequences valid, mean reward 0.25 (6 of 24 scored 1). The 8 masked rows were all FACET agent timeouts; there were
 no infra failures and no `unresolved_parent` or `ambiguous_terminal`. The terminal-selection fix held.
+The 10-step 64K run (job 1064832, 2026-11-27, 20 nodes, 8 x 8 rollouts, 2h52m) trained through all 10 steps:
+grad norms 0.059, 0.070, 0.047, 0.054, 0.083, 0.0, 0.104, 0.118, 0.091, 0.128 (step 6 had zero advantage in
+every group, so the gradient was 0); valid sequences 33, 45, 54, 57, 54, 43, 41, 53, 54, 45 of 64; mean reward
+among valid 0.15, 0.13, 0.07, 0.26, 0.17, 0.19, 0.13, 0.45, 0.26, 0.40. Of 640 rollouts: 491 `ok` (108 scored 1),
+86 agent timeouts, 61 context overflows, 2 infra; 3 `ambiguous_terminal`, 2 `unresolved_parent` and 8
+`no_records` (one prompt in step 1). The remaining ambiguous/unresolved cases are chains of consecutive empty
+`max_tokens` replies, where 0055 has no non-empty sibling to prefer; a 0056 could cap consecutive empty replies
+or pick the latest empty leaf. Checkpointing was off, so this run validates training, not a saved model.
 `run-agent-v.sh` warns when `AGENT=claude-code` runs below `CTX=65536`.
 The v0.1 model often names Claude Code's tools in lowercase (`bash`, `write`), which Claude Code rejects as unknown
 tools; v0.2 does not. The task with `timeout_sec = 120` in its `task.toml` (FACET) times out in all 8 trials.
