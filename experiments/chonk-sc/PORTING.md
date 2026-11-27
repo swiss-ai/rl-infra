@@ -37,6 +37,7 @@ Without our launchers, the Gym tree is: `git checkout <GYM_COMMIT>`, then `git a
 | Failure class per rollout and masking | 0037, 0041, 0043 (+ 0027) | `harbor_mask_infra`, `harbor_mask_context_overflow`, `harbor_mask_agent_timeout` |
 | Documentation of the above | 0046 | |
 | pi adapter (uploaded release, capture-safe settings, turn budget, failure classes from `agent/pi.txt`) | 0048 | `harbor_agent_kwargs.pi_*` |
+| Binaries the sandbox platform mounts (chisel, OpenCode, pi; version checked, nothing uploaded) | 0047, 0049 | `model_tunnel.pod_install` / `pod_binary`, `opencode_install: mounted` / `opencode_bin`, `pi_install: mounted` / `pi_bin` (`AGENT_BINARIES`) |
 
 Several are open PRs against swiss-ai/nemo-gym; rl-infra drops a patch once its PR is merged.
 

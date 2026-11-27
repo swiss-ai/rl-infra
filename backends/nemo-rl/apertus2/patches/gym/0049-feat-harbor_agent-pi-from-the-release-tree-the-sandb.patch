@@ -1,0 +1,192 @@
+From 5c758c07258d7c4c9dc771608d27e505a8b99d3b Mon Sep 17 00:00:00 2001
+From: Philip Mueller <claude@philipmueller.ch>
+Date: Fri, 27 Nov 2026 06:31:21 +0000
+Subject: [PATCH] feat(harbor_agent): pi from the release tree the sandbox
+ platform mounts
+
+pi_install: mounted with pi_bin (e.g. /opt/rl-tools/pi/1.5.2/pi/pi on Breithorn, a read-only image
+volume with the release tree, so pi's package.json sits next to the executable): no archive, no
+pi_archive_dir or digest needed; setup runs installed_compat.check_mounted_binary (executable,
+`--version` = version, else agent setup fails as a failed install), and the run calls pi by that
+path. upload stays the default.
+
+Signed-off-by: Philip Mueller <claude@philipmueller.ch>
+---
+ responses_api_agents/harbor_agent/README.md   |  7 ++--
+ .../harbor_agent/custom_agents/pi_nemo_gym.py | 34 +++++++++++++++----
+ .../custom_agents/test_pi_nemo_gym.py         | 31 +++++++++++++++++
+ 3 files changed, 63 insertions(+), 9 deletions(-)
+
+diff --git a/responses_api_agents/harbor_agent/README.md b/responses_api_agents/harbor_agent/README.md
+index 9ed539854..2bb5903c5 100644
+--- a/responses_api_agents/harbor_agent/README.md
++++ b/responses_api_agents/harbor_agent/README.md
+@@ -544,7 +544,8 @@ harbor_mask_context_overflow: true                  # optional, see "Failure cla
+ 
+ **pi** ([github.com/earendil-works/pi](https://github.com/earendil-works/pi), `PiNemoGym`): the standalone release
+ (a Bun-compiled binary, no Node) is uploaded from `pi_archive_dir` into each sandbox and only the binary and its
+-`package.json` are unpacked (the image needs `tar`). The run writes pi's `models.json` (one OpenAI-compatible
++`package.json` are unpacked (the image needs `tar`); with `pi_install: mounted` the sandbox already has the release
++tree and nothing is installed. The run writes pi's `models.json` (one OpenAI-compatible
+ provider at `api_base`), `settings.json` and the optional turn-budget extension into `/logs/agent/pi-agent` and
+ runs `pi --print --mode json` with the tools `read`, `bash`, `edit`, `write`; the events go to `agent/pi.txt`, the
+ session to `agent/pi/sessions`. For capture the adapter turns off compaction (summary calls, compact-and-retry),
+@@ -573,7 +574,9 @@ harbor_agent_kwargs:
+ | Option | Default | Meaning |
+ |---|---|---|
+ | `version` | `1.5.2` | pi release. Settings, flags and the extension API were checked against this release; another one needs `pi_sha256` and a re-check. |
+-| `pi_archive_dir` | required | Directory with `<version>/<asset>`. The archive's sha256 is checked once per process, and again in the sandbox if `sha256sum` is there. |
++| `pi_install` | `upload` | `upload`: the archive from `pi_archive_dir`, unpacked in the sandbox. `mounted`: the sandbox already has the release tree (e.g. a read-only volume the sandbox platform mounts into every pod); setup only checks that `pi_bin` prints `version`. |
++| `pi_bin` | none | For `mounted`: absolute path of the `pi` executable in the sandbox (its `package.json` next to it); the run calls it by this path. |
++| `pi_archive_dir` | required for `upload` | Directory with `<version>/<asset>`. The archive's sha256 is checked once per process, and again in the sandbox if `sha256sum` is there. |
+ | `pi_asset` | `pi-linux-x64.tar.gz` | Release asset (glibc x86_64, built for `bun-linux-x64-baseline`: no AVX2 needed). |
+ | `pi_sha256` | built in for 1.5.2 | sha256 of the archive. |
+ | `pi_timeout_sec` | none | pi is ended with exit 124 after this, so its log and exit status are recorded before Harbor's agent timeout. |
+diff --git a/responses_api_agents/harbor_agent/custom_agents/pi_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/pi_nemo_gym.py
+index c5b6134cf..af90c9f67 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/pi_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/pi_nemo_gym.py
+@@ -17,7 +17,9 @@
+ Harbor's own Pi agent installs pi with npm under nvm in the sandbox and raises when pi exits non-zero.
+ This subclass installs the standalone release (a Bun-compiled binary, no Node/npm) from an archive the
+ adapter uploads into the sandbox, and runs it through `installed_compat` like OpenCodeNemoGym: one
+-recorded command, the exit status written down instead of raised.
++recorded command, the exit status written down instead of raised. With `pi_install: mounted` nothing is
++installed: the sandbox already has the release tree (e.g. a read-only volume the sandbox platform mounts
++into every pod), setup checks that `pi_bin` prints `version`, and the run calls it by that path.
+ 
+ pi talks to one OpenAI-compatible provider declared in its `models.json`, whose base URL is the
+ `api_base` harbor_agent passes (the model server, with the rollout's capture prefix when token capture
+@@ -61,6 +63,7 @@ from responses_api_agents.harbor_agent.custom_agents.installed_compat import (
+     PIPEFAIL_IF_SUPPORTED,
+     TIMEOUT_KILL_AFTER_SEC,
+     ExecInput,
++    check_mounted_binary,
+     deep_merge,
+     drop_shared_kwargs,
+     install_from_template,
+@@ -91,6 +94,9 @@ INSTALL_DIR = "/opt/pi-nemo-gym"
+ PI_BIN = f"{INSTALL_DIR}/pi"
+ # where the adapter uploads the release archive (the install script removes it)
+ POD_ARCHIVE = "/installed-agent/pi.tar.gz"
++# upload: the archive from pi_archive_dir, unpacked to INSTALL_DIR; mounted: the sandbox already has the release
++# tree, pi_bin is its executable (the package.json pi reads its version from must sit next to it)
++INSTALL_METHODS = ("upload", "mounted")
+ 
+ LOG_FILE = "/logs/agent/pi.txt"
+ # PI_CODING_AGENT_DIR (config.ts:610-636): models.json, settings.json, the turn-budget extension. Under the
+@@ -139,6 +145,8 @@ class PiNemoGym(Pi):
+         pi_timeout_sec: int | None = None,
+         pi_workdir: str | None = None,
+         pi_settings: dict[str, Any] | None = None,
++        pi_install: str = "upload",
++        pi_bin: str | None = None,
+         **kwargs: Any,
+     ) -> None:
+         # Harbor's base keeps `version` (the pi release).
+@@ -155,10 +163,15 @@ class PiNemoGym(Pi):
+             raise ValueError("pi_sha256 must be 64 lowercase hex digits")
+         if pi_workdir is not None and not str(pi_workdir).startswith("/"):
+             raise ValueError(f"pi_workdir must be an absolute path, got {pi_workdir!r}")
+-        if not pi_archive_dir:
++        if pi_install not in INSTALL_METHODS:
++            raise ValueError(f"pi_install must be one of {INSTALL_METHODS}, got {pi_install!r}")
++        mounted = pi_install == "mounted"
++        if mounted and not str(pi_bin or "").startswith("/"):
++            raise ValueError(f"pi_install 'mounted' needs pi_bin as an absolute path, got {pi_bin!r}")
++        if not mounted and not pi_archive_dir:
+             raise ValueError("PiNemoGym needs pi_archive_dir (with <version>/<asset>, e.g. from fetch-pi.sh)")
+         sha256 = pi_sha256 or KNOWN_ARCHIVE_SHA256.get((self._version, pi_asset))
+-        if not sha256:
++        if not mounted and not sha256:
+             raise ValueError(f"pi {self._version} ({pi_asset}) has no known digest: set pi_sha256")
+         self._api_base = api_base
+         self._api_key = api_key
+@@ -169,9 +182,13 @@ class PiNemoGym(Pi):
+         self._timeout_sec = int(pi_timeout_sec) if pi_timeout_sec is not None else None
+         self._workdir = pi_workdir
+         self._settings_overlay = pi_settings or {}
+-        self._archive = verified_archive(
+-            Path(pi_archive_dir) / self._version / pi_asset, sha256, what="pi", dir_option="pi_archive_dir"
+-        )
++        self._install_method = pi_install
++        self._pi_bin = str(pi_bin) if mounted else PI_BIN
++        self._archive: Path | None = None
++        if not mounted:
++            self._archive = verified_archive(
++                Path(pi_archive_dir) / self._version / pi_asset, sha256, what="pi", dir_option="pi_archive_dir"
++            )
+ 
+     @staticmethod
+     def name() -> str:
+@@ -189,6 +206,9 @@ class PiNemoGym(Pi):
+         }
+ 
+     async def install(self, environment: BaseEnvironment) -> None:
++        if self._archive is None:  # pi_install: mounted
++            await check_mounted_binary(self, environment, "pi", self._pi_bin, self._version)
++            return
+         await environment.upload_file(source_path=self._archive, target_path=POD_ARCHIVE)
+         # as root: it writes to INSTALL_DIR
+         await install_from_template(self, environment, INSTALL_TEMPLATE, self.install_variables())
+@@ -318,7 +338,7 @@ class PiNemoGym(Pi):
+             # Ends pi before Harbor's agent timeout so the command's return code is recorded.
+             argv += ["timeout", "-k", str(TIMEOUT_KILL_AFTER_SEC), str(self._timeout_sec)]
+         argv += [
+-            PI_BIN,
++            self._pi_bin,
+             "--print",
+             "--mode",
+             "json",
+diff --git a/responses_api_agents/harbor_agent/custom_agents/test_pi_nemo_gym.py b/responses_api_agents/harbor_agent/custom_agents/test_pi_nemo_gym.py
+index 41c1d1ff4..67b231f58 100644
+--- a/responses_api_agents/harbor_agent/custom_agents/test_pi_nemo_gym.py
++++ b/responses_api_agents/harbor_agent/custom_agents/test_pi_nemo_gym.py
+@@ -375,6 +375,34 @@ async def test_install_uploads_the_archive_then_runs_the_script_as_root(tmp_path
+     assert env.calls[-1]["user"] == "root"
+ 
+ 
++MOUNTED_BIN = "/opt/rl-tools/pi/1.5.2/pi/pi"
++
++
++@pytest.mark.asyncio
++async def test_mounted_install_only_checks_the_binary(tmp_path: Path) -> None:
++    from responses_api_agents.harbor_agent.custom_agents import installed_compat
++
++    # no archive dir and no digest needed: nothing is uploaded
++    agent = PiNemoGym(logs_dir=tmp_path, model_name=MODEL, api_base=API_BASE, pi_install="mounted", pi_bin=MOUNTED_BIN)
++    env = _Env()
++    await agent.install(env)
++    script = Environment().from_string(installed_compat.MOUNTED_CHECK_TEMPLATE.read_text())
++    assert env.uploads == [
++        (script.render(name="pi", bin=MOUNTED_BIN, version="1.5.2").encode(), "/installed-agent/install.sh")
++    ]
++    assert [c["command"] for c in env.calls] == ["bash /installed-agent/install.sh"]
++    assert f" {MOUNTED_BIN} --print --mode json " in _command(agent).command
++    # the upload install keeps its own path
++    assert f" {mod.PI_BIN} --print --mode json " in _command(_agent(tmp_path)).command
++
++
++@pytest.mark.asyncio
++async def test_failed_mounted_check_fails_setup(tmp_path: Path) -> None:
++    agent = _agent(tmp_path, pi_install="mounted", pi_bin=MOUNTED_BIN)
++    with pytest.raises(RuntimeError, match="exit code 1"):
++        await agent.install(_Env(return_code=1))
++
++
+ def test_default_version_and_pinned_digest(tmp_path: Path) -> None:
+     assert mod.DEFAULT_VERSION == "1.5.2"
+     # "digest" of pi-linux-x64.tar.gz in the v1.5.2 release (GitHub release API)
+@@ -390,6 +418,9 @@ def test_default_version_and_pinned_digest(tmp_path: Path) -> None:
+     "kwargs, match",
+     [
+         ({"pi_archive_dir": None}, "pi_archive_dir"),
++        ({"pi_install": "npm"}, "pi_install"),
++        ({"pi_install": "mounted"}, "pi_bin"),
++        ({"pi_install": "mounted", "pi_bin": "pi/pi"}, "pi_bin"),
+         ({"pi_sha256": "ABC"}, "pi_sha256"),
+         ({"version": "1.5.2; rm -rf /"}, "version"),
+     ],
+-- 
+2.56.0
+

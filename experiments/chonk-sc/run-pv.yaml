@@ -5,8 +5,9 @@
 # - Time: Harbor's agent cap is 1800 s (the tasks allow 3000 s); pi is ended at 1740 s so its exit status and pi.txt
 #   are recorded and the verifier runs. PI_TIMEOUT_SEC overrides; at long context (CTX > 24576) run-agent-v.sh sets
 #   it to AGENT_CAP - 60 = 2940 s (common.sh agent_v_defaults).
-# - Install: always the uploaded archive (59 MB; fetch-pi.sh puts it into PI_DIR on the login node), no internet in
-#   the sandbox, only tar in the image.
+# - Install (pi-sc.yaml): AGENT_BINARIES=mounted (default) uses the release tree Breithorn mounts into every sandbox
+#   (Gym 0049, /opt/rl-tools/pi/1.5.2/pi/pi); AGENT_BINARIES=upload the uploaded archive (59 MB; fetch-pi.sh puts it
+#   into PI_DIR on the login node), no internet in the sandbox, only tar in the image.
 env:
   nemo_gym:
     harbor_agent:

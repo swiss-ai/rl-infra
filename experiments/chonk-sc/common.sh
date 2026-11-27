@@ -226,19 +226,23 @@ agent_v_agent() {
 # (default): Breithorn mounts them read-only into every new sandbox (the images/agent-bin image volumes, user
 # 2026-11-27) at AGENT_BIN_ROOT/<name>/<version>/ (/opt/rl-tools); nothing is uploaded, setup checks each version.
 # AGENT_BINARIES=upload: as before (chisel uploaded at every start, Gym 0016; OpenCode's archive per trial, Gym 0045).
-# Exports what tunnel-sc.yaml and run-ov.yaml read (sbatch passes them into the job): CHISEL_POD_INSTALL,
-# CHISEL_POD_BINARY, OPENCODE_INSTALL, OPENCODE_BIN. The node's chisel (arm64) comes from CHISEL_DIR either way.
+# Exports what tunnel-sc.yaml, run-ov.yaml and pi-sc.yaml read (sbatch passes them into the job): CHISEL_POD_INSTALL,
+# CHISEL_POD_BINARY, OPENCODE_INSTALL, OPENCODE_BIN, PI_INSTALL, PI_BIN (pi: Gym 0049). The node's chisel (arm64)
+# comes from CHISEL_DIR either way.
 agent_binaries_env() {
     export AGENT_BINARIES="${AGENT_BINARIES:-mounted}" AGENT_BIN_ROOT="${AGENT_BIN_ROOT:-/opt/rl-tools}"
     export CHISEL_VERSION="${CHISEL_VERSION:-1.12.0}"
-    local opencode_version="${OPENCODE_VERSION:-1.17.11}"
+    local opencode_version="${OPENCODE_VERSION:-1.17.11}" pi_version="${PI_VERSION:-1.5.2}"
     case "${AGENT_BINARIES}" in
-        mounted) export CHISEL_POD_INSTALL=mounted OPENCODE_INSTALL=mounted \
+        mounted) export CHISEL_POD_INSTALL=mounted OPENCODE_INSTALL=mounted PI_INSTALL=mounted \
                         CHISEL_POD_BINARY="${AGENT_BIN_ROOT}/chisel/${CHISEL_VERSION}/chisel" ;;
-        upload)  export CHISEL_POD_INSTALL=upload OPENCODE_INSTALL=upload CHISEL_POD_BINARY=/tmp/.nemo-gym-chisel ;;
+        upload)  export CHISEL_POD_INSTALL=upload OPENCODE_INSTALL=upload PI_INSTALL=upload \
+                        CHISEL_POD_BINARY=/tmp/.nemo-gym-chisel ;;
         *) echo "agent_binaries_env: AGENT_BINARIES must be mounted or upload, not '${AGENT_BINARIES}'" >&2; return 1 ;;
     esac
-    export OPENCODE_BIN="${AGENT_BIN_ROOT}/opencode/${opencode_version}/opencode"
+    # the pi release tree: the executable pi/pi with its package.json next to it
+    export OPENCODE_BIN="${AGENT_BIN_ROOT}/opencode/${opencode_version}/opencode" \
+           PI_BIN="${AGENT_BIN_ROOT}/pi/${pi_version}/pi/pi"
 }
 
 # agent_v_defaults: run-agent-v.sh's knobs with their defaults (check.sh RUNS=ov checks the same values).
@@ -594,7 +598,12 @@ check_gym_agents() {
             # without it a pi rollout that ran into the context limit reads as ok (pi exits 0 in --mode json)
             grep -q "def pi_end_flags" "${g}/responses_api_agents/harbor_agent/failure_classes.py" 2>/dev/null \
                 && ok "Gym patch 0048: failure classes from pi's events (agent/pi.txt)" \
-                || bad "Gym patch 0048 missing (pi_end_flags in harbor_agent/failure_classes.py)" ;;
+                || bad "Gym patch 0048 missing (pi_end_flags in harbor_agent/failure_classes.py)"
+            if [[ "${AGENT_BINARIES:-mounted}" == mounted ]]; then
+                grep -q 'pi_install' "${ca}/pi_nemo_gym.py" 2>/dev/null \
+                    && ok "Gym patch 0049: pi from the release tree mounted into the sandbox (pi_install: mounted)" \
+                    || bad "Gym patch 0049 missing (pi_install in custom_agents/pi_nemo_gym.py); or AGENT_BINARIES=upload"
+            fi ;;
         *) bad "check_gym_agents: no checks for agent '$1'" ;;
     esac
     return "${fails}"

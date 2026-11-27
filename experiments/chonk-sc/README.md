@@ -302,8 +302,10 @@ HTTP 400 context-length answers in `model-calls/`; OpenCode exit 124 (1740 s); r
 
 Run OV with the [pi coding agent](https://github.com/earendil-works/pi) (v1.5.2) instead of OpenCode: same tasks,
 layout, tunnel, token capture and long-context profile; config `../harbor-capture-sc/pi-sc.yaml` and `run-pv.yaml`
-in place of `opencode-sc.yaml` and `run-ov.yaml`. Gym patch 0048 (`PiNemoGym`): the release archive (59 MB) is fetched
-once into `$PI_DIR` (`$SCRATCH/pi`, `fetch-pi.sh`) and uploaded into each sandbox; pi runs with compaction, retries,
+in place of `opencode-sc.yaml` and `run-ov.yaml`. Gym patch 0048 (`PiNemoGym`): pi runs from the release tree Breithorn
+mounts into every sandbox (`/opt/rl-tools/pi/1.5.2/pi/pi`, Gym 0049, `AGENT_BINARIES=mounted`); with
+`AGENT_BINARIES=upload` the release archive (59 MB) is fetched once into `$PI_DIR` (`$SCRATCH/pi`, `fetch-pi.sh`) and
+uploaded into each sandbox. pi runs with compaction, retries,
 timeouts, extensions, MCP and skills off and only `read`, `bash`, `edit`, `write`; `max_turns` is a pi extension that
 blocks the tool calls of the last allowed turn; the failure classes read pi's events in `agent/pi.txt` (in
 `--mode json` pi exits 0 also after an error). pi is ended at `PI_TIMEOUT_SEC` (1740 s; at long context

@@ -444,7 +444,12 @@ else:
         if EXPECT == "pv":
             expect("agent", hcfg.get("harbor_agent_import_path", "").rsplit(":", 1)[-1], "PiNemoGym")
             expect("pi version (Gym 0048: settings checked against 1.5.2)", kw.get("version"), "1.5.2")
-            expect("pi archive dir (PI_DIR)", kw.get("pi_archive_dir"), ENV.get("PI_DIR"))
+            expect("pi install (AGENT_BINARIES: 0049 mounted, 0048 uploaded archive)", kw.get("pi_install"),
+                   ENV.get("PI_INSTALL"))
+            if kw.get("pi_install") == "mounted":
+                expect("pi binary in the pod (PI_BIN)", kw.get("pi_bin"), ENV.get("PI_BIN"))
+            else:
+                expect("pi archive dir (PI_DIR)", kw.get("pi_archive_dir"), ENV.get("PI_DIR"))
             expect("pi_workdir unset (the task's WORKDIR, run-pv.yaml)", kw.get("pi_workdir"), None)
             expect("pi timeout (PI_TIMEOUT_SEC, default agent cap - 60)", kw.get("pi_timeout_sec"),
                    int(ENV.get("PI_TIMEOUT_SEC") or av_cap - 60))

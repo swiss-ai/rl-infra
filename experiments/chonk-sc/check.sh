@@ -158,7 +158,7 @@ if [[ "${AV_RUNS}" == 1 ]]; then
             || echo "  WARN  no prepared tasks in ${HARBOR_ROOT} and no task store ${store} (VERIFIED_STORE)"; }
     [[ -s "${AGENT_V_TRAIN}" ]] && echo "  ok    filtered rows ${AGENT_V_TRAIN}: $(wc -l < "${AGENT_V_TRAIN}")" \
         || echo "  note  ${AGENT_V_TRAIN} not written yet (run-agent-v.sh writes it)"
-    echo "  note  AGENT_BINARIES=${AGENT_BINARIES}: chisel in the pods ${CHISEL_POD_BINARY}$( [[ "${AGENT_BINARIES}" == mounted ]] && echo ", opencode ${OPENCODE_BIN} (mounted by Breithorn; checked in each pod at setup)")"
+    echo "  note  AGENT_BINARIES=${AGENT_BINARIES}: chisel in the pods ${CHISEL_POD_BINARY}$( [[ "${AGENT_BINARIES}" == mounted ]] && echo ", opencode ${OPENCODE_BIN}, pi ${PI_BIN} (mounted by Breithorn; checked in each pod at setup)")"
     for a in amd64 arm64; do
         f="${CHISEL_DIR}/chisel_${CHISEL_VERSION:-1.12.0}_linux_${a}"
         [[ -x "${f}" ]] && echo "  ok    chisel ${f}" || echo "  note  ${f} missing (run-agent-v.sh fetches it)"
@@ -167,7 +167,7 @@ if [[ "${AV_RUNS}" == 1 ]]; then
         f="${OPENCODE_DIR}/${OPENCODE_VERSION:-1.17.11}/opencode-linux-x64-baseline.tar.gz"
         [[ -s "${f}" ]] && echo "  ok    OpenCode archive ${f}" || echo "  note  ${f} missing (run-agent-v.sh fetches it)"
     fi
-    if [[ " ${RUNS} " == *" pv "* ]]; then
+    if [[ " ${RUNS} " == *" pv "* && "${AGENT_BINARIES}" == upload ]]; then
         f="${PI_DIR}/${PI_VERSION:-1.5.2}/pi-linux-x64.tar.gz"
         [[ -s "${f}" ]] && echo "  ok    pi archive ${f}" || echo "  note  ${f} missing (run-agent-v.sh fetches it)"
     fi

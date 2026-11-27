@@ -4,8 +4,9 @@
 # Terminus-2:
 #   AGENT=opencode  run OV: OpenCode 1.17.11 (as runs O / R2), the binary Breithorn mounts into each pod (Gym 0047;
 #                   AGENT_BINARIES=upload: the release archive fetched once, fetch-opencode.sh, and uploaded, Gym 0045)
-#   AGENT=pi        run PV: the pi coding agent 1.5.2 (Gym 0048), release archive fetched once (fetch-pi.sh) and
-#                   uploaded into each pod; untested on the cluster
+#   AGENT=pi        run PV: the pi coding agent 1.5.2 (Gym 0048), the release tree Breithorn mounts into each pod
+#                   (Gym 0049; AGENT_BINARIES=upload: the archive fetched once, fetch-pi.sh, and uploaded); untested
+#                   on the cluster
 # (another agent = a new AGENT value: common.sh agent_v_tag / agent_v_agent / agent_v_overlays / check_gym_agents,
 # its overlay run-<tag>.yaml, check.py)
 # The agent calls the model through the per-pod chisel tunnel (pod 127.0.0.1:8000 -> policy_model), and the token
@@ -34,7 +35,8 @@
 # OPENCODE_TIMEOUT_SEC (1740; AGENT_CAP - 60 when AGENT_CAP is set), OPENCODE_VERSION, OPENCODE_DEBUG, CHISEL_DIR,
 # OPENCODE_DIR ($SCRATCH/opencode; AGENT_BINARIES=upload only), AGENT_BINARIES (mounted: chisel and the agent from
 # the read-only mounts in every sandbox, AGENT_BIN_ROOT /opt/rl-tools; upload: uploaded per sandbox; common.sh
-# agent_binaries_env); for AGENT=pi: PI_TIMEOUT_SEC (as OPENCODE_TIMEOUT_SEC), PI_VERSION, PI_DIR ($SCRATCH/pi)
+# agent_binaries_env); for AGENT=pi: PI_TIMEOUT_SEC (as OPENCODE_TIMEOUT_SEC), PI_VERSION, PI_DIR ($SCRATCH/pi;
+# upload only)
 # ($SCRATCH/chisel), the long-context knobs (common.sh: SFT_CKPT, THINKING, CP, KCP, CAP, NCCL_MIN, MAX_NEW, MAX_TURNS,
 # AGENT_CAP, TTL, MASK_AGENT_TIMEOUT, MASK_OVERFLOW, KCP_MEGATRON_DIR, KCP_FLA_DIR, KCP_EDF_NAME, HANG_*),
 # and as run-v.sh: VERIFIED_STORE, HARBOR_ROOT ($SCRATCH/osb/harbor_verified), COLLECT_ARGS, EXCLUDE_CAMPAIGNS,
@@ -156,14 +158,14 @@ bash "${APERTUS2_DIR}/fetch-chisel.sh"
 if [[ "${AGENT}" == opencode && "${OPENCODE_INSTALL}" == upload ]]; then
     export OPENCODE_DIR="${OPENCODE_DIR:-${SCRATCH}/opencode}"
     bash "${APERTUS2_DIR}/fetch-opencode.sh"
-elif [[ "${AGENT}" == pi ]]; then
+elif [[ "${AGENT}" == pi && "${PI_INSTALL}" == upload ]]; then
     export PI_DIR="${PI_DIR:-${SCRATCH}/pi}"
     bash "${APERTUS2_DIR}/fetch-pi.sh"
 fi
 if [[ "${AGENT_BINARIES}" == mounted ]]; then
-    echo "== binaries in the pods: mounted (chisel ${CHISEL_POD_BINARY}, opencode ${OPENCODE_BIN})"
+    echo "== binaries in the pods: mounted (chisel ${CHISEL_POD_BINARY}, ${AGENT} $([[ "${AGENT}" == pi ]] && echo "${PI_BIN}" || echo "${OPENCODE_BIN}"))"
 else
-    echo "== binaries in the pods: uploaded (chisel from ${CHISEL_DIR}, opencode from ${OPENCODE_DIR:-?})"
+    echo "== binaries in the pods: uploaded (chisel from ${CHISEL_DIR}, ${AGENT} from $([[ "${AGENT}" == pi ]] && echo "${PI_DIR:-?}" || echo "${OPENCODE_DIR:-?}"))"
 fi
 
 TASK_COPY="${OUT}/configs/${RUN}-task.yaml"

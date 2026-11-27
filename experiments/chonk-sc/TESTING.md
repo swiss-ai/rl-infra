@@ -133,5 +133,5 @@ label) before starting the next run.
   since 2026-11-27); the runs use them (`AGENT_BINARIES=mounted`, Gym 0047) and upload nothing. Not yet run on the
   cluster. `AGENT_BINARIES=upload` goes back to uploading (52 MB OpenCode archive per sandbox through the OpenSandbox
   gateway, the 167 MB binary in node memory per sandbox; 32 at a time tested).
-- Gym runs at a pinned commit plus 48 patches (`backends/nemo-rl/apertus2/patches/gym/`); the ones of ours are on
+- Gym runs at a pinned commit plus 49 patches (`backends/nemo-rl/apertus2/patches/gym/`); the ones of ours are on
   their way upstream into swiss-ai/nemo-gym.
