@@ -23,7 +23,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "${HERE}/../.." && pwd)"
 
-# This branch pins Gym (15 patches) and NeMo-RL (without 0057) differently from chonk-sc-harbor025, whose
+# This branch pins Gym (16 patches) and NeMo-RL (without 0057) differently from chonk-sc-harbor025, whose
 # runs use the default clone ${PROJECTS_DIR}/nemo-rl-apertus2. setup.sh / setup-gym.sh would reset that clone
 # under its running and queued jobs (a job mounts the clone named in its EDF when it starts, not when it is
 # submitted), so this experiment gets a clone, Gym venvs, a pydeps overlay and an EDF of its own. Never taken from

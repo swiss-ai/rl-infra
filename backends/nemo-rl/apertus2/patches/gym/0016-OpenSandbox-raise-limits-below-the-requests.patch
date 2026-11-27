@@ -1,0 +1,118 @@
+OpenSandbox provider: a limit below its request is raised to the request. resource_requests is
+one map for every sandbox, the limits come from each task.toml, and Kubernetes rejects a pod whose
+request exceeds its limit ("spec.containers[0].resources.requests: Invalid value: "3Gi": must be
+less than or equal to memory limit of 2Gi"). OpenSandbox then leaves the sandbox Pending until
+POD_READY_TIMEOUT (600 s), Gym retries, and the trial ends in EnvironmentStartTimeoutError while it
+holds a harbor_agent concurrency slot: with memory_mib 3072, 255 of 588 task images (2 GiB limit)
+never started and only ~1068 of 1800 slots had a sandbox (run t2-verified-1k-20261127-135337).
+Applies to cpu, memory_mib and disk_gib; a resource without a limit keeps none; each distinct raise
+is logged once at INFO.
+
+diff --git a/nemo_gym/sandbox/providers/opensandbox/provider.py b/nemo_gym/sandbox/providers/opensandbox/provider.py
+index 51ea6020b..c23bcac18 100644
+--- a/nemo_gym/sandbox/providers/opensandbox/provider.py
++++ b/nemo_gym/sandbox/providers/opensandbox/provider.py
+@@ -340,6 +340,29 @@ def _resource_map(resources: SandboxResources) -> dict[str, str]:
+     return values
+ 
+ 
++_RAISED_LIMITS_LOGGED: set[tuple[str, Any, Any]] = set()
++
++
++def _raise_limits_to_requests(limits: SandboxResources, requests: SandboxResources) -> SandboxResources:
++    """Raise each limit below its request to the request.
++
++    The requests are one map for every sandbox, the limits come from each task, and Kubernetes
++    rejects a pod whose request exceeds its limit; OpenSandbox then leaves the sandbox Pending until
++    the ready timeout. A resource without a limit keeps none. Each raise is logged once.
++    """
++    raised: dict[str, Any] = {}
++    for name in ("cpu", "memory_mib", "disk_gib"):
++        limit, request = getattr(limits, name), getattr(requests, name)
++        if limit is not None and request is not None and request > limit:
++            raised[name] = request
++            if (name, limit, request) not in _RAISED_LIMITS_LOGGED:
++                _RAISED_LIMITS_LOGGED.add((name, limit, request))
++                LOGGER.info(
++                    "OpenSandbox: %s limit %s is below the request %s; raised to the request", name, limit, request
++                )
++    return replace(limits, **raised) if raised else limits
++
++
+ def _metadata_value(value: Any) -> str:
+     normalized = METADATA_VALUE_RE.sub("_", str(value)).strip("._-")
+     normalized = normalized[:63].strip("._-")
+@@ -1341,15 +1364,20 @@ class OpenSandboxProvider:
+         Sandbox, _, _, _, _ = _require_opensandbox_sdk()
+         options = OpenSandboxProviderOptions.from_mapping(spec.provider_options)
+ 
++        limits = spec.resources
++        requests = None
++        if options.resource_requests is not None:
++            requests = SandboxResources.from_mapping(options.resource_requests)
++            limits = _raise_limits_to_requests(limits, requests)
+         kwargs: dict[str, Any] = {
+             "env": spec.env,
+             "metadata": spec.metadata,
+-            "resource": _resource_map(spec.resources),
++            "resource": _resource_map(limits),
+             "extensions": self._resolve_extensions(options.extensions),
+             "connection_config": self._connection_config(request_timeout_s=self._create.request_timeout_s),
+         }
+-        if options.resource_requests is not None:
+-            kwargs["resource_requests"] = _resource_map(SandboxResources.from_mapping(options.resource_requests))
++        if requests is not None:
++            kwargs["resource_requests"] = _resource_map(requests)
+         if spec.image is not None:
+             kwargs["image"] = _to_image_spec(spec.image, options.image_auth)
+         if options.snapshot_id is not None:
+diff --git a/tests/unit_tests/test_opensandbox_provider.py b/tests/unit_tests/test_opensandbox_provider.py
+index b09126e63..efee74af9 100644
+--- a/tests/unit_tests/test_opensandbox_provider.py
++++ b/tests/unit_tests/test_opensandbox_provider.py
+@@ -274,6 +274,45 @@ async def test_direct_create_passes_resource_requests_to_sdk_create(
+         )
+ 
+ 
++async def test_direct_create_raises_limits_below_the_requests(
++    fake_opensandbox_sdk: None,
++) -> None:
++    # Kubernetes rejects a pod whose request exceeds its limit ("must be less than or equal to memory
++    # limit"), and the sandbox then stays Pending until the ready timeout. A limit below the request
++    # is raised to the request; limits above it, and resources without a limit, stay as they are.
++    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
++
++    await provider.create(
++        SandboxSpec(
++            image="mirror.gcr.io/astral/uv:python3.12-bookworm-slim",
++            resources={"cpu": 1, "memory_mib": 2048},
++            provider_options={"resource_requests": {"cpu": 0.5, "memory_mib": 3072, "disk_gib": 1}},
++        ),
++    )
++
++    assert FakeSandbox.created_kwargs["resource"] == {"cpu": "1", "memory": "3072Mi"}
++    assert FakeSandbox.created_kwargs["resource_requests"] == {
++        "cpu": "0.5",
++        "memory": "3072Mi",
++        "ephemeral-storage": "1Gi",
++    }
++
++    await provider.create(
++        SandboxSpec(
++            image="mirror.gcr.io/astral/uv:python3.12-bookworm-slim",
++            resources={"cpu": 1, "memory_mib": 2048, "disk_gib": 10},
++            provider_options={"resource_requests": {"cpu": 2, "memory_mib": 1024, "disk_gib": 20}},
++        ),
++    )
++
++    assert FakeSandbox.created_kwargs["resource"] == {"cpu": "2", "memory": "2048Mi", "ephemeral-storage": "20Gi"}
++    assert FakeSandbox.created_kwargs["resource_requests"] == {
++        "cpu": "2",
++        "memory": "1024Mi",
++        "ephemeral-storage": "20Gi",
++    }
++
++
+ async def test_direct_create_passes_image_auth_to_sdk_create(
+     fake_opensandbox_sdk: None,
+ ) -> None:

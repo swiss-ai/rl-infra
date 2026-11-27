@@ -207,7 +207,9 @@ env:
               # Scheduling requests; each task.toml gives the limits. Without disk_gib the storage request
               # defaults to the limit (storage_mb, 10-32 GiB), and the sandbox nodes ran out of reservable
               # ephemeral storage at about 300 pods. The full harbor_agent_opensandbox_training.yaml map,
-              # as this replaces it.
+              # as this replaces it. A task whose limit is below a request gets its limit raised to the
+              # request (Gym patch 0016); without that, Kubernetes rejects the pod (request > limit) and
+              # the trial waits for the start timeout: memory_mib 3072 vs. the 2 GiB tasks, 2026-11-27.
               resource_requests:
                 cpu: 0.5
                 memory_mib: 3072
