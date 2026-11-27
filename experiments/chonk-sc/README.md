@@ -370,8 +370,11 @@ non-empty continuation, so the dropped empty reply and the re-sent request are n
 With 0054 the live 64K smoke (job 1061605, 2026-11-26, 20 nodes, 1 step) trained: grad norm 0.086, 19 of 32
 sequences valid, mean reward 0.105. 20 rollouts ended `ok`; 6 were FACET agent timeouts and 6 infra (3 uploads of
 `claude.gz` hit the 300 s write timeout, 2 sandboxes were not ready, 1 tunnel did not connect); 3 were rejected as
-`ambiguous_terminal`. The live run therefore confirms the `unresolved_parent` fix, but terminal selection is not
-yet clean (the next step tracks it separately).
+`ambiguous_terminal`. The live run therefore confirms the `unresolved_parent` fix, but terminal selection was not
+yet clean at that point.
+With 0055 the next 64K smoke (job 1064831, 2026-11-27, 20 nodes, 1 step) trained: grad norm 0.082, 24 of 32
+sequences valid, mean reward 0.25 (6 of 24 scored 1). The 8 masked rows were all FACET agent timeouts; there were
+no infra failures and no `unresolved_parent` or `ambiguous_terminal`. The terminal-selection fix held.
 `run-agent-v.sh` warns when `AGENT=claude-code` runs below `CTX=65536`.
 The v0.1 model often names Claude Code's tools in lowercase (`bash`, `write`), which Claude Code rejects as unknown
 tools; v0.2 does not. The task with `timeout_sec = 120` in its `task.toml` (FACET) times out in all 8 trials.
